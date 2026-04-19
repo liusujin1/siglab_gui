@@ -1,0 +1,634 @@
+  function[Out1,Out2, Out3, Out4, Out5] = h_dlg1(Action,In1,In2,In3,In4,In5,In6,In7);
+% function[Out1,Out2, Out3, Out4, Out5] = h_dlg1(Action,In1,In2,In3,In4,In5,In6,In7); 
+% labeled h_dlg1 for (Horizontal) Sampling related controls dialog
+%  actions are
+%     'init'         init the ui objects
+%                    In1=position, In2=null, In3 has initial colors
+%                    HDLG1_S1 = In5 dlg_vis = In6
+%                    In7 [optional] has parent figure handle 
+%     'open'         open with a backup into HDLG1_BAK1
+%         'full'     load & show_cond,all combo
+%         'fast'     show_cond,all  only, no load
+%     'close'        conditionally hide (don't hide if not visible)
+%     'clear'        clear globals
+%     'show_cond'    display the ui objects
+%           'all'
+%            'zm'
+%     'get'
+%         'state'    returns state of controls in Out1, null in Out2, Out3 vis
+%         'sampsel'  return buffer size in Out1
+%                    sampling selector in Out2
+%                    and centerfreq in Out3
+%                    resolution BW in Out4  ... v > 1.14
+%                    frequency domain buffer size in Out5 v > 1.14
+%         'filedat'  return SampleRate , CenterFreq, and TrigDelay in samples
+%
+%      'vcap'        (vcap calls h_dlg1)
+%         'lock'     lock some controls for vcap
+%         'locksize' lock frame size slider
+%         'unlock'   unlock all of the above
+%
+%     'load_all'     loads states, visibility
+%     'load'         loads control states from HDLG1_S1
+%     'restore'      restore state from HDLG1_BAK1
+%     'set_frmsz_edit'   update slider 1 value display
+%     'set_zvis'     set zoom parameters visibility by checking zoom on/off
+%     'set_abro'     set analysis band frequency readout and zmcf slider
+%                    also conditionally sets hardware acquisition parameters
+%     'zmckpb_tog'   toggle homebrew check button 1 ON/OFF and set LED
+%     'aaf_tog'      anti-alias filter toggle
+%     Dick Benson, DSP Technology 
+
+global HHDLG1_;      % main handle vector
+global HDLG1_S1;     % S1 holds the numerical states
+global VCAP_ALIVE;   % if vcap is active must notify of changes
+% end global defs
+
+% ***************************************************************
+%include
+   hdlg1_h;   % handle index definitions
+    vcol_h;   %  common color definitions
+    vsld_h;   % slider modes
+     vhw_h;   % system info OVSFACc , BLK_MINc BLK_MAXc etc
+    vsiz_h;   % control size definition  PBS1 LHO  etc
+%end_include
+% *******************************************************
+
+%define
+    ZOOMDEFAULTc = 3; % go to bw sel # 3 or greater for zoom
+%end_define
+
+   if strcmp(Action,'init'),
+   %INIT Command
+    %define
+      dl_pos      = In1; % position
+                  % In2 has frame size if no file for initial condx
+      my_color    = In3; % initial colors passed here
+    %end_define
+
+      hdlg1_owner = In4; % the owner  of this dialog
+
+      if nargin >=7
+          if length(In5)<7
+             HDLG1_S1 = [In5,5,1]; % append a zoom and baseband sampling rate selection
+          else
+             HDLG1_S1 = In5;
+          end;
+          dlg_vis  = In6;
+          if nargin ==8
+              hf = In7;
+          else
+              hf = gcf;
+          end;
+      else
+         % hdlg_1 initial states
+         %            samppu1   zmckpb    frmsz
+         HDLG1_S1  = [1,         0,       In2,...
+                      10000 ,    1,       fp_list('SysClk'), 5     1];   %  initial control states
+                    % zmcf     aafckpb    system clock    zoomsel  bbsel
+         dlg_vis = 'off';
+         if nargin ==6
+            hf = In5;
+         else
+            hf = gcf;
+         end;
+      end;
+
+
+      % the following positioning is done for init
+      %define
+        wdl    = 134;              % dialog width,      dialog vertical size determined by owner
+        wdl    = 120;
+        wlb    = 58;               % control label width
+        wsldtxt= 40;
+        sldtxt = [wsldtxt,HSLDc];  % slider text size
+        wvaltxt= 42;
+        valtxt = [wvaltxt,HSLDc];  % slider value text
+        wpu    = wdl-2*LHOc;       % width of Pull Down
+        wsld   = wdl-2*LHOc;       % slider width
+      %end_define
+
+
+       if strcmp(hdlg1_owner,'vid')  % for vid, eliminate # of samples and aafilt options
+         zvert  = 2.75*VSc;
+         okvert = 5.75;
+         hdlx   = 214-(6-2.75)*VSc;  % shrink
+       else
+         zvert  = 6.4*VSc-HTXTc;
+         okvert = 9;
+         hdlx   = 214;               % normal  size
+       end;
+
+       %define
+          dlgfrm_pos    = [dl_pos,  wdl,hdlx];
+          titletxt_pos  = [dl_pos + [LHOc,hdlx-HTXTc-1],wdl-2*LHOc,HTITLEc];
+
+          % MAIN SAMPLING Parameters
+          samppu1_pos   = [dl_pos + [LHOc,hdlx-1.75*VSc],wsld,HPU1c];
+
+          % AA filters on/off
+          aafckpb_pos   = [dl_pos + [LHOc,hdlx-2.75*VSc],0.85*wsld,HCKS1c];
+          aafled_pos    = [dl_pos + [1.5*LHOc+0.85*wsld,hdlx-2.75*VSc],LEDS1c];
+
+          % # of SAMPLES slider
+          frmsz_pos      = [dl_pos+  [LHOc,hdlx-3.5*VSc],wdl-2*LHOc];
+
+          % ZOOM CENTER FREQ slider (uses a button as the label)
+          zmckpb_pos    = [dl_pos + [LHOc,hdlx-zvert],wdl-2*LHOc,HCKS1c];
+          zmcf_pos      = zmckpb_pos;
+
+          % ANALYSIS BAND READ OUT
+          anabnd_pos    = [dl_pos + [LHOc,hdlx-zvert-2*VSc],wsld,HTXTc];
+          % Delta F read out
+          dfro_pos    =   [dl_pos + [LHOc,hdlx-zvert-2*VSc-HTXTc],wsld,HTXTc];
+
+
+        %end_define
+% init ALL ui controls now
+
+          HHDLG1_(dlgfrm)=uicontrol(hf,'Style','frame','visible','off',...
+                                    'Position',dlgfrm_pos,...
+                                    'BackGroundColor',my_color(DLG_BKc,:));
+%
+          if strcmp(hdlg1_owner,'vos')
+             stitle = 'TIMEBASE';
+             spu1   = fp_list('per_list');
+             sldmode= [QUASILOGc,10];
+          else
+             stitle = 'FREQUENCY RNG';
+             spu1   = fp_list('bw_list');
+             sldmode= POWOF2c;
+          end;
+
+          HHDLG1_(titletxt) = uicontrol(hf,'Style','text','visible','off',...
+                                        'String',stitle,...
+                                        'Position',titletxt_pos,...
+                                        'BackGroundColor',my_color(DTL_BKc,:),...
+                                        'ForeGroundColor',my_color(DTL_FRc,:),...
+                                        'userdata', hdlg1_owner); %@***** stash ownere here
+
+
+          % SAMPLING  / Analysis bandwidth
+          HHDLG1_(samppu1)=uicontrol(hf,'Style','Popup','Visible','off',...
+                                     'Position',samppu1_pos,...
+                                     'BackgroundColor',my_color(PUP_BKc,:),...
+                                     'ForeGroundColor',my_color(PUP_FRc,:),...
+                                     'String',spu1,'HorizontalAlignment','left',...
+                                     'Value',HDLG1_S1(samppu1),...
+                                     'CallBack',...
+                                      ['h_dlg1(''set_samp'');',...
+                                       'ls_',hdlg1_owner,'(''set_acq'');',...
+                                       'plot_',hdlg1_owner,'(''tbax_upd'');']);
+
+           if strcmp(hdlg1_owner,'vid') ~=1
+           % FRAME SIZE
+               if HDLG1_S1(zmckpb)==1
+                  max_frame=BLK_MAXZMc;
+               else
+                  max_frame=BLK_MAXc;
+               end;
+               HHDLG1_(frmsz)= islider([],'init',frmsz_pos,...
+                                       [BLK_MINc,max_frame,HDLG1_S1(frmsz),BLK_MINc,max_frame],...
+                                        'Record Length',...
+                                        ['h_dlg1(''set_frmszro'');',...
+                                         'ls_',hdlg1_owner,'(''set_acq'');',...
+                                         'ls_',hdlg1_owner,'(''set_trg'');',...
+                                         'plot_',hdlg1_owner,'(''tbax_upd'');'],...
+                                        NotUsed,'off',sldmode,...
+                                        [my_color(LBL_BKc,:);my_color(EDT_BKc,:);my_color(LBL_FRc,:);my_color(EDT_FRc,:)],...
+                                        ['%3.0w';'%4.0f';'%4.0f'], hf);
+           end;
+
+           % AA filt on/off
+           if HDLG1_S1(aafckpb)==1,
+              ss='AA Filters On';
+              color = GRNc;
+           else
+              ss='AA Filters Off';
+              color = REDc;
+           end;
+
+           HHDLG1_(aafckpb)=uicontrol(hf,'Style','Pushbutton','Visible','off',...
+                                      'Position',aafckpb_pos,...
+                                      'String',ss,...
+                                      'UserData',HDLG1_S1(aafckpb),... % 'ON' =1
+                                      'HorizontalAlignment','center',...
+                                      'Callback',...
+                                       ['h_dlg1(''aaf_tog'');',...
+                                        'ls_',hdlg1_owner,'(''set_acq'');']);
+
+           HHDLG1_(aafled)=uicontrol(hf,'Style','frame','visible','off',...
+                                     'Position',aafled_pos,...
+                                     'BackGroundColor',color);
+
+          % ZOOM stuff
+          if strcmp(hdlg1_owner,'vid') | strcmp(hdlg1_owner,'vos')
+             sldmode=[LININTQc,fp_list('SysClk')/8192];
+             % limit cf to be N*Fs/8192 so that we track cf choice
+             % available for random noise
+          elseif strcmp(hdlg1_owner,'vna')
+             % limit cf to be on an analysis line
+             sldmode=[LININTQc,fp_list('df',HDLG1_S1(samppu1),HDLG1_S1(frmsz));];
+          else
+             sldmode=LINc;
+          end;
+
+          [bw,fmax]   = fp_list('bw_fmax',HDLG1_S1(samppu1));
+
+          cbStr = ['h_dlg1(''set_zmcfro'');',...
+                   'ls_',hdlg1_owner,'(''set_acq'');'];
+          if strcmp(hdlg1_owner,'vsa') | strcmp(hdlg1_owner,'vna')
+                 cbStr =[cbStr ,'plot_',hdlg1_owner,'(''tbax_upd'');'];
+          end;
+         
+          HHDLG1_(zmcf)= islider([],'init',zmcf_pos,...
+                                  [bw,fmax,HDLG1_S1(zmcf),bw,fmax],...
+                                  '',...
+                                  cbStr,...
+                                  '','off',sldmode,...
+                                  [my_color(LBL_BKc,:);my_color(EDT_BKc,:);my_color(LBL_FRc,:);my_color(EDT_FRc,:)],...
+                                  ['%3.0f';'%8w  ';'%4.0f'],hf);                        
+                                  
+       
+          HHDLG1_(anabnd) = uicontrol(hf,'Style','text','visible','off',...
+                                      'String','null',...
+                                      'Position',anabnd_pos,...
+                                      'BackGroundColor',my_color(LBL_BKc,:),...
+                                      'ForeGroundColor',my_color(LBL_FRc,:));
+
+          HHDLG1_(dfro)   = uicontrol(hf,'Style','text','visible','off',...
+                                      'String',['dF=',sprintf('%5.3f',fp_list('df',HDLG1_S1(samppu1),HDLG1_S1(frmsz))),'Hz.'],...
+                                      'Position',dfro_pos,...
+                                      'BackGroundColor',my_color(LBL_BKc,:),...
+                                      'ForeGroundColor',my_color(LBL_FRc,:));
+
+          % Homebrew dynamic buttons (show state of control)
+          if HDLG1_S1(zmckpb)==0,
+             ss='Zoom Off'; zmflg=0; color = GRNc;
+          else
+             ss='Center Freq';  zmflg=1; color = YELc;
+          end;
+
+
+         
+         % pre 3.0
+         %    cbStr = [hdlg1_owner,'(''stop'');',...
+         %             'h_dlg1(''zmckpb_tog'');',...
+         %             'h_dlg1(''show_cond'',''zm'');',...
+         %             'ls_',hdlg1_owner,'(''set_acq'');'];
+         %    cbStr = [cbStr, ['plot_',hdlg1_owner,'(''tbax_upd'');']];
+          
+          
+         % 3.0 7/7/98 
+          cbStr = ['h_dlg1(''zmckpb_tog'');',...
+                   'h_dlg1(''show_cond'',''zm'');',...
+                   'plot_',hdlg1_owner,'(''tbax_upd'');',...
+                   'ls_',hdlg1_owner,'(''set_acq'');'];
+          
+          
+          HHDLG1_(zmckpb)=uicontrol(hf,'Style','Pushbutton','Visible','off',...
+                                      'Units','pixels','Position',zmckpb_pos,...
+                                      'String',ss,...
+                                      'UserData',zmflg,...
+                                      'HorizontalAlignment','center',...
+                                      'Callback',cbStr);
+
+      if strcmp(dlg_vis,'on')
+         h_dlg1('show_cond','all');
+      end;
+
+      if zmflg
+         h_dlg1('set_abro');
+      end;
+
+   % *******************  INIT complete  ***********************
+
+   elseif strcmp(Action,'set_samp'),
+   % SET_SAMP
+      % decide if zoom is on
+      if HDLG1_S1(zmckpb)==0
+         % base band everything is legal
+         HDLG1_S1(samppu1)= get(HHDLG1_(samppu1),'value');
+         HDLG1_S1(bbsel)  = HDLG1_S1(samppu1);
+      else
+        % zoom
+        sampsel = max(get(HHDLG1_(samppu1),'value'),ZOOMDEFAULTc); % limit to legit sampling rate
+        set(HHDLG1_(samppu1),'value',sampsel);
+        HDLG1_S1(samppu1)= sampsel;
+        HDLG1_S1(zoomsel)= sampsel;
+        [bw,fmax] = fp_list('bw_fmax',HDLG1_S1(samppu1));
+        newval=islider(HHDLG1_(zmcf),'set','minmax',[bw,fmax,bw,fmax]);   
+        HDLG1_S1(zmcf)=newval;
+      end;
+      h_dlg1('set_abro');
+
+      if ~isempty(VCAP_ALIVE)&VCAP_ALIVE ==1
+         eval('vcap(''set_acq'');');
+      end; % inform vcap
+
+   elseif strcmp(Action,'show_cond'),
+   % SHOW_COND (ALL, ZM)
+       if strcmp(In1,'all'),
+           allflg=1;
+           zmflg=1;
+       elseif strcmp(In1,'zm'),
+           allflg=0;
+           zmflg =1;
+       else
+           ['unrecognized option in h_dlg1 show_cond'];
+       end;
+
+     % ALL VIS (these controls are unconditionally ON)
+       hdlg1_owner=get(HHDLG1_(titletxt),'userdata');
+       if allflg ==1,
+          if strcmp(hdlg1_owner,'vid') ~=1
+              % not the vid
+              set([HHDLG1_(samppu1:zmckpb),HHDLG1_(aafckpb:aafled)],'Visible','on');
+              islider(HHDLG1_(frmsz),'set','vis_on');
+
+              if strcmp(hdlg1_owner,'vos') ==1
+                set(HHDLG1_(titletxt),'Visible','on');
+              else
+                % not vos
+                set(HHDLG1_(dfro:titletxt),'Visible','on');
+              end;
+          else
+              % vid is the owner
+              set([HHDLG1_(samppu1:zmckpb),HHDLG1_(dlgfrm),HHDLG1_(titletxt)],'Visible','on');
+          end;
+       end;
+
+     % ZM_VIS
+       if zmflg == 1,
+          if(get(HHDLG1_(zmckpb),'UserData')==1 & (get(HHDLG1_(samppu1),'Value') >1)),
+              islider(HHDLG1_(zmcf),'set','vis_on');
+              set(HHDLG1_(anabnd),'Visible','on');
+              zmvis = 'on';
+          else
+              islider(HHDLG1_(zmcf),'set','vis_off');
+              set(HHDLG1_(anabnd),'Visible','off');
+          end;
+       end;
+
+   elseif strcmp(Action,'zmckpb_tog'),
+   % ZMCKPB_TOG
+       HDLG1_S1(zmckpb) = ckbtog(HHDLG1_(zmckpb),'Zoom Off','Center Freq');
+       if  HDLG1_S1(zmckpb)==1
+       % zoom on
+           HDLG1_S1(bbsel)=get(HHDLG1_(samppu1),'Value');   % save base band selection
+           set(HHDLG1_(samppu1),'Value',HDLG1_S1(zoomsel)); % set zoom selection
+           HDLG1_S1(samppu1)=HDLG1_S1(zoomsel);
+
+           % aa filter must be on to zoom
+           set(HHDLG1_(aafckpb),'string','AA Filters On','value',1);
+           HDLG1_S1(aafckpb) = 1;
+           set(HHDLG1_(aafled),'BackGroundColor',GRNc);
+           h_dlg1('set_zmcfro');
+
+           % zoom is active, use limited value for center freq
+           [bw,fmax] = fp_list('bw_fmax',HDLG1_S1(samppu1));
+           
+           % zoom is active, use limited value for center freq
+           newval=islider(HHDLG1_(zmcf),'set','minmax',[bw,fmax,bw,fmax]); % restored to proper lower limit, rab 11/8/00
+           %%newval=islider(HHDLG1_(zmcf),'set','minmax',[0,fmax,0,fmax]); % this was where I found it !  Caused problems in outburst  
+           HDLG1_S1(zmcf)=newval;
+           % must also limit max frame size 10/10/95
+           if strcmp(get(HHDLG1_(titletxt),'userdata'),'vid') ~=1
+               HDLG1_S1(frmsz)=islider(HHDLG1_(frmsz),'set','minmax',[BLK_MINc,BLK_MAXZMc,BLK_MINc,BLK_MAXZMc]);
+           end;
+       else
+       % zoom off
+           islider(HHDLG1_(zmcf),'set','vis_off');
+           set(HHDLG1_(anabnd),'Visible','off');
+
+           HDLG1_S1(zoomsel)=get(HHDLG1_(samppu1),'Value');   % save zoomed band selection
+           set(HHDLG1_(samppu1),'Value',HDLG1_S1(bbsel));     % set bb selection
+           HDLG1_S1(samppu1)=HDLG1_S1(bbsel);
+
+           % must also set max frame size 10/10/95
+           if strcmp(get(HHDLG1_(titletxt),'userdata'),'vid') ~=1
+              HDLG1_S1(frmsz)=islider(HHDLG1_(frmsz),'set','minmax',[BLK_MINc,BLK_MAXc,BLK_MINc,BLK_MAXc]);
+           end;
+       end;
+       set(HHDLG1_(dfro),'string',['dF=',sprintf('%5.3f', fp_list('df',HDLG1_S1(samppu1),HDLG1_S1(frmsz)) ),'Hz.'] );
+
+
+   elseif strcmp(Action,'aaf_tog'),
+   % AAF_TOG
+        if HDLG1_S1(zmckpb) ==0 & HDLG1_S1(samppu1) >1
+          HDLG1_S1(aafckpb) = ckbtog(HHDLG1_(aafckpb),'AA Filters Off','AA Filters On');
+          if HDLG1_S1(aafckpb) == 0,
+              set(HHDLG1_(aafled),'BackGroundColor',REDc);
+          else
+              set(HHDLG1_(aafled),'BackGroundColor',GRNc);
+          end;
+        end;
+
+   elseif strcmp(Action,'set_zmcfro'),
+   % SET_ZMCFRO
+   % Set Zoom CF readout to agree with slider position with constraints
+   % and sets analysis band readout.
+   % If changes are made, check the 'load' action.
+          newval=islider(HHDLG1_(zmcf),'get');
+          HDLG1_S1(zmcf)=newval;
+          bw= fp_list('bw',get(HHDLG1_(samppu1),'Value'));
+          set(HHDLG1_(anabnd),'String',...
+          sprintf('Frng:%4.0f-%4.0f',newval-bw,newval+bw));
+
+   elseif strcmp(Action,'set_abro'),
+   % SET_ABRO  analysis band read out ,zmcf slider position, and AA filter
+         HDLG1_S1(samppu1)= get(HHDLG1_(samppu1),'Value');
+            %         no Digital Filt   and AA Filt set to OFF  is an illegal state
+         if HDLG1_S1(samppu1) ==1  &  HDLG1_S1(aafckpb) ==0
+            % turn AA filter indicator ON since we are at max BW
+              HDLG1_S1(aafckpb)= ckbtog(HHDLG1_(aafckpb),'AA Filters Off','AA Filters On');
+              set(HHDLG1_(aafled),'BackGroundColor',GRNc);
+         end;
+         if(HDLG1_S1(samppu1) < ZOOMDEFAULTc & HDLG1_S1(zmckpb)==1),
+            % this won't work, need to turn zoom off
+            h_dlg1('zmckpb_tog');
+         else
+            newval=islider(HHDLG1_(zmcf),'get');
+            if ~isempty(newval)
+              bw = fp_list('bw',HDLG1_S1(samppu1));
+              df = fp_list('df',HDLG1_S1(samppu1),HDLG1_S1(frmsz));
+              newval=islider(HHDLG1_(zmcf),'set','newquant',df);
+              HDLG1_S1(zmcf)=newval;
+              set(HHDLG1_(anabnd),'String',sprintf('Frng:%4.0f-%4.0f',newval-bw,newval+bw));
+              set(HHDLG1_(dfro),'string',['dF=',sprintf('%5.3f',df),'Hz.'] );
+            end;
+         end;
+   elseif strcmp(Action,'set_frmszro'),
+   % SET_FRMSZRO
+   % and sets Buffer size readout
+          HDLG1_S1(frmsz)=round(islider(HHDLG1_(frmsz),'get'));
+          % set dF readout and fix zoom cf value
+          df = fp_list('df',HDLG1_S1(samppu1),HDLG1_S1(frmsz));
+          HDLG1_S1(zmcf)=islider(HHDLG1_(zmcf),'set','newquant',df);
+          set(HHDLG1_(dfro),'string',['dF=',sprintf('%5.3f',df),'Hz.'] );
+          if ~isempty(VCAP_ALIVE),
+             if VCAP_ALIVE ==1 eval('vcap(''set_acq'');'); end; % inform vcap
+          end;
+
+
+
+
+   elseif strcmp(Action,'set')
+        hdlg1_owner=get(HHDLG1_(titletxt),'userdata');
+        switch In1
+           case 'bwcode'
+                 set(HHDLG1_(samppu1),'Value',In2);
+                 h_dlg1('set_samp');
+                 eval(['ls_',hdlg1_owner,'(''set_acq'');'])
+                 eval(['plot_',hdlg1_owner,'(''tbax_upd'');']);
+                 
+           case 'zmcf'
+                 islider(HHDLG1_(zmcf),'set','value',In2);
+                 h_dlg1('set_zmcfro');
+                 eval(['ls_',hdlg1_owner,'(''set_acq'');']);
+                 eval(['plot_',hdlg1_owner,'(''tbax_upd'');']);
+           otherwise
+               disp(['h_dlg1 set ',In1,' not recognized']);
+        end;
+
+
+
+   elseif strcmp(Action,'get'),
+   % GET command
+        if strcmp(In1,'state'),
+        % GET STATE
+           Out1 = HDLG1_S1;
+           Out2 = [];
+           Out3 = get(HHDLG1_(titletxt),'Visible');
+
+        elseif strcmp(In1,'sampsel'),
+       % GET SAMPSEL
+           Out1 = HDLG1_S1(frmsz);
+           Out2 = HDLG1_S1(samppu1);
+           Out4 = fp_list('bw',HDLG1_S1(samppu1))*OVS_FACc/HDLG1_S1(frmsz);
+           if HDLG1_S1(zmckpb)==1
+              % zoom on
+              Out3 = HDLG1_S1(zmcf); % CenterFreq
+              Out5 = 1+2*HDLG1_S1(frmsz)/OVS_FACc;
+           else
+              % baseband
+              Out3 = 0.0;  % by convention in file definition
+              Out5 = 1+HDLG1_S1(frmsz)/OVS_FACc;
+           end;
+
+
+        elseif strcmp(In1,'filedat'),
+        % GET FILEDAT command
+        % returns stuff required for common file storage format
+           Out1 = fp_list('SysClk');
+              % SystemClk
+           Out2 = fp_list('Fs',get(HHDLG1_(samppu1),'Value'));
+              % SampleRate
+           if HDLG1_S1(zmckpb)==1,
+                Out3 = HDLG1_S1(zmcf); % CenterFreq
+           else
+                Out3 = 0.0;  % by convention in file definition
+           end;
+        else
+           error = [In1,' not recognized in h_dlg1(get,xxx)']
+        end;
+
+   elseif strcmp(Action,'load'),
+   % LOAD command  load controls from HDLG1_S1
+            s1 = HDLG1_S1;
+            set(HHDLG1_(samppu1),'Value',s1(samppu1));
+            if s1(zmckpb)==1,
+                mark = 'Center Freq';
+                color= YELc;
+            else
+                mark = 'Zoom Off';
+                color= GRNc;
+            end;
+            set(HHDLG1_(zmckpb), 'UserData', s1(zmckpb),'String',mark);
+            % hdlg1_owner=get(HHDLG1_(titletxt),'userdata');
+            if strcmp(get(HHDLG1_(titletxt),'userdata'),'vid') ~=1
+               islider(HHDLG1_(frmsz),'set','value',s1(frmsz));
+               % account for zoom frame size limitation
+               if s1(zmckpb)==1
+                   HDLG1_S1(frmsz)=islider(HHDLG1_(frmsz),'set','minmax',[BLK_MINc,BLK_MAXZMc,BLK_MINc,BLK_MAXZMc]);
+               else
+                   HDLG1_S1(frmsz)=islider(HHDLG1_(frmsz),'set','minmax',[BLK_MINc,BLK_MAXc,BLK_MINc,BLK_MAXc]);
+               end;
+            end;
+            [bw,fmax] = fp_list('bw_fmax',s1(samppu1));
+            islider(HHDLG1_(zmcf) ,'set','minmax',[bw,fmax,bw,fmax]);
+            islider(HHDLG1_(zmcf) ,'set','value',s1(zmcf));
+
+          if s1(aafckpb)==1,
+             mark = 'AA Filters On';
+             color= GRNc;
+          else
+             mark = 'AA Filters Off';
+             color= REDc;
+          end;
+
+          set(HHDLG1_(aafckpb), 'UserData', s1(aafckpb),'String',mark);
+          set(HHDLG1_(aafled),'BackGroundColor',color);
+
+    % setup strings
+
+            % setting anabnd too complicated to duplicate here
+            % but do not load hardware yet
+            h_dlg1('set_abro');
+            % set dF readout
+            set(HHDLG1_(dfro),'string',['dF=',sprintf('%5.3f',fp_list('df',HDLG1_S1(samppu1),HDLG1_S1(frmsz))    ),'Hz.'] );
+
+   elseif strcmp(Action,'open'),
+   % OPEN Command
+         if strcmp('fast',In1) ~=1,
+            h_dlg1('load');
+         end;
+         h_dlg1('show_cond','all');
+
+   elseif strcmp(Action,'load_all'),
+   % LOAD_ALL Command
+       if length(In2)<7
+          HDLG_S1 = [In2,5,1]; % append a zoom and baseband sampling rate selection
+       else
+          HDLG1_S1 = In2;
+       end;
+       if strcmp(In1,'on'),        % display this dialog
+           h_dlg1('load');
+           h_dlg1('show_cond','all');
+       else
+           h_dlg1('close');        % it might be open
+           h_dlg1('load');         % only do a load
+       end;
+
+   elseif strcmp(Action,'vcap')
+   % VCAP section
+       if strcmp(In1,'lock')
+          set(HHDLG1_([samppu1,zmckpb,aafckpb]),'enable','off');
+          islider(HHDLG1_(zmcf),'set','ena_off');
+       elseif strcmp(In1,'locksize')
+          islider(HHDLG1_(frmsz),'set','ena_off');
+       elseif strcmp(In1,'unlock')
+          set(HHDLG1_([samppu1,zmckpb,aafckpb]),'enable','on');
+          islider(HHDLG1_(frmsz),'set','ena_on');
+          islider(HHDLG1_(zmcf),'set','ena_on');
+       else
+          disp('error in h_dlg1 vcap section' )
+       end;
+
+   elseif strcmp(Action,'close'),
+   % CLOSE command
+       if strcmp(get(HHDLG1_(titletxt),'Visible') ,'on'),
+          set([HHDLG1_(samppu1:zmckpb),HHDLG1_(aafckpb:titletxt)],'Visible','off');
+          % titletxt userdata has owner
+          if strcmp(get(HHDLG1_(titletxt),'userdata'),'vid') ~=1
+             islider(HHDLG1_(frmsz),'set','vis_off');
+          end;
+          islider(HHDLG1_(zmcf),'set','vis_off');
+       end;
+   elseif strcmp(Action,'clear'),
+   % CLEAR command
+       clear global HHDLG1_ HDLG1_S1;
+   else
+        disp(['error in h_dlg1:', Action,' not recognized']);
+   end; % end of MAGNUM IF
+% end dialog function

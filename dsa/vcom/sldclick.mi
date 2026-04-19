@@ -1,0 +1,47 @@
+  function click_type = sldclick(h)
+% function click_type = sldclick(h) 
+% Returns type of slider click for slider with handle h
+% requires previous slider value to be stored in userdata
+% Usefull information/structure gained from Dave Mellinger, dkm1@cornell.edu .
+% uislider.m code
+%    returns click type:
+%    DWNc  SMALL_DWNc   SAMEc  SMALL_UPc    UPc   DRAGc
+%    see vsld_h.m for definitions 
+% 
+%    Dick Benson, DSP Technology 
+
+%include
+      vsld_h.m
+%end_include
+
+    sld_max    = get(h,'max');
+    sld_min    = get(h,'min');
+    d          = sld_max-sld_min;
+    
+    % normalized units 0...992   992=WEIRDc
+    oldval     = WEIRDc*(get(h,'userdata')-sld_min)/d;
+    newval     = WEIRDc*(get(h,'value')-sld_min)/d;
+    
+                                                        click_type = DRAGc;                           
+    if     (newval == oldval),                          click_type = SAMEc;
+    elseif (abs(newval - oldval - SMALLc) < SLDTOLc  ), click_type = SMALL_UPc;
+    elseif (abs(newval - oldval - BIGc  ) < SLDTOLc  ), click_type = UPc;
+    elseif (abs(oldval - newval - SMALLc) < SLDTOLc  ), click_type = SMALL_DWNc;
+    elseif (abs(oldval - newval - BIGc  ) < SLDTOLc  ), click_type = DWNc;
+    else                                          
+      if (newval == WEIRDc)
+        if     (abs(newval - oldval) < SMALLc),         click_type = SMALL_UPc;
+        elseif (abs(newval - oldval) < BIGc  ),         click_type = UPc;
+        end
+      elseif (newval == 0)
+        if     (abs(oldval - newval) < SMALLc),         click_type = SMALL_DWNc;
+        elseif (abs(oldval - newval) < BIGc  ),         click_type = DWNc;
+        end
+      end
+    end
+% end sldclick function
+
+
+
+
+

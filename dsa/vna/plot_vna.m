@@ -1,0 +1,4805 @@
+  function [Out1,Out2,Out3,Out4] = plot_vna(Action,In1,In2,In3,In4,In5,In6,In7,In8,In9,In10,In11,In12)
+% function [Out1,Out2,Out3,Out4] = plot_vna(Action,In1,In2,In3,In4,In5,In6,In7,In8,In9,In10,In11,In12)  
+% Some actions include
+%       'init'       init the ui objects
+%                    see init action for details 
+% 
+%       'clear'      clear globals
+%       'single'     set single plot mode
+%       'double'     set dual plot mode
+%       'get'
+%          'state'   returns state in Out1   Out2 now has position
+%                    Out3 has display scales, Out 4 has grid on/off
+%          'filedat' returns ChanDat data structure in all its glory! 
+%                   
+%          'rs'      run stop status
+%       'load'       LOAD state from
+%                    In1 (numerics)  
+%                    In2 now has figure position info
+%                    In3= Axis scales, In4 = grids on/off
+%                    In5 = #####
+%                    In6=Fvec In7 = AspecDat In8 = AspecMap
+%                    In9=Tvec In10 = TimeDat (old files may not have this info)
+%                    If In5 is not empty, assume the "new" file format and 
+%                    #### if In5 is not empty, it will have the full ChanDat data structure. 
+%
+%       'chax_upd'   Channel Axis update call from v_dlg1 action
+%       'tbax_upd'   TimeBase Axis update from h_dlg1 & h_dlg2
+%       'set'
+%        'clist_x'   Set enabled channel list from output of vdlg1 in In2, a major screen state update occurs 
+%        'grids'     Axis Grids on/off
+%        'cb_avg'    Callback when averaging is complete (wgd stuff)
+%      
+%        'fq_lock'   'on' or 'off'
+%        'plot_name' sets figure name 
+%       'run'        run acquisition & display loop , 
+%          'instpb'    raw data
+%          'avgpb'     averaged data
+%       'stop'       stop acquisition & display loop by setting 
+%       'set_ma_flg' set manual arm flag with state of In1
+%
+% Dynamic, interactive, time, spectrum and xfer function plotting routine with multi-channel 
+% and multi-reference enhancements. 
+% MIMO support activated 12/14/98 
+% RMS, Peak, Peak-to-Peak selection for ASPEC added 8/2/99
+% Dick Benson, DSP Technology 
+
+global Hpvna            % handles to plot_vna objects (1 = upper plot, 2 = lower plot) and some aux flags, variables
+global ChanDat          % channel data structure
+global VCAP_Acquiring;  % set to 1 if vcap is capturing
+% end global declarations
+
+%**************************************************************
+%include
+  vcol_h;   %  common color definitions
+  vhw_h;    %  hardware defs
+  vsiz_h;   % control size definition HTXTc PBS1c LHOc  etc
+%end_include
+%*************************************************************
+
+%define
+% 
+      
+       ECHOc         = 0;  % echo Actions et. al. for debugging .... a VERY valuable tool.  
+       OLDFILEWARNc  = 0;  % warn user that an old file has been loaded
+       MIMOc         = 1;  % enable MIMO calculations
+       MAXLINECOLORc = 4;  % max number of line colors defined by vi_color 
+       MAXSLOTc      = 10; % number of data request id slots 
+
+       DBLHAMPc      = 50;  % new double hit amplitude in percent of max peak 
+       DBLHDLYc      = 20;  % delay this persentage of fram b4 looking for dblhit
+       FORCEWINc     = 20;  % extent of force window up to %100  
+       EXPDECAYc     = 10;  % exponetial decay value (in percent) at end of frame
+       TTSc          = 'plot_vna_tts';     % tool tip string
+
+
+
+       WFIGc     = 640;    % initial figure sizes
+       HFIGc     = 436;    % 
+       
+       HLCBc     = 18;     % only matters for listcheckbox pseudo object
+       
+       WAXc      = 420;    % axis width , can't get bigger due to hardcopy considerations ... 
+       DXc       = 3;
+       DDXc      = 5;
+       XOFSc     = 200;    % axis offset from left of figure
+       YOFSc     = 50;
+       HAXSNGc   = 348;    % single axis height
+       HAXDBLc   = 134;    % dual axis height
+       DBLFUDGEc = 1.625;  % empirical scaling for dual axis
+       YOVERc    = 1.25;   % set y axis scales to be larger than max anticipated data 
+      
+       ATXTSIZEc = 7;      %  text size in points
+       WPUc      = 70;     % pop up width
+       WLBc      = 20;     % text min width
+       
+       OVLD_POSc = [DXc,30];
+     
+       % cursor related stuff ...
+       CLWc      = 13;
+       CROWc     = 65;
+       NROWSc    = 4;
+       CSPc      = 1;      % space between cursor fields
+       MKWc      = 38;
+       CURDXc    = 4;
+       CDYc      = 12;
+       
+       % axis selections
+       UPPERc    = 1;
+       LOWERc    = 2;
+       SINGLEc   = 3;
+       
+       AVGSTRc = 'avg:';
+       DELIMITERc = '/';  
+       
+       MAXCHANc    = 16;  % a rational upper limit
+       MAXREFc     = 4;   % maximum number of reference channels
+       MAXTIMEc    = 2.5; % timeout for getting data from SigLab
+      
+       SQc         = char(178); % square symbol string 
+       NLc         = char(10);  % new line character
+       
+       % The following defines the strings and corresponding numerical states for the popup controls.....
+       % *** ypu1 **** definitions
+       YPREFIXc   = 2;  % assumes a 2 char prefix e.g. 'y:' .... must be consistant
+       YOFTc      = 1;
+       ASPECc     = 2;
+       XFERc      = 3;
+       COHc       = 4;
+       CSPECc     = 5;
+       ACORc      = 6;
+       CCORc      = 7;
+       IMPc       = 8;
+       FFTc       = 9;   % note the following DISPLAYEDc  for the file storage stuff
+       DISPLAYEDc = 10;
+       Y1_G1c  =   {'y:y(t)','y:aspec','y:xfer', 'y:coh','y:cspec', 'y:acor','y:ccor','y:impulse','y:fft'};
+       FS_STATEc  = { 1        1         1         1       0          0        0        0           0        0      };
+       FS_LABELc  = {'y(t)'  ,'aspec','xfer', 'coh','cspec', 'acor','ccor','impulse','fft', 'displayed'};
+       FS_FIELDSc = {'tdmeas','aspec','xfer', 'coh','cspec', 'acor','ccor','imp'    ,'fft'};
+       INST_FCNc =  ' y(t) , aspec, and fft .';  % functions that will update in Inst acq mode
+       
+       
+       % *** ypu2 *** definitions
+       % group 1   time,fft,acor, ccor, impulse
+       Y_REALc     = 1;
+       Y_MAGc      = 2;
+       Y_IMAGc     = 3;
+       Y2_G1c      = {'real','mag','imag'};
+       
+       % group 2, aspec,  a bewildering array of display units .... 
+       Y_DBUc         =1;
+       Y_DBUpRTHXc    =2;
+       Y_Uc           =3;
+       Y_SQUc         =4;
+       Y_UpRTHZc      =5;
+       Y_SQUpHZc      =6;
+       Y_SQUSECpHZc   =7;     
+       Y_LOGUc        =8;
+       Y_LOGSQUc      =9;
+       Y_LOGUpRTHZc   =10;
+       Y_LOGSQUpHZc   =11;
+       Y_LOGSQUSECpHZc =12;
+       Y2_G2RMSc ={ 'dB rms',...
+                    'dB rms/rt(Hz)',...
+                    'rms',...
+                   ['rms',SQc],...
+                    'rms/rt(Hz)',...
+                   ['rms',SQc,'/Hz'],...
+                   ['rms',SQc,'sec/Hz'],...
+                    'Log rms',...
+                   ['Log rms',SQc],...
+                    'Log rms/rt(Hz)',...
+                   ['Log rms',SQc,'/Hz'],...
+                   ['Log rms',SQc,'sec/Hz']};
+
+       URMSc = 1.0;
+
+       Y2_G2PKc ={  'dB pk',...
+                    'dB pk/rt(Hz)',...
+                    'pk',...
+                   ['pk',SQc],...
+                    'pk/rt(Hz)',...
+                   ['pk',SQc,'/Hz'],...
+                   ['pk',SQc,'sec/Hz'],...
+                    'Log pk',...
+                   ['Log pk',SQc],...
+                    'Log pk/rt(Hz)',...
+                   ['Log pk',SQc,'/Hz'],...
+                   ['Log pk',SQc,'sec/Hz']};
+       
+       UPKc = 1.41421356237310;  % sqrt(2)
+       
+       Y2_G2P2Pc ={ 'dB p-p',...
+                    'dB p-p/rt(Hz)',...
+                    'p-p',...
+                   ['p-p',SQc],...
+                    'p-p/rt(Hz)',...
+                   ['p-p',SQc,'/Hz'],...
+                   ['p-p',SQc,'sec/Hz'],...
+                    'Log p-p',...
+                   ['Log p-p',SQc],...
+                    'Log p-p/rt(Hz)',...
+                   ['Log p-p',SQc,'/Hz'],...
+                   ['Log p-p',SQc,'sec/Hz']};
+
+
+       UP2Pc = 2.82842712474619; % 2*sqrt(2)     
+       
+       % group 3 xfer & cspec functions build on group 1
+       % Y_REALc     = 1;
+       % Y_MAGc      = 2;
+       % Y_IMAGc     = 3;
+         Y_DBc       = 4;
+         Y_LOGc      = 5;
+         Y_PHASEWc   = 6;
+         Y_PHASEUc   = 7;
+         Y_NYQUISTc  = 8;
+       Y2_G3c        = {'real','mag','imag','dB','log mag','phase','phase u','nyquist'};
+       
+       % group 4 coherence .... degenerate situation 
+       Y_COHMAGc     = 1;
+       Y2_G4c        = {'mag'}; % coherence only has magnitude   
+         
+         
+       %*** ypu3 *** definitions  (integration/differentiation )
+       % Y3_G1c = {'*1','int',['int',SQc],'dif',['dif',SQc]}; 
+       Y3_G1c   = {'*1','i',['i',SQc],'d',['d',SQc]};
+       Y3_G1TTc =['*1=no operation, i=integral  i',SQc,'=2nd integral  d=derivative','  d',SQc,'=2nd derivative'];   
+       
+       Y3_NOINTc = 1;
+       Y3_INT1c  = 2;
+       Y3_INT2c  = 3;
+       Y3_DIF1c   = 4;
+       Y3_DIF2c  = 5;
+       
+       %*** ypu4 *** definitions  (window amplitude / power correction)
+       Y_AMPCc  = 1;
+       Y_PWRCc  = 2;
+       Y4_G1c   ={'A','P'};                 % oh they are gonna love it! 
+       Y4_G1TTc ='A= amplitude correction  P= power correction';
+       
+       XCREF_TTc='Reference Channel Select';
+       
+       VSFNc  = 1e-307;            % a very small number to prevent log(0), 1e-308 blows up in v5.2 on KDS/GG computers !  
+       DB10c  = 4.34294481903252;  % 10*log10(x) = DB10c*log(x) where log(x) is natural log
+       DB20c  = 8.68588963806504;  % 20*log10(x) = DB20c*log(x)
+       DBFSc  = 100;               % 100 dB range default
+       RMSROc = 10;                % moderates the rate of rms readout calc, larger number, fewer calcs
+       LWINc  = 64;                % number of points (2^N) for "analysis window" display
+  
+       % ***xpu1*** definitions
+       % group 1 time domain
+       XTIMEc     = 1;  % time vector 
+       RECHANc    = 2;  % for lissajous
+       MAGCHANc   = 3;  %
+       IMCHANc    = 4;  %
+       X1_G1c     = {'x:time','x:real','x:mag','x:imag'};
+       
+       % group 2  aspec, xfer, coh, cspec
+       XLINFREQc  = 1;
+       XLOGFREQc  = 2;
+       X1_G2c     = {'x:linear','x:log'};
+       
+       % group 3  fft, covered by previous definitions in group1 ... potentially confusing
+       % XLINFREQc  = 1; % frequency vector 
+       % RECHANc    = 2;  % for lissajous
+       % MAGCHANc   = 3;  %
+       % IMCHANc    = 4;  %
+       X1_G3c       = {'x:freq','x:real','x:mag','x:imag'};
+      
+       % group 4 acor, ccor, impulse 
+       % XTIMEc       = 1;
+       X1_G4c       = {'x:time'};
+       
+       % ***xpu2***  definitions
+       % group 1, time domain and acor, ccor 
+       SECONDSc       = 1;  
+       MILLISECONDSc  = 2;
+       MICROSECONDSc  = 3;
+       X2_G1c     = {'sec.','milli sec.','micro sec.'};
+       
+       % group 2 (spectrum) 
+       HZc        = 1;
+       KHZc       = 2;
+       RPMc       = 3;
+       KRPMc      = 4;
+       X2_G2c     = {'Hertz','kHz','rpm','krpm'};
+       
+       % group 3 (fft , xfer, coh, cspec)
+       % same as group 2
+       X2_G3c     = {'Hertz','kHz','rpm','krpm'};
+       
+       % Time Averaging Mode, see v_dlg2.mi 
+       TAVGc  = 5;
+       
+       INSTDc  = 0;  % last "sucessful" measurement data type
+       AVGDc   = 1;
+       
+       
+       scg1_pos    = [3,2];        % Status / Group1 controls @ bottom of screen
+       scg1_size   = [147,28];
+
+       instpb_pos  = [scg1_pos+[1*DDXc         ,4],PBS1c];
+       avgpb_pos   = [scg1_pos+[2*DDXc+1*WPBS1c,4],PBS1c];
+       stoppb_pos  = [scg1_pos+[3*DDXc+2*WPBS1c,4],PBS1c];
+     
+       % userdata macros (expanded for plain .m compatibility)
+%end_define
+
+
+  % ##### debugging aid ###############################################################
+  if ECHOc
+     global CallDepth
+     if ~isempty(CallDepth) CallDepth = CallDepth+1;
+     else CallDepth =1; end;  % initialize it
+    
+     % some actions may want to be filtered out ... e.g. a 'measplot' Action
+     % if no filtering is desired, just put in a bogus string, or delete the if construction
+     if ~strcmp(Action,'foo_measplot')
+        s = [char(9*ones(1,CallDepth)), Action];   % note 9 makes a tab character
+        for k=2:min(nargin,5)
+              switch k
+                 case 2 , p = In1;
+                 case 3 , p = In2;
+                 case 4 , p = In3;
+                 case 5 , p = In4;
+              end;
+              switch class(p)
+                  case 'char'   , s = [s,' ',p(1,:)];
+                  case 'double'
+                     if isempty(p)
+                        s = [s,' []'];
+                     else
+                        s = [s,' ',num2str(p(1,1))];
+                     end;   
+                  case 'struct' , s = [s,' (structure)']; 
+                  case 'cell'   , s = [s,' (cell)']; 
+              end;
+        end;
+       disp(s);
+       %if ~strcmp(Action,'init')
+           % get(Hpvna(1).xpu2,'string')
+           % yreqlist = Hpvna(1).yreqlist
+       %end;
+     end;
+     
+  end;
+  % ##### end of debugging aid #########################################################
+  
+  % the "real" code ..... 
+  switch Action
+  case 'init'
+  %INIT Command
+       % get vcap out of the way first
+       if isempty(VCAP_Acquiring),
+          VCAP_Acquiring = 0;
+       end;
+       % now to the UI creation
+       numin      = In1(1); % In1 the number of input channels mbsup
+       NCperBox   = In1(2); % required for multi reference code 
+       colors     = In2;    % In2 color info
+       pfh        = In3;    % In3 parent figure handle
+       plot_pos = get(pfh,'position');
+       % make a new figure and redefine parent figure handle pfh
+       new_pfh=figure('position',[plot_pos(1)+plot_pos(3)+5,plot_pos(2)+plot_pos(4)-HFIGc+YOFSc,WFIGc,HFIGc],...
+                      'Name','',...
+                      'NumberTitle','off',...
+                      'visible','on',...
+                      'inverthardcopy','off',...
+                      'PaperOrientation','landscape',...  
+                      'PaperUnits','normalized',...
+                      'PaperpositionMode','Auto',...
+                      'BackingStore','off',...
+                      'resizefcn','',...
+                      'CloseRequestFcn','vna_safe_close',...
+                      'tag','vna_plot',...       % wgd 
+                      'color',get(pfh,'color')); % synch background color 
+
+         set(new_pfh,'ToolBar','figure');
+         % deal with menus first, kill undesired entries
+         htmp  = findall(new_pfh,'type','uimenu');
+         % Hide MATLAB default top menus (locale-independent by tag).
+         defaultMenuTags = {'figMenuFile','figMenuEdit','figMenuView', ...
+                            'figMenuInsert','figMenuTools','figMenuHelp'};
+         for mt = 1:length(defaultMenuTags)
+             hm = findall(htmp,'tag',defaultMenuTags{mt});
+             if ~isempty(hm)
+                 set(hm,'visible','off');
+             end
+         end
+         % Keep legacy fallbacks for very old menu labels.
+         set(findall(htmp,'label','&File'),'visible','off');
+         set(findall(htmp,'label','&Help'),'visible','off');
+         set(findall(htmp,'label','&Edit'),'visible','off');
+         set(findall(htmp,'label','Show &Toolbar'),'visible','off');
+         set(findall(htmp,'label','Show Le&gend'),'visible','off');
+         set(findall(htmp,'label','&Rotate 3D'),'visible','off');
+         set(findall(htmp,'label','&Zoom In'),'visible','off');
+         set(findall(htmp,'label','Zoom &Out'),'visible','off');
+         
+         % now add some stuff to the Tool Menu
+         hTM = findall(htmp,'label','&Tools');
+         if ~isempty(hTM)
+             uimenu(hTM(1),'label','Export','callback','filemenufcn(gcbf,''FileExport'')','separator','on');
+             uimenu(hTM(1),'label','Page Setup','callback','pagesetupdlg(gcbf)','separator','on');
+             uimenu(hTM(1),'label','Copy Figure','callback','editmenufcn(gcbf,''EditCopyFigure'')','separator','on');
+             uimenu(hTM(1),'label','Copy Options','callback','editmenufcn(gcbf,''EditCopyOptions'')','separator','off');
+ 
+             uimenu(hTM(1),'label','Print Setup','callback','filemenufcn(gcbf,''FilePrintSetup'')','separator','on');
+             uimenu(hTM(1),'label','Print Preview','callback','printpreview(gcbf)','separator','off');
+             uimenu(hTM(1),'label','Print','callback','printdlg','separator','off');
+         end
+        
+         % then kill nonsense entries in the toolbar
+         htmp2 = allchild(findall(new_pfh,'type','uitoolbar'));
+         set(findall(htmp2,'tag','figToolRotate3D'),'visible','off');
+         set(findall(htmp2,'tag','figToolZoomOut'),'visible','off');
+         set(findall(htmp2,'tag','figToolZoomIn'),'visible','off');
+
+         set(findall(htmp2,'clickedcallback','figure'),'visible','off');
+         set(findall(htmp2,'clickedcallback','filemenufcn(gcbf,''FileOpen'')'),'visible','off');
+         set(findall(htmp2,'clickedcallback','filemenufcn(gcbf,''FileSave'')'),'visible','off');
+
+         set(new_pfh,'visible','off');
+         drawnow;
+       
+        % set of handles to forthcoming objects 
+         h.figure   = new_pfh;   % there will be redundant copies of these
+         h.msngl    = 0;
+         h.mdbl     = 0;
+         h.mgrids   = 0;
+         h.mprint   = 0;
+         h.manalwin = 0;
+         h.mxchan   = 0;   % cross channel dialog
+         h.mkilltt  = 0;
+         h.mbodepl  = 0;
+         h.mmodal   = 0;
+         h.mmimo    = 0;
+         h.owner    = pfh;
+         
+         % the following handles are repeated for each axis .... 
+         h.movly    = 0;  % overlayed plot menu
+         h.axis     = 0;
+         h.lines    = zeros(1,numin);
+         h.text     = zeros(1,numin);
+         h.ovly     = 0;
+         h.ovlwin   = zeros(1,2);  % 2 analwin max 
+         
+         
+         h.title    = 0;
+         h.axlabel  = 0;
+         h.aylabel  = 0;
+         h.ypu1     = 0;  % measurement flavor (y(t),Aspec,FFT?)
+         h.ypu2     = 0;  % display units (depends on ypu1 selection)
+         h.yintfac  = 0;  % integration selection
+         h.xcref    = 0;  % reference channel select
+         h.yapcor   = 0;  % amplitude or power correction factor 
+         h.ylcb     = 0;  % channel plotting list
+         h.xpu1     = 0;  % x vector 
+         h.xpu2     = 0;  % units 
+         h.cursor   = 0;
+         h.aux_ro   = 0;  % aux freq readout for nyquist cursor
+         h.navgro   = 0;  % could get by with 1, but be consistent
+         h.rmsro    = 0;  % spectrum rms readout
+         h.stoppb   = 0;
+         h.instpb   = 0;
+         h.avgpb    = 0;
+         
+         % state storage for cross channel modal dialog (activated from menu pick)
+         
+         xc.xc_ckstate = zeros(MAXREFc,MAXCHANc);
+         xc.xc_cmax    = numin;
+         xc.xc_rmax    = NCperBox; 
+         xc.hxch       = [];         % handle to cross channel modal dialog
+         h.xchanv      = xc; 
+        
+         % now add some misc flags etc. 
+         h.runflag     = 0;
+         h.availflag   = 0;              % data should be available 
+         h.avgflag     = 0;              % inst or avg data
+         h.flavorreq   = zeros(1,FFTc);  % flags controlling 'get','flavor' action
+         
+         h.fq_lock     = 0;
+         h.mcviewexist = 0;     % 1 if mcview is alive 
+         h.hchngflag   = 0;
+         h.ma_flag     = 0;     % manual arm flag
+         h.warnflag    = 1;     % warn once per session about zero padding
+         h.mimo_on     = MIMOc; % query about mimo computation
+         h.instwarn    = 1;     % warn about inst acq with avg display
+         h.lastnyquist = 0;     % last display was nyquist, need to cleanup after this abboration in the grand scheme
+         h.minnyq_index = 1;     % minimum index into data for our very good friend Nyquist
+         h.maxnyq_index = 2;     % maximum index into data 
+         
+         
+         h.f_reqid     = 0;     % 2 flavors of data may be requested in real time loop
+         h.f_reqlist   = 0;
+         h.f_reqstr    = '';
+         h.f_fdflag    = 0;     % indicates a freq domain function
+         h.f_framesize = 0;     %
+         h.f_avgflag   = 0;     % indicates averaged function
+         h.f_refchan   = 0;     % flavor can have independent ref channels .... sooooo simple! (@#$%^)
+      
+         h.yreqlist    = [];    % channels needed for y axis real-time display  on a per axis basis
+         h.xreqlist    = [];    % channels needed for x axis real-time display 
+         h.refchan     = 1;     % each axis can have one reference channel for cross channel meas
+         h.int_vec     = 1.0;   % integration vector for spectrum displays, one per axis required.
+         h.int_vec_max = 1.0;   % max value of above
+         
+         h.xfer_int_vec= 1.0;        % integration vector for xfer function displays
+         h.xfer_int_vec_max = 1.0;   % max value of above
+         
+         
+         h.topline     = 1;     % which line/channel handle index is on top 
+         h.lastrun     = [];    % what type of measurement was last made: inst or avg
+         
+         
+        temp(UPPERc:LOWERc)  = h; % init handle array for the 2 axis  
+       
+        pfh = new_pfh;  % subsequent objects will now be owned by this new figure window. 
+        ovldstat('init',OVLD_POSc,numin,colors,pfh);
+        ovldstat('reconfig',[1 2]);     % just to get some initial info into ovldstat 
+       
+% ******* Access to full control setup panel ********************************
+        uimenu(pfh,'Label','&Setup',...
+                   'Callback','plot_vna(''menu'',''setup'')');
+       
+       
+% *********** mc setup *******************************************                                        
+        uimenu(pfh,'Label','&MC Setup','accelerator','M',...
+                   'Callback',['mcsetup(''init'',',int2str(numin),');']);  
+
+
+% **********  cross channel functions ****************************************
+        temp(1).mxchan = uimenu(pfh,'Label','Cross Channel',...
+                                    'Callback','plot_vna(''set'',''xchan_on'')');
+       
+         
+% ******Display Menus ********************************************
+         hdspm1  = uimenu(pfh,'Label','&Display');
+        
+         temp(1).msngl = uimenu(hdspm1,'Label','S&ingle',...
+                                       'accelerator','i',...
+                                       'Callback','plot_vna(''menu'',''single'');');
+
+         temp(1).mdbl  = uimenu(hdspm1,'Label','D&ual',...
+                                       'accelerator','u',...
+                                       'Callback','plot_vna(''menu'',''double'');');
+
+
+         temp(1).mgrids =  uimenu(hdspm1,'Label','&Grids',...
+                                         'Separator','on',...
+                                         'accelerator','g',...
+                                         'Callback','plot_vna(''menu'',''grids'');');
+                                         
+         % ******Overlay Menus, one per axis  ******************************************** 
+         s={'&Upper','&Lower'};
+         sa = {'U','L'};
+         for i=UPPERc:LOWERc
+                 temp(i).movly = uimenu(hdspm1,'Label',['Overlay ',s{i}],...
+                                            'accelerator',sa{i},...
+                                            'enable','on',...
+                                            'Callback',['plot_vna(''menu'',''ovline'',',int2str(i),');']);
+         end;    
+                                         
+         temp(1).manalwin =  uimenu(hdspm1,'Label','Analysis &Windows',...
+                                          'Separator','on',...
+                                          'accelerator','W',...
+                                          'Callback','plot_vna(''menu'',''analwin'');');                                
+                                         
+
+         temp(1).mprint = uimenu (hdspm1,'Label','&Print',...
+                                         'Separator','on',...
+                                         'accelerator','P',...
+                                         'Callback','hcpyv5(''init'',gcbf);');
+                                         
+                                         
+                          uimenu(hdspm1,'Label','Default si&ze','accelerator','z',...
+                                        'Separator','on',...
+                                        'Callback', 'plot_vna(''menu'',''default_size'');'); 
+                                        
+        temp(1).mbodepl = uimenu (hdspm1,'Label','&Bode Plot',...
+                                         'Separator','on',...
+                                         'accelerator','B',...
+                                         'Callback','bodepl(''init'',''vna'')');
+                                         
+                                        
+                                        
+        temp(1).mkilltt = uimenu (hdspm1,'Label','&Kill Tooltips',...
+                                         'Separator','on',...
+                                         'accelerator','K',...
+                                         'Callback','plot_vna(''menu'',''killtt'')');
+                                         
+% ************ mc view ********************************************
+                uimenu(pfh,'Label','&Preview','accelerator','M',...
+                           'Callback', 'plot_vna(''menu'',''mcview'',''init'');');                         
+                                         
+% *******  File Storage Menu ****************************************************         
+         uimenu(pfh,'Label','File Storage',...
+                             'Callback','plot_vna(''menu'',''filestor_on'')');
+% *******  Units BS ****************************************************         
+         hunits =  uimenu(pfh,'Label','Units',...
+                              'Callback','','visible','on');
+                                      
+         temp(1).rms_units =  uimenu(hunits,'Label','RMS',...
+                                            'Callback','plot_vna(''menu'',''units'',''rms'')','visible','on');
+         temp(1).pk_units =   uimenu(hunits,'Label','Peak',...
+                                            'Callback','plot_vna(''menu'',''units'',''pk'')','visible','on');
+         temp(1).p2p_units =  uimenu(hunits,'Label','Peak to Peak',...
+                                            'Callback','plot_vna(''menu'',''units'',''p2p'')','visible','on');
+
+         
+         
+
+% *******  Modal Analysis Parameters ****************************************************         
+         temp(1).mmodal =  uimenu(pfh,'Label','Modal',...
+                                      'Callback','plot_vna(''menu'',''modalpar_on'')');
+                                      
+% *******  MIMO Computation ****************************************************         
+         temp(1).mmimo =  uimenu(pfh,'Label','MIMO',...
+                                     'Callback','plot_vna(''menu'',''mimo'')','visible','off');
+ 
+         
+% ******* Buttons ****************************************************************
+         % BACKGROUND
+         temp(1).scg1 = uicontrol(pfh,'Style','frame',...
+                                      'Position',[scg1_pos,scg1_size],...
+                                      'BackGroundColor',colors(DLG_BKc,:));
+                  
+         % INST BUTTON
+         temp(1).instpb = uicontrol(pfh,'Style','Pushbutton',...
+                                        'Position',instpb_pos,...
+                                        'String','Inst',...
+                                        'Callback','plot_vna(''run'',''instpb'');',...
+                                        'Interruptible','on');
+                      
+         % AVG BUTTON
+         temp(1).avgpb = uicontrol(pfh,'Style','Pushbutton',...
+                                       'Position',avgpb_pos,...
+                                       'String','Avg',...
+                                       'Callback','plot_vna(''run'',''avgpb'');',...
+                                       'userdata','',....
+                                       'Interruptible','on');
+                                       % ###### userdata holds callback on completion of average 
+                                       
+                    
+         % STOP BUTTON
+         temp(1).stoppb = uicontrol(pfh,'Style','Pushbutton',...
+                                        'Position',stoppb_pos,...
+                                        'String','Stop',...
+                                        'Enable','off',...
+                                        'Callback','plot_vna(''stop'');',...
+                                        'Interruptible','on');
+                  
+       % create 2 axis objects, and associated popups and cursors. 
+       % leave all objects invisible till the load command 
+       % which will then decide if we got 1 or 2 plots.
+       
+       % for a dual plot format, use positions/sizes  in pos(1) and pos(2)
+       % for a single plot format, enlarge the "upper" and hide the lower and use pos(3) values
+       vis = 'off'; % set to on for debug
+       
+       % precompute positions for all objects
+         o = [0 0 0 0];
+         p.axis   = o;
+         p.xpu1   = o;
+         p.xpu2   = o;
+         p.ypu1   = o;
+         p.yintfac= o;
+         p.yapcor = o;
+         p.xcref  = o;
+         p.ypu2   = o;
+         p.ylcb   = o;
+         p.navgro = o;
+         p.frmrej = o;
+         p.cursor = [o;o;o;o;o;o;o;o;o];
+         pos(1:3) = p;
+         
+         wlcb =  WPUc + (numin>8)*WPUc; % adjust size accoring to # of channels
+         
+         pos(UPPERc).axis    = [[XOFSc,282],WAXc,HAXDBLc];     % upper  dual
+         pos(UPPERc).xpu1    = [[DXc,410],WPUc,HPU1c];
+         pos(UPPERc).xpu2    = [[DXc+WPUc,410],WPUc,HPU1c];
+         pos(UPPERc).ypu1    = [[DXc,410-1*HPU1c],WPUc,HPU1c];
+         
+      %  pos(UPPERc).yintfac = [[DXc+WPUc,410-1*HPU1c],WPUc,HPU1c];
+         pos(UPPERc).yintfac = [[DXc+WPUc,410-1*HPU1c],WPUc/2,HPU1c];
+        
+      %  pos(UPPERc).xcref   = [[DXc+WPUc,410-1*HPU1c],WPUc,HPU1c];
+         pos(UPPERc).xcref   = [[DXc+1.5*WPUc,410-1*HPU1c],WPUc/2,HPU1c];
+         
+      %  pos(UPPERc).yapcor  = [[DXc+1.5*WPUc,410-2*HPU1c],WPUc/2,HPU1c];
+         pos(UPPERc).yapcor  = [[DXc+1.5*WPUc,410-HPU1c],WPUc/2,HPU1c];
+         
+         pos(UPPERc).ypu2    = [[DXc,410-2*HPU1c],1.5*WPUc,HPU1c];
+         pos(UPPERc).ylcb    = [[DXc,410-3*HPU1c],wlcb,HLCBc];
+         pos(UPPERc).navgro  = [[DXc,230],4*WLBc,HTXTc];
+         pos(UPPERc).frmrej  = [[DXc,230+1.1*HTXTc],4*WLBc,HTXTc];
+         pos(UPPERc).rmsro   = [[WFIGc-11*WLBc-DXc,HFIGc-HTXTc-4],4*WLBc,HTXTc]; 
+         
+         pos(LOWERc).axis    = [[XOFSc,62],WAXc,HAXDBLc];      % lower  dual
+         pos(LOWERc).xpu1    = [[DXc,190],WPUc,HPU1c];
+         pos(LOWERc).xpu2    = [[DXc+WPUc,190],WPUc,HPU1c];
+         pos(LOWERc).ypu1    = [[DXc,190-1*HPU1c],WPUc,HPU1c];
+        
+       % pos(LOWERc).yintfac = [[DXc+WPUc,190-1*HPU1c],WPUc,HPU1c];
+         pos(LOWERc).yintfac = [[DXc+WPUc,190-1*HPU1c],WPUc/2,HPU1c];
+        
+       % pos(LOWERc).xcref   = [[DXc+WPUc,190-1*HPU1c],WPUc,HPU1c];
+         pos(LOWERc).xcref   = [[DXc+1.5*WPUc,190-1*HPU1c],WPUc/2,HPU1c];
+         
+       % pos(LOWERc).yapcor  = [[DXc+1.5*WPUc,190-2*HPU1c],WPUc/2,HPU1c];
+         pos(LOWERc).yapcor  = [[DXc+1.5*WPUc,190-HPU1c],WPUc/2,HPU1c];
+         
+         pos(LOWERc).ypu2    = [[DXc,190-2*HPU1c],1.5*WPUc,HPU1c];
+         pos(LOWERc).ylcb    = [[DXc,190-3*HPU1c],wlcb,HLCBc];
+         pos(LOWERc).navgro  = pos(UPPERc).navgro;
+         pos(LOWERc).frmrej  = pos(UPPERc).frmrej;
+         pos(LOWERc).rmsro   = [[WFIGc-11*WLBc-DXc,62+HAXDBLc],4*WLBc,HTXTc]; 
+         
+         
+         pos(SINGLEc).axis    = [[XOFSc 62],WAXc,HAXSNGc];      % single
+         pos(SINGLEc).xpu1    = [[DXc,410],WPUc,HPU1c];
+         pos(SINGLEc).xpu2    = [[DXc+WPUc,410],WPUc,HPU1c];
+         pos(SINGLEc).ypu1    = [[DXc,410-1*HPU1c],WPUc,HPU1c];
+         
+      %  pos(SINGLEc).yintfac = [[DXc+WPUc,410-1*HPU1c],WPUc,HPU1c];
+         pos(SINGLEc).yintfac = [[DXc+WPUc,410-1*HPU1c],WPUc/2,HPU1c];
+      %  pos(SINGLEc).xcref   = [[DXc+WPUc,410-1*HPU1c],WPUc,HPU1c];
+         pos(SINGLEc).xcref   = [[DXc+1.5*WPUc,410-1*HPU1c],WPUc/2,HPU1c];
+         
+         pos(SINGLEc).yapcor  = [[DXc+1.5*WPUc,410-HPU1c],WPUc/2,HPU1c];
+         
+         pos(SINGLEc).ypu2    = [[DXc,410-2*HPU1c],1.5*WPUc,HPU1c];
+         pos(SINGLEc).ylcb    = [[DXc,410-3*HPU1c],wlcb,HLCBc];
+         pos(SINGLEc).navgro  = pos(UPPERc).navgro;
+         pos(SINGLEc).frmrej  = pos(UPPERc).frmrej; 
+         pos(SINGLEc).rmsro   = [[WFIGc-11*WLBc-DXc,HFIGc-HTXTc-10],4*WLBc,HTXTc]; 
+         
+         for i=1:3
+            % positions for dual and single display mode ... hence a total of 3
+            axp = pos(i).axis;
+            ly  = axp(2)-CDYc;
+            lx  = axp(1);
+            wx  = axp(3);
+            hx  = axp(4);
+            
+            pos(i).cursor = [lx                                 ly-2*HTXTc      CLWc   HTXTc+2; % x label
+                             lx                                 ly-3*HTXTc      CLWc   HTXTc+2; % y label
+                             lx+CLWc+CSPc                       ly-2*HTXTc      CROWc  HTXTc+3; % x readout
+                             lx+CLWc+CROWc+2*CSPc               ly-2*HTXTc      CROWc  HTXTc+3; % x expand
+                             lx+CLWc+CSPc                       ly-3*HTXTc      CROWc  HTXTc+3; % y readout
+                             lx+CLWc+CROWc+2*CSPc               ly-3*HTXTc      CROWc  HTXTc+3; % y expand
+                             lx-MKWc-CSPc                       ly-2*HTXTc      HTXTc  HTXTc;   % peak button
+                             lx-MKWc-CSPc+HTXTc                 ly-2*HTXTc      HTXTc  HTXTc;   % valley button
+                             lx-MKWc-CSPc                       ly-3*HTXTc      MKWc   HTXTc];  % mark button
+            pos(i).aux_ro = [lx+CLWc+CSPc                       ly-1*HTXTc      CROWc  HTXTc+3;]; % nyquist freq                  
+                             
+         end;
+         
+         if length(colors(:,1)) < OVLYLINEc
+            colors(OVLYLINEc,:)=[0.5,0.5,0.5];
+         end;
+
+         cursor_colors  =  [colors(LBL_BKc,:);   % label color
+                            [0 0 0];             % readout color (zeros == track line color) was colors(EDT_BKc,:)
+                            colors(CURSORc,:);   % expansion box color
+                            colors(MARKc,:);     % mark line color
+                            colors(OVLYLINEc,:)  % cursor color  (overlay plot)
+                            colors(CURSORc,:)];  % cursor color  (main plot)
+                            
+         line_colors = colors(TRA_1c:TRA_4c,:);
+         
+         % only MAXLINECOLORc line colors are defined ... add more for 16 channel max  
+         if numin > MAXLINECOLORc
+            %              r   g   b
+            more_colors = [1   0   0
+                           1   0.7 0
+                           0   1   1
+                           0.7 0.7 1
+                           0   0   1
+                           1   1   1
+                           0   1   0
+                           1   1   0
+                           0.5 1   0
+                           0   0.5 1
+                           1   0   0.5
+                           1   0.5 0.5
+                           0.5 1   0
+                           0   0   1
+                           1   0.5 0
+                           0   1   0.5
+                           1   1   0.5
+                           1   0   0.25
+                           1   0.7 0.25
+                           0   1   0.25
+                           0.7 0.7 0.25 ];
+            i=1;  % 7/17/99 mod to add colors as needed  
+            while length(line_colors(:,1)) < numin
+                if ismember(more_colors(i,:),line_colors,'rows')==0
+                   line_colors  = [line_colors;more_colors(i,:)];
+                end;
+                i=i+1;
+                if i > length(more_colors(:,1))
+                   disp('ran out of colors, why?');
+                end
+            end;
+         end;
+         
+         % initial state of the pseudo list box for y axis channel selection 
+         xs.position       = o;
+         xs.visible        = vis;
+         xs.maxnum         = numin;
+         xs.maxrow         = NROWSc;
+         xs.label          = 'chan sel';
+         xs.clabel         = colors(PUP_BKc,:);
+         xs.cframe         = min(1,exp(-pi/2.56)+colors(PLT_BKc,:));
+         xs.cb_close       = '';
+         xs.cb_check       = ''; % defined below
+         xs.fontname       = [];
+         xs.fontsize       = [];
+         xs.fontweight     = [];
+         slcb1(1).label    = ['null'];
+         slcb1(1).color    = [1 1 1];
+         slcb1(1).state    = 0;
+         slcb1(1).respchan = 0;
+         
+         for i=UPPERc:LOWERc
+             % various objects associated with the 2 axes
+             if i==UPPERc
+                % the upper plot will always be visible
+                vis='on';
+                xs.visible = 'on';
+             end;
+             temp(i).axis = axes('Parent',pfh,'Units','pixels','Position',pos(i).axis,...
+                                  'Box','on',...
+                                  'visible',vis,...
+                                  'NextPlot','add',...
+                                  'DrawMode','fast',...
+                                  'Color',colors(PLT_BKc,:),...
+                                  'TickDir','out',...
+                                  'Xcolor',colors(XY_AXc,:),...
+                                  'Ycolor',colors(XY_AXc,:),...
+                                  'fontname','arial',...              
+                                  'FontSize',fontsize);  
+                          
+                          
+             temp(i).title = get(temp(i).axis,'Title');
+             set(temp(i).title,'String','null/null','FontSize',fontsize,'Color',colors(XY_LBLc,:),'userdata',[]);
+                               % ######## note userdata 
+             
+             temp(i).axlabel = get(temp(i).axis,'XLabel');
+             set(temp(i).axlabel,'String','null','FontSize',fontsize,'Color',colors(XY_LBLc,:));
+                               % ######## note userdata 
+             
+             temp(i).aylabel = get(temp(i).axis,'YLabel');
+             set(temp(i).aylabel,'String','null','FontSize',fontsize,'Color',colors(XY_LBLc,:));
+                               % ######## note userdata 
+             
+             % create a set of line and text objects (1 per input channel)
+             
+             
+             for k=1:numin
+                 temp(i).lines(k) =  line('parent',temp(i).axis,...
+                                          'Xdata',[nan,nan],'Ydata',[nan,nan],'clipping','on',...
+                                          'Color',line_colors(k,:),...
+                                          'visible',vis);
+                 x = 0.02+ 0.25*rem((k-1),4);
+                 if k<=8
+                     y = 0.96 - fix((k-1)/4)*0.04;
+                 else
+                     y = 0.04 + fix((k-9)/4)*0.04;
+                 end;
+                 
+                 temp(i).text(k) = text('parent', temp(i).axis,'string','null','color',[0 0 0],...
+                                        'erasemode','background',...
+                                        'units','normalized','position',[x,y],'visible','off','userdata',0,...
+                                        'interpreter','none',...
+                                        'fontunits','points','fontsize',ATXTSIZEc); 
+                                        % ########## note userdata
+                % setting 'interpreter' to 'none' is KEY for max painting speed                         
+             end;
+             temp(i).ovly   =  line('parent',temp(i).axis,'Xdata',[nan,nan],'Ydata',[nan,nan],'clipping','on',...
+                                                          'Color',colors(OVLYLINEc,:),...
+                                                          'erasemode','background','visible','off','userdata',0);
+                                        % ########## note userdata                           
+            
+             % line objects for blessed analwin, limit to upper display only, a rational compromise
+             more_colors = [1 0 0.5
+                            1 1 0.5];
+             markers = {'square','diamond'};
+             
+             if i==UPPERc
+                for k=1:2
+                     temp(i).ovlwin(k)   =  line('parent',temp(i).axis,'Xdata',[nan,nan],'Ydata',[nan,nan],'clipping','on',...
+                                                 'Color',more_colors(k,:),'markersize',4,'userdata',0,...
+                                                 'linestyle','none','marker',markers{k},'erasemode','background','visible','off');
+                                                  % ########## note userdata       
+                 end;                         
+             end;                                             
+                                                          
+             temp(i).cursor = cursor(temp(i).axis,'init',pos(i).cursor,cursor_colors,['x:';'y:'],['+','+'],0.7*fontsize,['%7v';'%7v'],vis);
+             gridline(temp(i).axis,'init',colors(GRIDc,:));  %  initialize grid line rountine
+
+             % popup controls ... 
+             temp(i).xpu1    = uicontrol(pfh,'Style','Popup','Units','pixels',...
+                                            'Position',pos(i).xpu1,...
+                                            'Visible',vis,...
+                                            'BackgroundColor',colors(PUP_BKc,:),...
+                                            'userdata',0,...
+                                            'String','null','HorizontalAlignment','left',...
+                                            'CallBack',['plot_vna(''cb_xpu1'',',int2str(i),');']);
+                                            % ####### note userdata 
+             
+             temp(i).xpu2    = uicontrol(pfh,'Style','Popup','Units','pixels',...
+                                            'Position',pos(i).xpu2,...
+                                            'Visible',vis,...
+                                            'BackgroundColor',colors(PUP_BKc,:),...
+                                            'String',{'null'},'HorizontalAlignment','left',...
+                                            'CallBack',['plot_vna(''cb_xpu2'',',int2str(i),');']);
+                                          
+                                            
+             temp(i).ypu1    = uicontrol(pfh,'Style','Popup','Units','pixels',...
+                                            'Position',pos(i).ypu1,...
+                                            'Visible',vis,...
+                                            'BackgroundColor',colors(PUP_BKc,:),...
+                                            'String',Y1_G1c,'HorizontalAlignment','left',...
+                                            'CallBack',['plot_vna(''cb_ypu1'',',int2str(i),');']);
+         
+         
+             temp(i).ypu2    = uicontrol(pfh,'Style','Popup','Units','pixels',...
+                                            'Position',pos(i).ypu2,...
+                                            'Visible',vis,...
+                                            'BackgroundColor',colors(PUP_BKc,:),...
+                                            'String',{'null'},'HorizontalAlignment','left',...
+                                            'CallBack',['plot_vna(''cb_ypu2'',',int2str(i),');']);
+                                            
+                                         
+             temp(i).yintfac   =  uicontrol(pfh,'Style','Popup','Units','pixels',...
+                                            'Position',pos(i).yintfac,...
+                                            'Visible','off',...
+                                            'BackgroundColor',colors(PUP_BKc,:),...
+                                            'String',Y3_G1c,...
+                                            'HorizontalAlignment','left',...
+                                            'tooltipstring',Y3_G1TTc,...
+                                            'tag',TTSc,...
+                                            'CallBack',['plot_vna(''cb_intfac'',',int2str(i),');']);
+                                            
+             
+                                            
+             temp(i).xcref   =  uicontrol(pfh,'Style','Popup','Units','pixels',...
+                                            'Position',pos(i).xcref,...
+                                            'Visible','off',...
+                                            'BackgroundColor',colors(PUP_BKc,:),...
+                                            'String','null',...
+                                            'HorizontalAlignment','left',...
+                                            'value',1,...
+                                            'tooltipstring',XCREF_TTc,...
+                                            'tag',TTSc,...
+                                            'CallBack',['plot_vna(''cb_refchan'',',int2str(i),');']);
+                                            
+                                            
+             temp(i).yapcor   =  uicontrol(pfh,'Style','Popup','Units','pixels',...
+                                            'Position',pos(i).yapcor,...
+                                            'Visible','off',...
+                                            'BackgroundColor',colors(PUP_BKc,:),...
+                                            'String',Y4_G1c,...
+                                            'tooltipstring',Y4_G1TTc,...
+                                            'tag',TTSc,...
+                                            'HorizontalAlignment','left',...
+                                            'CallBack',['plot_vna(''cb_apcor'',',int2str(i),');']);
+         
+         
+             if i==UPPERc
+                 temp(i).navgro = uicontrol(pfh,'Style','Text','Visible',vis,...
+                                                'Position',pos(i).navgro,...
+                                                'BackgroundColor',colors(LBL_BKc,:),...
+                                                'visible','off',...
+                                                'String',[AVGSTRc,'0'],'HorizontalAlignment','left');
+             
+                 temp(i).frmrej = uicontrol(pfh,'Style','Pushbutton','Visible',vis,...
+                                                'Position',pos(i).frmrej,...
+                                                'BackgroundColor',colors(LBL_BKc,:),...
+                                                'visible','off',...
+                                                'Callback','plot_vna(''frame_reject'')',...
+                                                'String',['Rej. Frame'],'HorizontalAlignment','Center');
+             end;                               
+                                            
+             temp(i).rmsro = uicontrol(pfh,'Style','Text','Visible',vis,...
+                                            'Position',pos(i).rmsro,...
+                                            'BackgroundColor',[0 0 0],...
+                                            'visible','off',...
+                                            'String','n/a','HorizontalAlignment','left');
+                                            
+                                            
+             temp(i).aux_ro = uicontrol(pfh,'Style','Edit','Visible',vis,...
+                                            'Position',pos(i).aux_ro,...
+                                            'BackgroundColor',colors(EDT_BKc,:),...
+                                            'visible','off',...
+                                            'String','n/a','HorizontalAlignment','left');
+                                            
+                                            
+             xs.position    = pos(i).ylcb;
+             xs.fontsize    = get(temp(1).xpu1,'fontsize');
+             xs.fontname    = get(temp(1).xpu1,'fontname');
+             xs.fontweight  = get(temp(1).xpu1,'fontweight');
+             xs.cb_check    = ['plot_vna(''chan_change'',',int2str(i),');'];
+             temp(i).ylcb   = listchka(pfh,'init',xs,slcb1);
+         end;
+         
+         Hpvna = temp;  % only way that I have figured out to get
+                        % a global structure initialized
+         set(Hpvna(UPPERc).axlabel,'userdata',pos); % stash size & position of objects               
+                        
+         clear temp
+         % Initialize a basic channel data structure.
+         % For measurements that do not use cross channel functions, 
+         % there will be one of these per input channel.
+         % 
+         c.tdmeas           = [];  % td -> time domain
+         c.aspec            = [];  % spectrum in Vrms^2
+         c.fft              = [];  % raw fft results
+         c.acor             = [];  % auto correlation ... one of my favorites! 
+         c.label            = [];  % channel label
+         c.eu_on_off        = [];
+         c.euscale_fac      = [];  % precomputed from eu on/off and eu_value 
+         c.eu_string        = [];  
+         c.eu_val           = [];
+         c.fs_val           = [];  % channel full scale setting
+	 c.a_r_flag         = [];  % auto ranging flag 1==on a_r
+         c.db_ref           = 1.0; % 0 dB reference level .... 
+         
+         chan(1:MAXCHANc)   = c;   % An **array** of basic structures for channel data
+                                   % It must be large enough to hold the entire wad independent 
+                                   % of the systems actual # of channels
+                                   % multi-reference cross channel functions will build on this theme.
+         clear c
+         % cross channel measurements
+                                            % LFD = length of freq domain meas
+                                            % LTD = length of time domain meas
+         c.xfer                      = [];  % LTD * MAXCHANc
+         c.coh                       = [];  %     "
+         c.cspec                     = [];  %     "
+         c.ccor                      = [];  % LTD * MAXCHANc
+         c.imp                       = [];  % LTD * MAXCHANc
+         cmeas(1:MAXREFc,1:MAXCHANc) = c;   % up to MAXREFc reference channels
+         
+         
+         
+         % make the grand structure from the array of basic structures,a time vector, freq vector,
+         % and other ancillary stuff
+         temp.scmeas         = chan;     % single channel measurements and channel specific info 
+         temp.xcmeas         = cmeas;    % cross channel measurements
+         temp.xcstate        = [];       % cross channel computation state
+         temp.tdxvec         = [];       % time domain x vector 
+         temp.fdxvec         = [];       % freq domain x vector 
+         temp.clist          = [];       % the active channel list
+         temp.numin          = numin;    % number of inputs
+         temp.wincor         = 1;        % window amplitude/power correction factor 
+         temp.winsel         = 1;        % window selection code see avgdef_h.m 
+         temp.rbw            = 1;        % resolution bandwidth for Power Spectrum Density displays
+         temp.navg           = 0;        % number of averages
+         temp.zpad           = 0;        % track if zero padding was used. 
+         temp.ovld           = [];       % overload status
+         temp.zoomcf         = 0;        % zoom center freq
+         temp.modal.dblpcnt  = DBLHAMPc; % new double hit amplitude in percent of max peak 
+         temp.modal.dbldelay = DBLHDLYc; % and delay in percent of frame 
+         temp.modal.forcewin = FORCEWINc; % extent of force window up to %100  
+         temp.modal.expdecay = EXPDECAYc; % exponetial decay value at end of frame in percent
+         temp.filestor.state = FS_STATEc;
+         temp.filestor.label = FS_LABELc;
+         temp.filestor.fields= FS_FIELDSc;
+         
+         ChanDat             = temp;     % finally, set global ChanDat
+          
+         clear temp chan cmeas           % to be tidy
+         % Enable guarded auto-relayout on window size changes.
+         set(Hpvna(UPPERc).figure,'resizefcn','plot_vna(''resize_safe'')');
+         try
+             set(Hpvna(UPPERc).figure,'SizeChangedFcn','plot_vna(''resize_safe'')');
+         catch
+             % Property may not exist on older releases.
+         end
+         % Auto-install shutdown-safe callbacks for legacy vna.p.
+         try
+             vna_patch_runtime;
+         catch
+         end
+
+% ***************** End Init Section **************************
+
+  case 'measplot'
+       % MEASPLOT 
+       % attempt to localize plotting of all data to this code segment 
+       % rely on subsequent drawnow to follow this call
+       % In2 has which axis to update, could be both: [1,2] 
+      
+       for axnum=In2
+         xpu1sel     = get(Hpvna(axnum).xpu1,'value');
+         ypu1sel     = get(Hpvna(axnum).ypu1,'value');
+         ypu2sel     = get(Hpvna(axnum).ypu2,'value');
+    
+         xsetscale   = 0;
+         ysetscale   = 0;
+         
+         switch In1
+           case 'rtl'
+                % real time display loop, depends completely on the x and y request lists ... 
+                xptr   = Hpvna(axnum).xreqlist;
+                switch ypu1sel
+                   case {XFERc, COHc, CSPECc, CCORc, IMPc}
+                       % remove (from ylist) reference and channels not logged as responses 
+                       if length(ChanDat.xcstate.refc) > get(Hpvna(axnum).xcref,'value') 
+                           % added this test 4/12/99 RAB
+                           refchan = ChanDat.xcstate.refc(get(Hpvna(axnum).xcref,'value'));
+                           ylist = intersect(setdiff(Hpvna(axnum).yreqlist,refchan),[ChanDat.xcstate.resp(refchan).r]);
+                       else
+                           refchan=[];
+                           ylist =  [Hpvna(axnum).yreqlist];
+                       end;
+                   otherwise
+                       ylist  = [Hpvna(axnum).yreqlist];
+                       refchan = [];
+                end;
+                
+                if nargin==4 & strcmp(In3,'setscales')
+                   xsetscale = 1;
+                   ysetscale = 1;
+
+                elseif nargin == 4 & strcmp(In3,'do_not_setscales')
+                   xsetscale = 0;
+                   ysetscale = 0;
+                elseif nargin == 4
+                   xxx = In3
+                   error('unrecognized option to plot_vna measplot rtl');
+                end;
+           case 'xaxis'
+                if isempty(In3)
+                   ylist =  [Hpvna(axnum).yreqlist];
+                else
+                   ylist = In3; % for time domain
+                end;
+                if isempty(In4)
+                   xptr  = Hpvna(axnum).xreqlist;
+                   if isempty(xptr)
+                      xptr=1;
+                   end;
+                else
+                   xptr  = In4;
+                end;
+              
+                refchan = Hpvna(axnum).refchan;
+                if isempty(refchan)&ismember(ypu1sel,[XFERc,COHc,CCORc,IMPc])
+                   return;  % 6/11/98
+                end;
+                
+                for i=ChanDat.clist
+                   switch ypu1sel
+                    case  YOFTc
+                            ChanDat.scmeas(i).tdmeas = resize(ChanDat.scmeas(i).tdmeas,length(ChanDat.tdxvec),1); 
+                    case  ASPECc 
+                            ChanDat.scmeas(i).aspec  = resize(ChanDat.scmeas(i).aspec,length(ChanDat.fdxvec),1);
+                    case  FFTc
+                            ChanDat.scmeas(i).fft    = resize(ChanDat.scmeas(i).fft,length(ChanDat.fdxvec),1);
+                    case ACORc 
+                            ChanDat.scmeas(i).acor   = resize(ChanDat.scmeas(i).acor,length(ChanDat.tdxvec),1);
+                    case XFERc 
+                            ChanDat.xcmeas(refchan,i).xfer  = resize(ChanDat.xcmeas(Hpvna(axnum).refchan,i).xfer,length(ChanDat.fdxvec),1); 
+                    case COHc 
+                            ChanDat.xcmeas(refchan,i).coh   = resize(ChanDat.xcmeas(Hpvna(axnum).refchan,i).coh,length(ChanDat.fdxvec),1); 
+                    case CSPECc 
+                            ChanDat.xcmeas(refchan,i).cspec = resize(ChanDat.xcmeas(Hpvna(axnum).refchan,i).cspec,length(ChanDat.fdxvec),1); 
+                    case CCORc 
+                            ChanDat.xcmeas(refchan,i).ccor  = resize(ChanDat.xcmeas(Hpvna(axnum).refchan,i).ccor,length(ChanDat.tdxvec),1); 
+                    case IMPc 
+                            ChanDat.xcmeas(refchan,i).imp   = resize(ChanDat.xcmeas(Hpvna(axnum).refchan,i).imp,length(ChanDat.tdxvec),1); 
+                   end;
+                end;
+                
+                
+                if nargin == 6
+                  xsetscale  = In5;
+                else
+                  xsetscale  = 1;
+                end;
+           case 'yaxis'
+                if isempty(In3)
+                   ylist = [Hpvna(axnum).yreqlist];
+                else
+                % modified this section 3/29/2k to make EUs work on previously acquired data. 
+                   switch ypu1sel
+                      case {CCORc, IMPc, XFERc, COHc, CSPECc}
+                           refchan = ChanDat.xcstate.refc(get(Hpvna(axnum).xcref,'value'));
+                           ylist = setdiff(Hpvna(axnum).yreqlist,refchan); 
+                    otherwise
+                          ylist = In3; 
+                   end
+                end;
+                xptr      = In4;
+                ysetscale = 1;
+         end;  
+         % process X axis stuff if there is any .... 
+         if  ~isempty(xptr)
+             switch ypu1sel
+              case  YOFTc
+                if xsetscale
+                   set(Hpvna(axnum).axis,'Xscale','Linear');
+                end;
+                switch xpu1sel
+                 case XTIMEc
+                   xscale  = 1e3^(get(Hpvna(axnum).xpu2,'value')-1);  % seconds, milli-seconds, micro-seconds
+                   xdata = ChanDat.tdxvec*xscale;
+                   if xsetscale
+                      cursor(Hpvna(axnum).cursor,'set','xlim',xscale*[ChanDat.tdxvec(1),ChanDat.tdxvec(end)]); % reasonable 
+                      xsetscale = 0;
+                   end;
+                  
+                 case {RECHANc,IMCHANc, MAGCHANc }
+                     % lissajous
+                   switch xpu1sel
+                     case RECHANc
+                       xdata = real(ChanDat.scmeas(xptr).tdmeas)*ChanDat.scmeas(xptr).euscale_fac;  
+                     case IMCHANc
+                       xdata = imag(ChanDat.scmeas(xptr).tdmeas)*ChanDat.scmeas(xptr).euscale_fac; 
+                     case MAGCHANc
+                       xdata = abs(ChanDat.scmeas(xptr).tdmeas)*ChanDat.scmeas(xptr).euscale_fac;
+                     otherwise
+                       % nothing
+                   end;
+                   if xsetscale
+                      % axis scaling is required
+                      xmax = ChanDat.scmeas(xptr).fs_val*ChanDat.scmeas(xptr).euscale_fac; 
+                      cursor(Hpvna(axnum).cursor,'set','xlim',[-xmax xmax]);
+                      xsetscale = 0;
+                   end;
+                end;
+             case {ACORc, CCORc, IMPc}
+                if xsetscale
+                   set(Hpvna(axnum).axis,'Xscale','Linear');
+                end;
+                l  = length(ChanDat.tdxvec);
+                xscale  = 1e3^(get(Hpvna(axnum).xpu2,'value')-1);  % seconds, milli-seconds, micro-seconds
+                if ypu1sel == IMPc
+                   xdata = xscale*(ChanDat.tdxvec(2)-ChanDat.tdxvec(1))*(0:1:(l-1));
+                else
+                   xdata = xscale*(ChanDat.tdxvec(2)-ChanDat.tdxvec(1))*(-l/2:1:(l/2-1));
+                end;
+                if xsetscale
+                   cursor(Hpvna(axnum).cursor,'set','xlim',[xdata(1),xdata(end)]); % reasonable 
+                   xsetscale = 0;
+                end;
+             case  FFTc 
+                if xpu1sel== XLINFREQc
+                   switch get(Hpvna(axnum).xpu2,'value')
+                      case HZc
+                          xdata = ChanDat.fdxvec;
+                      case KHZc
+                          xdata = ChanDat.fdxvec/1000;
+                      case RPMc
+                          xdata = ChanDat.fdxvec*60;  
+                      case KRPMc
+                          xdata = ChanDat.fdxvec*(60/1000);  
+                   end;
+                   set(Hpvna(axnum).axis,'Xscale','Linear');
+                   if xsetscale
+                     % axis scaling is required 
+                     cursor(Hpvna(axnum).cursor,'set','xlim',[xdata(1) xdata(end)]);
+                     xsetscale = 0;
+                   end;
+                else 
+                   % quasi Nyquist
+                   switch xpu1sel
+                     case RECHANc
+                       xdata = real(ChanDat.scmeas(xptr).fft)*ChanDat.scmeas(xptr).euscale_fac;  
+                     case IMCHANc
+                       xdata = imag(ChanDat.scmeas(xptr).fft)*ChanDat.scmeas(xptr).euscale_fac; 
+                     case MAGCHANc
+                       xdata = abs(ChanDat.scmeas(xptr).fft)*ChanDat.scmeas(xptr).euscale_fac;
+                     otherwise
+                       % nothing
+                   end; % switch xpu1sel
+                   
+                   if xsetscale
+                      % axis scaling is required
+                      xmax = (ChanDat.scmeas(xptr).fs_val/sqrt(2))*ChanDat.scmeas(xptr).euscale_fac; % div by root 2 for rms 
+                      cursor(Hpvna(axnum).cursor,'set','xlim',[-xmax xmax]);
+                      xsetscale = 0;
+                   end;
+                end;
+                
+             case  { ASPECc XFERc COHc CSPECc}
+                   switch get(Hpvna(axnum).xpu2,'value')
+                      case HZc
+                          xdata = ChanDat.fdxvec;
+                      case KHZc
+                          xdata = ChanDat.fdxvec/1000;
+                      case RPMc
+                          xdata = ChanDat.fdxvec*60;  
+                      case KRPMc
+                          xdata = ChanDat.fdxvec*(60/1000);  
+                   end;
+                
+                   switch xpu1sel
+                    case XLINFREQc
+                      set(Hpvna(axnum).axis,'Xscale','Linear');
+                      if xsetscale
+                        % axis scaling is required 
+                        cursor(Hpvna(axnum).cursor,'set','xlim',[xdata(1) xdata(end)]);
+                        xsetscale = 0;
+                      end;
+                    case XLOGFREQc
+                      set(Hpvna(axnum).axis,'Xscale','Log');
+                      if xsetscale
+                         cursor(Hpvna(axnum).cursor,'set','xlim',[xdata(2) xdata(end)]);
+                         xsetscale = 0;
+                      end;
+                   otherwise
+                      xpu1sel
+                      error('range error 2');  
+                   end;
+             end; % ypu1sel switch  
+         end;
+    
+    
+         % process y axis stuff ...
+         for ychan = ylist
+              switch ypu1sel
+               case  YOFTc
+                 if ysetscale
+                    set(Hpvna(axnum).axis,'Yscale','Linear');
+                    ymaxval = 0;
+                    for p = ylist
+                       ymaxval= max(ymaxval,abs(ChanDat.scmeas(p).euscale_fac)*ChanDat.scmeas(p).fs_val); 
+                    end;
+                    cursor(Hpvna(axnum).cursor,'set','ylim',YOVERc*[-ymaxval ymaxval]);
+                 end;
+                 
+                % ydata "processing" section for YOFT
+                ydata =  ChanDat.scmeas(ychan).tdmeas*ChanDat.scmeas(ychan).euscale_fac;
+                switch ypu2sel
+                 case Y_REALc
+                   ydata = real(ydata) ; 
+                 case Y_IMAGc
+                   ydata = imag(ydata);
+                 case Y_MAGc 
+                   ydata = abs(ydata);
+                 otherwise
+                   disp('invalid Y processing selection');
+                end;
+              
+               case  ACORc
+                 if ysetscale
+                    set(Hpvna(axnum).axis,'Yscale','Linear');
+                    ymaxval = 0;
+                    for p = ylist
+                       ymaxval= max(ymaxval,abs(ChanDat.scmeas(p).euscale_fac)*ChanDat.scmeas(p).fs_val); 
+                    end;
+                    ymaxval=ymaxval^2;
+                    cursor(Hpvna(axnum).cursor,'set','ylim',YOVERc*[-1 1]*ymaxval);
+                 end;
+                 ydata = (ChanDat.scmeas(ychan).acor)*(ChanDat.scmeas(ychan).euscale_fac^2); 
+                 switch ypu2sel
+                  case Y_REALc
+                    ydata = real(ydata)  ; % dependent on displayed units 
+                 case Y_IMAGc
+                    ydata = imag(ydata);   %  this produces zero 
+                 case Y_MAGc 
+                    ydata = abs(ydata);
+                 otherwise
+                    disp('invalid Y processing selection');
+                end;
+                 
+               case { CCORc, IMPc}
+                 if ysetscale
+                    set(Hpvna(axnum).axis,'Yscale','Linear');
+                    ymaxval = 0;
+                    for p = ylist
+                       if ypu1sel ==CCORc
+                           ymaxval= max(ymaxval,abs(ChanDat.scmeas(p).euscale_fac)*abs(ChanDat.scmeas(p).fs_val))*ChanDat.scmeas(Hpvna(axnum).refchan).euscale_fac*ChanDat.scmeas(Hpvna(axnum).refchan).fs_val; 
+                       else
+                           % max value impulse scales with BW selection 
+                           % but the max value cannot be ascertained by any means that I can figure
+                           % First try to set a scale from the data ... if its present.
+                           % moral equivalent of autoscaling
+                           yscale   = ChanDat.scmeas(ychan).euscale_fac/ChanDat.scmeas(Hpvna(axnum).refchan).euscale_fac;
+                           ymaxval  = max(abs(yscale*ChanDat.xcmeas(Hpvna(axnum).refchan,ychan).imp));
+                           if isempty(ymaxval)
+                              ng_flag=1;
+                           elseif ymaxval==0
+                              ng_flag=1;
+                           elseif isnan(ymaxval)
+                              ng_flag=1;
+                           else
+                              ng_flag=0;
+                           end;
+                           if ng_flag 
+                              ymaxval  = max(abs(ChanDat.scmeas(p).euscale_fac)*abs(ChanDat.scmeas(p).fs_val))/(ChanDat.scmeas(Hpvna(axnum).refchan).euscale_fac*ChanDat.scmeas(Hpvna(axnum).refchan).fs_val); 
+                           end;
+                       end;
+                    end;
+                    cursor(Hpvna(axnum).cursor,'set','ylim',YOVERc*[-1 1]*ymaxval);
+                 end;
+                
+                 if ypu1sel ==CCORc
+                     yscale = ChanDat.scmeas(ychan).euscale_fac*ChanDat.scmeas(Hpvna(axnum).refchan).euscale_fac;
+                     ydata = yscale*ChanDat.xcmeas(Hpvna(axnum).refchan,ychan).ccor;
+                 else
+                     yscale = ChanDat.scmeas(ychan).euscale_fac/ChanDat.scmeas(Hpvna(axnum).refchan).euscale_fac;
+                     ydata  = yscale*ChanDat.xcmeas(Hpvna(axnum).refchan,ychan).imp;
+                 end;
+                
+                 switch ypu2sel
+                       case Y_REALc
+                           ydata = real(ydata);
+                       case Y_IMAGc
+                           ydata = imag(ydata);
+                       case Y_MAGc
+                           ydata = abs(ydata);
+                       otherwise
+                           disp('invalid Y processing selection');
+                 end;
+                 
+               case  ASPECc
+                 % aspec amplitude or power correction
+                 switch get(Hpvna(axnum).yapcor,'value')
+                    case Y_AMPCc
+                       wcor_fac = 1;
+                    case Y_PWRCc
+                       wcor_fac = ChanDat.wincor;
+                 end;
+                 
+                 if ysetscale
+                    switch ypu2sel
+                       case {Y_DBUc, Y_DBUpRTHXc, Y_Uc, Y_UpRTHZc, Y_SQUc, Y_SQUpHZc, Y_SQUSECpHZc}
+                          set(Hpvna(axnum).axis,'Yscale','Linear');  
+                       otherwise
+                          set(Hpvna(axnum).axis,'Yscale','Log');  
+                    end;
+                 end;   
+                   
+                 switch ypu2sel
+                   case  {Y_DBUc, Y_DBUpRTHXc}
+                     switch ypu2sel
+                        case Y_DBUc
+                             %        window cor          eng units                      rms,peak,p-p        dB reference
+                             yscale = wcor_fac * ((abs(ChanDat.scmeas(ychan).euscale_fac*ChanDat.units.val)/ChanDat.scmeas(ychan).db_ref)^2); 
+                        case Y_DBUpRTHXc
+                             %             window cor                       eng units                 rms,peak,p-p         dB reference
+                             yscale = (wcor_fac/ChanDat.rbw)*(( abs(ChanDat.scmeas(ychan).euscale_fac*ChanDat.units.val ) /ChanDat.scmeas(ychan).db_ref)^2); 
+                     end;
+                     if ysetscale
+                       y_max   = DB10c*log(yscale*ChanDat.scmeas(ychan).fs_val*Hpvna(axnum).int_vec_max); 
+                       y_min   = y_max-DBFSc;
+                       cursor(Hpvna(axnum).cursor,'set','ylim',[y_min YOVERc*y_max]);
+                     end;
+                     ydata = DB10c*log(yscale*ChanDat.scmeas(ychan).aspec.*Hpvna(axnum).int_vec+VSFNc);
+                 
+                   case  {Y_Uc,Y_UpRTHZc,Y_LOGUc,Y_LOGUpRTHZc}
+                     switch ypu2sel
+                           case {Y_Uc,Y_LOGUc}  
+                             yscale = wcor_fac * ((ChanDat.scmeas(ychan).euscale_fac*ChanDat.units.val)^2);
+                           case {Y_UpRTHZc,Y_LOGUpRTHZc} 
+                             yscale = (wcor_fac/ChanDat.rbw) * ((ChanDat.scmeas(ychan).euscale_fac*ChanDat.units.val)^2);
+                     end;
+                     if ysetscale
+                       y_max   = sqrt(yscale*ChanDat.scmeas(ychan).fs_val*Hpvna(axnum).int_vec_max); 
+                       switch ypu2sel
+                          case {Y_Uc, Y_UpRTHZc}
+                             y_min= 0.0;
+                          case {Y_LOGUc, Y_LOGUpRTHZc}
+                             y_min = 1e-6*y_max;
+                       end;
+                       cursor(Hpvna(axnum).cursor,'set','ylim',[y_min YOVERc*y_max]);
+                     end;
+                     ydata = sqrt(yscale*ChanDat.scmeas(ychan).aspec.*Hpvna(axnum).int_vec);
+                     
+                  case {Y_SQUc, Y_SQUpHZc, Y_SQUSECpHZc, Y_LOGSQUc, Y_LOGSQUpHZc, Y_LOGSQUSECpHZc}
+                     switch ypu2sel
+                        case {Y_SQUc, Y_LOGSQUc}
+                            yscale = wcor_fac * ((ChanDat.scmeas(ychan).euscale_fac*ChanDat.units.val)^2);
+                        case {Y_SQUpHZc, Y_LOGSQUpHZc}
+                            yscale = (wcor_fac/ChanDat.rbw) * ((ChanDat.scmeas(ychan).euscale_fac*ChanDat.units.val)^2);
+                        case {Y_SQUSECpHZc, Y_LOGSQUSECpHZc}
+                            yscale = (wcor_fac/(ChanDat.rbw^2)) * ((ChanDat.scmeas(ychan).euscale_fac*ChanDat.units.val)^2);
+                     end;
+                     
+                     if ysetscale
+                       y_max   = yscale*abs(ChanDat.scmeas(ychan).fs_val)*Hpvna(axnum).int_vec_max; % abs for auto range
+                       switch ypu2sel
+                          case {Y_SQUc, Y_SQUpHZc, Y_SQUSECpHZc }
+                             y_min= 0.0;
+                          case {Y_LOGSQUc, Y_LOGSQUpHZc,Y_LOGSQUSECpHZc}
+                             y_min = 1e-12*y_max;
+                       end;
+                       cursor(Hpvna(axnum).cursor,'set','ylim',[y_min YOVERc*y_max]);
+                     end;
+                     ydata = yscale*ChanDat.scmeas(ychan).aspec.*Hpvna(axnum).int_vec;
+                 end;
+                 
+               case  FFTc
+                  switch get(Hpvna(axnum).yapcor,'value')
+                    case Y_AMPCc
+                       wcor_fac = 1;
+                    case Y_PWRCc
+                       wcor_fac = ChanDat.wincor;
+                  end;
+                    yscale = sqrt(wcor_fac * ((ChanDat.scmeas(ychan).euscale_fac*ChanDat.units.val)^2));
+                    ydata = yscale*ChanDat.scmeas(ychan).fft;
+                  switch ypu2sel
+                    case Y_REALc
+                         ydata = real(ydata);
+                    case Y_IMAGc
+                         ydata = imag(ydata);
+                    case Y_MAGc
+                         ydata = abs(ydata);
+                    otherwise
+                    disp('invalid Y processing selection');
+               
+                  end;
+                  if ysetscale
+                       y_max   = sqrt(yscale)*ChanDat.scmeas(ychan).fs_val/sqrt(2); % div by root 2 for rms 
+                       cursor(Hpvna(axnum).cursor,'set','ylim',[-YOVERc*y_max YOVERc*y_max]);
+                       set(Hpvna(axnum).axis,'Yscale','Linear');  % missing, added 7/2/99 RAB 
+                  end;
+              
+              case XFERc
+                     yscale   = (ChanDat.scmeas(ychan).euscale_fac/ChanDat.scmeas(Hpvna(axnum).refchan).euscale_fac);
+                     ydata    = yscale*ChanDat.xcmeas(Hpvna(axnum).refchan,ychan).xfer.*Hpvna(axnum).xfer_int_vec;
+                     yscale   = yscale*Hpvna(axnum).xfer_int_vec_max;
+                  switch ypu2sel
+                     case Y_REALc
+                          ydata = real(ydata);
+                     case { Y_MAGc,Y_LOGc}  
+                          ydata = abs(ydata);
+                     case Y_IMAGc
+                          ydata = imag(ydata);
+                     case Y_DBc
+                          ydata = DB20c*log(VSFNc+abs(ydata));   % ouch, was DB10c !!! 
+                     case Y_PHASEWc
+                          ydata = (180/pi)*atan2(imag(ydata),real(ydata));
+                     case Y_PHASEUc
+                          ydata = (180/pi)*unwrap(atan2(imag(ydata),real(ydata)));
+                     case Y_NYQUISTc
+                          xdata  = real(ydata(Hpvna(axnum).minnyq_index:Hpvna(axnum).maxnyq_index));
+                          ydata  = imag(ydata(Hpvna(axnum).minnyq_index:Hpvna(axnum).maxnyq_index));
+                          xptr   =  1;  % jam this to force x&y update
+                  end; % switch ypu2sel
+                  if ysetscale
+                     switch ypu2sel
+                        case Y_LOGc
+                           if ~strcmp(get(Hpvna(axnum).axis,'Yscale'),'Log')
+                               set(Hpvna(axnum).axis,'Yscale','Log'); 
+                           end;
+                        otherwise
+                           if ~strcmp(get(Hpvna(axnum).axis,'Yscale'),'Linear')
+                              set(Hpvna(axnum).axis,'Yscale','Linear');  
+                           end;   
+                     end;   
+                  
+                     switch ypu2sel
+                         case {Y_REALc,Y_IMAGc}
+                              y_max = yscale*ChanDat.scmeas(ychan).fs_val/ChanDat.scmeas(Hpvna(axnum).refchan).fs_val; 
+                              y_min = -y_max;
+                         case Y_LOGc
+                              y_max = yscale*ChanDat.scmeas(ychan).fs_val/ChanDat.scmeas(Hpvna(axnum).refchan).fs_val; 
+                              y_min = 1e-8*y_max;
+                         case Y_MAGc
+                              y_max = yscale*ChanDat.scmeas(ychan).fs_val/ChanDat.scmeas(Hpvna(axnum).refchan).fs_val; 
+                              y_min = 0;
+                         case Y_DBc
+                              % go 30 dB over and show 80 dB range
+                              y_max = DB20c*log(yscale*ChanDat.scmeas(ychan).fs_val/ChanDat.scmeas(Hpvna(axnum).refchan).fs_val)+30; 
+                              y_min = y_max - 80;
+                         case Y_PHASEWc
+                              y_max = 200;
+                              y_min = -y_max;
+                         case Y_PHASEUc
+                              y_max = 200;
+                              y_min = -800;
+                         case Y_NYQUISTc
+                              y_max = abs(yscale*ChanDat.scmeas(ychan).fs_val/ChanDat.scmeas(Hpvna(axnum).refchan).fs_val); 
+                              y_min = -y_max;
+                              cursor(Hpvna(axnum).cursor,'set','xlim',[y_min y_max]);
+                              xptr  =  1;  % jam this to force x&y update
+                               
+                         otherwise
+                            disp(['ypu2sel =',int2str(ypu2sel)])
+                     end;
+                     cursor(Hpvna(axnum).cursor,'set','ylim',[y_min YOVERc*y_max]);
+                  end;
+                  
+              case COHc
+                   if ysetscale
+                      y_min = 0;
+                      y_max = 1;
+                      
+                      if ~strcmp(get(Hpvna(axnum).axis,'Yscale'),'Linear')
+                          set(Hpvna(axnum).axis,'Yscale','Linear');  
+                      end;
+                      cursor(Hpvna(axnum).cursor,'set','ylim',[y_min YOVERc*y_max]);
+                   end;
+                   % only have linear format, no switch based on ypu2sel required
+                   ydata = ChanDat.xcmeas(Hpvna(axnum).refchan,ychan).coh;
+                  
+              case CSPECc
+                  yscale = ChanDat.scmeas(ychan).euscale_fac*ChanDat.scmeas(Hpvna(axnum).refchan).euscale_fac;
+                  ydata = (yscale*ChanDat.xcmeas(Hpvna(axnum).refchan,ychan).cspec).*Hpvna(axnum).int_vec;
+                  yscale = yscale*Hpvna(axnum).int_vec_max;
+                  switch ypu2sel
+                     case Y_REALc
+                          ydata = real(ydata);
+                     case {Y_MAGc,Y_LOGc} 
+                          ydata = abs(ydata);
+                     case Y_IMAGc
+                          ydata = imag(ydata);
+                     case Y_DBc
+                          ydata = DB10c *log(VSFNc+abs(ydata));
+                     case Y_PHASEWc
+                          ydata = (180/pi)*atan2(imag(ydata),real(ydata));
+                     case Y_PHASEUc
+                          ydata = (180/pi)*unwrap(atan2(imag(ydata),real(ydata)));
+                     case Y_NYQUISTc
+                          xdata  = real(ydata(Hpvna(axnum).minnyq_index:Hpvna(axnum).maxnyq_index));
+                          ydata  = imag(ydata(Hpvna(axnum).minnyq_index:Hpvna(axnum).maxnyq_index));
+                          xptr   =  1;  % jam this to force x&y update     
+                  end; % switch ypu2sel
+                  if ysetscale
+                    
+                     switch ypu2sel
+                        case Y_LOGc
+                           if ~strcmp(get(Hpvna(axnum).axis,'Yscale'),'Log')
+                               set(Hpvna(axnum).axis,'Yscale','Log'); 
+                           end;
+                        otherwise
+                           if ~strcmp(get(Hpvna(axnum).axis,'Yscale'),'Linear')
+                              set(Hpvna(axnum).axis,'Yscale','Linear');  
+                           end;   
+                     end;   
+                  
+                     switch ypu2sel
+                         case {Y_REALc,Y_IMAGc}
+                              y_max = yscale*ChanDat.scmeas(ychan).fs_val*ChanDat.scmeas(Hpvna(axnum).refchan).fs_val; 
+                              y_min = -y_max;
+                         case Y_LOGc
+                              y_max = yscale*ChanDat.scmeas(ychan).fs_val*ChanDat.scmeas(Hpvna(axnum).refchan).fs_val; 
+                              y_min = 1e-8*y_max;
+                         case Y_MAGc
+                              y_max = yscale*ChanDat.scmeas(ychan).fs_val*ChanDat.scmeas(Hpvna(axnum).refchan).fs_val; 
+                              y_min = 0;
+                         case Y_DBc
+                              y_max = DB10c*log(yscale*ChanDat.scmeas(ychan).fs_val*ChanDat.scmeas(Hpvna(axnum).refchan).fs_val);                               y_min = y_max - 80;
+                              
+                         case Y_PHASEWc
+                              y_max = 200;
+                              y_min = -y_max;
+                         case Y_PHASEUc
+                              y_max = 200;
+                              y_min = -800;
+                         case Y_NYQUISTc     
+                              y_max = abs(yscale)*ChanDat.scmeas(ychan).fs_val*ChanDat.scmeas(Hpvna(axnum).refchan).fs_val; 
+                              y_min = -y_max;
+                              % use same limits for x axis 
+                              cursor(Hpvna(axnum).cursor,'set','xlim',[y_min y_max]);
+                              xptr  =  1;  % jam this to force x&y update
+                         otherwise
+                            disp(['ypu2sel =',int2str(ypu2sel)])
+                     end;
+                     
+                     
+                     if y_min > y_max
+                        temp = y_min;     % allow for negative EUs 
+                        y_min = y_max;
+                        y_max = temp;
+                     end;
+                     cursor(Hpvna(axnum).cursor,'set','ylim',[y_min YOVERc*y_max]);
+                  end;
+              end; % switch ypu1sel
+              
+              
+              % finally .... plot the data ! 
+              if ~isempty(xptr)
+                 set(Hpvna(axnum).lines(ychan),'xdata',xdata,'ydata',ydata);     % THE x&y axis plot action, required for real time lissajous
+              else
+                 set(Hpvna(axnum).lines(ychan),'ydata',ydata);                   % THE y axis plot action
+              end;
+
+              [xy,index,line_handle] = cursor(Hpvna(axnum).cursor,'get','position');
+	      if line_handle==Hpvna(axnum).lines(ychan)
+	         if index<=length(ydata)
+                    cursor(Hpvna(axnum).cursor,'set','y_ro&pos',ydata(index));   % RAB 8/11/00 "dynamic" cursor
+		                                                                 % RAB added conditional, 11/8/00 hmmmmm
+	         end;
+              end;
+
+         end;  % ychan loop
+       end;    % axnum loop 
+       
+  case 'chax_upd'
+    % CHAX_UPD   Update axis info when a channel parameter is changed , e.g. full scale
+    %  find  out  what  changed, react to change. 
+    %  If a channel has been enabled or disabled, OR mcsetup has been invoked, 
+    %  v_dlg1 currently forces a call to  plot_vna set clist ... which rebuilds the world ...
+    %  for better or worse. This is to accomidate the multiple changes that can occur in one action 
+    %  when mc setup is used. 
+    %  Therefore, this action (chax_upd) should only be invoked as a result of a single action by the user 
+    %  in the v_dlg1 range, labels, euon/off etc. The type of v_dlg1 action is passed in In1. 
+    %  to streamline the response .... as much as possible. 
+   
+    [state,tstr]  = v_dlg1('get','cstate_edch');
+    % in state: Vmax, offset, EUfactor, EUstate, Channel
+    % in tstr : Label~Axis~EUon/off~
+   
+    csel        = state(5);  % channel that has changed a parameter in some way
+   
+    reqlist_f1  = union(union(union(Hpvna(UPPERc).yreqlist,Hpvna(LOWERc).yreqlist),Hpvna(UPPERc).xreqlist),Hpvna(LOWERc).xreqlist);
+    
+    % update all local channel parameters, it is quick and easy.
+    
+     ChanDat.scmeas(csel).a_r_flag       = state(1) < 0 ;  % a_r, negative full scale setting indicates autoranging is on
+     ChanDat.scmeas(csel).fs_val         = abs(state(1));  % a_r, full scale setting  
+     ChanDat.scmeas(csel).label          = pullstr(tstr,1); 
+     ChanDat.scmeas(csel).eu_val         = state(3);
+     ChanDat.scmeas(csel).eu_on_off      = state(4);
+     ChanDat.scmeas(csel).db_ref         = state(6);   
+     if ChanDat.scmeas(csel).eu_on_off 
+        ChanDat.scmeas(csel).euscale_fac = ChanDat.scmeas(csel).eu_val;
+     else
+        ChanDat.scmeas(csel).euscale_fac = 1;
+     end;
+     ChanDat.scmeas(csel).eu_string      = pullstr(tstr,2); 
+     
+     if ~isempty(findobj('tag','siglab_mc_view'))
+         mcview('Yupdate');
+     end;
+      
+     for axnum = UPPERc:LOWERc
+        ych =   Hpvna(axnum).yreqlist;
+        xch =   Hpvna(axnum).xreqlist;
+       
+        if ismember(csel,[ych,xch])
+           switch In1
+              case 'fs_val'
+                   plot_vna('measplot','yaxis',axnum,csel,1);   
+                   if ismember(csel,xch)
+                       plot_vna('measplot','xaxis',axnum,[],csel);   
+                   end;
+              case 'label'
+                   plot_vna('set','ylabels',axnum);
+                   if length(ych)==1 
+                      plot_vna('set','titles&linevis',axnum); % 7/15/98
+                   end; 
+                   
+              case {'eu_val','eu_on_off'  }
+                   if strcmp(In1,'eu_on_off')
+                      plot_vna('set','ylabels',axnum);
+                      plot_vna('set','titles&linevis',axnum);
+                   end;
+
+                   plot_vna('measplot','yaxis',axnum,csel,1);
+                   
+                   if ismember(csel,xch)
+                       plot_vna('measplot','xaxis',axnum,[],csel);
+                   end;
+
+                   plot_vna('set','rmsro',axnum);
+                  
+              case 'eu_string'
+                   plot_vna('set','ylabels',axnum);
+                   plot_vna('set','titles&linevis',axnum);
+                   plot_vna('set','rmsro',axnum);           % readout includes eu string 
+              case 'dbref'
+                   ypu2sel = get(Hpvna(axnum).ypu2,'value');
+                   if (get(Hpvna(axnum).ypu1,'value') == ASPECc) & (ypu2sel== Y_DBUc | ypu2sel== Y_DBUpRTHXc)
+                      plot_vna('measplot','yaxis',axnum,csel,1); 
+                   end;
+                   plot_vna('set','ylabels',axnum);
+              otherwise
+                 % VCAP, for some long forgotten reason, calls plot_vna with a chax_upd
+                 % for each channel in clist. In1 has the channel number. zzzz 
+                 if ischar(In1)
+                    disp(['unrecognized subaction: ',In1,' in plot_vna chax_upd']);
+                 end;    
+                 return;
+           end;
+        end;
+     end;
+    
+  case 'tbax_upd'
+  % TBAX_UPD update labels and axis when relevent timebase parameters
+       % just set the flag to alert acq loop ....  
+       Hpvna(1).hchngflag = 1;   % this will force a new setup if running
+
+  case 'cb_xpu1'
+  % CB_XPU1   
+       % x axis popup 1 callback, in time domain and fft, selects what **type** of data will be the x axis
+       axnum   = In1;
+       xpu1sel  = get(Hpvna(axnum).xpu1,'value');
+       ypu1sel  = get(Hpvna(axnum).ypu1,'value');
+       
+       if ypu1sel == YOFTc & xpu1sel == IMCHANc & isreal(ChanDat.scmeas(1).tdmeas)
+          set(Hpvna(axnum).xpu1,'value',RECHANc);
+          % the data is real, save the user. 
+       end; 
+       clist   = ChanDat.clist;
+      
+       % see if popup 2 needs to be reloaded .... 
+       ud = get(Hpvna(axnum).xpu1,'userdata');  % this contains last selection
+       if ud == xpu1sel | (ud>=RECHANc & xpu1sel>=RECHANc)
+          % disp('no reload') % should be ok as is
+       else  
+          % may need to reload x popup 2 strings
+           
+          if nargin ==3  % strcmp(In2,'no_val') 
+             pu2val = get(Hpvna(axnum).xpu2,'value');
+          else
+             pu2val = 1;  % just set it to 1 
+          end;
+           
+          switch ypu1sel
+            case YOFTc
+               if xpu1sel == XTIMEc
+                  %load up simple seconds string ... 
+                  set(Hpvna(axnum).xpu1,'userdata',XTIMEc);
+               elseif ~(ud >=RECHANc  & ud <= IMCHANc)
+                  set(Hpvna(axnum).xpu1,'userdata',RECHANc);
+               end;
+               
+            case {ASPECc, ACORc}
+               set(Hpvna(axnum).xpu1,'userdata',xpu1sel);
+           
+            case FFTc
+                 if xpu1sel == XLINFREQc
+                   set(Hpvna(axnum).xpu1,'userdata',XLINFREQc); 
+                 elseif ~(ud >=RECHANc  & ud <= IMCHANc)
+                   set(Hpvna(axnum).xpu1,'userdata',RECHANc);
+                 end;
+                 
+                 
+          end; % switch 
+          plot_vna('set','xpu2',axnum,xpu1sel,pu2val);
+          
+       end;
+       plot_vna('cb_xpu2',axnum); % this does the plotting and changes labels/titles ..... whew! 
+        
+  case 'cb_xpu2'
+  % CB_XPU2
+       % change in channel selection for lissajous or x axis units/scaling
+       axnum   = In1;
+       xpu1sel = get(Hpvna(axnum).xpu1,'value');
+       ypu1sel = get(Hpvna(axnum).ypu1,'value');
+       chstat  = listchka(Hpvna(axnum).ylcb,'get','state');
+       ch_on   = listchka(Hpvna(axnum).ylcb,'get','active');  %  vector of active channels 
+       
+       if ~isempty(ch_on)
+          switch ypu1sel
+             case YOFTc
+                % process only the channels which are visible
+                if xpu1sel == XTIMEc
+                    % x axis is time vector
+                    cid = ch_on(1,1);
+                    Hpvna(axnum).xreqlist = [];  % need time vector only, no SigLab data
+                elseif (xpu1sel >=RECHANc  & xpu1sel <= IMCHANc)
+                    % x axis is a data vector (lissjous)
+                    % make sure value is within range, channel could have been deactivated
+                    ptr = get(Hpvna(axnum).xpu2,'value');
+                    if ptr > length(ChanDat.clist)
+                       ptr = 1;
+                       set(Hpvna(axnum).xpu2,'value',1);
+                    end;
+                    cid = ChanDat.clist(ptr);  
+                    Hpvna(axnum).xreqlist = cid; % save channel number b4 informing loop
+                end;
+             case {ASPECc, ACORc} 
+                 cid =ch_on(1,1);
+                 Hpvna(axnum).xreqlist = [];
+          
+             case FFTc
+                if xpu1sel == XLINFREQc
+                    % x axis is freq vector
+                    cid = ch_on(1,1);
+                    Hpvna(axnum).xreqlist = [];  % need freq vector only, no SigLab data
+                elseif (xpu1sel >=RECHANc  & xpu1sel <= IMCHANc)
+                    % x axis is a data vector (similar to nyquist)
+                    cid = ChanDat.clist(get(Hpvna(axnum).xpu2,'value'));  
+                    Hpvna(axnum).xreqlist = cid; % save channel number b4 informing loop
+                end;
+                
+            case { XFERc, COHc, CSPECc,CCORc, IMPc}
+               cid = ch_on(1,1);
+               Hpvna(axnum).xreqlist = [];  % need freq vector only, no SigLab data
+          end; % switch
+          plot_vna('measplot','xaxis',axnum,ch_on,cid);  
+       end;   
+       plot_vna('set','xlabels',axnum);
+       plot_vna('set','titles&linevis',axnum);  % and axis title
+       
+       if ypu1sel == ASPECc
+          plot_vna('set','rmsro',axnum); % devious link to rms computation ... 
+       end;
+       
+       Hpvna(1).dispflag  = 1;  % inform display loop of change
+  
+  case 'cb_ypu1'
+  % CB_YPU1
+       axnum = In1;
+       ypu1sel = get(Hpvna(axnum).ypu1,'value'); % get the flavor of the desired measurement
+       plot_vna('get','flavor',ypu1sel);         % this will conditionally get data from SigLab, iff needed
+       vis_axis = get(Hpvna(axnum).axis,'visible');
+       cursor(Hpvna(axnum).cursor,'set','axis_cb','');
+       Hpvna(1).instwarn  = 1;   % enable potential warning that avg data being displayed while inst pushed
+       switch  ypu1sel  
+          case  YOFTc
+                % set up appropriate strings for time domain 
+                set(Hpvna(axnum).ypu2,'string',Y2_G1c);
+                set(Hpvna(axnum).xpu1,'string',X1_G1c);
+                set(Hpvna(axnum).xpu2,'string',X2_G1c);
+                val_ypu2 = Y_REALc;
+                val_xpu1 = XTIMEc;
+                val_xpu2 = SECONDSc;
+                vis_if = 'off'; % integration factor
+                vis_ap = 'off'; % amp/pwr & rms readout
+                vis_r  = 'off'; % ref chan select
+                zpadopt = -1; % don't care
+                
+          case  ASPECc
+                % set up appropriate strings for spectrum 
+		switch ChanDat.units.val
+		   case  URMSc
+                      set(Hpvna(axnum).ypu2,'string',Y2_G2RMSc);
+	           case  UPKc
+                      set(Hpvna(axnum).ypu2,'string',Y2_G2PKc);
+                   case  UP2Pc
+                      set(Hpvna(axnum).ypu2,'string',Y2_G2P2Pc);
+                end;
+                set(Hpvna(axnum).xpu1,'string',X1_G2c);
+                set(Hpvna(axnum).xpu2,'string',X2_G2c);
+                val_ypu2 = Y_DBUc;
+                val_xpu1 = XLOGFREQc;
+                val_xpu2 = HZc;
+                cursor(Hpvna(axnum).cursor,'set','axis_cb',['plot_vna(''set'',''rmsro'',' ,int2str(axnum), ');']); 
+                vis_if = vis_axis; % integration factor
+                vis_ap = vis_axis; % amp/pwr & rms readout
+                vis_r = 'off'; % ref chan select
+                zpadopt = 0; % off
+                
+          case  FFTc
+                set(Hpvna(axnum).ypu2,'string',Y2_G1c);
+                set(Hpvna(axnum).xpu1,'string',X1_G3c);
+                set(Hpvna(axnum).xpu2,'string',X2_G3c);
+                val_ypu2 = Y_REALc;
+                val_xpu1 = XLOGFREQc;
+                val_xpu2 = HZc;
+                vis_if = 'off'; % integration factor
+                vis_ap = 'off'; % amp/pwr & rms readout
+                vis_r  = 'off'; % ref chan select
+                zpadopt = 0; % off
+                
+          case { ACORc , CCORc, IMPc}
+                set(Hpvna(axnum).ypu2,'string',Y2_G1c);
+                set(Hpvna(axnum).xpu1,'string',X1_G4c); 
+                set(Hpvna(axnum).xpu2,'string',X2_G1c);
+                val_ypu2 = Y_REALc;
+                val_xpu1 = XTIMEc;
+                val_xpu2 = SECONDSc;
+                vis_if = 'off'; % integration factor
+                vis_ap = 'off'; % amp/pwr & rms readout
+                switch ypu1sel
+                   case ACORc
+                      vis_r   = 'off';      % visibility of reference channel selector 
+                      zpadopt = 1; % on
+                   case CCORc 
+                      vis_r   = vis_axis;   % visibility of reference channel selector
+                      zpadopt = 1; % on
+                   case IMPc
+                      vis_r   = vis_axis;   % visibility of reference channel selector 
+                      zpadopt = 0; % off 
+                end;
+          case { XFERc , CSPECc}
+                set(Hpvna(axnum).ypu2,'string',Y2_G3c);
+                set(Hpvna(axnum).xpu1,'string',X1_G2c); 
+                set(Hpvna(axnum).xpu2,'string',X2_G2c);
+                val_ypu2 = Y_DBc;
+                val_xpu1 = XLOGFREQc;
+                val_xpu2 = HZc;
+                vis_if = vis_axis; % integration factor
+                vis_ap = 'off'; % amp/pwr & rms readout
+                vis_r =  vis_axis; % ref chan select
+                zpadopt = 0; % off
+                
+         case COHc
+                set(Hpvna(axnum).ypu2,'string',Y2_G4c);
+                set(Hpvna(axnum).xpu1,'string',X1_G2c); 
+                set(Hpvna(axnum).xpu2,'string',X2_G2c);
+                val_ypu2 = Y_COHMAGc;
+                val_xpu1 = XLOGFREQc;
+                val_xpu2 = HZc;
+                vis_if = 'off'; % integration factor
+                vis_ap = 'off'; % amp/pwr & rms readout
+                vis_r  =  vis_axis; % ref chan select
+                zpadopt = 0; % off
+       end;
+       
+       if  Hpvna(axnum).lastnyquist & (ypu1sel~=XFERc | ypu1sel~=CSPECc)
+           % turn off the ever popular nyquist display mode, oh the grief this display mode causes .... 
+           plot_vna('set','off_nyquist',axnum);
+       end;
+       
+       if nargin ==3 & strcmp(In2,'no_val')
+          % leave popup values as is, this call must have been from  a 'load' action
+       else
+          set(Hpvna(axnum).ypu2,'value',val_ypu2);
+          set(Hpvna(axnum).xpu1,'value',val_xpu1);
+          set(Hpvna(axnum).xpu2,'value',val_xpu2);
+       end;
+      
+       set([Hpvna(axnum).yintfac],'visible',vis_if);
+       set([Hpvna(axnum).xcref],'visible',vis_r);
+       set([Hpvna(axnum).yapcor,Hpvna(axnum).rmsro],'visible',vis_ap);
+       
+       if strcmp('off',vis_r)
+          listchka(Hpvna(axnum).ylcb,'set','disable',[]);  % not a cross channel function, disable nada
+          do_plot = 1;
+       else
+          % a cross channel function, disable ref channel and non response channels, very tricky
+          if ~isempty(ChanDat.xcstate.refc)
+              refchan = ChanDat.xcstate.refc(get(Hpvna(axnum).xcref,'value'));
+              listchka(Hpvna(axnum).ylcb,'set','disable', [refchan,setdiff(ChanDat.clist, [ChanDat.xcstate.resp(refchan).r])]);
+              do_plot=1;
+          else
+              s='You currently do not have any cross functions enabled.';
+              msgbox(s,'Operator Warning','warn','modal');
+              do_plot=0; 
+          end;
+       end
+       
+       plot_vna('set','ylabels',axnum); 
+       ch_on    =  listchka(Hpvna(axnum).ylcb,'get','active');  %  vector of active channels 
+       
+       if do_plot
+          % update plot y axis
+          plot_vna('measplot','yaxis',axnum,ch_on,[]);
+       
+          % update plot x axis ....  also sets title which tweak vis of lines and interior channel labels .... whew! 
+          if nargin ==3 & strcmp(In2,'no_val')
+             plot_vna('cb_xpu1',axnum,'no_val'); 
+          else
+             plot_vna('cb_xpu1',axnum); 
+          end;
+       end;
+       
+       if Hpvna(1).warnflag
+          if ChanDat.zpad ~=zpadopt
+              if zpadopt == 0
+                  s=['This measurement was made with zero padding ON.',NLc,'To turn padding off, un-check the Zp check box in the Setup Window Processing section.',NLc,...
+                     'Zero padding will degrade the accuracy of non correlation functions (spectrum, transfer function etc.). '];
+              elseif zpadopt == 1
+                  s=['This measurement was made with zero padding OFF.',NLc,'To turn padding on, check the Zp check box in the Setup Window Processing section.',NLc,...
+                     'Zero padding is usually enabled and used with a boxcar analysis window for optimal correlation measurements.'];
+              else
+                  s=[];
+              end;
+              if ~isempty(s)
+                 msgbox(s,'Operator Warning','warn','modal');
+                 Hpvna(1).warnflag=0;
+              end;
+          end;
+       end;
+    
+       if (axnum==UPPERc) & (ypu1sel==YOFTc) & (get(Hpvna(UPPERc).xpu1,'value')==XTIMEc)
+           set(Hpvna(1).manalwin,'enable','on');
+       elseif axnum==UPPERc
+           plot_vna('menu','analwin','clear')
+       end;
+      
+  case 'cb_ypu2'
+  % CB_YPU2
+       %  force a redraw (with new display units) on visible channels 
+       axnum    =  In1;
+       ch_on    =  listchka(Hpvna(axnum).ylcb,'get','active');  %  vector of active channels 
+       if get(Hpvna(axnum).ypu1,'value') == YOFTc & get(Hpvna(axnum).ypu2,'value') == Y_IMAGc  & isreal(ChanDat.scmeas(1).tdmeas)
+          % attempt to "protect" user from displaying imaginary data when there is none
+          set(Hpvna(axnum).ypu2,'value',Y_REALc);
+       end;
+       ypu1sel = get(Hpvna(axnum).ypu1,'value');
+       %  .                                   .    .                                            .  12/9/98
+       if (ypu1sel == XFERc | ypu1sel ==CSPECc)  & (get(Hpvna(axnum).ypu2,'value') == Y_NYQUISTc)
+          if ~ Hpvna(axnum).lastnyquist
+             plot_vna('set','on_nyquist',axnum);
+             % entering the ever popular nyquist display mode 
+          end;
+       else
+          if  Hpvna(axnum).lastnyquist
+            plot_vna('set','off_nyquist',axnum);
+          end;
+       end;
+       plot_vna('measplot','yaxis',axnum,ch_on,[]);
+       plot_vna('set','ylabels',axnum); 
+  
+  case 'cb_refchan'
+  % CB_REFCHAN
+       % this could get tricky .... 
+       % In1 has the axis number
+       axnum = In1;
+       % track the ref channel
+       % disable/hide the ref channel in the response selector
+       refchan = ChanDat.xcstate.refc(get(Hpvna(axnum).xcref,'value'));
+       Hpvna(axnum).refchan = refchan;
+       listchka(Hpvna(axnum).ylcb,'set','disable', [refchan,setdiff(ChanDat.clist,[ChanDat.xcstate.resp(refchan).r])]);
+       plot_vna('measplot','xaxis',axnum,[],[]);
+       plot_vna('set','ylabels',axnum);  
+       plot_vna('set','titles&linevis',axnum);  
+       Hpvna(1).dispflag = 1;
+  
+  case 'cb_intfac'
+  % CB_INTFAC
+       % integration factor has changed...
+       axnum    =  In1;
+       plot_vna('set','int_vec',axnum);
+       ch_on    =  listchka(Hpvna(axnum).ylcb,'get','active');  %  vector of active channels (or pairs)
+       plot_vna('measplot','yaxis',axnum,ch_on,[]);
+       plot_vna('set','ylabels',axnum); 
+       plot_vna('set','rmsro',axnum);
+       
+  case 'cb_apcor'
+  % CB_APCOR
+       % amplitude/power correction has changed
+       axnum    =  In1;
+       ch_on    =  listchka(Hpvna(axnum).ylcb,'get','active');  %  vector of active channels (or pairs)
+       plot_vna('measplot','yaxis',axnum,ch_on,[]);
+      
+  
+  case  'chan_change'
+  % CHAN_CHANGE 
+  %  a  change has occured in the channel y axis display list, or something related to same.
+   axnum  = In1;  % should be 1 or 2
+   if nargin >=3
+      ckb    = In2;  % must have been called from load or chax_upd action
+      disp('chan_change')
+   else
+      ckb    = listchka(Hpvna(axnum).ylcb,'get','change'); % which check box changed, and what its state is now
+   end;
+   csel   = ChanDat.clist(ckb.ckbox);  % selected channel
+   chstat = listchka(Hpvna(axnum).ylcb,'get','state');
+   if ckb.value == 1
+      % a channel for display has been added
+      % plot the data
+      if isempty(Hpvna(axnum).xreqlist) 
+         plot_vna('measplot','yaxis',axnum,csel,1); % the one, (1), forces an update of x axis stuff .... which is in general, needed. 
+      else
+         % lissajous or fft(?)
+         plot_vna('measplot','yaxis',axnum,csel,Hpvna(axnum).xreqlist); % forces an update of x axis stuff 
+      end;
+      set(Hpvna(axnum).lines(csel),'visible',get(Hpvna(axnum).axis,'visible'));
+   else
+      % a channel that was on display has been removed
+      % turn off the associated line, the easy part
+      set(Hpvna(axnum).lines(csel),'visible','off');
+   end;
+   
+   Hpvna(axnum).yreqlist = ChanDat.clist(find([chstat.state]));  % save list b4 informing loop
+   
+   % the following contorted wad of code was added 2/16/99 for RMS readout
+   if isempty(Hpvna(axnum).yreqlist)
+       Hpvna(axnum).topline = [];
+   else 
+       if isempty(Hpvna(axnum).topline)
+          Hpvna(axnum).topline= Hpvna(axnum).yreqlist(1);
+       else
+          if ~ismember(Hpvna(axnum).topline,Hpvna(axnum).yreqlist)
+             Hpvna(axnum).topline= Hpvna(axnum).yreqlist(1);
+          end;
+       end;
+   end;
+   plot_vna('set','rmsro',axnum)
+   % end of RMS related stuff
+   
+   plot_vna('set','ylabels',axnum);  % this does the real work of updating the labels
+   plot_vna('set','titles&linevis',axnum);   % 
+   
+   if ckb.value == 0
+      % turning a channel off,  often leaves holes in the diplayed data ....
+      % toggle the visibility of the lines that are currently visible .... 
+      vis = get(Hpvna(axnum).lines(:),'visible');
+      visline = [];
+      for i=1:length(vis)
+          if strcmp(vis{i},'on')
+            set(Hpvna(axnum).lines(i),'visible','off');
+            visline = [visline,i];
+          end;
+      end;
+      drawnow
+      set(Hpvna(axnum).lines(visline),'visible','on');
+      drawnow
+   end;
+   Hpvna(1).dispflag     = 1;           % inform display loop of change
+
+  case 'get'
+  % GET
+       switch In1
+       case 'state'     % state to  Out1,2,3,4, (this evolved from v4.2 construction)
+           Out2                = get(Hpvna(1).figure,'position');   % was a spare  
+           Out3                = [];
+           c.ylcb              = [];
+           c.ypu1sel           = [];
+           c.ypu2sel           = [];
+           c.xpu1sel           = [];
+           c.yintfac           = [];
+           c.xcref             = [];
+           c.yapcor            = [];
+           c.xchanv.xc_ckstate = [];
+           c.plot_mode         = []; % 1 for single, 2 for double, duh.
+           
+           Out1(UPPERc:LOWERc) = c;
+           for i=UPPERc:LOWERc
+               x =  listchka(Hpvna(i).ylcb,'get','state');
+               Out1(i).ylcb    = [x.state];
+               Out1(i).ypu1sel = get(Hpvna(i).ypu1,'value');
+               Out1(i).ypu2sel = get(Hpvna(i).ypu2,'value');
+               Out1(i).xpu1sel = get(Hpvna(i).xpu1,'value');
+               Out1(i).xpu2sel = get(Hpvna(i).xpu2,'value');
+               Out1(i).yintfac = get(Hpvna(i).yintfac,'value');
+               Out1(i).xcref   = get(Hpvna(i).xcref,'value');
+               Out1(i).yapcor  = get(Hpvna(i).yapcor ,'value');
+               Out3            = [Out3;cursor(Hpvna(i).cursor,'get','exp_his')];
+           end;
+           % raw states of check boxes in cross channel computation matrix
+           Out1(1).xchanv.xc_ckstate = Hpvna(1).xchanv.xc_ckstate;
+           Out1(1).xc_rmax           = Hpvna(1).xchanv.xc_rmax;     % needed for vcap mods 
+           Out1(1).xc_cmax           = Hpvna(1).xchanv.xc_cmax;     % needed for vcap mods 
+           Out1(1).plot_mode = strcmp('on',get(Hpvna(LOWERc).axis,'visible'))+1;  % returns 1 for single, 2 for dual 
+           
+           Out4 = get(Hpvna(1).mgrids,'checked');
+          
+       case 'rs'
+           Out1 =  Hpvna(1).runflag;
+           
+       case 'flavor'
+           % fills up measurement slots if required, conditional on runflag and if data is avail/present
+           if Hpvna(1).availflag & ~Hpvna(1).runflag
+              flavor = In2;
+              nact_chan     = length(ChanDat.clist);
+              frm_size      = length(ChanDat.tdxvec);
+              frq_size      = length(ChanDat.fdxvec);
+              new_ovld      = 0;
+              gotit         = 0;
+              if Hpvna(1).flavorreq(flavor) ==1
+                 switch  flavor
+                      case YOFTc
+           
+                           if Hpvna(1).avgflag & v_dlg2('get','avg_mode')==TAVGc & ChanDat.navg > 0
+                              f_reqstr = 'TimeA';
+                           else
+                              f_reqstr = 'TimeI';
+                           end;
+                           xx = siglab('DataReq',frm_size ,ChanDat.clist,f_reqstr,'First',0,'NoWait','Immed');
+                           [data,new_ovld,gotit,seqnum]=getdata(xx,MAXTIMEc,[],['Final Data Request:',f_reqstr]);
+                           if gotit
+                              for i=1:nact_chan
+                                  ChanDat.scmeas(ChanDat.clist(i)).tdmeas = data(:,i); 
+                              end;
+                           end;
+                      case ASPECc
+                           if Hpvna(1).lastrun == AVGDc & ChanDat.navg > 0
+                              f_reqstr = 'AspecA';
+                           elseif Hpvna(1).lastrun == INSTDc
+                              f_reqstr = 'AspecI';
+                           end;
+                           xx = siglab('DataReq',frq_size,ChanDat.clist,f_reqstr,'First',0,'NoWait','Immed');
+                           [data,new_ovld,gotit,seqnum]=getdata(xx,MAXTIMEc,[],['Final Data Request:',f_reqstr]);
+                           if gotit 
+                              for i=1:nact_chan
+                                 ChanDat.scmeas(ChanDat.clist(i)).aspec = data(:,i);
+                              end;
+                           end;
+                           % update RMS calculations
+                             plot_vna('set','rmsro',UPPERc:LOWERc);
+                      case FFTc 
+                           f_reqstr = 'FFT';  
+                           xx = siglab('DataReq',frq_size,ChanDat.clist,f_reqstr,'First',0,'NoWait','Immed');
+                           [data,new_ovld,gotit,seqnum]=getdata(xx,MAXTIMEc,[],['Final Data Request:',f_reqstr]);
+                           if gotit
+                              for i=1:nact_chan
+                                 ChanDat.scmeas(ChanDat.clist(i)).fft = data(:,i); 
+                              end;
+                           end;
+                      case ACORc
+                           if Hpvna(1).lastrun == AVGDc  & ChanDat.navg > 0
+                              f_reqstr = 'Acor';  
+                              xx = siglab('DataReq',frm_size,ChanDat.clist,f_reqstr,'First',0,'NoWait','Immed');
+                              [data,new_ovld,gotit,seqnum]=getdata(xx,MAXTIMEc,[],['Final Data Request:',f_reqstr]);
+                              if gotit 
+                                 for i=1:nact_chan
+                                    ChanDat.scmeas(ChanDat.clist(i)).acor = data(:,i); 
+                                 end;
+                              end;
+                           else
+                              gotit    = 0;
+                              f_reqstr = [];  
+                           end;
+                      case { XFERc, COHc, CSPECc, CCORc, IMPc}
+                           if Hpvna(1).lastrun == AVGDc & ChanDat.navg > 0
+                              switch flavor 
+                               case XFERc
+                                 f_reqstr = 'Xfer';
+                                 f_size   = frq_size;
+                               case COHc
+                                 f_reqstr = 'Coh';
+                                 f_size   = frq_size;
+                               case CSPECc
+                                 f_reqstr = 'Cspec';
+                                 f_size   = frq_size;
+                               case CCORc
+                                 f_reqstr = 'Ccor';
+                                 f_size   = frm_size;
+                               case IMPc
+                                 f_reqstr = 'Impulse';
+                                 f_size   = frm_size;
+                              end;
+                              for ref=ChanDat.xcstate.refc
+                                  % ref
+                                  xx = siglab('DataReq',f_size,ChanDat.xcstate.resp(ref).r,'Ref',ref,f_reqstr,'First',0,'NoWait','Immed');
+                                  [data,new_ovld,gotit,seqnum]=getdata(xx,MAXTIMEc,[],['Final Data Request ',f_reqstr,'['  ,sprintf(' response channel:%3.0f',ChanDat.xcstate.resp(ref).r),']   ',sprintf('reference channel: %3.0f',ref) ]);
+                                  if gotit
+                                     for i=1:length(ChanDat.xcstate.resp(ref).r);
+                                         switch flavor 
+                                             case XFERc
+                                                ChanDat.xcmeas(ref,ChanDat.xcstate.resp(ref).r(i)).xfer   = data(:,i);
+                                             case COHc
+                                                ChanDat.xcmeas(ref,ChanDat.xcstate.resp(ref).r(i)).coh    = data(:,i);
+                                             case CSPECc
+                                                ChanDat.xcmeas(ref,ChanDat.xcstate.resp(ref).r(i)).cspec  = data(:,i);
+                                             case CCORc
+                                                ChanDat.xcmeas(ref,ChanDat.xcstate.resp(ref).r(i)).ccor   = data(:,i);
+                                             case IMPc
+                                                ChanDat.xcmeas(ref,ChanDat.xcstate.resp(ref).r(i)).imp    = data(:,i);
+                                         end;
+                                     end;
+                                  end;   
+                              end;
+                           else
+                              gotit=0;
+                           end;
+                      otherwise
+                           error('plot_vna unsupported measurement flavor in final requests')
+                 end; % switch
+                 Out1 = gotit;
+                 if gotit
+                    Hpvna(1).flavorreq(flavor)=0;
+                 end;
+              end;    % if for flavor request test 
+              
+              ChanDat.ovld = setdiff(union(ChanDat.ovld,new_ovld),0); % must get rid of zeros
+              if isempty(ChanDat.ovld)
+                 ChanDat.ovld = 0;      % the bs one must endure
+              end;
+              ovldstat('proc',ChanDat.clist,0,ChanDat.ovld);  
+           else
+              Out1 = -1;  % request not processed 
+           end;
+           
+       case 'filedat'
+           % need all the stuff in ChanDat
+           %  Eliminate arrays that have obsolete measurement info 
+           %  so files (and local storage requirements!) do not grow to infinity.
+           %  For single channel measurements, clist defines which slots have (ostensibly) new data.
+           %  Kill all slots that are not in clist.
+           for i= setdiff(1:MAXCHANc,ChanDat.clist)
+               ChanDat.scmeas(i).tdmeas          = [];
+               ChanDat.scmeas(i).aspec           = [];
+               ChanDat.scmeas(i).fft             = [];
+               ChanDat.scmeas(i).acor            = [];
+           end;
+           
+           % kill irrelevent cross channel slots
+           for k=1:MAXREFc
+               for i=1:MAXCHANc
+                   if i==k | ~ismember(k,ChanDat.xcstate.refc) | ~ismember(i,ChanDat.xcstate.resp(k).r)
+                      ChanDat.xcmeas(k,i).xfer    = [];
+                      ChanDat.xcmeas(k,i).cspec   = [];
+                      ChanDat.xcmeas(k,i).coh     = [];
+                      ChanDat.xcmeas(k,i).ccor    = [];
+                      ChanDat.xcmeas(k,i).imp     = [];
+                   end;
+               end;
+           end;
+           
+           ChanDat.filestor.fields= FS_FIELDSc;   % this is for external application information only, see example vna_ex1.m
+           
+           % see what flavors of measurement the user has displayed
+           if strcmp('on',get(Hpvna(LOWERc).axis,'visible'))
+               udl = union(get(Hpvna(LOWERc).ypu1,'value'),get(Hpvna(UPPERc).ypu1,'value'));
+           else
+               udl = get(Hpvna(UPPERc).ypu1,'value');
+           end;
+           
+           % go through the file storage state cell array 
+           % and see what the user has requested to store
+           % there does not appear to be a simple way to init a range e.g. 1:MAXCHANc 
+           % this requires/assumes that the flavors are in the order specified by Y1_G1c
+           
+           storeflags = [ChanDat.filestor.state{:}];
+           if ChanDat.filestor.state{DISPLAYEDc}==1
+              % user has check the option to store any function that is 
+              % currently being displayed
+              storeflags(udl)=1; 
+           end;
+           
+           % get any new measurement data required as defined by storflags 
+           for flavor = 1:(DISPLAYEDc-1)
+              if  storeflags(flavor)
+                  plot_vna('get','flavor',flavor); % conditionally get it from SigLab (puts it into ChanDat)
+              end;
+           end;
+           Out1   = ChanDat; % simple ....  so far 
+           % now cleanse the stuff that is not in the current storage list.  
+           spick = FS_LABELc;   % measurement flavor names
+           for flavor = 1:(DISPLAYEDc-1)
+               if ~storeflags(flavor)
+                  % not requesting that the flavor be stored .... selectivly kill it. 
+                  switch flavor
+                      case  YOFTc
+                           for i=1:MAXCHANc; Out1.scmeas(i).tdmeas= []; end;
+                      case  ASPECc
+                           for i=1:MAXCHANc; Out1.scmeas(i).aspec = []; end;
+                      case  FFTc
+                           for i=1:MAXCHANc; Out1.scmeas(i).fft   = []; end;    
+                      case  ACORc
+                           for i=1:MAXCHANc; Out1.scmeas(i).acor  = []; end;    
+                      case  XFERc
+                           for i=1:MAXCHANc; for k=1:MAXREFc; Out1.xcmeas(k,i).xfer = []; end; end;
+                      case  COHc
+                           for i=1:MAXCHANc; for k=1:MAXREFc; Out1.xcmeas(k,i).coh  = []; end; end;    
+                      case  CSPECc
+                           for i=1:MAXCHANc; for k=1:MAXREFc; Out1.xcmeas(k,i).cspec= []; end; end;   
+                      case  CCORc
+                           for i=1:MAXCHANc; for k=1:MAXREFc; Out1.xcmeas(k,i).ccor = []; end; end;
+                      case  IMPc
+                           for i=1:MAXCHANc; for k=1:MAXREFc; Out1.xcmeas(k,i).imp  = []; end; end;
+                  end; % switch
+                  if ismember(flavor,udl)
+                     msgbox(['You were displaying an ', spick{flavor},' function.',NLc,...
+                             'This function is not in the current file storage list.',NLc...
+                             'It was NOT saved to the file or returned by a vna("get","meas")call ',NLc,...
+                             'for possible use by another app.',NLc,...
+                             'The measurement data still exists, and, by enabling the ', spick{flavor},' function',NLc,...
+                             'with the File Storage menu, you can get the measurement data to your file or application.'],...
+                             'SigLab Warning',...
+                             'warn',...
+                             'modal');
+                  end;
+
+               end;
+           end;
+           
+       case 'dis_mode'
+           % Called by ls_vna to decide if triggering is required
+           % when using linked chirp excitation. 
+           % Out1 ==  1  ==  no time history display, free run if chirp  9/17/98
+           % Return a 0 if a time history is being displayed 
+           % This will force a triggered acq. 
+           if strcmp('on',get(Hpvna(LOWERc).axis,'visible'))
+                    % dual axis plotting 
+               Out1 = ~(get(Hpvna(UPPERc).ypu1,'value') == YOFTc | get(Hpvna(LOWERc).ypu1,'value') == YOFTc);
+           else
+               Out1 = ~(get(Hpvna(UPPERc).ypu1,'value') == YOFTc);
+           end;
+       otherwise
+          disp([In1,' not recognized in plot_vna(get,xxx)']);
+       end; % switch In1 for 'get' action
+
+  case 'load'
+  % LOAD state from In1 (numerics)  
+  %                 In2 now has figure position info
+  %                 In3= Axis scales, In4 = grids on/off
+  %                 new files use:
+  %                     In5 = ChanDat 
+  %                 old files have: 
+  %                 In6 = Fvec In7 = AspecDat In8 = XferMap
+  %                 In9 = Tvec In10 = TimeDat (old files may not have this info)
+  %                 In11 = XferDat In12 = CohDat 
+  %                 with In5 being []
+  %                  
+      % check if position arg has position info
+      if ~ischar(In2) & length(In2)==4
+          set(Hpvna(1).figure,'position',In2);
+      end;
+      
+      Hpvna(1).flavorreq = zeros(1,FFTc);    % reset flags that control request of data from SigLab (set only by end of run action)
+      
+      if isempty(In5) 
+         % load up the ChanDat structure from arrays passed in the "Inxx" args. 
+         ChanDat.fdxvec = In6';
+         ChanDat.clist  = [];
+         map            = [1,In8(1:end,2)'];  % column 1 is the ref-channel, previously always channel 1
+         
+         % cleanse state of cross channel computation matrix
+         Hpvna(1).xchanv.xc_ckstate = zeros(MAXREFc,MAXCHANc); 
+         
+         [r c] = size(In7);
+       
+         for i = 1:length(map)
+             %if map(i) <= ChanDat.numin   %% removed 10/20/98 checked with old sdish.vna (16 ch ) in rab\mc_exp
+                if i<= c
+                   ChanDat.scmeas(map(i)).aspec = In7(:,i);
+                end;
+                ChanDat.clist = [ChanDat.clist,map(i)];       
+                Hpvna(1).xchanv.xc_ckstate(1,map(i)) = 1;     % only had ch1 as reference in old vna files, and rest were 
+                                                              % responses, so "turn em on". 
+             %end;
+         end;
+         
+         for i=1:MAXCHANc
+            for k=1:MAXREFc
+               ChanDat.xcmeas(k,i).xfer = [];
+               ChanDat.xcmeas(k,i).cspec= [];
+               ChanDat.xcmeas(k,i).coh  = [];
+               ChanDat.xcmeas(k,i).ccor = [];
+               ChanDat.xcmeas(k,i).imp  = [];
+            end;   
+         end;   
+       
+         for i=2:(length(ChanDat.clist))
+             ChanDat.xcmeas(Hpvna(UPPERc).refchan,ChanDat.clist(i)).xfer  = In11(:,i-1);
+             ChanDat.xcmeas(Hpvna(UPPERc).refchan,ChanDat.clist(i)).coh   = In12(:,i-1);
+             ChanDat.xcmeas(Hpvna(UPPERc).refchan,ChanDat.clist(i)).cspec = In11(:,i-1).*In7(:,1); % mpy xfer by aspec ch1 to get cspec
+         end;
+      
+         if ~isempty(In9)
+            ChanDat.tdxvec   = In9';
+            for i=1:length(ChanDat.clist)
+                ChanDat.scmeas(ChanDat.clist(i)).tdmeas = In10(:,i);
+            end;
+         else
+            ChanDat.tdxvec   = [0;1];
+            for i=1:length(ChanDat.clist)
+                ChanDat.scmeas(ChanDat.clist(i)).tdmeas = [-1;1];
+            end;
+         end;
+      
+         for i=1:length(ChanDat.clist)
+             ChanDat.scmeas(ChanDat.clist(i)).fft = [-1;1];
+         end;
+       
+         for i=1:length(ChanDat.clist)
+             ChanDat.scmeas(ChanDat.clist(i)).acor = [-1;1];
+         end;
+         ChanDat.rbw     = ChanDat.fdxvec(2)-ChanDat.fdxvec(1);
+
+         % deal with UNITS 
+	 set(Hpvna(UPPERc).rms_units,'checked','on');
+	 set(Hpvna(UPPERc).pk_units,'checked','off');
+	 set(Hpvna(UPPERc).p2p_units,'checked','off');
+         ChanDat.units.str = 'rms';
+	 ChanDat.units.val = 1.0;
+         old_file = 1;
+         
+         % to allign with stuff that used to be stored 
+           ChanDat.filestor.state = FS_STATEc;
+           ChanDat.filestor.label = FS_LABELc;
+        
+         % set modal oriented parameters  to defaults
+         ChanDat.modal.dblpcnt   = DBLHAMPc;  % new double hit amplitude in percent of max peak 
+         ChanDat.modal.dbldelay  = DBLHDLYc;  % and delay in percent of frame 
+         ChanDat.modal.forcewin  = FORCEWINc; % extent of force window up to %100  
+         ChanDat.modal.expdecay  = EXPDECAYc; % exponetial decay value at end of frame in percent
+         
+         plot_vna('set','dblhit'); 
+         try
+             siglab('setwindow',18,ChanDat.modal.forcewin/100); % slot 18 for force
+             siglab('setwindow',17,ChanDat.modal.expdecay/100); % slot 17 for exponential
+         catch
+             % no hardware backend in this environment
+         end
+          
+      else
+         % this IS a "new file" with the SLm structure
+         old_file = 0;
+         ChanDat = In5; % too simple ...
+         % states of check boxes in cross channel computation matrix
+         Hpvna(1).xchanv.xc_ckstate = In1(1).xchanv.xc_ckstate;
+        
+         if isfield(ChanDat,'modal')
+            % no tweaking needed 
+         else
+            % need to add this field and set defaults
+            ChanDat.modal.dblpcnt   = DBLHAMPc;  % new double hit amplitude in percent of max peak 
+            ChanDat.modal.dbldelay  = DBLHDLYc;  % and delay in percent of frame 
+            ChanDat.modal.forcewin  = FORCEWINc; % extent of force window up to %100  
+            ChanDat.modal.expdecay  = EXPDECAYc; % exponetial decay value at end of frame in percent
+         end;
+
+         % test for auto ranging stuff 
+         if ~isfield(ChanDat.scmeas,'a_r_flag')
+            for i=1:MAXCHANc
+                ChanDat.scmeas(i).a_r_flag=0;
+            end;
+         end;
+
+         % deal with UNITS 
+         if isfield(ChanDat,'units')
+            % already defined 
+       	 else
+	    % revert to RMS 
+            ChanDat.units.str = 'rms';
+            ChanDat.units.val = 1.0;
+         end;
+
+         plot_vna('set','dblhit');
+         try
+             siglab('setwindow',18,ChanDat.modal.forcewin/100); % slot 18 for force
+             siglab('setwindow',17,ChanDat.modal.expdecay/100); % slot 17 for exponential
+         catch
+             % no hardware backend in this environment
+         end
+      end;
+      
+      
+      % see what window was selected 
+      if vna('get','linked?')
+         [ChanDat.wincor,ChanDat.winsel] = ex_dlg2('get','wincor');  % linked
+      else
+         [ChanDat.wincor,ChanDat.winsel] = v_dlg2('get', 'wincor');  % unlinked
+      end;
+      
+      % init ChanDat.xcstate from raw info in Hpvna(1).xchanv
+      [ChanDat.xcstate Hpvna(1).xchanv]= xchan(Hpvna(1).xchanv,'translate');
+      v_dlg1('set','clist',ChanDat.xcstate.clist);      % keep v_dlg1 in sync  
+      
+      % compute a new integration vector 
+      for axnum=UPPERc:LOWERc
+          plot_vna('set','int_vec',axnum);
+      end;
+      clear slcb              
+      c.state = 0;
+      c.label = '';
+      c.color = [0 0 0];
+      
+      numchan = length(ChanDat.clist);
+      slcb(UPPERc:LOWERc,1:numchan)=c;
+     
+
+      if old_file
+         % old vna file file format.
+         % this is tricky for vna since a reference channel is involved. 
+         % Enable first 2 channels. 
+         for chan = 1:2
+           slcb(UPPERc,chan).state =1;
+           slcb(LOWERc,chan).state =1;
+         end;  
+         plot_mode = In1(1);
+         
+         if OLDFILEWARNc
+           msgbox(['This file was generated by a previous release of software.',...
+                   'You still have access to all of your data, but you will probably need to make adjustments in your display axis limits.',...
+                    NLc,NLc,'***   Right click in the axis area(s) to autoscale the data. ****',NLc,NLc,...
+                   'When finished, use the File Save menu to save this file in the current format.'],...
+                   'SigLab Warning',...
+                   'warn',...
+                   'modal');
+         end;
+      end;   
+      % broke up the if old_file into 2 pcs to work around vxx_auto bug 2/5/99
+      if strcmp(class(In1),'struct')
+         % new V5 MC format
+         plot_mode   = In1(1).plot_mode;
+         for k=UPPERc:LOWERc
+             yk = In1(k).ylcb;
+             numspec_k = min(numchan,length(yk));
+             for i=1:numspec_k
+                slcb(k,i).state = yk(i);
+             end;
+         end;
+      end;
+      
+      for axnum=UPPERc:LOWERc
+         % load up the x axis popup menus
+         
+           if old_file
+              set(Hpvna(axnum).ypu1,'value', ASPECc);      % select aspec by default here.
+              set(Hpvna(axnum).ypu2,'value', Y_DBUc);    % with dB 
+              set(Hpvna(axnum).xpu1,'value', XLINFREQc);   % select  Freq by default here.
+              xpu2val(axnum)       = HZc;
+              Hpvna(axnum).refchan = 1;  % in old scheme, clist(1) was always 1 (channel 1 reference)
+           else
+              set(Hpvna(axnum).ypu1,'value',In1(axnum).ypu1sel);
+              set(Hpvna(axnum).ypu2,'value',In1(axnum).ypu2sel);
+              set(Hpvna(axnum).xpu1,'value',In1(axnum).xpu1sel);
+              set(Hpvna(axnum).xpu2,'value',In1(axnum).xpu2sel);
+              xpu2val(axnum) = In1(axnum).xpu2sel;
+           end;
+      end;
+      
+     Out1 = plot_mode; 
+     if plot_mode ==1 
+        plot_vna('single');  % single display format
+     elseif plot_mode == 2
+        plot_vna('double')   % dual display format
+     end;
+     
+     for axnum = UPPERc:LOWERc 
+       if ~old_file
+            if In1(axnum).xcref > length(ChanDat.xcstate.refc)
+               %  this spells trouble, setup file had more channels than current hardware supports.  
+               In1(axnum).xcref = 1;  % avoid it
+               Hpvna(axnum).refchan =1;
+            end;
+            if ~isempty(ChanDat.xcstate.refc)
+              Hpvna(axnum).refchan = ChanDat.xcstate.refc(In1(axnum).xcref);
+            end;
+            set(Hpvna(axnum).xcref,'value',In1(axnum).xcref);
+       end;        
+     
+       ypu1sel = get(Hpvna(axnum).ypu1,'value');
+       %                                  .    .                                            .   12/9/98
+       if (ypu1sel == XFERc | ypu1sel ==CSPECc)  & (get(Hpvna(axnum).ypu2,'value') == Y_NYQUISTc)
+
+          if ~Hpvna(axnum).lastnyquist
+             % entering the ever popular nyquist display mode 
+             plot_vna('set','on_nyquist',axnum);
+             % init  nyquist limits .... 
+             Hpvna(axnum).minnyq_index = 1;
+             Hpvna(axnum).maxnyq_index = length(ChanDat.fdxvec); 
+          end;
+       else
+          if  Hpvna(axnum).lastnyquist
+            plot_vna('set','off_nyquist',axnum);
+          end;
+       end;
+     end;
+ 
+     % restore state to units menu 
+       set([Hpvna(UPPERc).rms_units,Hpvna(UPPERc).pk_units,Hpvna(UPPERc).p2p_units] ,'checked','off');
+       switch ChanDat.units.val
+         case URMSc
+             set(Hpvna(UPPERc).rms_units,'checked','on');
+         case UPKc
+             set(Hpvna(UPPERc).pk_units,'checked','on');
+         case UP2Pc
+             set(Hpvna(UPPERc).p2p_units,'checked','on');
+       end;
+     plot_vna('set','clist_ld',slcb,xpu2val); % This is a **very powerful** action, it reloads the whole woild.
+                                              % It must be called after all of the above have been set. 
+     ovldstat('reconfig',ChanDat.clist);      % update ovld indicator                                    
+                                               
+     %  need to reload axis limits
+     if old_file
+         % just autoscale for old files, best compromise
+         plot_vna('measplot','yaxis',UPPERc:LOWERc,[],[]);
+     else
+        % current file format
+        [eh_rows,eh_cols]  = cursor(Hpvna(UPPERc).cursor,'get','exp_his_shape');
+        for i=UPPERc:LOWERc
+            r1 = 1 + (i-1)*eh_rows;
+            r2 = i*eh_rows;
+            if size(In3,1) >= r2
+                cursor(Hpvna(i).cursor,'set','exp_his',In3(r1:r2,:));
+            else
+                % Some legacy files store only one axis of expansion history.
+                % Keep default cursor expansion history for missing rows.
+            end
+        end;    
+     end;
+    
+     % finally the grids and rms read outs
+     set(Hpvna(1).mgrids,'checked',In4)
+     gridline(Hpvna(UPPERc).axis,In4);
+     if plot_mode == 2
+        gridline(Hpvna(LOWERc).axis,In4);
+     end;
+     
+     for axnum= UPPERc:LOWERc
+         if get(Hpvna(axnum).ypu1,'value') == ASPECc
+            plot_vna('set','rmsro',axnum);
+         end;
+          plot_vna('set','ylabels',axnum); % mainly for nyquist related stuff 10/19/98 
+     end;
+     Hpvna(1).hchngflag = 1;   % force a new acq setup when Avg or Inst is pushed. 
+    
+     if (get(Hpvna(UPPERc).ypu1,'value')==YOFTc) & (get(Hpvna(UPPERc).xpu1,'value')==XTIMEc)
+        set(Hpvna(1).manalwin,'enable','on');
+     else
+        plot_vna('menu','analwin','clear')
+     end;
+ 
+     if Hpvna(1).mimo_on
+        % check to see if a MIMO measuremnt configuration exists, and if cspecs and aspecs were stored
+        [inchan,outchan] = mimocalc('check',ChanDat);
+        if ~isempty(inchan) & ~isempty(ChanDat.xcmeas(1,2).cspec) & ~isempty(ChanDat.scmeas(1).aspec)
+            set(Hpvna(1).mmimo,'visible','on','enable','on');
+        else
+            set(Hpvna(1).mmimo,'visible','off','enable','off');
+        end;   
+     end; % 
+    
+    
+    
+    
+    
+    
+  case 'set_ma_flg'
+  % SET_MA_FLG
+     Hpvna(1).ma_flag = In1; %zz this needs to be checked.
+  
+  case 'front_line'
+  % FRONT_LINE
+  % In1 has which axis , In2 has which line
+       axnum  = In1;
+       ch     = get(Hpvna(axnum).axis,'children');
+       index  = find(ch==Hpvna(axnum).lines(In2));
+       
+       if index ~=1
+          temp      = ch(1);
+          ch(1)     = ch(index);
+          ch(index) = temp;
+          set(Hpvna(axnum).axis,'children',ch);
+       end;
+       
+       Hpvna(axnum).topline= In2;
+       if get(Hpvna(axnum).ypu1,'value') == ASPECc
+          plot_vna('set','rmsro',axnum);
+       end;
+  
+  case 'stop'
+  % STOP, very complex .... 
+      Hpvna(1).runflag = 0;
+      if Hpvna(1).mcviewexist
+         mcview('Stop');
+      end;
+      if (VCAP_Acquiring == 1)
+         eval('vcap(''Poll_loop'');');
+      end;
+       
+  case 'run'
+  % RUN, where all the real action is .... 
+       Hpvna(1).avgflag   = strcmp(In1,'avgpb'); % need to know if averaging is invoked
+       Hpvna(1).lastrun   = [];                  % assume nothing till sucess
+      
+       if ~isempty(findobj('type','figure','tag','vcap_fig'))
+          eval( 'vcap(''file_menu'',''lock'')');
+       end;
+      
+       if vna('get','power') ==1
+          % if in power down mode, toggle power to on with 'power_toggle' 
+          vna('power_toggle');
+          pause(1); % allow some settling time, may not be enough for accelerometers
+       end;
+       
+       ex_dlg2('set','out_on');    % turn on output
+       v_dlg1('set','chena_lock'); % channel enable
+       ls_vna('set_trg');          % search for 9/17/98 
+
+
+       if sum([ChanDat.scmeas(ChanDat.clist).a_r_flag])
+          ls_vna('set_chan',[ChanDat.clist]);     % kickstart auto ranging zzzz
+       end;
+       
+       for i=UPPERc:LOWERc
+           cursor(Hpvna(i).cursor,'set','clrpk');
+           vis = get(Hpvna(i).lines(:),'visible');  % clean up FS 
+           set(Hpvna(i).lines(:),'erasemode','xor','visible','off');
+           drawnow;
+           set(Hpvna(i).lines,{'visible'},vis);
+           drawnow;
+           
+           % overlay line can get lost, the following monkey motion restores it.
+           if strcmp(get(Hpvna(i).ovly,'visible'),'on')
+             set(Hpvna(i).ovly,'visible','off');
+             drawnow;
+             set(Hpvna(i).ovly,'visible','on');
+             drawnow; 
+           end;
+       end;
+       
+       for i=0:MAXSLOTc
+          if siglab('DataRdy',i) >= 0
+             siglab('DataAbort',i);
+             if ECHOc
+                disp(['vna_plot aborting request id:',num2str(i)]);
+             end;   
+          end;
+       end;
+       
+       set([Hpvna(1).instpb,Hpvna(1).avgpb,Hpvna(1).mxchan,Hpvna(1).mmodal],'enable','off');
+       set(Hpvna(1).stoppb,'enable','on');
+       vna('file_menu','off');
+       set(Hpvna(1).figure,'CloseRequestFcn','vna_safe_close');
+      
+       ovld     = 0;
+       ovldstat('proc',ChanDat.clist,ovld); % clears ovld indicators
+       term_cnt = v_dlg2('get','term_cnt');
+    
+       Hpvna(1).runflag   = 1;
+       setxscale          = Hpvna(1).hchngflag; % see if new scales required
+       Hpvna(1).hchngflag = 1;   % force new setup on each startup 
+       Hpvna(1).dispflag  = 1;   % ditto
+       
+       % 2 flavors of data can be requested, one for each axis. The indexes represent flavor_1, and flavor_2 NOT axis
+       Hpvna(1).f_reqid   = -66;  % no outstanding requests flavor_1, note: 0 is a legal reqid !
+       Hpvna(2).f_reqid   = -66;  % no outstanding requests,flavor_2
+       mcview_reqid       = -66;
+       mcview_doplot      = 0;
+       mcview_XYflag      = 0;   % just one more level of complication ! 
+       mcview_reqlist     = [];
+       
+       Hpvna(1).f_reqlist = 0;   % no channels requested of flavor f1
+       Hpvna(2).f_reqlist = 0;   % or flavor f2
+       old_list_f1        = 0;
+       old_list_f2        = 0;
+  
+       Hpvna(1).availflag = 0;      % flag indicating data has come at least once, may need refinement
+    
+       ovlhit             = 0;
+       irmscnt            = [0,0];  % modulator for updating rms readout,  need one per axis 
+       if Hpvna(1).avgflag
+          respx = [];
+          refx  = [];
+          for i=ChanDat.xcstate.refc
+              respx=[respx,ChanDat.xcstate.resp(i).r];
+              refx =[refx, i*ones(1,length(ChanDat.xcstate.resp(i).r))];
+          end;
+          
+          if isempty(respx)
+              siglab('Compute',ChanDat.clist); % compute averages on channels in clist
+                                               % no cross functions
+          else
+             % clist = ChanDat.xcstate.clist
+             % respx
+             % refx
+              siglab('Compute',ChanDat.clist,respx,refx);
+          end;
+          
+          siglab('Event',ChanDat.clist,'AvgStart');
+          set(Hpvna(UPPERc).navgro,'string',[AVGSTRc,'0'],'vis','on','userdata',0);
+          if vna('get','ok_reject')
+             set(Hpvna(UPPERc).frmrej,'visible','on','enable','off');
+             rejectflag         = 1;      % frame reject mode
+          else
+             set(Hpvna(UPPERc).frmrej,'visible','off');
+             rejectflag    = 0;      % no frame reject mode
+          end;
+       else
+          set(Hpvna(UPPERc).navgro,'string',[AVGSTRc,'0'],'vis','off','userdata',0);
+          set(Hpvna(UPPERc).frmrej,'visible','off');
+          rejectflag         = 0;      % no frame reject mode
+       end;
+       
+       ChanDat.navg = 0;
+       ChanDat.ovld = [];
+     
+       % the MAIN loop .... 
+       while Hpvna(1).runflag
+           % check for a change in the channels being plotted
+           
+           if Hpvna(1).dispflag
+              % something changed, figure out if it affects requests
+              old_list_f1 = Hpvna(1).f_reqlist;
+              old_list_f2 = Hpvna(2).f_reqlist;
+              Hpvna(1).dispflag  = 0; % reset this flag
+                 if strcmp('on',get(Hpvna(LOWERc).axis,'visible'))
+                    % dual axis plotting 
+                    axnum    = UPPERc:LOWERc;
+                    dualflag = 1;
+                 else
+                    % single axis plotting 
+                    axnum    = UPPERc;
+                    dualflag = 0;
+                 end;
+                 
+               % construct channel data request lists 
+               if dualflag 
+                  if  get(Hpvna(UPPERc).ypu1,'value')== get(Hpvna(LOWERc).ypu1,'value')
+                  % dual axis with same type of data
+                      switch get(Hpvna(UPPERc).ypu1,'value')
+                         case {XFERc, COHc, CSPECc CCORc, IMPc}
+                           % gotta see if same reference channel is used 
+                           if  Hpvna(UPPERc).refchan == Hpvna(LOWERc).refchan
+                              % same reference channel for both axes
+                              Hpvna(1).f_reqlist  = union(intersect(setdiff(Hpvna(UPPERc).yreqlist,Hpvna(UPPERc).refchan),[ChanDat.xcstate.resp(Hpvna(UPPERc).refchan).r]),...
+                                                          intersect(setdiff(Hpvna(LOWERc).yreqlist,Hpvna(UPPERc).refchan),[ChanDat.xcstate.resp(Hpvna(UPPERc).refchan).r]));
+                              Hpvna(2).f_reqlist  = [];
+                              Hpvna(1).f_refchan  = Hpvna(UPPERc).refchan;
+                              Hpvna(2).f_refchan  = [];
+                              numflavors = 1;
+                           else
+                              % NOT the same reference channel, separate lists 
+                              for ax = UPPERc:LOWERc
+                                  Hpvna(ax).f_reqlist  = intersect(setdiff(Hpvna(ax).yreqlist,Hpvna(ax).refchan),[ChanDat.xcstate.resp(Hpvna(ax).refchan).r]);
+                                  Hpvna(ax).f_refchan  = Hpvna(ax).refchan;
+                                  if isempty(Hpvna(ax).f_reqlist)
+                                     listchka(Hpvna(ax).ylcb,'open');   % show user what is selected (air bag)
+                                  end;
+                              end; 
+                              numflavors = 2;
+                              
+                           end;
+                      otherwise
+                           % not a cross channel measurement 
+                           Hpvna(1).f_reqlist  = union(union(union(Hpvna(UPPERc).yreqlist,Hpvna(LOWERc).yreqlist),Hpvna(UPPERc).xreqlist),Hpvna(LOWERc).xreqlist);
+                           Hpvna(2).f_reqlist  = [];
+                           Hpvna(1).f_refchan  = [];
+                           Hpvna(2).f_refchan  = [];
+                           numflavors = 1;
+                           
+                           if isempty(Hpvna(1).f_reqlist)
+                              listchka(Hpvna(1).ylcb,'open');   % show user what is selected (air bag)
+                           end;
+                      end;
+                      
+                  else
+                      % dual axis, different data, construct two requests
+                      for ax=UPPERc:LOWERc
+                          switch get(Hpvna(ax).ypu1,'value')
+                             case {XFERc, COHc, CSPECc, CCORc, IMPc}
+                                  Hpvna(ax).f_reqlist  = intersect(setdiff(Hpvna(ax).yreqlist,Hpvna(ax).refchan),[ChanDat.xcstate.resp(Hpvna(ax).refchan).r]);
+                                  Hpvna(ax).f_refchan  = Hpvna(ax).refchan;
+                             otherwise
+                                 % not a cross channel function 
+                                 Hpvna(ax).f_reqlist  = union(Hpvna(ax).yreqlist,Hpvna(ax).xreqlist);
+                                 Hpvna(ax).f_refchan  = [];
+                          end;
+                          if isempty(Hpvna(ax).f_reqlist)
+                             listchka(Hpvna(ax).ylcb,'open');   % show user what is selected (air bag)
+                          end;
+                      end;
+                      numflavors = 2;
+                  end;
+                  
+               elseif dualflag == 0
+                  % single axis, therefore one request
+                  switch get(Hpvna(UPPERc).ypu1,'value')
+                     case {XFERc, COHc, CSPECc, CCORc, IMPc}
+                       ax = UPPERc;
+                       Hpvna(ax).f_reqlist  = intersect(setdiff(Hpvna(ax).yreqlist,Hpvna(ax).refchan),[ChanDat.xcstate.resp(Hpvna(ax).refchan).r]);
+                       Hpvna(ax).f_refchan  = Hpvna(ax).refchan;
+                       Hpvna(2).f_reqlist   = [];
+                       Hpvna(2).f_refchan   = [];
+                     otherwise
+                       % not a cross channel function 
+                       Hpvna(1).f_reqlist  = union(Hpvna(UPPERc).yreqlist,Hpvna(UPPERc).xreqlist);
+                       Hpvna(2).f_reqlist  = [];
+                       Hpvna(1).f_refchan  = [];
+                       Hpvna(2).f_refchan  = [];
+                  end;
+                  
+                  if isempty(Hpvna(1).f_reqlist)
+                     listchka(Hpvna(1).ylcb,'open');   % show user what is selected (air bag)
+                  end;
+                  numflavors = 1;
+               else
+                 error('plot_vna: incomprehensible situation'); % this is a surprise??
+               end;
+              
+               
+               % construct request strings for data flavors, in this case each axis has a flavor
+               Hpvna(UPPERc).f_avgflag= 0;
+               Hpvna(LOWERc).f_avgflag= 0;
+               for i=UPPERc:LOWERc
+                  ypu1sel =  get(Hpvna(i).ypu1,'value');
+                  switch ypu1sel
+                      case YOFTc
+                           if Hpvna(1).avgflag & v_dlg2('get','avg_mode')==TAVGc
+                              Hpvna(i).f_reqstr = 'TimeA';
+                              Hpvna(i).f_avgflag =1;
+                           else
+                              Hpvna(i).f_reqstr = 'TimeI';
+                              Hpvna(i).f_avgflag= 0;
+                           end;
+                           Hpvna(i).f_fdflag =0;
+                           
+                      case ASPECc
+                           if Hpvna(1).avgflag
+                              Hpvna(i).f_reqstr = 'AspecA';
+                              Hpvna(i).f_avgflag =1;
+                           else
+                              Hpvna(i).f_reqstr = 'AspecI';
+                              Hpvna(i).f_avgflag = 0;
+                           end;
+                           Hpvna(i).f_fdflag = 1;
+                        
+                      case FFTc 
+                           Hpvna(i).f_reqstr   = 'FFT';  
+                           Hpvna(i).f_fdflag   = 1;
+                           Hpvna(i).f_avgflag  = 0;
+                           
+                      case { ACORc, XFERc, COHc, CSPECc, CCORc, IMPc}
+                          if Hpvna(1).avgflag
+                              Hpvna(i).f_avgflag =1;
+                              switch ypu1sel
+                                 case ACORc
+                                     Hpvna(i).f_reqstr  = 'Acor';
+                                     Hpvna(i).f_fdflag  = 0;
+                                 case CCORc
+                                     Hpvna(i).f_reqstr  = 'Ccor';
+                                     Hpvna(i).f_fdflag  = 0;
+                                 case IMPc
+                                     Hpvna(i).f_reqstr  = 'Impulse';
+                                     Hpvna(i).f_fdflag  = 0;
+                                 case XFERc
+                                     Hpvna(i).f_reqstr  = 'Xfer';
+                                     Hpvna(i).f_fdflag  = 1;
+                                 case COHc
+                                     Hpvna(i).f_reqstr  = 'Coh';
+                                     Hpvna(i).f_fdflag  = 1;
+                                 case CSPECc
+                                     Hpvna(i).f_reqstr  = 'Cspec';
+                                     Hpvna(i).f_fdflag  = 1;
+                              end;
+                          else
+                              if Hpvna(1).instwarn  & (i==UPPERc | ( (i==LOWERc) & dualflag ))
+                                    msgbox(['You are running the Inst acquisition mode, but have selected  ', ...
+                                            'a function for display that requires Averaging for its computation.',...
+                                            'The following functions can be displayed in Inst mode:',INST_FCNc],...
+                                            'Operator Warning','warn','modal');
+                              end;           
+                              Hpvna(1).instwarn=0;        
+                              Hpvna(i).f_reqstr  = [];  % zzz ?
+                              Hpvna(i).f_avgflag = 1;
+                              Hpvna(i).f_reqlist  = [];
+                          end;
+                      
+                      otherwise
+                           error('plot_vna unsupported measurement flavor')
+                  end;
+               end;
+              
+               %%if mcview is alive AND a "normal" time domain request will be made,  expand the request list ********
+                    if Hpvna(1).mcviewexist
+                       if get(Hpvna(UPPERc).ypu1,'value') == YOFTc
+                          Hpvna(UPPERc).f_reqlist = ChanDat.clist;
+                          mcview_reqlist  = [];
+                       elseif get(Hpvna(LOWERc).ypu1,'value') == YOFTc
+                          Hpvna(LOWERc).f_reqlist = ChanDat.clist;
+                          mcview_reqlist  = [];
+                       else
+                          mcview_reqlist  = ChanDat.clist;
+                       end
+                    end;
+              change_req = 1;  % Always plan to change the requests, its just 
+                               % not worth filtering out the small percentage 
+                               % of passes through here that do not require it. 
+              % *************************************************
+           end;
+           
+           if Hpvna(1).hchngflag  == 1
+               % must do some setup, a time base parameter has changed (sample rate, frame size, zoom CF, channel on in Lissajous) 
+               [frm_size,fscode,ChanDat.zoomcf,Rbw,frq_size]   = h_dlg1('get','sampsel');
+               
+               if vna('get','linked?')
+                   [ChanDat.wincor, ChanDat.winsel]    = ex_dlg2('get','wincor');  % linked
+               else
+                   [ChanDat.wincor, ChanDat.winsel]    = v_dlg2('get', 'wincor');  % unlinked
+               end;
+               
+               % create a time vector
+               pcntdly = h_dlg2('get','dly');
+               dt      = 1/fp_list('Fs',fscode);
+               tmin    = frm_size*dt*pcntdly/100;
+               tmax    = frm_size*(1+pcntdly/100)*dt;
+               %   Time vector
+               ChanDat.tdxvec  = (tmin:dt:(tmax-dt));
+               
+               % need to make buffer lengths correct for mcview to work. 
+               for k=ChanDat.clist
+                   ChanDat.scmeas(k).tdmeas = resize(ChanDat.scmeas(k).tdmeas,length(ChanDat.tdxvec),1); 
+               end;
+               
+               plot_vna('menu','analwin','compute');      % 8/3/98 , moved call unconditionally 
+               % Frequency vector
+               if ChanDat.zoomcf == 0  
+                  ChanDat.fdxvec  = (0:1:frq_size-1)*(1/(dt*frm_size));
+               else
+                  ChanDat.fdxvec  = (ChanDat.zoomcf + (-(frq_size-1)/2:1:((frq_size-1)/2))*(1/(dt*frm_size)));
+               end;
+               ChanDat.rbw = ChanDat.fdxvec(2)-ChanDat.fdxvec(1); % rbw = delta f
+               plot_vna('set','int_vec',(UPPERc:LOWERc));  % compute the freq domain integration vector  
+               
+               % conditionally update both axis with new x data, conditionally force a rescale with set scale.
+               % all depends on the ever popular Nyquist 
+               for i=UPPERc:LOWERc
+                  if ~Hpvna(i).lastnyquist
+                      plot_vna('measplot','xaxis',i,[],[],setxscale);
+                  end;
+               end;   
+               drawnow;
+               
+               setxscale           = 1; % set new xscale if changes occure while running
+               Hpvna(1).hchngflag  = 0; % clear flag
+               change_req          = 1; % force the next if statement to take 
+               Hpvna(1).availflag  = 0; % clear this because there was a timebase change.
+               ChanDat.zpad        = ls_vna('get','ZPAD');  % keep track of this potential trouble spot
+                
+               if Hpvna(1).mcviewexist
+                   mcview_XYflag = 1; 
+               end;     
+           end;
+           %++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+           %++++      VCAP capture code here                          ++++
+           %++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+           if (VCAP_Acquiring == 1)
+              eval('vcap(''Poll'');');
+           end;
+           %++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+            
+           if change_req
+               for flavor=1:2
+                  % restablish frame sizes
+                  if Hpvna(flavor).f_fdflag 
+                     Hpvna(flavor).f_framesize = frq_size;
+                  else
+                     Hpvna(flavor).f_framesize = frm_size;
+                  end;
+               
+                   % kill last request/(s) if there is/(are) one/(some)
+                  if Hpvna(flavor).f_reqid  >= 0;
+                     junk = siglab('DataAbort',Hpvna(flavor).f_reqid); 
+                  end;
+               end;
+               
+               % make a new request(s) to prime the loop 
+               for flavor=1:2
+                  if ~isempty(Hpvna(flavor).f_reqlist)
+                     if isempty(Hpvna(flavor).f_refchan)
+                        % not a cross channel function 
+                        if Hpvna(1).availflag
+                           Hpvna(flavor).f_reqid=siglab('DataReq',Hpvna(flavor).f_framesize,Hpvna(flavor).f_reqlist,Hpvna(flavor).f_reqstr,'First',0,'NoWait','Immed');
+                        else
+                           Hpvna(flavor).f_reqid=siglab('DataReq',Hpvna(flavor).f_framesize,Hpvna(flavor).f_reqlist,Hpvna(flavor).f_reqstr,'First',0,'NoWait');
+                        end; 
+                     else
+                        % cross channel function
+                         if Hpvna(1).availflag 
+                              Hpvna(flavor).f_reqid=siglab('DataReq',Hpvna(flavor).f_framesize,Hpvna(flavor).f_reqlist,...
+                                                           'Ref',Hpvna(flavor).f_refchan,Hpvna(flavor).f_reqstr,'First',0,'NoWait','Immed');
+                         else
+                              Hpvna(flavor).f_reqid=siglab('DataReq',Hpvna(flavor).f_framesize,Hpvna(flavor).f_reqlist,...
+                                                           'Ref',Hpvna(flavor).f_refchan,Hpvna(flavor).f_reqstr,'First',0,'NoWait');
+                        end; 
+                     end;
+                  end;
+                  my_last_request=Hpvna(flavor).f_reqstr;   % 2/15/99 rab
+               end; 
+               
+               %  conditionally create a request for mcview
+               if Hpvna(1).mcviewexist & ~isempty(mcview_reqlist)
+                   mcview_reqid = siglab('DataReq',frm_size,mcview_reqlist,'TimeI','First',0,'NoWait');  
+               end;
+               
+               change_req    = 0;  % clear change_req flag
+           end;  % if change_req 
+
+           % update rms readout 
+           for i=axnum
+              irmscnt(i) = rem(irmscnt(i)+1,RMSROc);
+              if irmscnt(i) == 0  & get(Hpvna(i).ypu1,'value')==ASPECc  
+                 plot_vna('set','rmsro',i);
+              end;
+           end;
+           % now the fun really begins ..
+           for flavor=1:numflavors 
+              rdy = 0;
+              if ~isempty(Hpvna(flavor).f_reqlist)
+                 % check for valid data req ... 
+                 if Hpvna(flavor).f_reqid >= 0
+                    rdy=siglab('DataRdy',Hpvna(flavor).f_reqid);
+                 else
+                    if ~isempty(Hpvna(flavor).f_reqlist)
+                       disp(['Invalid request ID:' num2str(Hpvna(flavor).f_reqid),' Flavor:',num2str(flavor)]);
+                       plot_vna('stop');
+                    end;
+                 end;
+              end;
+              if rdy == 0
+                 % check 'inst' ovld
+                 ChanDat.ovld    = ovldstat('proc',ChanDat.clist,ChanDat.ovld,siglab('instatus'));
+                 ovlhit  = 1;
+                 drawnow;  
+
+              elseif rdy >= 1
+                 % measurement data is available
+                 % process average count,  11/22/98 changes made 
+                
+                 if Hpvna(UPPERc).avgflag & ( ChanDat.navg ~= rdy )
+                    set(Hpvna(UPPERc).navgro,'string',sprintf([AVGSTRc,'%4d'],rdy));
+                    ChanDat.navg=rdy;
+                    if rejectflag
+                       set(Hpvna(UPPERc).frmrej,'enable','on');
+                    end;
+                 end;
+                
+                 
+                 % get requested data 
+                 [data,newovld]=siglab('DataGet',Hpvna(flavor).f_reqid);
+                 % The newovld turns out to be the next best thing to useless ... it 
+                 % does not say anything about channels that are not included in the 
+                 % data requested. 
+                 
+                 if ovlhit ==0
+                    ChanDat.ovld    = ovldstat('proc',ChanDat.clist,ChanDat.ovld,siglab('instatus'));
+                 end;
+                 
+                 Hpvna(1).availflag = 1;  
+               
+                 if (ChanDat.navg*Hpvna(1).avgflag) >= term_cnt
+                     vna('stop');   % we have arrived at the proper # of averages
+                 else
+                     % conditional of run, launch a new request
+                     if Hpvna(1).runflag
+                        if isempty(Hpvna(flavor).f_refchan)
+                           % not a cross channel function 
+                           Hpvna(flavor).f_reqid=siglab('DataReq',Hpvna(flavor).f_framesize,Hpvna(flavor).f_reqlist,Hpvna(flavor).f_reqstr,'First',0,'NoWait');
+                        else
+                           % cross channel function
+                           Hpvna(flavor).f_reqid=siglab('DataReq',Hpvna(flavor).f_framesize,Hpvna(flavor).f_reqlist,...
+                                                        'Ref',Hpvna(flavor).f_refchan,Hpvna(flavor).f_reqstr,'First',0,'NoWait');
+                        end;
+                        my_last_request=Hpvna(flavor).f_reqstr;
+                     else
+                        Hpvna(flavor).f_reqid = -1;
+                     end;
+                     rdy    = 0;
+                     ovlhit = 0;
+                 end;
+               
+                 if Hpvna(1).ma_flag ==1
+                    % if manual arm is enabled, clear the LED/Button
+                    % to indicate that the front end must be re-armed
+                    h_dlg2('armck_clear');
+                    Hpvna(1).ma_flag = 0;
+                 end;
+                
+                 for i=1:length(Hpvna(flavor).f_reqlist)
+                     switch Hpvna(flavor).f_reqstr
+                          case {'TimeA','TimeI'}
+                               ChanDat.scmeas(Hpvna(flavor).f_reqlist(i)).tdmeas = data(:,i); 
+                               dflavor = YOFTc;
+                               mcview_doplot = 1;
+                          case {'AspecA', 'AspecI'}
+                               ChanDat.scmeas(Hpvna(flavor).f_reqlist(i)).aspec = data(:,i);
+                               dflavor = ASPECc; 
+                          case { 'FFT'}
+                               ChanDat.scmeas(Hpvna(flavor).f_reqlist(i)).fft = data(:,i); 
+                               dflavor = FFTc;
+                          case {'Acor'}
+                               ChanDat.scmeas(Hpvna(flavor).f_reqlist(i)).acor = data(:,i); 
+                               dflavor = ACORc; 
+                          case {'Xfer'}
+                               ChanDat.xcmeas(Hpvna(flavor).f_refchan,Hpvna(flavor).f_reqlist(i)).xfer = data(:,i);
+                               dflavor = XFERc;
+                          case {'Coh'}
+                               ChanDat.xcmeas(Hpvna(flavor).f_refchan,Hpvna(flavor).f_reqlist(i)).coh = data(:,i);
+                               dflavor = COHc;
+                          case {'Cspec'}
+                               ChanDat.xcmeas(Hpvna(flavor).f_refchan,Hpvna(flavor).f_reqlist(i)).cspec = data(:,i);
+                               dflavor = CSPECc;
+                          case {'Ccor'}
+                               ChanDat.xcmeas(Hpvna(flavor).f_refchan,Hpvna(flavor).f_reqlist(i)).ccor = data(:,i);
+                               dflavor = CCORc;
+                          case {'Impulse'}
+                               ChanDat.xcmeas(Hpvna(flavor).f_refchan,Hpvna(flavor).f_reqlist(i)).imp = data(:,i);
+                               dflavor = IMPc;
+                     end;
+                 end;
+
+                % go through active channels that are a_r, get current full scale values
+                % and compare them with previous values. Force a scale change if they have changed
+                 sss='do_not_setscales';  
+                 for csel=ChanDat.clist
+                       if ChanDat.scmeas(csel).a_r_flag
+                          fsv = siglab('get','inpgain',csel);
+                          if fsv ~=ChanDat.scmeas(csel).fs_val
+                             ChanDat.scmeas(csel).fs_val=fsv;
+                             sss='setscales';
+                             mcview_XYflag=1;
+                             break;
+                          end;
+                       end;
+                  end;
+
+                 if dualflag == 1
+                    if numflavors ==1
+                       % same flavor of measurement in both axis 
+                       plot_vna('measplot','rtl',UPPERc:LOWERc,sss);  
+                    else
+                       % which axis should be updated? 
+                       for ax=UPPERc:LOWERc
+                           if get(Hpvna(ax).ypu1,'value') == dflavor
+                              plot_vna('measplot','rtl',ax,sss); 
+                           end;
+                       end;
+                    end;
+                 else
+                    % single plot, therefore only one flavor of measurement
+                    plot_vna('measplot','rtl',UPPERc,sss);     
+                 end;
+                 drawnow; 
+              elseif rdy==-1
+                 disp(['error in plot_vna: siglab returns data never requested']);
+                 plot_vna('stop');
+              elseif rdy==-2
+                 plot_vna('stop');
+                 disp('SCSI transmission error in plot_vna.m')
+              else
+                 disp(['error in plot_vna: siglab returns illegal status:',int2str(rdy)]);
+              end;
+           end; % for flavors loop   
+              
+           if Hpvna(1).mcviewexist
+              if ~isempty(mcview_reqlist) 
+                 % alternate request list, check for data 
+                   if siglab('DataRdy',mcview_reqid) >=1
+                      [data,newovld]=siglab('DataGet',mcview_reqid);
+                      for i=1:length(mcview_reqlist)
+                         ChanDat.scmeas(mcview_reqlist(i)).tdmeas = data(:,i); 
+                      end;
+                      % launch a new request
+                      mcview_reqid = siglab('DataReq',frm_size,mcview_reqlist,'TimeI','First',0,'NoWait');
+                      if mcview_XYflag
+                         mcview('XYupdate');
+                         mcview_XYflag= 0;
+                      else
+                         mcview('Yupdate');
+                      end;
+                      
+                   end;
+              else
+                 % data request being handled by normal procedures
+                 if mcview_doplot
+                    if mcview_XYflag
+                       mcview('XYupdate');
+                       mcview_XYflag= 0;
+                    else
+                       mcview('Yupdate');
+                    end;
+                    mcview_doplot = 0;
+                 end;
+              end;
+           end;
+       end; % while acq loop
+       
+       
+       
+       
+       %############################################################
+       % clean up data acq process
+       % my_last_request=my_last_request
+       % need to insure that the last request made is always the last to be aborted .... 
+       % workaround for the devious "chicken" bug
+       if numflavors==1
+          if Hpvna(1).f_reqid >= 0 
+             siglab('DataAbort',Hpvna(1).f_reqid);
+          end;
+       else
+          % must have 2 flavors of data, only 2 possibilities ... 
+          % it is, or it isn't, the last one on the list
+          if strcmp(my_last_request,Hpvna(2).f_reqstr)
+             flavor = 1:numflavors;
+          else
+             flavor = numflavors:-1:1;
+          end;
+       end;
+
+       for f=flavor 
+          if Hpvna(f).f_reqid >= 0 
+             siglab('DataAbort',Hpvna(f).f_reqid);
+          end;
+       end;
+       
+       %###########################################################
+       
+       if mcview_reqid >=0
+          siglab('DataAbort',mcview_reqid);
+       end;
+     
+       if Hpvna(1).avgflag
+          siglab('Event',ChanDat.clist,'AvgStop');
+          set(Hpvna(UPPERc).frmrej,'visible','off');
+          if  Hpvna(1).availflag
+              Hpvna(1).lastrun   = AVGDc;                 
+          end;
+       else
+          % stop the front end acquisition to allow the final data requests
+          % to retrieve data from the same time interval. Concept blessed by GLS 7/16/96
+          if  Hpvna(1).availflag
+              Hpvna(1).lastrun   = INSTDc;                 
+          end;
+          ChanDat.navg = 0;
+       end;
+       
+       siglab('event',ChanDat.clist,'AcqStop');  % 7/27/98 
+       siglab('Delayms',100);
+       % get displayed flavors of data 
+       nact_chan     = length(ChanDat.clist);
+
+       if Hpvna(1).availflag  & ~isempty(Hpvna(1).lastrun)
+           ls_vna('set','STATE_CHG'); % we now ostensibly have new measurements 
+           ChanDat.numin= ls_vna('get','NUMIN'); % update since setup could have come from
+                                                 % a file that was save by a different HW config
+           Hpvna(1).flavorreq = ones(1,FFTc);    % init the request flags
+           % at this point, just get the ones needed for upper and lower displays
+           plot_vna('get','flavor',get(Hpvna(LOWERc).ypu1,'value'));
+           plot_vna('get','flavor',get(Hpvna(UPPERc).ypu1,'value'));
+          
+           
+           if Hpvna(1).mimo_on & Hpvna(1).avgflag
+              % check to see if a MIMO measuremnt configuration exists
+              [inchan,outchan] = mimocalc('check',ChanDat);
+              if ~isempty(inchan)
+                 set(Hpvna(1).mmimo,'visible','on','enable','on');
+                 plot_vna('get','flavor',ASPECc);
+                 plot_vna('get','flavor',CSPECc);
+              else
+                 set(Hpvna(1).mmimo,'visible','off','enable','off');
+              end;   
+           end; % 
+       end;
+     
+       % deal with enabling/disabling controls 
+       set([Hpvna(1).instpb,Hpvna(1).avgpb,Hpvna(1).mxchan,Hpvna(1).mmodal],'enable','on');
+       if Hpvna(1).fq_lock ==0
+          set(Hpvna(1).figure,'CloseRequestFcn','vna_safe_close');
+          vna('file_menu','on');
+       end;
+       v_dlg1('set','chena_unlock');    % channel enable
+       ex_dlg2('set','out_off');    % turn off output due to popular demand 
+       set(Hpvna(1).stoppb,'enable','off');
+       
+       if ~isempty(findobj('type','figure','tag','vcap_fig'))
+          eval( 'vcap(''file_menu'',''unlock'')');
+       end;
+       
+       ChanDat.zpad = ls_vna('get','ZPAD');  % log final state of zero padding
+      
+       if Hpvna(1).avgflag & Hpvna(1).availflag
+          % execute the callback defined by the plot_vna('set','cb_avg', 'xxxxx') command 
+          eval(get(Hpvna(UPPERc).avgpb,'userdata'))
+       end;
+       
+       
+       % must replot last measurement acquired to be in full sync with data in buffers
+       % update both axis even though lower may not be currently visible at this time
+       % for pretty plots, sans the xor orphaned points, use background erase
+       set(Hpvna(1).lines(:),'erasemode','background');
+       set(Hpvna(2).lines(:),'erasemode','background');
+       plot_vna('measplot','rtl',UPPERc:LOWERc);  % added 2/16/99 to insure that all new mesurement data is plotted 
+                                       
+       
+  
+  case { 'single' 'double'}
+  % SINGLE  or DOUBLE, repositions objects and controls their visibility 
+    pos = get(Hpvna(UPPERc).axlabel,'userdata');  % object positions as originally defined
+    fig_pos = get(Hpvna(1).figure,'position');
+    switch Action
+    case 'single'
+        % expand upper axis, hide lower axis 
+        pos_select = SINGLEc;
+        lower_vis = 'off';
+        dy2 = 0;
+        % fsize     =  ATXTSIZEc;
+        set(Hpvna(1).msngl,'checked','on');
+        set(Hpvna(1).mdbl,'checked','off');
+    case 'double'
+        % contract upper axis, show lower axis
+        pos_select = UPPERc;
+        lower_vis  = 'on';
+        % need to move bottom of upper axis 
+        dy2 =  DBLFUDGEc*HAXDBLc*((fig_pos(4)-HFIGc)/HFIGc);
+        % fsize     =  ATXTSIZEc;
+        set(Hpvna(1).msngl,'checked','off');
+        set(Hpvna(1).mdbl,'checked','on');
+    end;
+    % control position/size of upper axis
+    
+    dy1  = fig_pos(4)-HFIGc;
+    dx1  = fig_pos(3)-WFIGc;
+    
+    paxis = pos(pos_select).axis;
+    set(Hpvna(UPPERc).axis,'position'  ,[paxis(1),paxis(2)+dy2,max(paxis(3)+dx1,5),max(paxis(4)+(dy1-dy2),5)]);
+    % set(Hpvna(UPPERc).axis,'position',(pos(pos_select).axis)+[0, dy2, dx1, dy1-dy2]);
+    set(Hpvna(UPPERc).xpu1,'position'     ,(pos(pos_select).xpu1) +[0, dy1, 0  , 0]);
+    set(Hpvna(UPPERc).xpu2,'position'     ,(pos(pos_select).xpu2) +[0, dy1, 0  , 0]);
+    set(Hpvna(UPPERc).ypu1,'position'     ,(pos(pos_select).ypu1) +[0, dy1, 0  , 0]);
+    set(Hpvna(UPPERc).ypu2,'position'     ,(pos(pos_select).ypu2) +[0, dy1, 0  , 0]);
+    set(Hpvna(UPPERc).xcref,'position'    ,(pos(pos_select).xcref) +[0, dy1, 0  , 0])
+    set(Hpvna(UPPERc).yintfac,'position'  ,(pos(pos_select).yintfac) +[0, dy1, 0  , 0]);
+    set(Hpvna(UPPERc).yapcor,'position'   ,(pos(pos_select).yapcor) +[0, dy1, 0  , 0]);
+    
+    listchka(Hpvna(UPPERc).ylcb,'set'  ,'position',(pos(pos_select).ylcb) + [0, dy1, 0  , 0]);
+    set(Hpvna(UPPERc).navgro   , 'position',(pos(UPPERc).navgro) + [0, dy1, 0, 0]);
+    set(Hpvna(UPPERc).frmrej   , 'position',(pos(UPPERc).frmrej) + [0, dy1, 0, 0]);
+    set(Hpvna(UPPERc).rmsro    , 'position',(pos(pos_select).rmsro) + [dx1, dy1, 0, 0]);
+    
+    pc = pos(pos_select).cursor;
+    pc(:,2)=pc(:,2)+dy2;
+    cursor(Hpvna(UPPERc).cursor,'set','position',pc);
+    set(Hpvna(UPPERc).aux_ro,'position'   ,(pos(pos_select).aux_ro) +[0, dy2, 0  , 0]);
+    
+    % control visibility of lower axis and related objects
+    if strcmp(lower_vis,'on')
+       set(Hpvna(LOWERc).xpu1,'position'     ,(pos(LOWERc).xpu1) +[0, dy1-dy2, 0  , 0]);
+       set(Hpvna(LOWERc).xpu2,'position'     ,(pos(LOWERc).xpu2) +[0, dy1-dy2, 0  , 0]);
+       set(Hpvna(LOWERc).ypu1,'position'     ,(pos(LOWERc).ypu1) +[0, dy1-dy2, 0  , 0]);
+       set(Hpvna(LOWERc).ypu2,'position'     ,(pos(LOWERc).ypu2) +[0, dy1-dy2, 0  , 0]);
+       set(Hpvna(LOWERc).xcref,'position' ,(pos(LOWERc).xcref)   +[0, dy1-dy2, 0  , 0]);
+       set(Hpvna(LOWERc).yintfac,'position'  ,(pos(LOWERc).yintfac)    +[0, dy1-dy2, 0  , 0]);
+       set(Hpvna(LOWERc).yapcor,'position'   ,(pos(LOWERc).yapcor)     +[0, dy1-dy2, 0  , 0]);
+       listchka(Hpvna(LOWERc).ylcb,'set','position',(pos(LOWERc).ylcb) +[0, dy1-dy2, 0  , 0]);
+       paxis = pos(LOWERc).axis;
+       set(Hpvna(LOWERc).axis,'position'  ,[paxis(1),paxis(2),max(paxis(3)+dx1,5),max(paxis(4)+dy2,5)]); 
+       % set(Hpvna(LOWERc).axis,'position'  ,(pos(LOWERc).axis)+[0, 0, dx1, dy2]);
+       set(Hpvna(LOWERc).rmsro, 'position',(pos(LOWERc).rmsro) + [dx1, dy1-dy2, 0, 0]);
+       
+       % need to check if some objects are "really" on ....
+       if get(Hpvna(LOWERc).ovly,'userdata') 
+          set(Hpvna(LOWERc).ovly,'visible','on');
+       end;
+       
+       if get(Hpvna(LOWERc).aux_ro,'userdata')
+          set(Hpvna(LOWERc).aux_ro,'visible','on');
+       end;
+       
+      set(Hpvna(LOWERc).movly,'enable','on'); 
+      set(Hpvna(LOWERc).axis,'visible','on');
+      plot_vna('set','titles&linevis',LOWERc);   % this also tweaks visibility of objects .... mui complicado and not orthogonal
+      
+      switch get(Hpvna(LOWERc).ypu1,'value')
+         case ASPECc
+            vis_if = 'on'; % integration factor
+            vis_ap = 'on'; % amp/pwr & rms readout
+            vis_r = 'off'; % ref chan select
+         case { XFERc,CSPECc}
+            vis_r = 'on';
+            vis_ap = 'off';
+            vis_if = 'on'; 
+         case {COHc, CCORc, IMPc}
+            vis_if = 'off';
+            vis_ap = 'off';
+            vis_r = 'on';
+         otherwise
+            vis_if = 'off';
+            vis_r  = 'off';
+            vis_ap = 'off';
+      end;
+      set([Hpvna(LOWERc).yintfac],'visible',vis_if);
+      set(Hpvna(LOWERc).xcref, 'visible',vis_r);
+      set([ Hpvna(LOWERc).yapcor,Hpvna(LOWERc).rmsro ],'visible',vis_ap);
+      
+      if strcmp(get(Hpvna(1).mgrids,'checked'),'on')
+         gridline(Hpvna(LOWERc).axis,'on');
+      end;
+      
+    else
+       set([Hpvna(LOWERc).axis,Hpvna(LOWERc).lines, Hpvna(LOWERc).ovly Hpvna(LOWERc).text,Hpvna(LOWERc).yintfac,...
+            Hpvna(LOWERc).yapcor,Hpvna(LOWERc).rmsro,Hpvna(LOWERc).xcref,Hpvna(LOWERc).aux_ro],'visible','off');
+       set(Hpvna(LOWERc).movly,'enable','off'); 
+       gridline(Hpvna(LOWERc).axis,'off');
+       
+    end;
+    set([Hpvna(LOWERc).xpu1, Hpvna(LOWERc).xpu2,Hpvna(LOWERc).ypu1,Hpvna(LOWERc).ypu2],'visible',lower_vis);
+    listchka(Hpvna(LOWERc).ylcb,'set','visible',lower_vis);
+    cursor(Hpvna(LOWERc).cursor,'set',['vis_',lower_vis]);
+    Hpvna(1).dispflag = 1;  % inform acq loop there was a change
+
+
+  case 'resize'
+  % FIGURE RESIZE 
+     return;
+    
+  case 'resize_safe'
+  % FIGURE RESIZE with re-entry guard for newer MATLAB
+     if isempty(Hpvna) || numel(Hpvna) < LOWERc
+        return;
+     end
+     if ~isfield(Hpvna(LOWERc),'axis') || isempty(Hpvna(LOWERc).axis) || ~ishandle(Hpvna(LOWERc).axis)
+        return;
+     end
+     if ~isfield(Hpvna(1),'resize_busy')
+        Hpvna(1).resize_busy = 0;
+     end
+     if Hpvna(1).resize_busy
+        return;
+     end
+     Hpvna(1).resize_busy = 1;
+     try
+         if strcmp(get(Hpvna(LOWERc).axis,'visible'),'on')
+            plot_vna('double');
+         else
+            plot_vna('single');
+         end
+     catch
+         % Keep UI responsive even if relayout fails on some states.
+     end
+     Hpvna(1).resize_busy = 0;
+    
+  case 'menu'
+  % MENU
+     switch In1
+      case 'units'
+          switch In2
+            case 'rms'
+                 set(Hpvna(UPPERc).rms_units,'checked','on');
+                 set(Hpvna(UPPERc).pk_units,'checked','off');
+                 set(Hpvna(UPPERc).p2p_units,'checked','off');
+                 ChanDat.units.val = URMSc;
+                 ChanDat.units.str = 'rms';
+
+            case 'pk'
+                 set(Hpvna(UPPERc).rms_units,'checked','off');
+                 set(Hpvna(UPPERc).pk_units,'checked','on');
+                 set(Hpvna(UPPERc).p2p_units,'checked','off');
+                 ChanDat.units.val = UPKc;
+                 ChanDat.units.str = 'pk';
+
+            case 'p2p'
+                 set(Hpvna(UPPERc).rms_units,'checked','off');
+                 set(Hpvna(UPPERc).pk_units,'checked','off');
+                 set(Hpvna(UPPERc).p2p_units,'checked','on');
+                 ChanDat.units.val = UP2Pc;
+                 ChanDat.units.str = 'p-p';
+          end;
+          
+          for ax=UPPERc:LOWERc
+              if get(Hpvna(ax).ypu1,'value') == ASPECc 
+                 plot_vna('cb_ypu1',ax);
+              end;
+          end;
+
+
+      case 'grids'
+         if strcmp(get(Hpvna(1).mgrids,'checked'),'on')
+            grids='off';
+            gridline(Hpvna(UPPERc).axis,grids);
+            gridline(Hpvna(LOWERc).axis,grids);
+         else
+            grids='on';
+            gridline(Hpvna(UPPERc).axis,grids);
+            if strcmp('on',get(Hpvna(LOWERc).axis,'visible'))
+               gridline(Hpvna(LOWERc).axis,grids);
+            end;
+         end;
+         set(Hpvna(1).mgrids,'checked',grids);
+      
+      
+      case 'default_size'
+           fig_pos = get(Hpvna(1).figure,'position');
+           scrnsz  = get(0,'screensize');
+           figsz   = [WFIGc,HFIGc+43]; % need 43 for menu bar
+           for i=1:2
+              if fig_pos(i)+figsz(i) >= scrnsz(i+2)
+                  fig_pos(i)= max(scrnsz(i+2) - figsz(i),1);
+              elseif fig_pos(i) <1
+                  fig_pos(i) =1;
+              end;
+           end;
+           set(Hpvna(1).figure,'resize','off');
+           set(Hpvna(1).figure,'position',[fig_pos(1:2),WFIGc,HFIGc]);
+           drawnow;
+           if strcmp(get(Hpvna(LOWERc).axis,'visible'),'on')
+            % dual display 
+              plot_vna('double');
+           else
+              plot_vna('single');
+           end;
+           set(Hpvna(1).figure,'resize','on');
+       case  'double'
+         % DOUBLE
+         set(Hpvna(1).msngl,'checked','off');
+         set(Hpvna(1).mdbl,'checked','on');
+         plot_vna('double');
+         
+       case  'single'
+         % SINGLE
+         set(Hpvna(1).msngl,'checked','on');
+         set(Hpvna(1).mdbl,'checked','off');
+         plot_vna('single');
+         
+         
+       case 'analwin'
+         % ANALWIN
+          if nargin ==3 & strcmp(In2,'compute')
+             % called by the run or load  action
+             compute=1;
+          elseif nargin ==3 & strcmp(In2,'clear') 
+             compute=0;
+             set(Hpvna(1).manalwin,'checked','off','enable','off');
+             set(Hpvna(UPPERc).ovlwin(1:2),'vis','off');
+       
+          elseif strcmp(get(Hpvna(1).manalwin,'checked'),'on')
+             % called by menu pick 
+             compute=0;
+             set(Hpvna(1).manalwin,'checked','off');
+             set(Hpvna(UPPERc).ovlwin(1:2),'vis','off');
+          else
+             % called by menu pick
+             compute=1;
+             set(Hpvna(1).manalwin,'checked','on');
+             if get(Hpvna(UPPERc).ypu1,'value') == YOFTc &  get(Hpvna(UPPERc).xpu1,'value') == XTIMEc
+                set(Hpvna(UPPERc).ovlwin(1),'visible','on');
+             end;
+          end;
+          
+          if compute   
+             tvec  = ((0:(LWINc-1))/LWINc)*(ChanDat.tdxvec(end)-ChanDat.tdxvec(1)) + ChanDat.tdxvec(1);
+             winshape = wincalc(ChanDat.winsel,LWINc,ChanDat.modal);
+             ss = size(winshape);
+             if  ss(1)==1
+                  set(Hpvna(UPPERc).ovlwin(1),'ydata',winshape,'xdata',tvec);
+                  set(Hpvna(UPPERc).ovlwin(2),'visible','off');
+             else
+                  set(Hpvna(UPPERc).ovlwin(1),'ydata',winshape(1,:),'xdata',tvec);
+                  vis = get( Hpvna(UPPERc).ovlwin(1),'visible');
+                  % anything BUT simple ... 
+                  set(Hpvna(UPPERc).ovlwin(2),'ydata',winshape(2,:),'xdata',tvec,...
+                      'visible',get( Hpvna(UPPERc).ovlwin(1),'visible'));
+             end;
+             if nargin ==2
+                 % was menu pick, therefore autoscale the y axis
+                 cursor(Hpvna(UPPERc).cursor,'scale','auto','y');
+             end;
+          end
+     
+       case  'ovline' 
+         axnum = In2;
+         if strcmp(get(Hpvna(axnum).movly,'checked'),'on')
+            set(Hpvna(axnum).movly,'checked','off');
+            set([Hpvna(axnum).ovly],'visible','off','userdata',0);
+            
+            % Must refresh all active lines ($%^&**(^&%^%) when 
+            % the overlay is turned off,else they may be lost. 
+            lines = findobj(Hpvna(axnum).lines(:),'visible','on');
+            set(lines,{'visible'},{'off'});
+            set(lines,{'visible'},{'on'});
+         else
+            line_vis = 'on';
+            % find line that cursor is on and use its data for overlay
+            [line_num,line_handle]=cursor(Hpvna(axnum).cursor,'get','active_line');
+           % see if line handle belongs to a line that is currently visible on this axis
+           if ismember(line_handle, Hpvna(axnum).lines(:)) & strcmp(get(line_handle,'visible'),'on')
+               set(Hpvna(axnum).movly,'checked','on');
+               set(Hpvna(axnum).ovly,'Xdata',get(line_handle,'Xdata'),...
+                                     'Ydata',get(line_handle,'Ydata'),...
+                                     'userdata',1,'visible','on'); 
+           else
+               if axnum == UPPERc
+                  s = 'upper';
+               else
+                  s = 'lower';
+               end;
+               msgbox(['To overlay a line in the ',s,...
+                       ' axis, you must first select a line with the mouse.'],...
+                       'Warning',...
+                       'warn',...
+                       'modal');
+           end;
+         end;
+         
+       case 'mcview'
+         if strcmp(In2,'init')
+                if ~Hpvna(1).runflag & Hpvna(1).availflag 
+                   plot_vna('get','flavor',YOFTc);
+                end;
+                mcview('init');
+                Hpvna(1).mcviewexist = 1;
+         elseif strcmp(In2,'close')
+              Hpvna(1).mcviewexist = 0;
+         end;
+         Hpvna(1).dispflag    = 1;  % inform loop there was a change
+         
+       case 'filestor_on'
+          filestor(Hpvna(1).figure,'init','plot_vna(''menu'',''filestor_apply'')',ChanDat.filestor);
+      
+       case 'filestor_apply'
+          ChanDat.filestor = filestor([],'get&close');
+       
+       case 'modalpar_on'
+            modalpar(Hpvna(1).figure,'init','plot_vna(''menu'',''modalpar_apply'')',ChanDat.modal);
+       
+       case 'modalpar_apply'
+            ChanDat.modal = modalpar([],'get&close');
+            %   load the parameters to SigLab, they are in percent so div by 100
+           try
+               siglab('setwindow',18,ChanDat.modal.forcewin/100); % slot 18 for force
+               siglab('setwindow',17,ChanDat.modal.expdecay/100); % slot 17 for exponential
+               siglab('rawcommand',(ChanDat.modal.dblpcnt*256*65536)+(38*65536)+(4*256)+1,ChanDat.modal.dbldelay);
+           catch
+               % no hardware backend in this environment
+           end
+            
+       case 'killtt'
+          % kill the tooltips ... 
+          set(findobj(Hpvna(1).figure,'tag',TTSc),{'tooltipstring'},{''});
+          set(Hpvna(1).mkilltt,'enable','off');
+          
+       case 'setup' 
+       % return focus to SETUP 
+         figure(Hpvna(1).owner);
+         
+       case 'mimo'
+           % compute the xfer and coherence from the cspecs and aspecs
+             [ChanDat,status]= mimocalc('compute',ChanDat);
+             Hpvna(1).flavorreq(XFERc)=0;    % xfer and coh have been computed, don't request it.
+             Hpvna(1).flavorreq(COHc) =0;
+             plot_vna('measplot','rtl',UPPERc:LOWERc);
+             set(Hpvna(1).mmimo,'enable','off');
+         
+       otherwise 
+         disp('unrecognized plot_vna menu sub-action')
+     end; % switch for In1
+  
+  case 'set'
+  % SET
+      if strcmp(In1,'rmsro')
+      % RMSRO
+      % compute rms over x axis display range
+      % In2 has which axis is being computed  (could be both)
+       
+        for axnum = In2
+           ch  = Hpvna(axnum).topline; % channel
+           if isempty(ch)
+              lfd=0; %  3/10/2k
+           else
+              lfd = length(ChanDat.scmeas(ch).aspec);  %  5/11/99
+           end;
+           
+           if isempty(ch)
+              set(Hpvna(axnum).rmsro,'string','----','foregroundcolor',[1 1 1]); % 2/15/99
+           else
+              switch get(Hpvna(axnum).xpu2,'value')
+                case HZc
+                   xfac = 1;
+                 case KHZc
+                   xfac = 0.001; 
+                 case RPMc
+                   xfac = 60;  
+                 case KRPMc
+                   xfac = 0.06; % (60/1000)  
+              end;
+              df   = (ChanDat.fdxvec(2)-ChanDat.fdxvec(1));
+              nrng = round(1+(get(Hpvna(axnum).axis,'xlim')/xfac - ChanDat.fdxvec(1))/df);
+              nmin = min(max(nrng(1),1),lfd);
+              nmax = max(min(nrng(2),lfd),1);
+        
+            % sum spectrum vector over nmin to nmax with EU's , and power correction
+            
+              if ChanDat.scmeas(ch).eu_on_off 
+                 label = ChanDat.scmeas(ch).eu_string;
+              else
+                 label = ' V';
+              end;
+              % for proper RMS value, always apply the window power correction factor
+              if ~isempty(ChanDat.scmeas(ch).aspec)   % 5/5/99
+                 if length(Hpvna(axnum).int_vec) > 1
+                    if isnan(Hpvna(axnum).int_vec(nmin)) 
+                      nmin=nmin+1;
+                    end;
+                    rmsvalue = sqrt((ChanDat.wincor*(ChanDat.scmeas(ch).euscale_fac^2))*sum(ChanDat.scmeas(ch).aspec(nmin:nmax).*Hpvna(axnum).int_vec(nmin:nmax)));  
+                 else
+                    rmsvalue = sqrt((ChanDat.wincor*(ChanDat.scmeas(ch).euscale_fac^2))*sum(ChanDat.scmeas(ch).aspec(nmin:nmax)));  
+                 end;
+           
+                 set(Hpvna(axnum).rmsro,'string',[ftoa('%5w',rmsvalue),label,' rms'],'foregroundcolor',get(Hpvna(axnum).lines(Hpvna(axnum).topline),'color'));
+              else
+                 rmsvalue = 0.0;   % 5/5/99 
+              end;
+              
+              set(Hpvna(axnum).rmsro,'string',[ftoa('%5w',rmsvalue),label,' rms'],'foregroundcolor',get(Hpvna(axnum).lines(Hpvna(axnum).topline),'color'));
+              
+           end; % if test of ch    
+        end;
+      
+      elseif strcmp(In1,'cb_avg')
+          % when averaging is complete, execute this callback. (wgd)
+           set(Hpvna(UPPERc).avgpb,'userdata',In2);
+      
+      
+      elseif strcmp(In1,'win_change')
+      % WIN_CHANGE
+      % analysis window changed ... recompute RMS and update window parameters iff running
+         if Hpvna(1).runflag
+            % see what window was selected 
+            if vna('get','linked?')
+               [ChanDat.wincor,ChanDat.winsel] = ex_dlg2('get','wincor');  % linked
+            else
+               [ChanDat.wincor,ChanDat.winsel] = v_dlg2('get', 'wincor');  % unlinked
+            end;
+            plot_vna('set','rmsro',1:2);
+            plot_vna('menu','analwin','compute');
+           
+         end;
+        
+        
+      elseif strcmp(In1,'clist_x') | strcmp(In1,'clist_ld')
+      % CLIST_X
+      % This called by plot_vna xcapply when a channel is enabled or disabled OR 
+      % from the plot_vna load action with clist_ld ... since similar, but naturally not identical, shenantics 
+      % must occur.  
+      % There was possibly a change in the list of channels being acquired
+        
+         newclist   = ChanDat.xcstate.clist;  % **new** list of channels
+         plot_vna('set','refcpu'); % set up ref channel popup select
+         numchan    = length(newclist);
+         [ChanStat ChanLabel EULabel] = v_dlg1('get','filedat');
+         clear slcb              
+         c.state = 0;
+         c.label = '';
+         c.color = [0 0 0];
+         slcb(UPPERc:LOWERc,1:numchan) = c;
+         for i=1:numchan
+             cnum                                = newclist(i);
+             ChanDat.scmeas(cnum).label          = pullstr(ChanLabel(i,:),1);
+             ChanDat.scmeas(cnum).eu_on_off      = ChanStat(i,2);
+             ChanDat.scmeas(cnum).eu_val         = ChanStat(i,3);
+             ChanDat.scmeas(cnum).eu_string      = pullstr(EULabel(i,:),1);
+             ChanDat.scmeas(cnum).a_r_flag       = ChanStat(i,5) < 0 ;  % a_r, negative full scale setting indicates autoranging is on
+             ChanDat.scmeas(cnum).fs_val         = abs(ChanStat(i,5));  % a_r, full scale setting  
+             ChanDat.scmeas(cnum).db_ref         = ChanStat(i,6);
+             if ChanDat.scmeas(cnum).eu_on_off 
+                ChanDat.scmeas(cnum).euscale_fac = ChanDat.scmeas(cnum).eu_val;
+             else
+                ChanDat.scmeas(cnum).euscale_fac = 1;
+             end;
+             for axnum=UPPERc:LOWERc
+                 slcb(axnum,i).label         = int2str(cnum);
+                 slcb(axnum,i).color         = get(Hpvna(1).lines(cnum),'color');
+                 slcb(axnum,i).state         = 0;
+             end;
+         end;
+         
+         oldclist      = ChanDat.clist;
+         ChanDat.clist = newclist;
+         
+         % turn all text and lines off 'en mass and rebuild from scratch  ZZZZZ
+         for i=UPPERc:LOWERc
+             set([Hpvna(i).text(:)],'userdata',0);   % critical flag for proper line visibility
+             set([Hpvna(i).text(:);Hpvna(i).lines(:)],'visible','off');
+             set(Hpvna(i).aylabel,'userdata',[]);
+         end
+         for axnum = UPPERc:LOWERc
+             if strcmp(In1,'clist_x')
+                chstat   = listchka(Hpvna(axnum).ylcb,'get','state'); % get channels previously being displayed
+                old_disp = oldclist(find([chstat(:).state]));
+             
+                % y axis channel plotting selector
+                for i=1:numchan
+                   if ismember(newclist(i),old_disp)
+                      slcb(axnum,i).state  = 1;
+                   else
+                      slcb(axnum,i).state  = 0;
+                   end;
+                   slcb(axnum,i).respchan  = newclist(i);
+                end;
+             elseif strcmp(In1,'clist_ld')
+             
+                ls = length([In2(axnum,:).state]);
+                for i=1:numchan
+                    if i<=ls
+                       slcb(axnum,i).state    = In2(axnum,i).state;   % note state comes from the plot_vna load action
+                       slcb(axnum,i).respchan = newclist(i);
+                    else
+                       slcb(axnum,i).state = 0;
+                       slcb(axnum,i).respchan = newclist(i);
+                    end;
+                end;
+               
+             end;
+             listchka(Hpvna(axnum).ylcb,'set','state',slcb(axnum,:));    % load up the object
+             ch_on  =  listchka(Hpvna(axnum).ylcb,'get','active');
+             if isempty(ch_on)
+                Hpvna(axnum).topline  = [];
+                Hpvna(axnum).yreqlist = [];
+             else
+                Hpvna(axnum).topline  = ch_on(1);    % for RMS calc 2/15/99 
+                Hpvna(axnum).yreqlist = ch_on; % make channel request list
+             end;
+             Hpvna(axnum).xreqlist = []; % xreq will be rebuilt in following cb_popx 
+            
+            ypu1sel   = get(Hpvna(axnum).ypu1,'value');  % get the flavor of the desired measurement
+            vis_axis  = get(Hpvna(axnum).axis,'visible');
+
+            cursor(Hpvna(axnum).cursor,'set','axis_cb',''); 
+            switch  ypu1sel
+               case  YOFTc
+                  set(Hpvna(axnum).ypu2,'string',Y2_G1c);
+                  set(Hpvna(axnum).xpu1,'string',X1_G1c);
+                  vis_if = 'off'; % integration factor
+                  vis_ap = 'off'; % amp/pwr & rms readout
+                  vis_r  = 'off'; % ref chan select
+                  xf    = 0;
+                
+               case  ASPECc
+                  switch ChanDat.units.val
+                     case  URMSc
+                         set(Hpvna(axnum).ypu2,'string',Y2_G2RMSc);
+                     case  UPKc
+                         set(Hpvna(axnum).ypu2,'string',Y2_G2PKc);
+                     case  UP2Pc
+                         set(Hpvna(axnum).ypu2,'string',Y2_G2P2Pc);
+                  end;
+
+                  set(Hpvna(axnum).xpu1,'string',X1_G2c);
+                  cursor(Hpvna(axnum).cursor,'set','axis_cb',['plot_vna(''set'',''rmsro'',' ,int2str(axnum), ');']); 
+                  vis_if = vis_axis; % integration factor
+                  vis_ap = vis_axis; % amp/pwr & rms readout
+                  vis_r  = 'off';    % ref chan select
+                  xf    = 0;
+               case  FFTc
+                  set(Hpvna(axnum).ypu2,'string',Y2_G1c);
+                  set(Hpvna(axnum).xpu1,'string',X1_G3c);
+                 
+                  vis_if = 'off'; % integration factor
+                  vis_ap = 'off'; % amp/pwr & rms readout
+                  vis_r  = 'off'; % ref chan select
+                  xf    =  0;
+               case { ACORc CCORc,IMPc}
+                  set(Hpvna(axnum).ypu2,'string',Y2_G1c);
+                  set(Hpvna(axnum).xpu1,'string',X1_G4c); 
+                 
+                  vis_if = 'off'; % integration factor
+                  vis_ap = 'off'; % amp/pwr & rms readout
+                  switch ypu1sel
+                     case ACORc
+                        vis_r = 'off';  % visibility of reference channel selector
+                        xf = 0;
+                     case {CCORc, IMPc}
+                        vis_r = vis_axis;   % visibility of reference channel selector 
+                        xf = 1;
+                  end;
+                 
+               case {XFERc, CSPECc}
+                  set(Hpvna(axnum).ypu2,'string',Y2_G3c);
+                  set(Hpvna(axnum).xpu1,'string',X1_G2c); 
+                  vis_if = vis_axis; % integration factor
+                  vis_ap = 'off';    % amp/pwr & rms readout
+                  vis_r  = vis_axis;  % ref chan select
+                  xf = 1;
+               case COHc
+                  set(Hpvna(axnum).ypu2,'string',Y2_G4c);
+                  set(Hpvna(axnum).xpu1,'string',X1_G2c); 
+                  vis_if = 'off';    % integration factor
+                  vis_ap = 'off';    % amp/pwr & rms readout
+                  vis_r  = vis_axis; % ref chan select
+                  xf = 1;
+               end;
+      
+               set([Hpvna(axnum).yintfac],'visible',vis_if);
+               set(Hpvna(axnum).xcref,'visible',vis_r);
+               set([Hpvna(axnum).yapcor,Hpvna(axnum).rmsro],'visible',vis_ap);
+               
+               if xf
+                  % disable/hide the ref channel in the response selector and channels not used as responses 
+                  if ~isempty(ChanDat.xcstate.refc)
+                     refchan = ChanDat.xcstate.refc(get(Hpvna(axnum).xcref,'value'));
+                  else
+                     refchan = [];
+                  end;
+                  Hpvna(axnum).refchan  = refchan;
+                  listchka(Hpvna(axnum).ylcb,'set','disable', [refchan,setdiff(ChanDat.clist, [ChanDat.xcstate.resp(refchan).r])]);
+               else
+                   listchka(Hpvna(axnum).ylcb,'set','disable',[]);
+                   refchan = [];
+               end;
+               plot_vna('set','ylabels',axnum); % deal with labels
+              
+               % zzzzz conditional while if statement uninitialized ??? 
+               if ~xf | (xf & ~isempty(refchan))
+                  if xf
+                     plot_vna('measplot','yaxis',axnum,setdiff(ch_on,refchan),[]);  % update plot y axis
+                  else
+                     plot_vna('measplot','yaxis',axnum,ch_on,[]);  % update plot y axis
+                  end;
+                  % update plot x axis .... via cb_xpu1
+                  set(Hpvna(axnum).xpu1,'userdata',-1); % this forces a reload of xpu2 
+                  plot_vna('cb_xpu1',axnum,'no_val'); 
+               end;   
+
+               if strcmp(get(Hpvna(axnum).axis,'visible'),'on')
+                  set(Hpvna(axnum).lines(Hpvna(axnum).yreqlist),'visible','on');
+               end;
+         end;  % axnum loop 
+         
+         % set graph titles (both graphs) 
+         plot_vna('set','titles&linevis',UPPERc:LOWERc);  
+
+         if ~isempty(findobj('tag','siglab_mc_view'))
+             mcview('XYupdate');
+         end;
+
+      elseif  strcmp(In1,'fnyquist')
+      % FNYQUIST
+         axnum = In2;
+         [xy,index] = cursor(Hpvna(axnum).cursor,'get','position',2);
+         set(Hpvna(axnum).aux_ro,'string',['f=',ftoa('%5w',ChanDat.fdxvec(index+Hpvna(axnum).minnyq_index-1)),'Hz']);
+
+      elseif  strcmp(In1,'on_nyquist')
+      % ON_NYQUIST
+          axnum = In2;
+          Hpvna(axnum).lastnyquist = 1;
+          cursor(Hpvna(axnum).cursor,'set','move_cb',['plot_vna(''set'',''fnyquist''',',' int2str(axnum),')']);
+         
+          % set data range for Nyquist plot ... 7/15/98
+          lfd   = length(ChanDat.fdxvec(:));
+          switch get(Hpvna(axnum).xpu2,'value')
+             case HZc
+                xfac = 1;
+              case KHZc
+                xfac = 0.001; 
+              case RPMc
+                xfac = 60;  
+              case KRPMc
+                xfac = 0.06;     % (60/1000)  
+            end;
+          df   = (ChanDat.fdxvec(2)-ChanDat.fdxvec(1));
+          nrng = round(1+(get(Hpvna(axnum).axis,'xlim')/xfac - ChanDat.fdxvec(1))/df);
+          Hpvna(axnum).minnyq_index = min(max(nrng(1),1),lfd);
+          Hpvna(axnum).maxnyq_index = max(min(nrng(2),lfd),1);
+           
+          set(Hpvna(axnum).aux_ro,'visible','on','userdata',1);
+          set(Hpvna(axnum).xpu2,'enable','off');
+          set(Hpvna(axnum).xpu1,'enable','off');
+
+      elseif  strcmp(In1,'off_nyquist')
+      % OFF NYQUIST
+         axnum = In2;
+         % disp(' leaving the ever popular Nyquist display mode')
+         cursor(Hpvna(axnum).cursor,'set','move_cb',''); 
+         set(Hpvna(axnum).aux_ro,'visible','off','userdata',0);
+         set(Hpvna(axnum).xpu2,'enable','on');
+         set(Hpvna(axnum).xpu1,'enable','on');
+         plot_vna('measplot','xaxis',axnum,[],[]);
+         Hpvna(axnum).lastnyquist = 0;
+         plot_vna('set','xlabels',axnum);
+
+      elseif strcmp(In1,'dblhit')
+      % DBLHIT
+          % ChanDat.modal.dblpcnt  % new double hit amplitude in percent of max peak 
+          % ChanDat.modal.dbldelay % and delay in percent of frame
+          if nargin ==4
+              ChanDat.modal.dblpcnt =  In2;     % for WGD stuff 
+          end;
+          try
+              siglab('rawcommand',(ChanDat.modal.dblpcnt*256*65536)+(38*65536)+(4*256)+1,ChanDat.modal.dbldelay);
+          catch
+              % no hardware backend in this environment
+          end
+      
+      elseif strcmp(In1,'titles&linevis')
+      % TITLES&LINEVIS sets title(s) and controls line and internal channel label visibility 
+        for axnum = In2
+            ypu1sel  = get(Hpvna(axnum).ypu1,'value');
+            xpu1sel  = get(Hpvna(axnum).xpu1,'value');
+            ch_on    = Hpvna(axnum).yreqlist;
+            vis      = get(Hpvna(axnum).axis,'visible');
+            
+            % include function type in axis title except for time domain 
+            if ypu1sel == YOFTc
+               funcstr = '';
+            else
+               pustr  = get(Hpvna(axnum).ypu1,'string');
+               s      = pustr{get(Hpvna(axnum).ypu1,'value')};
+               funcstr = [s((YPREFIXc+1):end),' '];
+            end;
+            
+            refstr = '';     % in case of failure (e.g. xfer with no response channel) and for "normal" single channel functions
+            switch  ypu1sel
+               case {XFERc, COHc, CSPECc, CCORc, IMPc}
+                    % include reference channel in title for cross functions
+                    csel = Hpvna(axnum).refchan;
+                    if ~isempty(csel)
+                       if ChanDat.scmeas(Hpvna(axnum).refchan).eu_on_off 
+                           refstr = [' ref ch:',int2str(csel),' ', ChanDat.scmeas(csel).eu_string];
+                       else
+                           refstr = [' ref ch:',int2str(csel)];
+                       end;
+                    end;
+                         
+                    % remove reference channel and non-response channels for cross functions
+                    csel = intersect(setdiff(ch_on,Hpvna(axnum).refchan),[ChanDat.xcstate.resp(Hpvna(axnum).refchan).r]);
+                         
+                    if isempty(csel)
+                       ytitle = ' no response channels are selected ';
+                       listchka(Hpvna(axnum).ylcb,'open');   % show user what is selected (air bag)
+                    else
+                       ytitle = 'ch: ';
+                       for i=csel 
+                           ytitle = [ytitle,int2str(i),','];
+                           % turn on lines AND text involved with measurement ... it works both ways! 
+                            set(findobj(Hpvna(axnum).text,'userdata',i),'visible',vis);  % vis 7/14/98 zzzz
+                            set(Hpvna(axnum).lines(i),'visible',vis);
+                       end;
+                    end;
+                    % hide lines AND text of channels not involved with measurement
+                    chide = setdiff(ch_on,csel);
+                    for i=chide
+                        set(findobj(Hpvna(axnum).text,'userdata',i),'visible','off'); % zzzz
+                        set(Hpvna(axnum).lines(i),'visible','off');
+                    end;
+               otherwise
+                  if ypu1sel == YOFTc | ypu1sel == FFTc
+                     if ~(ypu1sel ==YOFTc & xpu1sel == XTIMEc |  (ypu1sel ==FFTc & xpu1sel == XLINFREQc)) 
+                         % lissajous or pseudo Nyquist
+                         cnum   =  ChanDat.clist( get(Hpvna(axnum).xpu2,'value'));  % which channel 
+                         refstr =  [' vs ',ChanDat.scmeas(cnum).label];
+                     end;
+                  end;
+                  % use all channels
+                  vis = get(Hpvna(axnum).axis,'visible');
+                  if ~isempty(ch_on)
+                     if length(ch_on) == 1 
+                        ytitle = [ChanDat.scmeas(ch_on).label,' '];
+                        set(Hpvna(axnum).lines(ch_on),'visible',vis);
+                     else
+                        ytitle = 'ch: ';
+                        for i=ch_on
+                            ytitle = [ytitle,int2str(i),','];
+                            set(findobj(Hpvna(axnum).text,'userdata',i),'visible',vis); % zzzz
+                            set(Hpvna(axnum).lines(i),'visible',vis);
+                        end;
+                     end;
+                  else
+                     ytitle = 'no channels are active ';  
+                  end;
+            end; % ypu1sel switch
+            
+            set(Hpvna(axnum).title,'string',[funcstr, ytitle(1:(end-1)),refstr]);
+        end; % for axnum loop 
+        
+      elseif strcmp(In1,'all_labels') 
+      % ALL LABELS 
+      % This kludge is called by fileinc.m It has the power to change all channel labels. 
+        [junk,labels] = v_dlg1('get','state');
+        for i=1:MAXCHANc
+           ChanDat.scmeas(i).label  = pullstr(labels(i,:),1);  
+        end;
+        plot_vna('set','ylabels',UPPERc:LOWERc);
+        
+      elseif strcmp(In1,'ylabels')
+      % YLABELS   sets labels associated with Y axis controls on axis specified by In2
+        for axnum = In2
+            xpu1sel  = get(Hpvna(axnum).xpu1,'value');
+            ypu1sel  = get(Hpvna(axnum).ypu1,'value');
+            ch_on    = [ Hpvna(axnum).yreqlist];
+            vis      = get(Hpvna(axnum).axis,'visible');
+            ylabels{1}='';
+            
+            if ~isempty(ch_on)
+               ilbl =1;   % interior channel labels 
+               for csel=ch_on
+                  if ChanDat.scmeas(csel).eu_on_off 
+                     ustr = ChanDat.scmeas(csel).eu_string;
+                  else
+                     ustr ='Volts';   % careful, see ASPEC case below 
+                  end;
+                  
+                  member = 1;   % assume channel
+                  switch ypu1sel
+                     case { XFERc, COHc, CSPECc, CCORc, IMPc}
+                       chlabel = [ChanDat.scmeas(csel).label,':',ustr];
+                       if ismember(csel,intersect(setdiff(ch_on,Hpvna(axnum).refchan),[ChanDat.xcstate.resp(Hpvna(axnum).refchan).r]));
+                         visx=vis;
+                       else
+                         visx='off';
+                         member = 0;
+                       end;
+                      
+                     case ASPECc
+                       switch get(Hpvna(axnum).ypu2,'value')
+                          case {Y_DBUc, Y_DBUpRTHXc}
+                            if strcmp(ustr,'Volts') ustr = 'V'; end;  % to make max room for 0dB 
+                            chlabel = [ChanDat.scmeas(csel).label,': 0dB=', ftoa('%6w',ChanDat.scmeas(csel).db_ref),ustr,ChanDat.units.str];
+                          otherwise
+                            chlabel = [ChanDat.scmeas(csel).label,':',ustr];
+                       end;
+                       visx = vis;
+                     otherwise
+                       chlabel = [ChanDat.scmeas(csel).label,':',ustr];
+                       visx = vis;
+                   end;
+                  if ~strcmp(chlabel,get(Hpvna(axnum).text(ilbl),'string'))
+                      if get(Hpvna(axnum).lines(csel),'color') == get(Hpvna(axnum).text(ilbl),'color')
+                          set(Hpvna(axnum).text(ilbl),'string',chlabel,...
+                                                      'ButtonDownFcn',['plot_vna(''front_line'',',int2str(axnum),',',int2str(csel), ');'],...
+                                                      'visible',visx,'userdata',csel); % log which line got a label
+                      else
+                          set(Hpvna(axnum).text(ilbl),'color',get(Hpvna(axnum).lines(csel),'color'),...
+                                                      'string',chlabel,...
+                                                      'ButtonDownFcn',['plot_vna(''front_line'',',int2str(axnum),',',int2str(csel), ');'],...
+                                                      'visible',visx,'userdata',csel); % log which line got a label
+                     end;                             
+                  else
+                     % should not have to change anything 
+                     set(Hpvna(axnum).text(ilbl),'visible',visx);
+                  end;
+                  
+                  if member
+                     ylabels{ilbl} = ustr;   % create cell array of lablels
+                     ilbl=ilbl+1;
+                  end;   
+               end;  % for csel loop
+               
+              
+               ylabels=unique(ylabels);  % strip out redundent labels
+               ylabelstr='';
+               for i=1:length(ylabels)
+                  ylabelstr = [ylabelstr,ylabels{i}];
+                  if i<length(ylabels)
+                     ylabelstr=[ylabelstr,','];
+                  end;
+               end;
+               
+               set(Hpvna(axnum).text(ilbl:end),'visible','off','userdata',0);  % mark as "free" the remainder of interior channel labels 
+               
+              % tweak labels for rms where needed removed when units of rms,peak and p-p added 
+              % switch ypu1sel
+              %    case {CSPECc,CCORc,ACORc}     
+              %         unit_str = ' rms';
+              %    otherwise
+              %         unit_str = '';
+              % end;
+
+
+               unit_str = '';
+               ypu2sel  = get(Hpvna(axnum).ypu2,'value');
+               pustr    = get(Hpvna(axnum).ypu2,'string');
+               dtype    = pustr{ypu2sel};  % string is used in label 
+               switch ypu1sel
+                   case {XFERc, CSPECc}
+                       switch ypu2sel
+                           case { Y_PHASEWc, Y_PHASEUc} 
+                              set(Hpvna(axnum).aylabel,'string',[dtype,' (degrees) ']);
+                           otherwise
+                           
+                              csel = Hpvna(axnum).refchan;
+                              if ~isempty(csel)
+                                 if ChanDat.scmeas(csel).eu_on_off 
+                                    ustr = ChanDat.scmeas(csel).eu_string;
+                                 else
+                                    ustr ='Volts';
+                                 end;
+                              end;
+                              
+                              switch get(Hpvna(axnum).yintfac,'value')
+                                 case Y3_INT1c 
+                                      istr = ' int ';
+                                 case Y3_INT2c 
+                                      istr = [' int',SQc,' '];
+                                 case Y3_DIF1c 
+                                      istr = [' dif '];    
+                                 case Y3_DIF2c 
+                                      istr = [' dif',SQc,' '];
+                                 otherwise
+                                      istr = ' ';
+                              end;
+                              
+                              switch ypu1sel
+                                 case XFERc
+                                    if ypu2sel == Y_NYQUISTc
+                                       set(Hpvna(axnum).aylabel,'string',['imag',istr,'(',ylabelstr,')','/',ustr]);
+                                       set(Hpvna(axnum).axlabel,'string',['real',istr,'(',ylabelstr,')','/',ustr]);
+                                    else
+                                       set(Hpvna(axnum).aylabel,'string',[dtype,istr,'(',ylabelstr,')','/',ustr]);
+                                    end;
+                                    
+                                 case CSPECc
+                                    if ypu2sel == Y_NYQUISTc
+                                       set(Hpvna(axnum).aylabel,'string',['imag',istr,'(',ylabelstr,')','*',ustr,unit_str]);
+                                       set(Hpvna(axnum).axlabel,'string',['real',istr,'(',ylabelstr,')','*',ustr,unit_str]);
+                                    else
+                                       set(Hpvna(axnum).aylabel,'string',[dtype,istr,'(',ylabelstr,')','*',ustr,unit_str]);
+                                    end;
+                              end;
+                       end;
+                   
+                   case {CCORc, IMPc}
+                      csel = Hpvna(axnum).refchan; 
+                      if ChanDat.scmeas(csel).eu_on_off 
+                         ustr = ChanDat.scmeas(csel).eu_string;
+                      else
+                         ustr ='Volts';
+                      end;
+                      switch ypu1sel
+                         case CCORc
+                             set(Hpvna(axnum).aylabel,'string',[dtype,' (',ylabelstr,')',unit_str,'*',ustr, unit_str]);
+                         case IMPc
+                             set(Hpvna(axnum).aylabel,'string',[dtype,' (',ylabelstr,')','/',ustr]);
+                      end;
+                      
+                   case COHc
+                        set(Hpvna(axnum).aylabel,'string','Coherence');
+                   
+                   case ASPECc
+                        switch get(Hpvna(axnum).yintfac,'value')
+                            case Y3_INT1c 
+                                istr = ' int ';
+                            case Y3_INT2c 
+                                istr = [' int',SQc,' '];
+                            case Y3_DIF1c 
+                                istr = [' dif '];    
+                            case Y3_DIF2c 
+                                istr = [' dif',SQc,' '];
+                            otherwise
+                                istr = '';
+                        end;
+                       set(Hpvna(axnum).aylabel,'string',[dtype,istr,' (',ylabelstr,')',unit_str]);
+                       
+                   case ACORc
+                       set(Hpvna(axnum).aylabel,'string',[dtype,' (',ylabelstr,' ^2)',unit_str]); % added 6/2/98 to account for square
+                       
+                   otherwise
+                       set(Hpvna(axnum).aylabel,'string',[dtype,' (',ylabelstr,')']);
+               end;
+            else
+               set(Hpvna(axnum).aylabel,'string','','userdata',[]);
+               set(Hpvna(axnum).text(1:end),'string','','visible','off','userdata',0); % free all interior axis labels
+            end;
+        end;
+      
+      elseif strcmp(In1,'xlabels')
+      % XLABELS .... sets labels associated with X axis controls on axis specified by In2
+        for axnum = In2
+            xpu1sel  = get(Hpvna(axnum).xpu1,'value');
+            ypu1sel  = get(Hpvna(axnum).ypu1,'value');
+            switch  ypu1sel
+             case {YOFTc, FFTc}
+               %  .                                    .    .                                     .  12/9/98
+               if (ypu1sel == YOFTc & xpu1sel == XTIMEc) |  (ypu1sel ==FFTc & xpu1sel == XLINFREQc)
+                  pustr  = get(Hpvna(axnum).xpu2,'string');
+                  xlabel = pustr{get(Hpvna(axnum).xpu2,'value')};   % string is used in label
+               else
+                  % lissajous / pseudo Nyquist
+                  cnum      =  ChanDat.clist( get(Hpvna(axnum).xpu2,'value'));  % which channel 
+                  xtitle    =  ChanDat.scmeas(cnum).label;
+                  if ChanDat.scmeas(cnum).eu_on_off
+                     units  = ChanDat.scmeas(cnum).eu_string;
+                  else
+                     units  = 'Volts';
+                  end;
+                  pustr  = get(Hpvna(axnum).xpu1,'string');
+                  dtype  = pustr{xpu1sel};   % string is used in label 
+                  xlabel = [dtype,'( ',xtitle,') ',units];
+               end;
+               set(Hpvna(axnum).axlabel,'string',xlabel);
+               
+             case {ASPECc, ACORc, XFERc, COHc, CSPECc, CCORc, IMPc}
+               pustr  = get(Hpvna(axnum).xpu1,'string');
+               dtype  = pustr{xpu1sel};                          % string is used in label
+               pustr  = get(Hpvna(axnum).xpu2,'string');
+               dunits = pustr{get(Hpvna(axnum).xpu2,'value')};   % string is used in label
+               set(Hpvna(axnum).axlabel,'string',[dtype,' ',dunits]);
+               
+            otherwise
+               disp(' measurement mode not supported in plot_vna set xlabels');
+            
+            end; % switch
+        end;
+        
+      elseif strcmp(In1,'xpu2')
+      % XPU2 loading of strings and selection of a value
+          axnum  = In2;
+          xpu1sel = In3;
+          if isempty(In4)
+             xpu2val = 1;
+          else
+             xpu2val = In4;
+          end;
+          ypu1sel = get(Hpvna(axnum).ypu1,'value');
+          switch  ypu1sel
+             case  {YOFTc,FFTc}
+               if ypu1sel == YOFTc & xpu1sel == XTIMEc 
+                 set(Hpvna(axnum).xpu2,'string',X2_G1c,'value',xpu2val);
+               elseif ypu1sel == FFTc & xpu1sel == XLINFREQc
+                  set(Hpvna(axnum).xpu2,'string', X2_G2c,'value',xpu2val);
+               else
+                 % lissajous or pseudo Nyquist
+                 cstr = {};
+                 for i=1:length(ChanDat.clist);
+                    cstr   = [cstr,{['ch:',int2str(ChanDat.clist(i))]}];
+                 end;
+                 set(Hpvna(axnum).xpu2,'string',cstr,'value',xpu2val);
+               end;
+               
+            case  {ACORc,CCORc,IMPc}  
+               set(Hpvna(axnum).xpu2,'string', X2_G1c,'value',xpu2val);
+               
+             case  {ASPECc,XFERc,CSPECc,COHc}
+               set(Hpvna(axnum).xpu2,'string', X2_G2c,'value',xpu2val);
+           end;
+          
+      elseif strcmp(In1,'no_hardware')
+      % NO_HARDWARE
+         set([Hpvna(1).instpb, Hpvna(1).avgpb],'enable','off');
+        
+      elseif strcmp(In1,'ax1track')
+      % AX1TRACK
+        % disp('ax1track ??') % zzzz what will this do with multi channel display? 
+
+      elseif strcmp(In1,'plot_name')
+      % PLOT_NAME
+          set(Hpvna(1).figure,'name',In2);
+         
+      elseif strcmp(In1,'fq_lock')
+      % FQ_LOCK 
+         if strcmp(In2,'on')
+            Hpvna(1).fq_lock =1;
+            set(Hpvna(1).figure,'CloseRequestFcn','vna_safe_close');
+         else
+            Hpvna(1).fq_lock =0;
+            set(Hpvna(1).figure,'CloseRequestFcn','vna_safe_close');
+         end;
+         
+      elseif strcmp(In1,'refcpu')
+      % REFCPU   Ref channel popup 
+             pustr = {};                                     
+             if ~isempty(ChanDat.xcstate.refc)
+                k=1;
+                for i=ChanDat.xcstate.refc
+                    % pustr{k} = ['ref:',int2str(i)] ;
+                    pustr{k}  = ['r',int2str(i)] ;
+                    k=k+1;
+                end;
+                for axnum=UPPERc:LOWERc
+                   if ~isempty(Hpvna(axnum).refchan)
+                      index=find(Hpvna(axnum).refchan==ChanDat.xcstate.refc);
+                      if isempty(index)
+                         index=1;         % better than an explosion, but not by much. 
+                      end;
+                   else
+                      index = 1;
+                   end;
+                   set(Hpvna(axnum).xcref,'string',pustr,'enable','on','value',index);
+                end;
+             else
+                set(Hpvna(UPPERc).xcref,'string','inactive','enable','off','value',1);
+                set(Hpvna(LOWERc).xcref,'string','inactive','enable','off','value',1);
+             end;
+        
+      elseif strcmp(In1,'xchan_on')
+          % XCHAN_ON
+          % activate the cross channel modal dialog 
+          Hpvna(1).hxch = xchan(gcbf,'init','plot_vna(''set'',''xcapply'')',Hpvna(1).xchanv);  
+        
+      elseif strcmp(In1,'xcapply') | strcmp(In1,'xcapply_vcap') | strcmp(In1,'clist')
+          Hpvna(1).availflag = 0;   % 4/28/99  RAB   don't assume stuff is available when chans change
+          % XCAPPLY
+          if strcmp(In1,'xcapply')
+             % normal callback from selecting apply in xchan dialog
+             [ChanDat.xcstate Hpvna(1).xchanv]= xchan(Hpvna(1).hxch,'get_state','close');
+             % retrieve state of cross channel modal dialog, and then close it
+             v_dlg1('set','clist',ChanDat.xcstate.clist); % keep v_dlg1 in sync  
+          elseif strcmp(In1,'xcapply_vcap') 
+             % vcap  call 
+             % In2 has raw checkbox info stored by vcap when capture occured
+             temp.xc_ckstate = In2;
+             temp.xc_rmax    = Hpvna(1).xchanv.xc_rmax;
+             temp.xc_cmax    = Hpvna(1).xchanv.xc_cmax; 
+             
+             [ChanDat.xcstate Hpvna(1).xchanv] = xchan(temp,'translate');
+              v_dlg1('set','clist',ChanDat.xcstate.clist); % keep v_dlg1 in sync
+          
+          elseif strcmp(In1,'clist')     
+             % CLIST  called from v_dlg1 (and optionally, mcsetup)
+             clist = In2';
+             listchange = setxor(clist,ChanDat.clist);
+
+             if ~isempty(listchange)
+                % if lists are different need to do more work
+                mr_on = 0;
+                for i=2:Hpvna(1).xchanv.xc_rmax
+                    if sum(Hpvna(1).xchanv.xc_ckstate(i,:)) >0
+                      mr_on = 1;
+                    end;
+                end;
+             
+                if mr_on 
+                  s = ['Caution, cross channel functions have been cleared for reference channel 2 and beyond. The Cross Channel Selection Matrix show the current state.',...
+                       'You must close this warning and then the Cross Channel Selection Matrix before proceeding. Select "Cancel" if no changes need to be made.'];
+                  msgbox(s,'Operator Warning','warn','modal');
+                  plot_vna('stop');            
+                end;
+             
+                % cleanse state of cross channel computation matrix
+                Hpvna(1).xchanv.xc_ckstate = zeros(MAXREFc,MAXCHANc); 
+                Hpvna(1).xchanv.xc_ckstate(1,clist) = 1;   
+                [ChanDat.xcstate Hpvna(1).xchanv]= xchan(Hpvna(1).xchanv,'translate');
+                % show new situation if need be
+                if mr_on
+                   Hpvna(1).hxch = xchan(Hpvna(1).figure,'init','plot_vna(''set'',''xcapply'')',Hpvna(1).xchanv);  
+                end;
+             end;
+             
+          end;
+          
+          if isempty(setxor(ChanDat.clist, ChanDat.xcstate.clist))
+             % minor change, still requires effort since this could be from mc_setup ofod
+             plot_vna('set','refcpu');
+             if nargin ==4 & strcmp(In3,'setscales')
+                 numchan    = length(clist);
+                 [ChanStat ChanLabel EULabel] = v_dlg1('get','filedat');
+                 for i=1:numchan
+                     cnum                                = clist(i);
+                     ChanDat.scmeas(cnum).label          = pullstr(ChanLabel(i,:),1);
+                     ChanDat.scmeas(cnum).eu_on_off      = ChanStat(i,2);
+                     ChanDat.scmeas(cnum).eu_val         = ChanStat(i,3);
+                     ChanDat.scmeas(cnum).eu_string      = pullstr(EULabel(i,:),1);
+                     ChanDat.scmeas(cnum).a_r_flag       = ChanStat(i,5) < 0 ;  % a_r, negative full scale setting indicates autoranging is on
+                     ChanDat.scmeas(cnum).fs_val         = abs(ChanStat(i,5));  % a_r, full scale setting  
+                     ChanDat.scmeas(cnum).db_ref         = ChanStat(i,6);
+                     if ChanDat.scmeas(cnum).eu_on_off 
+                        ChanDat.scmeas(cnum).euscale_fac = ChanDat.scmeas(cnum).eu_val;
+                     else
+                        ChanDat.scmeas(cnum).euscale_fac = 1;
+                     end;
+                 end;
+                 for axnum=UPPERc:LOWERc
+                     plot_vna('set','ylabels',axnum); % deal with labels
+                     plot_vna('measplot','rtl',axnum,'setscales');
+                 end;    
+                 
+                 if ~isempty(findobj('tag','siglab_mc_view'))
+                    mcview('XYupdate');
+                 end;
+             end;
+             
+          else
+            % major change
+             plot_vna('set','clist_x');  % the major action
+             ovldstat('reconfig',ChanDat.clist);
+             ls_vna('set_acq');
+             ls_vna('set_proc');
+          end;
+          
+      elseif strcmp(In1,'int_vec')
+       % INT_VEC
+       % Freq domain integration/differentiation  vector
+            % Y3_NOINTc = 1;
+            % Y3_INT1c  = 2;
+            % Y3_INT2c  = 3;
+            % Y3_DIF1c  = 4;
+            % Y3_DIF2c  = 5;
+         for axnum=In2
+            isel = get(Hpvna(axnum).yintfac,'value');
+            if isel == Y3_INT1c |  isel == Y3_INT2c 
+               %                           w (omega)         ^    -2 or ^-4 since it is applied to a squared quantity
+               Hpvna(axnum).int_vec  = (2*pi*ChanDat.fdxvec).^(2*(Y3_INT1c-1-isel))'; % note the transpose!
+            elseif isel == Y3_DIF1c |  isel == Y3_DIF2c
+               %                           w (omega)         ^    2 or ^4 since it is applied to a squared quantity
+               Hpvna(axnum).int_vec  = (2*pi*ChanDat.fdxvec).^(2*(1+isel-Y3_DIF1c))'; % note the transpose!
+            else
+               Hpvna(axnum).int_vec  = 1;   % no point in burning multiplies, just assign a scalar
+            end;
+            if Hpvna(axnum).int_vec(1) == inf | Hpvna(axnum).int_vec(1) == 0
+               Hpvna(axnum).int_vec(1) = nan;
+            end;
+            Hpvna(axnum).int_vec_max      = max(Hpvna(axnum).int_vec);   % precompute, used in scaling 
+            jfacs = [1,-j,-1,j,-1];   % corresponds to nop,int1,int2,dif1,dif2
+            Hpvna(axnum).xfer_int_vec     = sqrt(Hpvna(axnum).int_vec);  % for xfer function 
+            Hpvna(axnum).xfer_int_vec_max = max(Hpvna(axnum).xfer_int_vec);
+            Hpvna(axnum).xfer_int_vec     = jfacs(isel)*Hpvna(axnum).xfer_int_vec; % may as well go whole hawg
+                                                                                   % and make phase come out correct! 
+         end;
+      else
+         disp([In1,' error in plot_vna(set,xxx)']);
+      end;
+
+  case 'run_enable'
+  % VCAP run_enable
+       set([Hpvna(1).instpb,Hpvna(1).avgpb],'enable',In1);
+       set(Hpvna(1).figure,'CloseRequestFcn','vna_safe_close');
+       
+  case 'stop_enable'
+  % VCAP stop_enable
+       set(Hpvna(1).stoppb,'enable',In1);
+
+  case 'frame_reject'  
+  %  FRAME_REJECT
+       siglab('event',1,'frmreject');
+       ChanDat.navg = ChanDat.navg-1;
+       set(Hpvna(UPPERc).navgro,'string',sprintf([AVGSTRc,'%4d'], ChanDat.navg));
+       set(Hpvna(UPPERc).frmrej,'enable','off');  % only reject one at a time 
+       
+  case 'print'
+  % PRINT COMMAND  
+         hcpyv5('init',Hpvna(1).figure);
+
+  case 'clear'
+  % CLEAR COMMAND
+       for i=UPPERc:LOWERc
+           cursor(Hpvna(i).cursor,'clear');
+       end;
+       if ~isempty(findobj('tag','siglab_mc_setup'))
+           eval('mcsetup(''close'')');
+       end;
+       
+       if Hpvna(1).mcviewexist
+           eval('mcview(''Close'')');
+       end;
+       siglab('Compute',1); 
+       set(Hpvna(1).figure,'CloseRequestFcn','closereq');
+       close(Hpvna(1).figure);
+       clear global Hpvna ChanDat
+  otherwise
+      disp(['error in plot_vna:', Action,' not recognized']);
+  end;  % the outer switch Action 
+  
+  if ECHOc
+     CallDepth = CallDepth-1;
+  end;   
+% end  plot_vna function, the authentic mother of all mothers! 
+

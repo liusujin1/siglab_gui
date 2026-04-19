@@ -1,0 +1,1023 @@
+  function [Out1,Out2,Out3,Out4,Out5,Out6,Out7,Out8,Out9]=vna(Action,In1,In2,In3)
+% function [Out1,Out2,Out3,Out4,Out5,Out6,Out7,Out8,Out9]=vna(Action,In1,In2,In3)
+% Virtual Network Analyzer main line function ,  ehnanced multi-channel support.
+% Any channel(s) in first SigLab box may now be a reference channel(s).
+% Channel enables and response/reference selection are now done by a gui matrix of check boxes. 
+% A VNA data file (*.vna) contains the following data: 
+% 
+%  SLm = Structure of SigLab Measurement data
+%  Please see SLm.doc for complete details. 
+%
+%  SLm.clist        the active channel list (values for index i below)
+%
+%  Individual channel parameters 
+%  SLm.scmeas(i).label        channel text label
+%  SLm.scmeas(i).eu_on_off    engineering unit state
+%  SLm.scmeas(i).eu_val       engineering unit value
+%  SLm.scmeas(i).eu_string    engineering unit string
+%  SLm.scmeas(i).db_ref       0 dB reference
+%  SLm.scmeas(i).fs_val       full scale voltage range 
+%  SLm.scmeas(i).euscale_fac  (not intended for end user)
+% 
+%  Non cross channel measurements 
+%  i  =  channel number from 1 to 16 
+%  SLm.scmeas(i).tdmeas       time history
+%  SLm.scmeas(i).aspec        autospectrum in Vrms^2
+%  SLm.scmeas(i).fft          fft in Vrms (complex)
+%  SLm.scmeas(i).acor         autocorrelation**
+%
+%  Cross channel measurements
+%  SLm.xcstate
+%     refc                     vector of reference channels (defines legit values for ref below) 
+%     resp                     for each refc element, there are response channels 
+%                              for example  SLm.xcstate.resp(1).r   
+%                              provides list of response channels associated with refernce channel #1 
+%  ref = ref channel (1..4) i = response channel (1..16) from SLm.xcstate.resp(ref).r 
+%  SLm.xcmeas(ref,i).xfer     transfer function**
+%  SLm.xcmeas(ref,i).coh      coherence**
+%  SLm.xcmeas(ref,i).cspec    cross spectrum**
+%  SLm.xcmeas(ref,i).ccor     cross correlation**
+%  SLm.xcmeas(ref,i).imp      impulse response**
+%  
+%  Time and freq vectors for above measurements
+%  SLm.tdxvec    time domain x vector 
+%  SLm.fdxvec    freq domain x vector 
+% 
+%  Ancillary information 
+%  SLm.numin     number of inputs in hardware configuration
+%  SLm.wincor    window amplitude/power correction factor 
+%  SLm.rbw       resolution bandwidth for power spectral density displays
+%  SLm.navg      number of averages, 0 = inst data 
+%  SLm.zpad      0 if zero-padding was off, 1 if it was on during the measurement.
+%  SLm.ovld      overload status
+%  SLm.zoomcf    zoom center freq, 0 for base band
+%  SLm.filestor.label  cell array of functions that may be stored in this file
+%  SLm.filestor.state  flags corresponding to functions that ARE stored in this file
+%
+%  NOTE: ** = computation of this function requires an averaged measurement (not the "inst" version). 
+%
+%
+%  NOTE: Most of the following information is now contained in the SLm data structure.
+%  M = number of active channels
+%  CenterFreq     1 by 1   Zoom Center Frequency in Hz (==0 if zoom is off)
+%   ChanLabel     M by 20  Labels of channels in AspecDat (string)
+%    ChanStat     M by 5   ChanStat(:,1)= Channel Number
+%                          ChanStat(:,2)= 1 for EU on, 0 for EU off
+%                          ChanStat(:,3)= EU value
+%                          ChanStat(:,4)= Overload Status 0=OK 1=Ovld
+%                          ChanStat(:,5)= Voltage Range e.g. 2.5
+%  SampleRate     1 by 1   Sampling Rate (post decimating filters)
+%   SystemClk     1 by 1   System Fundamental Clock (51200 Hz for 20-X2s, 128000 for 50-21)
+%   UniformFlg    1 by 1   =1 indicating uniform frequency element spacing
+%
+%
+% [Out1,Out2,Out3,Out4,Out5,Out6]=vna(Action,In1,In2);
+% Actions
+%       'get'
+%           'meas'      SLm structure               in Out1
+%
+%           'chaninfo'  ChanStat                    in Out1
+%                       ChanLabel                   in Out2
+%                       EULabel                     in Out3
+%           'acqpar'    SystemClk                   in Out1
+%                       SampleRate                  in Out2
+%                       CenterFreq                  in Out3
+%           'file'      Data file path              in Out1
+%                       Data file name              in Out2
+%           'linked?'   Returns 1 if linked mode    in Out1
+%
+%       'init'          (optional) Start vna, entering vna (no args) at MATLAB prompt will also accomplish this.
+%          In1,In2      (optional) path and filename
+%                 In3   (optional) 'lock' locks file menus and quit button
+%
+%       'fq_lock'
+%          In2          'on' or 'off' control of File and Quit methods
+%       '?'             select file from user preferred subdirectory b4 starting vna (upmod0)    
+%       '??'            select file from vna default subdirectory b4 starting vna    " 
+% Copyright (c) 1994-1998 DSP Technology Inc. All rights reserved.      
+
+
+%       'quit'          shut down with option to save state
+%       'close'         unconditionally close this application
+%       'save'          save state to a selected file (opt In1 path, In2 filename)
+%       'save_as'       select file then save state
+%       'save_default'  save state to default file
+%       'open'          open file and set control state from it
+
+%       'load_hdwr'     load hardware with control states abd SystemClk=In1
+%       'menu'          menu activated dialogs etc, In1 fine decode
+%            'file','window','help' etc, In1 fine decode
+%       'dont_start'    don't allow more than one copy of vna to run
+%       'instpb'        run inst acq / display loop
+%       'avgpb'         run averaged acq / display loop
+%       'stop'          stop if not already stopped
+%       'error'         eval function errors
+%           'save'      error in saving file
+%           'open'               opening
+%       'get_quit_flg'   return state of quit_flg for shutdown
+%
+
+% Dick Benson, DSP Technology 
+
+
+global HVNA_;      % VNA module handle vector
+global VCAP_ALIVE;   % set to 1 if vcap is active
+global VI_DEBUG;
+
+% end global declarations
+
+% Handle index definitions
+%define
+ f1      = 1;         % Figure 1
+ exm1;     % Excitation Menu
+ exms1;    % Excitation dialog for internal excitation
+ exms2;    % Triggering dialog for exernal excitation
+ sm1;      % storage menu
+ sms1;     % storage submenu #1
+ sms2;     % storage submenu #2
+ sms3;     % storage submenu #3
+ sms4;     % storage submenu #4
+ sms5;     % storage submenu #5
+ sms6;     % storage submenu #6  Print
+ sms7;     % storage submenu #7  Notes
+ sms8;     % storage submenu #8  Vcap
+ sms9;     %                     Power control 
+ vfgm;     % vfg menu
+ hm1;      % help menu
+ fq_lock;  % file/quit lock
+ Lhvna   = fq_lock;   % length of this storage
+
+ DEFAULT_FILEc = 'default.vna';       % vna default setup
+ BACKUPc       = 'vnadef.mat';        % backup in case user blows away default
+ DEFAULT_EXTc  = '*.vna';             % extension
+ 
+ FILE_KEY1c     = 'DSPt vna_1 file';  % to verify file integrity
+ FILE_KEY2c     = 'DSPt vna_2 file';  % indicate that it is latest format
+ FIG_NAMEc      = 'vna';               % figure title
+
+ NLc          = char(10);  % new line character
+ 
+ WVIc         = 241;                 % vi size
+ HVIc         = 386;
+ VI_VERSIONc  = '''v3.2''';
+ 
+ % Macros for path and filename
+ Mset_path(       = set(HVNA_(sms2),'userdata',
+ Mget_path        = get(HVNA_(sms2),'userdata');
+
+ % filename
+ Mset_fname(      = set(HVNA_(sms3),'userdata',
+ Mget_fname       = get(HVNA_(sms3),'userdata');
+ 
+ % number of ios
+ Mget_numio       = get(HVNA_(sms4),'userdata')
+ % Hardware Ok
+ Mget_HW_ok       = get(HVNA_(sms5)'userdata');
+ 
+ Mget_cnote       = get(HVNA_(sms7),'userdata');  
+ Mset_cnote(      = set(HVNA_(sms7),'userdata',
+
+%end_define
+
+% ****************************************************
+%include
+  vcol_h;   %  color definitions
+  vsiz_h;   % control size definition  PBS1 LHO  etc
+%end_include
+% ****************************************************
+
+% If VNA is invoked with no arguments, touch off the whole mess
+% from ground zero ... vna('init');
+
+  if nargin==0 Action='init'; end;
+
+% The following checks to see that proper hardware support is available.
+% It prevents more than one program from using the acquisition hardware
+% at the same time.
+
+   if strcmp(Action,'init'),
+      [stat,owner]=hw_stat('request','in','vna.m');
+      if stat ~=1
+         Action='dont_start';
+         % there is already someone using the input hardware
+      else
+         [stat,owner]=hw_stat('request','out','vna.m');
+         if stat ~=1
+            if strcmp(owner,'vfg.m')
+               hw_stat('free','out','vfg.m'); % vna will assume control .... to a nebulous degree
+               stat=1;   % zzzz
+            else
+               Action='dont_start';
+            end;
+         end;
+      end;
+     
+      if stat==1
+        % vna will probably start, it has the input hardware
+        [stat,owner]=hw_stat('request','out','vna.m');
+        if exist('VI_DEBUG') == 1
+           [Numin,Numout,SystemClk, HW_ok, NCperbox] = ls_vna('init',VI_DEBUG); 
+        else
+           [Numin,Numout,SystemClk, HW_ok, NCperbox] = ls_vna('init',0);       
+        end;
+        
+        
+        fp_list('init',SystemClk);
+        if Numin ==0
+           Action='close_nofig';
+           disp('Error initializing hardware, Zero input channels reported');
+        end;
+     end;
+   end;
+
+if strcmp(Action,'init'),  % init everything
+% INIT Command
+   HVNA_=zeros(1,Lhvna);
+   if (nargin < 3)
+         % try to load default setup
+         [default_drv,path_n] = pathfind('vna');
+         In1 = [default_drv,path_n,'\'];
+         In2 = DEFAULT_FILEc;
+   end;
+
+    if nargin ==4
+      % optional run time file and quit button lock parameter
+        if strcmp(In3,'lock')
+            HVNA_(fq_lock) = 1;
+        else
+            HVNA_(fq_lock) = 0;
+            disp(['4th arg to', FIG_NAMEc,' must be "lock" , current argument ignored']);
+        end;
+     end;
+
+     Cmprssd_Notes = notefig('init_msg');   % measurement notes  v > 1.14n
+     num_io=  [2,2];            % mbsup5 assume 20-22
+     grids  = 'off';            % plot grids
+     SLm    = [];
+     path_file=[In1,In2];
+     
+     default_warn = 0;
+     
+     if exist(path_file) >0
+             % file exists
+             key=' ';         % clear key
+             AspecDat =[];      % v > 1.13 will replace these
+             Tvec     =[];
+             TimeDat  =[];
+             s=['load ''',path_file,''' -mat'];   
+             eval(s,['vna(''error'',''init_open'')']);
+             if strcmp(key,FILE_KEY1c) | strcmp(key,FILE_KEY2c)
+             % this is good, we have a current file
+             % it contains:  key ch_ptr vdlg1_s1 vdlg1_s2 hdlg1_s1
+             %               vna_pos hdlg2_s1 vdlg2_s1
+             %               xplot_s1,xplot_s2,Fvec,XferDat,CohDat,XferMap,xplot_axes
+             % OR SLm
+                vna_path = In1;
+                vna_file = In2;
+                filestate_ok = 1;
+             else
+                % file exists, but no key, bad file 
+                [stat,owner]=hw_stat('free','in&out','vna.m');
+                error([path_file,' file does not have either key: ',FILE_KEY1c,'.... or .... ',FILE_KEY2c,' ',FIG_NAMEc,' will not start.']);
+             end;
+     else
+             % specified file does not exist
+             if strcmp(In2,DEFAULT_FILEc)
+                % try to load backup default file, user must have blown away normal default. 
+                 path_file = [default_drv,path_n,'\',BACKUPc];
+                 s=['load ''',path_file,''' -mat'];   
+                 eval(s,['vna(''error'',''init_openbackup'')']);
+                 % if we survive, to here, the file should have proper key. 
+                 default_warn = 1;
+                 vna_path = In1;
+                 vna_file = DEFAULT_FILEc;
+                 filestate_ok = 1;
+             else
+                 [stat,owner]=hw_stat('free','in&out','vna.m');
+                 error(['The file you specified: "', path_file,'" does not exist. ',FIG_NAMEc,' will not be started.']);
+             end; 
+     end;
+   
+  %define
+    % Size, location, color definitions
+    vdlg1_pos = [2,172];    % 1st Vertical Dialog window position
+    vdlg2_pos = [2,2];
+    hdlg1_pos = [121,172];  % 1st Horizontal Dialog
+    hdlg2_pos = [121,2];    % 2nd Horizontal Dialog (Trigger)
+    exdlg2_pos= [121,2];    % excitation Dialog
+  %end_define
+
+  virun('run','vna'); % let vi run know in case vna was started
+                      % from the command line
+
+    % if the file vi_color.mat with startup colors exists,
+    % use the colors in it rather than INIT_COLORc
+    VIfont = 0;  % Use default font.
+    if exist('vi_color.mat') ==2
+      load vi_color
+      vna_color=stored_vi_colors;
+    else
+      vna_color=INIT_COLORc;
+    end;
+
+    SaveFont = eval('uifont(VIfont)');
+
+
+    HVNA_(f1)    = figure('Color',vna_color(FIG_BKc,:),'Name',lower([FIG_NAMEc,': ',vna_path,vna_file]),...
+                          'colormap',[],...
+                          'Units','pixels','Position',pos_clip(vna_pos,[WVIc,HVIc]),...
+                          'Resize','off',...
+                          'menu','none',...
+                          'NumberTitle','off','visible','off',...
+                          'inverthardcopy','off',...
+                          'PaperOrientation','landscape',...
+                          'tag','vna_fig',...
+                          'BackingStore','off');
+                          
+
+    hf =  HVNA_(f1);                      
+
+    set(hf,'pointer','watch'); drawnow;
+    
+%**** File Storage Menus*****************************************************
+
+    HVNA_(sm1)  = uimenu(hf,'Label','&File','accelerator','f' );
+
+    HVNA_(sms2) = uimenu(HVNA_(sm1),'Label','&Open',...
+                                    'Callback',['vna(''open'')'],'accelerator','o');
+
+    HVNA_(sms3) = uimenu(HVNA_(sm1),'Label','&Save',...
+                                    'Callback',['vna(''save'');'],'accelerator','s');
+
+    HVNA_(sms4) = uimenu(HVNA_(sm1),'Label','Save &As',...
+                                    'userdata', [Numin,Numout],...
+                                    'Callback',['vna(''save_as'');'],'accelerator','a');
+
+    HVNA_(sms5) = uimenu(HVNA_(sm1),'Label','Save to &Default',...
+                                    'userdata',HW_ok,...
+                                    'Callback',['vna(''save_default'');'],'accelerator','d');
+
+                  uimenu(HVNA_(sm1),'Label','Export',...
+                                    'separator','on',...
+                                    'Callback','dtselect');
+
+
+                  uimenu(HVNA_(sm1),'Label','Save As to &ME''scope .BLK File',...
+                                    'Separator','on',...
+                                    'accelerator','m',...
+                                    'Callback','vna2mesc;');
+                                    
+    HVNA_(sms6) = uimenu(HVNA_(sm1),'Label','&Print to Clipboard',...
+                                    'Separator','on',...
+                                    'Callback','vna(''print'');',...
+                                    'accelerator','p');
+
+    %**** Note Menu ***********************************************
+    HVNA_(sms7) = uimenu(HVNA_(sm1),'Label','&Notes',...
+                           'Separator','on',...
+                           'userdata',Cmprssd_Notes,...
+                           'Callback','notefig(''init'',gcbf,''vna'')','accelerator','n');          
+
+                  
+    HVNA_(sms8) = uimenu(HVNA_(sm1),'Label','&Vcap',...
+                                    'Separator','on',...
+                                    'Callback','vna(''vcap'')','accelerator','v' );
+
+    HVNA_(sms9) =  uimenu(HVNA_(sm1),'Label','Power Down (Standb&y)',...
+                                    'Separator','on',...
+                                    'Callback','vna(''power_toggle'')','accelerator','y' );
+    
+                  uimenu(HVNA_(sm1),'Label','Quit/E&xit',...
+                                    'Separator','on',...
+                                    'Callback',['vna(''quit'');'], 'accelerator','x');
+
+
+% ******Excitation  Menus ********************************************
+    HVNA_(exm1)  = uimenu(hf,'Label','&Excitation',...
+                    'accelerator','E');
+
+    HVNA_(exms1) = uimenu(HVNA_(exm1),'Label','&Linked to Measurement',...
+                    'accelerator','l',...
+                    'Callback',['vna(''menu'',''ex_dlg2'')']);
+
+    HVNA_(exms2) = uimenu(HVNA_(exm1),'Label','&Independent (vfg)',...
+                    'accelerator','i',...
+                    'Callback',['vna(''menu'',''h_dlg2'')']);
+
+%**** VFG Menu *************************************************
+     HVNA_(vfgm) = uimenu(hf,'Label','&Vfg',...
+                             'accelerator','v',...
+                             'enable','on',...
+                             'Callback','vna(''menu'',''vfgm'');');
+
+% ************************ DIALOGS & XPLOT*******************************
+    owner    ='vna';
+    % use state found in file
+    % reconcile sampling parameter differences between hardware used to create 
+    % the file and the hardware that is actually being used right now
+    [hdlg1_s1, SystemClk, warn_flg] = fp_list('reconcile',SystemClk,hdlg1_s1);
+    [vdlg1_s1,vdlg1_s2]=max2042(vdlg1_s1,vdlg1_s2);                                  % bump control storage to 16 channels
+    v_dlg1('init',vdlg1_pos,Numin,vna_color,owner,vdlg1_s1,vdlg1_s2,'on',ch_ptr,hf); % Channel parameters
+    v_dlg2('init',vdlg2_pos,[],vna_color,owner,vdlg2_s1,'on',hf)                     % Averaging parameters
+    h_dlg1('init',hdlg1_pos,[],vna_color,owner,hdlg1_s1,'on',hf);                    % Time Base parameters
+    ex_dlg2('init',exdlg2_pos,[],vna_color,owner,exdlg2_s1,exdlg2_vis,hf);           % Excitation
+
+    if strcmp(exdlg2_vis,'on')
+       % linked excitation
+       h_dlg2('init',hdlg2_pos,[[Numin,Numout],num_io],vna_color,owner,hdlg2_s1,'off',hf); % mbsup5
+       set(HVNA_(exms1),'checked','on');
+       set(HVNA_(exms2),'checked','off');
+       v_dlg2('show_cond','win_off');  % hide windowing options
+       if Numout ==1
+          set(HVNA_(vfgm),'enable','off'); % only have 1 output ... 
+       else
+          if vna('vfg_check') > 0
+             vfg('ch1','lock');  % lock out changes to channel 1
+          end;
+       end;
+       ls_vna('set_exci','int','no_load');
+    else
+       % unlinked excitation
+       h_dlg2('init',hdlg2_pos,[[Numin,Numout],num_io],vna_color,owner,hdlg2_s1,'on',hf);
+       v_dlg2('show_cond','win_on');  % allow windowing options
+       set(HVNA_(exms1),'checked','off');
+       set(HVNA_(exms2),'checked','on');
+       set(HVNA_(vfgm),'enable','on');
+       ls_vna('set_exci','ext','no_load');
+           
+       if vna('vfg_check') >0
+          vfg('ch1','unlock');  % enable changes to channel 1
+       end;
+       hw_stat('free','out','vna.m'); % log out vna
+    end;
+
+    plot_vna('init',[Numin,NCperbox],vna_color,hf);
+
+    if strcmp(key,FILE_KEY1c)
+                %         1         2           2        4    5  6      7       8      9    10      11      12   
+        plot_vna('load',xplot_s1,xplot_s2, xplot_axes, grids,[],Fvec,AspecDat,XferMap,Tvec,TimeDat,XferDat,CohDat);
+    elseif strcmp(key,FILE_KEY2c)
+        plot_vna('load',xplot_s1,xplot_s2,xplot_axes,grids,SLm); 
+    end;   
+    plot_vna('set','plot_name',lower([FIG_NAMEc,': (plot)  ',vna_path,vna_file]));
+
+    if warn_flg
+       plot_vna('tbax_upd');
+    end;
+
+    % nhw
+    if ~HW_ok
+       % no hardware detected disable data acq controls
+       plot_vna('set','no_hardware');
+    else
+       siglab('playback','analog');
+    end;
+
+    vna('load_hdwr',SystemClk);                  % sys clock not really needed here
+    ls_vna('clear','STATE_CHG');
+
+    if HVNA_(fq_lock)
+       set(HVNA_([sm1]),'enable','off');
+    end;
+
+    % if no explicit path and file name were specified, check for a user preferred vi_path (upmod1)
+    if  (nargin < 3)
+        vna_path = vip('get',vna_path);
+    end;
+
+    Mset_path(vna_path);
+    Mset_fname(vna_file);
+    uifont(SaveFont);
+
+
+    if HVNA_(fq_lock) == 0;
+       set(hf,'CloseRequestFcn','vna(''quit'')');
+       plot_vna('set','fq_lock','off');
+       set(HVNA_(sm1),'enable','on');
+    else
+       set(hf,'CloseRequestFcn','');
+       plot_vna('set','fq_lock','on');
+       set(HVNA_(sm1),'enable','off');
+    end;
+
+%**** Help Menus ***********************************************
+    [drv,pn]   = pathfind('vna');    % 2/5/99
+    pn = strrep(pn,'vna','doc');
+    
+    HVNA_(hm1) = uimenu(hf,'Label','Help');
+    uimenu(HVNA_(hm1),'Label','Help on Dynamic Signal Analyzer (vna)',  'Callback',['siglab(''exe'',''',[drv,pn,'\sec_5.pdf'')']]);
+    uimenu(HVNA_(hm1),'Label','Help on Common Elements',                'Callback',['siglab(''exe'',''',[drv,pn,'\sec_4.pdf'')']]);
+    uimenu(HVNA_(hm1),'Label','Help on Function Generator',             'Callback',['siglab(''exe'',''',[drv,pn,'\sec_6.pdf'')']]);
+    uimenu(HVNA_(hm1),'Label','Help on Long Record Capture',            'Callback',['siglab(''exe'',''',[drv,pn,'\vcap_ug1.pdf'')']]);
+    uimenu(HVNA_(hm1),'Label','SigLab Help Center',                     'Callback',['siglab(''exe'',''',[drv,pn,'\helpcent.pdf'')']]);
+    uimenu(HVNA_(hm1),'Label','Command Window Help',                    'Callback','help vna');
+    uimenu(HVNA_(hm1),'Label','About','separator','on',...
+                      'Callback',['vi_about(''init'',gcbf,''vna'',',VI_VERSIONc,')']);
+
+    set(HVNA_(f1),'visible','on','pointer','arrow');
+    drawnow;
+    
+    if default_warn
+            msgbox(['The file:', DEFAULT_FILEc,' was not found. A back up version is being used to start ',FIG_NAMEc,NLc,...
+                    'You should do a File Save to Default operation to restore a default setup file.'],...
+                    'SigLab Warning',...
+                    'warn',...
+                    'modal');
+    end;                
+
+%*************** END OF INIT section *******************************
+
+% Now on to the remainder of the vna Actions.......
+elseif strcmp(Action,'menu'),
+% MENU management
+% open "fast" assumes state is already loaded to ui objects in dialogs
+
+      if strcmp(In1,'h_dlg2'),
+      % externally generated excitation
+          ex_dlg2('close');
+          h_dlg2('open','fast');
+          v_dlg2('show_cond','win_on');  % allow windowing options
+          set(HVNA_(exms1),'checked','off');
+          set(HVNA_(exms2),'checked','on');
+          ls_vna('set_exci','ext','load');
+          set(HVNA_(vfgm),'enable','on');
+          if vna('vfg_check') >0
+             vfg('ch1','unlock');  % enable changes to channel 1
+          end;
+          hw_stat('free','out','vna.m'); % log out vna
+
+      elseif strcmp(In1,'ex_dlg2'),
+      % internally generated excitation
+          h_dlg2('close');
+          ex_dlg2('open','fast');
+          v_dlg2('show_cond','win_off');  % hide windowing options
+          set(HVNA_(exms1),'checked','on');
+          set(HVNA_(exms2),'checked','off');
+          
+          nio = Mget_numio; % actual number of inputs and outputs
+          if nio(2) ==1
+             set(HVNA_(vfgm),'enable','off'); % only have 1 output ...
+             if vna('vfg_check') >0
+                vfg('close');  % must kill it 
+             end;
+          else
+             set(HVNA_(vfgm),'enable','on'); % 
+             if vna('vfg_check') >0
+                vfg('ch1','lock');  % disable changes to channel 1
+             end;
+          end;
+          ls_vna('set_outpar');
+          ls_vna('set_exci','int','load');
+          % hw_stat('request','out','vna.m');
+
+      elseif strcmp(In1,'vfgm')
+      % VFGM
+        % see if vfg happens to be alive
+        h_vfg=vna('vfg_check');
+
+        if h_vfg>0
+           % give it the focus
+           figure(h_vfg);
+        else
+           % must start it
+           if strcmp(get(HVNA_(exms1),'checked'),'on')
+              % internal linked excitation start vfg but let it know vna has channel 1
+              vfg('init_vna');
+           else
+              % external / unlinked excitation
+              vfg;
+           end;
+        end;
+
+      else
+          disp([In1,' is not recognized in vna.m MENU branch']);
+      end;
+
+elseif strcmp(Action,'save'),
+% SAVE
+     if (nargin == 3),
+          vna_path = In1;
+          vna_file = In2;
+     else
+          vna_file = Mget_fname;
+          vna_path = Mget_path;
+          vna_file = fileinc(vna_file,'DOF'); % auto inc file name if appropriate
+                                              % with new 'DOF' option it tweaks
+                                              % channel label stuff also
+     end;
+     if strcmp(vna_file,DEFAULT_FILEc)        %    upmod2
+        % always save default.vxx in the vxx directory
+        [default_drv,path_n]=pathfind('vna');
+        vna_path = [default_drv,path_n,'\'];
+     else
+        Mset_path(vna_path);
+     end;
+
+        % save control states, colors, and required file data
+        key=FILE_KEY2c;  % to validate setup/data file when it is loaded
+        [vdlg1_s1, vdlg1_s2,  y, ch_ptr]           =  v_dlg1('get','state');
+        [vdlg2_s1,  x,        y]                   =  v_dlg2('get','state');
+        [hdlg1_s1,  x,        y]                   =  h_dlg1('get','state');
+        [hdlg2_s1,  x,        hdlg2_vis]           =  h_dlg2('get','state');
+        [xplot_s1,  xplot_s2, xplot_axes, grids]   =  plot_vna('get','state');
+        [exdlg2_s1, x,        exdlg2_vis]          =  ex_dlg2('get','state');
+        num_io = Mget_numio;  
+
+        [SystemClk,SampleRate,CenterFreq]   = h_dlg1('get','filedat');
+        [ChanStat,ChanLabel,EULabel]        = v_dlg1('get','filedat');
+        SLm                                 = plot_vna('get','filedat');
+        UniformFlg    = 1;
+        vna_pos       = get(HVNA_(f1),'position');
+        vi_timestamp  = clock;
+        Cmprssd_Notes = Mget_cnote; 
+        % Note: vna_path & vna_file are not saved in the file, they
+        % determine what file to save the data to.
+        
+        s1=[' save ''',vna_path, vna_file,''' key num_io'];  % mbsup5   10/15/97
+        s2=[' ch_ptr  vdlg1_s1 vdlg1_s2  hdlg1_s1 vna_pos vi_timestamp '];
+        s3=[' hdlg2_vis hdlg2_s1  vdlg2_s1 exdlg2_s1 exdlg2_vis'];
+        s4=[' xplot_s1 xplot_s2 xplot_axes grids'];
+        s5=[' SystemClk SampleRate CenterFreq ChanStat ChanLabel EULabel '];
+        s6=[' SLm UniformFlg Cmprssd_Notes'];
+        eval([s1,s2,s3,s4,s5,s6],['vna(''error'',''save'')']); % should check if this is sucessful XXX
+        ls_vna('clear','STATE_CHG'); % we have saved what we can
+                                     % 'save','init', 'open' and 'load'
+                                     %  set false
+       
+        plot_vna('set','plot_name',lower([FIG_NAMEc,': (plot)  ',vna_path,vna_file])); 
+        set(HVNA_(f1),'name', lower([FIG_NAMEc,': ',vna_path,vna_file])  );
+        Mset_fname(vna_file);             
+    
+
+elseif strcmp(Action,'get')
+% GET
+    if strcmp(In1,'meas')
+    % MEAS
+           Out1  = plot_vna('get','filedat');
+    elseif strcmp(In1,'chaninfo')
+    % CHANINFO
+           [Out1,Out2,Out3]  = v_dlg1('get','filedat');
+    elseif strcmp(In1,'acqpar')
+    % ACQPAR
+           [Out1,Out2,Out3]  = h_dlg1('get','filedat');
+    elseif strcmp(In1,'ok_reject')
+    % OK_REJECT   (ok to enable manual frame reject)
+    %             true if linked, therefore complement           true if analog trigger source                                   
+         Out1 = ~strcmp(get(HVNA_(exms1),'checked'),'on')   &    ls_vna('get','analog_trig');
+    elseif strcmp(In1,'power')
+        Out1 = strcmp(get(HVNA_(sms9),'checked'),'on');
+        
+    elseif strcmp(In1,'note_c')
+    % NOTE_C
+           Out1 = Mget_cnote; % get compressed notes v > 1.14n
+    elseif strcmp(In1,'file')
+           Out1=Mget_path;
+           Out2=Mget_fname;
+    elseif strcmp(In1,'linked?')
+           Out1 =  strcmp(get(HVNA_(exms1),'checked'),'on');
+    else
+           disp([In1,' not recognized in vna(get,xxx) use meas,chaninfo,acqpar']);
+    end;
+
+
+
+
+elseif strcmp(Action,'set')
+ % SET
+    if strcmp(In1,'note_c')
+       Mset_cnote(notefig('get_notes')); % v > 1.14n
+    end;
+
+
+elseif strcmp(Action,'save_as'),
+% SAVE AS
+     [file_n,path_n]=uiputfile([Mget_path,DEFAULT_EXTc],'Save_As File',0.5,0.5);
+     if file_n ~=0
+        ext = DEFAULT_EXTc;
+        vna('save',path_n,extcheck(ext(3:5),file_n));
+     end;
+
+elseif strcmp(Action,'save_default'),
+% SAVE DEFAULT
+      [default_drv,path_n]=pathfind('vna');
+      vna('save',[default_drv,path_n,'\'],DEFAULT_FILEc);
+
+elseif strcmp(Action,'get_quit_flg'),
+% GET_QUIT_FLG
+  Out1= HVNA_(quit_flg);  % to allow xplot a graceful termination
+
+elseif strcmp(Action,'quit'),
+% QUIT
+     vna_file=Mget_fname;
+     if (ls_vna('get','STATE_CHG')==1) & ~strcmp(vna_file,DEFAULT_FILEc)
+         s=['Do you wish to save changes to ',vna_file,'?'];
+         cbYes= ['vna(''save''); vna(''close'');'];
+         cbNo = ['vna(''close'');'];
+         uiyncf('Quit?',(get(gcf,'Position')+[200,144,0,0]),s,cbYes,cbNo,' ');
+     else
+         vna('close'); % there were ostensibly no changes, close up shop
+     end;
+
+elseif strcmp(Action,'open'),
+% 'OPEN'
+    if size(VCAP_ALIVE)
+       if VCAP_ALIVE ==1
+          % get back vcap state
+          % use eval to forgo compilation of vcap if it is not alive
+          if eval('vcap(''get_mode'')') ==2
+             tmsg('Cannot load setup file while Vcap in Memory mode');
+             % memory mode
+             return;
+          end;
+       end;
+   else
+       VCAP_ALIVE = 0;
+   end;
+
+   if (nargin ==3),
+     file_n=In2;
+     path_n=In1;
+   else
+     [file_n,path_n]=uigetfile([Mget_path, DEFAULT_EXTc],'Open File',0.5,0.5);
+   end;
+      if file_n ~= 0,
+         % [default_drv,path]=pathfind('vna');
+         key = '';          % clean the key
+         num_io = [2,2];    % assume 20-22 mbsup5
+         grids  = 'off';    % used to be 'no' 2/3/99 RAB
+         AspecDat =[];      % v > 1.13 will replace these
+         Tvec     =[];
+         TimeDat  =[];
+         Cmprssd_Notes = notefig('init_msg');
+         s=['load ''',[path_n,file_n],''' -mat'];
+         eval(s,['vna(''error'',''open'')']);  % this overwrites any variables defined at this point
+         if strcmp(key,FILE_KEY1c) | strcmp(key,FILE_KEY2c)
+            % this is good, we have a current file
+            % load dialog states into dialog controls
+            % reconcile sampling parameter differences between hardware used to create 
+            % the file and the hardware that is actually being used right now
+            [hdlg1_s1, SystemClk, warn_flg] = fp_list('reconcile',SystemClk,hdlg1_s1);
+
+            % NOTE:  'full' forces the control states to be loaded from
+            % state storage arrays
+              [vdlg1_s1,vdlg1_s2]=max2042(vdlg1_s1,vdlg1_s2);    % bump control storage to 16 channels
+              v_dlg1('load_all','on',vdlg1_s1,vdlg1_s2,ch_ptr);
+              v_dlg2('load_all','on',vdlg2_s1);
+              h_dlg1('load_all','on',hdlg1_s1);
+              h_dlg2('load_all',hdlg2_vis,hdlg2_s1,[Mget_numio,num_io]); % mbsup5
+              ex_dlg2('load_all',exdlg2_vis,exdlg2_s1);
+              
+              nio  = Mget_numio;    % actual configuration of [Numin,Numout] 
+              if strcmp(exdlg2_vis,'on')
+                 % linked excitation 
+                 set(HVNA_(exms1),'checked','on');
+                 set(HVNA_(exms2),'checked','off');
+                 v_dlg2('show_cond','win_off');  % hide windowing options
+                if nio(2) ==1
+                   set(HVNA_(vfgm),'enable','off'); % only have 1 output ...
+                   if vna('vfg_check') >0
+                      vfg('close');  % must kill it 
+                   end;
+                else
+                   set(HVNA_(vfgm),'enable','on'); % 
+                   if vna('vfg_check') >0
+                      vfg('ch1','lock');  % disable changes to channel 1
+                   end;
+                end;
+                 ls_vna('set_exci','int','no_load');
+              else
+                 % unlinked excitation 
+                 v_dlg2('show_cond','win_on');  % allow windowing options
+                 set(HVNA_(exms1),'checked','off');
+                 set(HVNA_(exms2),'checked','on');
+                 set(HVNA_(vfgm),'enable','on');
+                 ls_vna('set_exci','ext','no_load');
+                 if vna('vfg_check') >0
+                    vfg('ch1','unlock');  % enable changes to channel 1
+                 end;
+                 hw_stat('free','out','vna.m'); % log out vna 1/12/99
+              end;
+
+             if VCAP_ALIVE ==1
+                % inform vcap of h_dlg1 state
+                eval('vcap(''set_acq'');');
+             end;
+
+             if strcmp(key,FILE_KEY1c) 
+                plot_vna('load',xplot_s1,xplot_s2, xplot_axes, grids,[],Fvec,AspecDat,XferMap,Tvec,TimeDat,XferDat,CohDat);
+             elseif strcmp(key,FILE_KEY2c)
+                plot_vna('load',xplot_s1,xplot_s2,xplot_axes,grids,SLm); 
+             end;   
+               
+             Numin=Mget_numio;
+
+             Mset_fname(file_n);
+             Mset_path(path_n);
+            
+             set(HVNA_(f1),'name',lower([FIG_NAMEc,': ',file_n]));
+             plot_vna('set','plot_name',lower([FIG_NAMEc,': (plot)  ',path_n,file_n]));
+
+
+             vp=get(HVNA_(f1),'position');
+             % see if current figure position is close to the new one
+             vna_pos=pos_clip(vna_pos,[WVIc,HVIc]);
+           
+             if (abs(vp(1)-vna_pos(1))+abs(vp(2)-vna_pos(2)))<10
+                set(HVNA_(f1),'name',lower([FIG_NAMEc,': ',path_n,file_n]));
+             else
+                set(HVNA_(f1), 'name',lower([FIG_NAMEc,': ',path_n,file_n]),'position',vna_pos);
+             end;
+             Mset_cnote(Cmprssd_Notes);      % v > 1.14
+
+             % NOW ... finally setup hardware,
+             % this is also conditionally done at end of init
+             vna('load_hdwr',SystemClk);
+             ls_vna('clear','STATE_CHG');
+
+             if warn_flg
+                plot_vna('tbax_upd');
+             end;
+         else
+             % not a good situation, may not load all parameters properly
+             % may not be a matlab file, or a file generated with this program
+             s=['Incorrect key. Incompatible file format. Continue?'];
+             cbNo =   ['vna(''close'');'];
+             uiyncf('Quit?',(get(gcf,'Position')+[200,144,0,0]),s,' ',cbNo,'');
+         end;
+      end;
+
+elseif strcmp(Action,'load_hdwr'),
+% LOAD HDWR
+      if In1 > 0,
+          ls_vna('set','SYS_CLOCK',In1);
+      end;
+      ls_vna('set_olev');
+      ls_vna('set_chan',1:ls_vna('get','NUMIN')); % set control state in hardware
+      ls_vna('set_acq');     %  ls_vna('set_outpar'); contained in set_acq
+      % study ls_vna to get linkages, set_acq is powerful medicine.
+      ls_vna('clear','STATE_CHG');
+
+
+elseif strcmp(Action,'instpb') | strcmp(Action,'avgpb'),
+% INSTPB or AVGPB
+% These calls used to be made by pushbuttons, but the buttons have been moved to the plot routine.  
+   if plot_vna('get','rs') ==0,           % not running
+      set(HVNA_(f1),'CloseRequestFcn','');
+      plot_vna('run',Action);   
+   end;
+
+
+ elseif strcmp(Action,'vcap')
+ % run VCAP  
+    handle = findobj('type','figure','tag','vcap_fig');
+    if isempty(handle)
+       cf = gcbf;
+       set(cf,'Pointer','watch'); drawnow;
+       eval('vcap');
+       set(cf,'Pointer','arrow');
+    else
+       figure(handle);
+    end;
+
+elseif strcmp(Action,'run_enable')
+ % VCAP    
+     plot_vna('run_enable',In1);
+     
+ elseif strcmp(Action,'stop_enable')
+ % VCAP
+    plot_vna('stop_enable',In1); 
+
+elseif  strcmp(Action,'stop')
+% STOP
+   plot_vna('stop');
+   if ~HVNA_(fq_lock)
+      set(HVNA_(sm1),'enable','on');
+      set(HVNA_(f1),'CloseRequestFcn','vna(''quit'')');
+   end;
+
+
+elseif strcmp(Action,'fq_lock')
+% FQ_LOCK    
+    if strcmp(In1,'off') 
+       HVNA_(fq_lock) == 0;
+       set(HVNA_(f1),'CloseRequestFcn','vna(''quit'')');
+       plot_vna('set','fq_lock','off');
+       set(HVNA_(sm1),'enable','on');
+    elseif  strcmp(In1,'on')
+       HVNA_(fq_lock) == 1;
+       set(HVNA_(f1),'CloseRequestFcn','');
+       plot_vna('set','fq_lock','on');
+       set(HVNA_(sm1),'enable','off');
+    end;
+    
+elseif strcmp(Action,'close') | strcmp(Action,'close_nofig')
+% CLOSE and CLOSE_NOFIG
+     [status owner]=hw_stat('owners');
+     if strcmp(owner(2,:),'vfg.m')
+        vfg('quit');
+        [stat,owner]=hw_stat('free','in','vna.m');
+     else
+        if vna('vfg_check') > 0
+           vfg('quit');
+        end;
+        [stat,owner]=hw_stat('free','in&out','vna.m');
+     end;
+
+     if stat ~=1
+        disp(['error releasing hardware in vna.m close, owner=',owner]);
+     end;
+
+     if ~isempty(VCAP_ALIVE)
+         if VCAP_ALIVE==1, % kill vcap if it is alive
+            eval('vcap(''quit'')');
+         end;
+     end;
+
+     if strcmp(Action,'close')
+         ex_dlg2('set','out_off');     % v > 1.14
+         ls_vna('clear');
+         h_dlg1('clear');
+         h_dlg2('clear');
+         v_dlg1('clear');
+         v_dlg2('clear');
+         ex_dlg2('clear');
+         plot_vna('clear');
+         ovldstat('clear');
+         set(HVNA_(f1),'CloseRequestFcn','closereq');
+         close(HVNA_(f1)); % unconditionally close this figure window
+         clear global HVNA_ ;
+     end;
+     virun('close','vna'); % inform virun of closing
+
+
+ elseif strcmp(Action,'vfg_check')
+ % VFG_CHECK
+     % test for vfg being around returns handle to vfg figure if found
+     handle = findobj('type','figure','tag','vfg_fig');
+     if isempty(handle)
+        Out1=-1;
+     else
+        Out1 = handle;
+     end;
+
+ elseif strcmp(Action,'file_menu')
+    
+      % called by plot_vna
+      set(HVNA_(sm1),'enable',In1);
+      if strcmp(In1,'on')
+         set(HVNA_(f1),'CloseRequestFcn','vna(''close'')');
+      else
+         set(HVNA_(f1),'CloseRequestFcn','');
+      end;
+      
+ elseif strcmp(Action,'power_toggle')
+ % POWER_TOGGLE
+     Opcode = 2;
+     if strcmp(get(HVNA_(sms9),'checked'),'on')
+        set(HVNA_(sms9),'checked','off');
+        hibyte = 0;
+     else
+        set(HVNA_(sms9),'checked','on');
+        hibyte = 1;
+     end;
+     siglab('rawcommand',1024+(Opcode*65536)+(hibyte*65536*256) ); % the ever popular "rawcommand" may be used to control power
+    
+ elseif strcmp(Action,'print')
+     eval(['print -f',int2str(HVNA_(f1)),' -dbitmap']);
+     drawnow;
+     tmsg('A bitmap image of your setup window is now in the clipboard.',...
+           2,[],'ATTENTION');
+
+ elseif strcmp(Action,'dont_start'),
+ % DONT START
+      
+     
+       
+       disp(['Program:',owner, ' is currently using the hardware resources.']);
+
+ elseif strcmp(Action,'error'),
+ % EVAL ERRORS
+    if strcmp(In1,'save')
+       disp('file could not be saved, check disk space')
+    elseif strcmp(In1,'open')
+       disp('error opening file in vna(open), check file name and type');
+    elseif strcmp(In1,'init_open')
+       disp('error opening file in vna(init, path, file), check file name and type');
+    elseif strcmp(In1,'init_openbackup')
+       [stat,owner]=hw_stat('free','in&out','vna.m');
+       error('error reading ', BACKUPc,'  backup file', FIG_NAMEc,' will not start.');
+    else
+       disp('error in vna error routine!');
+    end;
+
+elseif strcmp(Action(1),'?')
+ % ?, ??
+ % create modal file dialog to choose file b4 starting v > 1.14
+   f_prompt(Action,'vna',DEFAULT_EXTc);
+
+else
+    disp(['error in vna:', Action,' not recognized'])
+end; % Main IF statement
+
+
+% end   function vna

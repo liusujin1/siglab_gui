@@ -1,0 +1,462 @@
+  function[Out1,Out2,Out3] = h_dlg2(Action,In1,In2,In3,In4,In5,In6,In7);
+% function[Out1,Out2,Out3] = h_dlg2(Action,In1,In2,In3,In4,In5,In6,In7);
+% Labeled h_dlg2 for Horizontal Trigger dialog
+%  actions are
+%       'init'       init the ui objects
+%                    In1=position, In2=[numin,numout],In3 has initial colors
+%                    HDLG2_S1 = In5 dlg_vis = In6
+%                    In7 [optional] has parent figure handle 
+%       'open'       open with a show & backup combo
+%       'close'      conditionally hide all objects
+%       'clear'      clear globals
+%       'show'       display the ui objects
+%       'get'
+%          'state'   returns state of controls in Out1, null in Out2,
+%                                                         vis in Out3
+%          'dly'     return trigger delay setting in Out1
+%                    delay=0 if triggering is off,
+%                    Out2 == 1 if triggering, 0 if not triggering
+%
+%
+%       'load'       loads control states from HDLG2_S1
+%       'restore'    restore state from HDLG2_BAK1
+%       'set_delayro'update slider 1 value display, sets hdwr conditionally
+%          'load'    loads state to hardware via ls_vos.m
+%          'no_load' don't load hardware
+%       'set_mode'   set mode and hardware
+%       'set_tsel'   set trigger source select and hardware
+%       'set_thrpu2' set threshold and hardware
+%
+%       'slopeck_toggle'toggle homebrew slope check button 1 ON/OFF
+%       'filtck_toggle' toggle homebrew filter check button 2 +/-
+%       'armck_toggle'  toggle homebrew arm check button 3 ON/OFF
+%       'armck_clear'   clear arm chek button
+%      'vcap'        (vcap calls h_dlg2)
+%         'lock'     lock some controls for vcap
+%         'unlock'   unlock all of the above
+%
+%     Dick Benson, DSP Technology   
+
+
+global HH2_;         % main handle vector
+global HDLG2_S1;     % S1 holds the numerical states
+% end global defs
+
+% ***************************************************************
+%include
+   hdlg2_h;   % handle index definitions
+  trgdef_h;   % trigger related definitions
+    vcol_h;   %  common color definitions
+    vsld_h;   % slider modes
+     vhw_h;   % system info OVSFACc , BLK_MINc BLK_MAXc DLY_MINc DLY_MAXc NUMLEVELc etc
+    vsiz_h;   % control size definition  PBS1 LHO  etc
+%end_include
+% *******************************************************
+
+
+  if strcmp(Action,'init'),
+   %INIT Command
+    %define
+      dl_pos      = In1;    % position
+      my_color    = In3;    % initial colors passed here
+    %end_define
+    Ioc           = In2;    % In2 has the number of input and output channels
+                            % plus number spec'd in file mbsub1
+    hdlg2_owner = In4;      % who owns this dialog
+
+    if nargin >=7
+          HDLG2_S1 = In5;
+          dlg_vis  = In6;
+          HDLG2_S1(numin:numout)=Ioc(1:2);
+          if nargin ==8
+             hf = In7;
+          else
+             hf = gcf;
+          end;
+    else
+          % hdlg_2 initial control states
+          %               filtck   thrpu2     armck      numin
+          %           tselpu1  delay     slopeck   modepu3       numout
+         HDLG2_S1  = [1,    0,   0,   9,    0,  0,   1,  Ioc(1),  Ioc(2)];
+                      % note: 9 for thrpu2 sets 0% trigger thresh
+         dlg_vis ='off';
+         if nargin ==6
+            hf = In5;
+         else
+            hf = gcf;
+         end;
+    end;
+
+    %define
+       wdl       = 120;
+       hdl       = 170;               % This dialog's  size
+       wlb       = 48;                % control label width
+       wsldtxt   = 32;
+       sldtxt    = [wsldtxt,HSLDc];   % slider text size
+       wpu       = 55;                % width of Pull Down
+       wsld      = wdl-2*LHOc;        % slider width
+
+    %  the following positioning is done once in init
+       dlgfrm_pos   = [dl_pos,wdl,hdl];
+       titletxt_pos = [dl_pos + [LHOc,hdl-HTXTc-1],wdl-2*LHOc,HTITLEc];
+
+       %Mode parameter
+       modepu3_pos  = [dl_pos + [LHOc,hdl-1.75*VSc], wdl-2*LHOc,HPU1c];
+
+       % Trigger chan / Threshold
+       tselpu1_pos  = [dl_pos + [LHOc,      hdl-2.75*VSc],   wpu,HPU1c];
+       thrpu2_pos   = [dl_pos + [1.5*LHOc+wpu,hdl-2.75*VSc], wpu,HPU1c];
+
+       % Slope / Filt on/off
+       filtck_pos   = [dl_pos + [LHOc            ,hdl-3.7*VSc],wpu,HCKS1c];
+       filtled_pos  = [dl_pos + [1.5*LHOc+wpu    ,hdl-3.7*VSc],LEDS1c];
+       slopeck_pos  = [dl_pos + [2*LHOc+wpu+WLDVc,hdl-3.7*VSc],CKS1c];
+
+       % Trigger Delay slider in percent
+       delay_pos    = [dl_pos + [LHOc,hdl-5.375*VSc],wsld];
+
+       armck_pos    = [dl_pos + [LHOc,        hdl-4.6*VSc],wpu,HCKS1c];
+       armled_pos   = [dl_pos + [1.5*LHOc+wpu,hdl-4.6*VSc],LEDS1c];
+    %end_define
+
+% init ALL ui controls now
+          HH2_(dlgfrm)=uicontrol(hf,'Style','frame','visible','off',...
+                                 'Position',dlgfrm_pos,...
+                                 'BackGroundColor',my_color(DLG_BKc,:));
+
+          HH2_(titletxt) = uicontrol(hf,'Style','text','visible','off',...
+                                     'String','TRIGGER',...
+                                     'Position',titletxt_pos,...
+                                     'BackGroundColor',my_color(DTL_BKc,:),...
+                                     'ForeGroundColor',my_color(DTL_FRc,:));
+
+          HDLG2_S1(tselpu1)= trigmap(HDLG2_S1(tselpu1),Ioc); % mbsup1
+
+          HH2_(tselpu1)=uicontrol(hf,'Style','Popup','Visible','off',...
+                                  'Position',tselpu1_pos,...
+                                  'BackgroundColor',my_color(PUP_BKc,:),...
+                                  'ForeGroundColor',my_color(PUP_FRc,:),...
+                                  'String',[chanstr(Ioc(1),Ioc(2)),'|Ext'],...
+                                  'Value',HDLG2_S1(tselpu1),...
+                                  'CallBack',...
+                                 ['h_dlg2(''set_tsel'');',...
+                                  'h_dlg2(''show'');',...
+                                  'ls_',hdlg2_owner,'(''set_trg'');']);
+
+          HH2_(modepu3)=uicontrol(hf,'Style','Popup','Visible','off',...
+                                  'Position',modepu3_pos,...
+                                  'BackgroundColor',my_color(PUP_BKc,:),...
+                                  'ForeGroundColor',my_color(PUP_FRc,:),...
+                                  'String',TRGSTRc,...
+                                  'Value',HDLG2_S1(modepu3),...
+                                  'Callback',...
+                                  ['h_dlg2(''set_mode'');',...
+                                   'h_dlg2(''show'');',...
+                                   'ls_',hdlg2_owner,'(''set_trg'');',...
+                                   'plot_',hdlg2_owner,'(''tbax_upd'');']);
+
+          if strcmp(hdlg2_owner,'vna')
+             tts = 'Attention Modal Users: 0% and 9% are very poor choices for impact testing! Consult triggering section of manual.';
+          else
+             tts = '';
+          end;
+        
+          HH2_(thrpu2)=uicontrol(hf,'Style','Popup','Visible','off',...
+                                 'Position',thrpu2_pos,...
+                                 'BackgroundColor',my_color(PUP_BKc,:),...
+                                 'ForeGroundColor',my_color(PUP_FRc,:),...
+                                 'String',trgstr('list'),...
+                                 'tooltipstring',tts,...
+                                 'Value',HDLG2_S1(thrpu2),...
+                                 'CallBack',...
+                                  ['h_dlg2(''set_thrpu2'');',...
+                                   'ls_',hdlg2_owner,'(''set_trg'');']);
+
+          % Trigger Delay
+          HH2_(delay)= islider([],'init',delay_pos,...
+                               [DLY_MINc,DLY_MAXc,HDLG2_S1(delay),DLY_MINc,DLY_MAXc],...
+                               'Delay',...
+                               ['h_dlg2(''set_delayro'');',...
+                                'ls_',hdlg2_owner,'(''set_trg'');',...
+                                'plot_',hdlg2_owner,'(''tbax_upd'');'],...
+                               NotUsed,'off',[QUASILOGc,1],...
+                               [my_color(LBL_BKc,:);my_color(EDT_BKc,:);my_color(LBL_FRc,:);my_color(EDT_FRc,:)],...
+                               ['%4.0f';'%4.1f';'%4.0f'],hf);
+
+          % Homebrew dynamic buttons (show state of control)
+
+          if HDLG2_S1(filtck)==1,
+              ss='HFrej';  x=1; color = YELc;
+          else
+              ss='NoFilt'; x=0; color = GRNc;
+          end;
+          HH2_(filtck)=uicontrol(hf,'Style','Pushbutton','Visible','off',...
+                                 'Position',filtck_pos,...
+                                 'String',ss,...
+                                 'UserData',x,...
+                                 'Callback',...
+                                 ['h_dlg2(''filtck_toggle'');',...
+                                  'ls_',hdlg2_owner,'(''set_trg'');']);
+          HH2_(filtled)=uicontrol(hf,'Style','frame','visible','off',...
+                                  'Position',filtled_pos,...
+                                  'BackGroundColor',color);
+
+          % Homebrew dynamic buttons (show state of control)
+          if HDLG2_S1(slopeck)==1,
+              ss='Neg'; x=1;
+          else
+              ss='Pos'; x=0;
+          end;
+
+          HH2_(slopeck)=uicontrol(hf,'Style','Pushbutton','Visible','off',...
+                                  'Position',slopeck_pos,...
+                                  'String',ss,...
+                                  'UserData',x,...
+                                  'Callback',...
+                                  ['h_dlg2(''slopeck_toggle'');',...
+                                   'ls_',hdlg2_owner,'(''set_trg'');']);
+
+          if HDLG2_S1(armck)==1,
+              ss='Armed'; x=1; color = GRNc;
+          else
+              ss='Arm'; x=0; color = REDc;
+          end;
+
+          HH2_(armck)=uicontrol(hf,'Style','Pushbutton','Visible','off',...
+                                'Position',armck_pos,...
+                                'String',ss,...
+                                'UserData',x,...
+                                'Callback',...
+                                ['h_dlg2(''armck_toggle'');',...
+                                 'ls_',hdlg2_owner,'(''set_arm'');',...
+                                 'plot_',hdlg2_owner,'(''set_ma_flg'',h_dlg2(''get'',''ma_flg''));']);
+                                 
+         
+         HH2_(armmenu) =  uimenu(hf,'Label','&Arm','accelerator','A',...
+                                 'Visible','off',...
+                                 'Callback',...
+                                ['h_dlg2(''armck_toggle'');',...
+                                 'ls_',hdlg2_owner,'(''set_arm'');',...
+                                 'plot_',hdlg2_owner,'(''set_ma_flg'',h_dlg2(''get'',''ma_flg''));']);
+                                 
+                                 
+                                 
+
+         HH2_(armled)=uicontrol(hf,'Style','frame','visible','off',...
+                                'Position',armled_pos,...
+                                'BackGroundColor',color);
+
+         h_dlg2('set_delayro'); % don't load hardware
+
+
+        if strcmp(dlg_vis,'on')
+           h_dlg2('show');
+        end;
+
+
+% ****************  END INITIALIZATION *******************************
+   elseif strcmp(Action,'set_thrpu2'),
+   % SET_THRPU2
+       HDLG2_S1(thrpu2)  = get(HH2_(thrpu2) ,'Value');
+   elseif strcmp(Action,'set_mode'),
+   % SET_MODE
+       HDLG2_S1(modepu3) = get(HH2_(modepu3) ,'Value');
+   elseif strcmp(Action,'set_tsel'),
+   % SET_TSEL
+       HDLG2_S1(tselpu1) = get(HH2_(tselpu1) ,'Value');
+   elseif strcmp(Action,'set_delayro'),
+   % SET_DELAYRO % Delay readout set by slider position with constraints
+   % sets percent delay readout
+       [buf,sel]       = h_dlg1('get','sampsel'); % get current sampling selections
+       HDLG2_S1(delay) = 100*round(islider(HH2_(delay),'get')*buf/100)/buf; % must be integer # of samples
+
+   elseif strcmp(Action,'get'),
+   % GET command
+       if strcmp(In1,'state'),
+          % return state of controls
+          Out1 = HDLG2_S1;
+          Out2 = [];
+          Out3 = get(HH2_(titletxt),'Visible');
+       elseif  strcmp(In1,'dly'),
+          temp = ~(HDLG2_S1(modepu3)==FREE_RUNc);
+             %  temp = 0;  % triggering is off
+             %  temp = 1;  % its on
+          Out1 = temp*HDLG2_S1(delay);
+          Out2 = temp;
+       elseif  strcmp(In1,'ma_flg')
+          Out1 = HDLG2_S1(armck);
+       else
+          disp([In1,' not recognized in h_dlg2(get,xxx)']);
+       end;
+
+  elseif strcmp(Action,'load'),
+  % LOAD command
+
+            s1 = HDLG2_S1;
+            set(HH2_(tselpu1),'Value',s1(tselpu1));
+
+            if s1(filtck)==1,
+               mark  = 'HFrej'; color = YELc;
+            else
+               mark  = 'NoFilt'; color =GRNc;
+            end;
+            set(HH2_(filtled),'BackGroundColor',color);
+            set(HH2_(filtck), 'UserData', s1(filtck),'String',mark);
+
+            islider(HH2_(delay),'set','value',s1(delay));
+
+            if s1(slopeck)==1, mark = 'Neg'; else mark = 'Pos'; end;
+            set(HH2_(slopeck), 'UserData', s1(slopeck),'String',mark);
+
+            set(HH2_(modepu3),'Value',s1(modepu3));
+            set(HH2_(thrpu2),'Value',s1(thrpu2));
+            if s1(armck)==1,
+                mark = 'Armed'; color = GRNc;
+            else
+                mark = 'Arm'; color = REDc;;
+            end;
+            set(HH2_(armck), 'UserData', s1(armck),'String',mark);
+            set(HH2_(armled),'BackGroundColor',color);
+
+   % setup linked displays
+
+            h_dlg2('set_delayro');
+            % the 'delayro' is pretty complicated so it is best not to copy
+            % sections of it here to set the readout. The hardware should not
+            % be loaded here (no point)
+
+
+   elseif strcmp(Action,'show'),
+   % SHOW
+   % Try putting 'intelligence' into this ....
+   % conditionally turn stuff on and off ....
+   % Only have one group of controls with conditional visibility
+   % to deal with. So this strategy is OK, and it could be extended
+   % to check the state of other 'enabling' controls.
+      trg_mode = get(HH2_(modepu3),'value');
+      if strcmp(get(HH2_(titletxt),'visible'),'off'),
+      % nobody on, turn on bare essentials
+            set([HH2_(modepu3),HH2_(dlgfrm),HH2_(titletxt)],'Visible','on');
+      end;
+
+      if trg_mode == FREE_RUNc,
+         % mode=1 is free run ... don't show much here
+         set(HH2_([tselpu1:filtck,thrpu2:armck,armled:filtled]),'Visible','off');
+         set(HH2_(armmenu),'Visible','off','label','');  
+         % the armmenu won't obey the vis off command, therefore label is killed, the crap u gotta deal with! 
+         islider(HH2_(delay),'set','vis_off');
+      else
+         % triggering enabled
+          set(HH2_(tselpu1),'Visible','on');
+          islider(HH2_(delay),'set','vis_on');
+         if trg_mode < MANUAL_ARMc     % not manual arm (we call it Auto Arm)
+             armvis='off';
+           else
+             armvis='on';
+         end;
+
+         if get(HH2_(tselpu1),'value') > HDLG2_S1(numin)
+            % using a direct output trigger, no slope, filt,
+            % controls are active
+            outvis='off';
+         else
+            outvis='on';
+         end;
+         set([HH2_(armck),HH2_(armled)],'Visible',armvis);
+         set(HH2_(armmenu),'Visible',armvis,'Label',get(HH2_(armck),'string'));
+         % need to set the label to agree with string in armck
+         set([HH2_(filtck),HH2_(thrpu2:slopeck),HH2_(filtled)],'Visible',outvis);
+      end;
+
+   elseif strcmp(Action,'filtck_toggle'),
+   % FILTCK_TOGGLE
+     HDLG2_S1(filtck) =  ckbtog(HH2_(filtck),'NoFilt','HFrej');
+     if HDLG2_S1(filtck) == 0,
+        set(HH2_(filtled),'BackGroundColor',GRNc);
+     else
+        set(HH2_(filtled),'BackGroundColor',YELc);
+     end;
+   elseif strcmp(Action,'armck_toggle'),
+   % ARMCK_TOGGLE
+     HDLG2_S1(armck)= ckbtog(HH2_(armck),'Arm','Armed');
+     if  HDLG2_S1(armck)== 0,
+        set(HH2_(armled),'BackGroundColor',REDc);
+        set(HH2_(armmenu),'label','Arm');
+     else
+        set(HH2_(armled),'BackGroundColor',GRNc); % we are armed
+        set(HH2_(armmenu),'label','Armed');
+     end;
+
+   elseif strcmp(Action,'armck_clear'),
+   % ARMCK_CLEAR
+     HDLG2_S1(armck) = 0;
+     set(HH2_(armled),'BackGroundColor',REDc);
+     set(HH2_(armck),'string','Arm','UserData',0);
+     set(HH2_(armmenu),'label','Arm');
+
+   elseif strcmp(Action,'slopeck_toggle'),
+   % SLOPECK_TOGGLE
+     HDLG2_S1(slopeck) = ckbtog(HH2_(slopeck),'Pos','Neg');
+
+   elseif strcmp(Action,'open'),
+   % OPEN Command
+       if strcmp(get(HH2_(titletxt),'Visible') ,'off'),
+         if strcmp('fast',In1) ~=1,
+            h_dlg2('load');   % load then show
+         end;
+         h_dlg2('show');   % unhide objects
+       end;
+
+   elseif strcmp(Action,'vcap')
+   % VCAP section
+       if strcmp(In1,'lock')
+          set(HH2_([tselpu1,modepu3,thrpu2,filtck,slopeck]),'enable','off');
+          islider(HH2_(delay),'set','ena_off');
+       elseif strcmp(In1,'unlock')
+          set(HH2_([tselpu1,modepu3,thrpu2,filtck,slopeck]),'enable','on');
+          islider(HH2_(delay),'set','ena_on');
+       else
+          disp('error in h_dlg2 vcap section' )
+       end;
+
+   elseif strcmp(Action,'close'),
+   % CLOSE command
+         if strcmp(get(HH2_(titletxt),'Visible') ,'on'),
+              set([HH2_(tselpu1:filtck),HH2_(thrpu2:titletxt)],'Visible','off');
+              islider(HH2_(delay),'set','vis_off');
+         end;
+
+   elseif strcmp(Action,'load_all'),
+   % LOAD_ALL Command
+
+       if nargin==4
+           HDLG2_S1 = In2;  % sets control state storage
+           HDLG2_S1(tselpu1)= trigmap(HDLG2_S1(tselpu1),In3); % mbsup1
+           HDLG2_S1(numin:numout) = In3(1:2);                 % load with actual configuration
+       else
+           Ioc      =  HDLG2_S1(numin:numout);
+           HDLG2_S1 = In2;
+           HDLG2_S1(numin:numout) = Ioc;
+       end;
+
+
+       if strcmp(In1,'on'),
+           h_dlg2('load');
+           h_dlg2('show');       % has smarts built in
+       else 
+           h_dlg2('close');
+           h_dlg2('load');       % do only a load
+       end;
+   elseif strcmp(Action,'clear'),
+   % CLEAR Command
+       clear global HH2_ HDLG2_S1
+   else
+        disp(['error in h_dlg2:', Action,' not recognized']);
+   end; % end of MAGNUM IF
+% end dialog function
+
+
+
+
+
+

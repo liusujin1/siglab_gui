@@ -1,0 +1,1716 @@
+function  [Out1,Out2,Out3] = cursor(Cur_ID,Action,In1,In2,In3,In4,In5,In6,In7,In8,In9)
+% function  [Out1,Out2,Out3] = cursor(Cur_ID,Action,In1,In2,In3,In4,In5,In6,In7,In8,In9)
+%
+%   Pseudo Object providing cursor and display expansion control for single 
+%   or multiple plots on the same axis as well as overlayed dual axis (e.g. mag/phase).
+%
+%   What it does:
+%      No expansion box visible:
+%          Left click on or near a line and the cursor will jump to the line
+%            AND
+%          the line is selected for value readout, peak/valley finding 
+%          or marking for delta x/y.
+%          
+%
+%          Left click on or near a line and drag, and the cursor will track on the line.
+%          Left click inside the axis will also drag the cursor, but won't change the 
+%          line the cursor is on (if there were multiple lines). 
+%          
+%          Double left click and drag opens an expansion box.
+%
+%          Right click anywhere backs up one expansion level, eventually back to 
+%          initial screen coordinates. The most recent 4 expansions are stored and
+%          a beep occurs when the original coordinates have been reached. If one 
+%          pushes the right button one more time after the beep, the axis will auto-scale.
+%
+%          The x and y readout buttons (labels) allow explicit x and or y axis scales 
+%          to be set. Press the button and current axis scales will be displayed. Edit 
+%          the numbers and press the button again or click the left mouse button to rescale
+%          the graph. The scaling can be cancelled by a right mouse click in the axis area. 
+%
+%      The ^ button  will find peaks of the data on the selected line
+%      The v button  finds valleys 
+%
+%      Clicking the mark button marks a line @ the current cursor position. Subsequent clicks 
+%      on the line will readout the cursor position and the difference from the marker.
+%      The expand is disabled when the marker is on. Click the mark button again to turn this mode off. 
+%
+%      With expansion box open:
+%          editing readout text specifies expansion coords and exp. box shows results  
+%          left click expands to box coordinates
+%          right click cancels the expansion mode
+%
+%      On overlayed graphs, only the primary axis (on top) 'drags'. 
+%      The secondary axis (below primary) updates on a left click or when the drag is complete.
+%      The secondary y value is readout by the second y readout
+%          
+%
+%     Caveats: 1) Due to problems with the gca functioning properly with a line object,
+%                 a local global vector of cursor initializations is maintained.  
+%                 The good news here is that the axes userdata is not needed. 
+%                 See description of 'clear' action in the actions section. 
+% 
+%              2) Overlayed plots can have no more than 1 line object per axes
+%              3) Overlayed plots must have same Xdata
+%              4) Ideally, objects would be hidden when they are no longer needed.
+%                 Changing the visibility of an object (any object) forces a redraw of the
+%                 of the graphs which is very painful when there is a large amount of 
+%                 data to be replotted. An interim work-around attempts to make the backround
+%                 of the unneccesary objects the same as the parent figure. Well, nice try, 
+%                 but you must have selected a 'magic' figure background color for this 
+%                 to work perfectly. Oh....the time one can burn on these details......
+%                 PM tweaked the Max property to work around this, look for backgroundcolor
+%              5) axes and line object buttondownfcns are defined by cursor m-file. Do not
+%                 destroy these (at least while the cursor is active). One can 
+%                 extend them (add more functions in the callback) using the 'set' 'axis_cb'
+%                 and 'set' 'move_cb'.
+%              6) line object callbacks do not observe the clipping property. This allows 
+%                 cursors to jump outside the axis limits. A workaround is installed. Search
+%                 for xylimit to remove at least some of this stuff. Some will still be necessary
+%                 since you can drag outside an axis. 
+% 
+%                 
+%
+%                               x y w h coordinates in pixels
+%     Action 
+%         'init'    
+%                       Cur_ID  = [owner axis    handle of owner axis
+%                                    aux axis]   (optional) handle of aux axis
+%        
+%                               Locations for cursor objects
+%                       In1 = [ x y w h    x label              1
+%                               x y w h    y label              2
+%                               x y w h    x cursor readout     3
+%                               x y w h    x cursor expansion   4
+%                               x y w h    y cursor readout     5
+%                               x y w h    y cursor expansion   6
+%                               x y w h    peak button          7
+%                               x y w h    valley button        8
+%                               x y w h    mark button          9
+%
+%                       In2 = [ r g b      label color
+%                               r g b      readout color  (if [0 0 0] track associated line color)
+%                               r g b      expansion box color
+%                               r g b      mark line color 
+%                               r g b      cursor color for cursor  #1 (if [0 0 0] use associated line color)
+%                               r g b];    cursor/expansion line color for each cursor #2 (optional)
+%                                          must have r g b for each line object that has a cursor
+%
+%                       In3 = ['xlabel'    x and y labels
+%                              'ylabel']
+%
+%                       In4 = stylestr     cursor LineStyle e.g. '+','o','x'
+%                                          must have a Line Style for each line that has 
+%                                          a cursor.
+%                       In5 = cursor size  eg. 6... 28 (points) MarkerSize (one size fits all)
+% 
+%                       In6 = [fmtxro      format string for x readout
+%                              fmtyro]     format string for y readout
+%                                          e.g['%2.1f';'%6.1f']
+%
+%                       In7 =              visible 'on' / 'off' (optional)
+%                       In8 =              monotonic flag (optional)
+%                                          set to 1 if data will have a monotonic x component
+%                                          set to 0 if it will not (e.g. Nyquist plots)
+%                                          leave undefined and test will be done to determine
+%                                          x monotonicity.
+%                       In9 =              axis limit change callback (optional) executed when axis limits 
+%                                          are changed
+%
+%                       Out1 =             returns cursor ID needed for calling program to 
+%                                          communicate with the cursor (integer)
+%
+%   ****************** Note ********************************
+%          For cursor calls OTHER THAN 'init',  Cur_ID is set to an internally
+%          assigned integer that was returned to the calling program in Out1
+%          during the init phase. 
+%                 In1=    In2=
+%         'set'          
+%                'vis_on'            visibility of all cursor objects, normal cursor 
+%                                    state resored (no expand, no mark)
+%                'vis_off'
+%                'aux_off'           hide aux cursor and its readout
+%                'aux_on'            enable aux cursor and its readout
+%                'position'          reset position of objects with In2 per definition of 'init' action
+%                'xlab'              x readout label
+%                'ylab'              y readout label
+%                'xylim'             set new xylimits, update expansion history
+%                                    In2=[xmin,xmax,ymin,ymax]
+%                                    In3=[ymin,ymax] for aux axis (optional)
+%                'ylim'              new y limits, update y expansion history
+%                                    In3=[ymin,ymax] for aux axis (optional)
+%                'xlim'              new x limits, update x expansion history
+%                'exp_his'           restores array of expansion history and sets axis 
+%                'clrpk'             clears peak/valley finder data  
+%                'axis_cb'           user defined callback function when an axis limit change occurs
+%                          callback
+%                'move_cb'           user defined callback when cursor moves
+%                          callback 
+%                'y_ro&pos' yvalue   sets cursor y position and y readout 8/10/00 RAB
+%
+%         'get'
+%             'position' line#  returns cursor position for a line number 
+%                               if no line number is given, assumes active cursor and 
+%                               returns the line *handle* in Out3 RAB 8/11/00
+%             'exp_his'         returns expansion history
+%             'exp_his_shape'   returns size of this array
+%             'active_line'     returns active Out1=line number and Out2=handle to same (useful for overlayed line implementation)
+%                            
+%         'edit_cb'     
+%                 offset#       edit offset  0..3
+%
+%         'peakval_cb'  
+%               '^' or 'v'      peak / valley
+%
+%         'axis_cb'            axis call back
+%
+%         'line_cb'            line call back 
+%              plot line#
+%         'exp_his'            returns array of axis expansion history
+%         'clear'              clear ID slot in CUR_MAIN_HNDL. Repeated calls eventually 
+%                              clear the global to be a good citizen. This
+%                              action should be executed when a cursor is no
+%                              longer needed. 
+%         'killpatch'          kills the workaround used to address the problem 
+%                              the axis object has with callback extents. 1/4/99
+
+
+%        Dick Benson, DSP Technology 
+
+global CUR_MAIN_HNDL;   % array of cursor 'xlabel' handles
+
+%define
+    % Handle and ancilary index definitions 
+    % ***** leave ixlabel through ivalbut in the order below *********
+    % Extensive use of 'userdata', only one global is needed.
+    %ixlabel     = 1;    % userdata stores all object handles
+    %iylabel     = 2;    % userdata stores readout edit box formats
+    %ixro        = 3;    % userdata has last x and y cursor values plus following misc parameters
+         %i_x       = 1;    % last x cursor value
+         %i_y       = 2;    % last y cursor value
+         %i_a       = 3;    % ratio of yaxis scaling for overlayed plots
+         %i_b       = 4;    % base offset of yaxis scaling for overlayed plots
+         %i_yaux    = 5;    % last overlay y axis cursor value
+         %i_imin    = 6;    % index for main axes Xdata cursor
+         %i_act     = 7;    % cursor that is currently active (for multiple plots on 1 axes)
+         %i_auxon   = 8;    % visibility of aux cursor and readout.
+         %i_monoflag= 9;    % 1=if data is monotonic in x, 0 if not, -1 if not set in init
+         %i_xexp    =10;    % in x axis expand mode from button   v > 1.14
+         %i_yexp    =11;    % in y axis expand mode from button   v > 1.14
+         %i_killpatch = 12; % 1/4/99, RAB
+         
+    %ixexp       = 4;    % x axis expansion edit, userdata has axis change callback 
+    %iyro        = 5;    % userdata stores expansion history in Nx(4+1) array.     
+                        % 1st 4 elements have initial axis state, 5th column is a marker
+    %iyexp       = 6;    % y axis expansion edit, userdata has cursor move callback  
+    %ipkbut      = 7;    % userdata has peak
+    %ivalbut     = 8;    % userdata has valley
+                        % leave above objects in same order to match position input order
+    %imkbut      = 9;    % mark button for delta mode            
+    %iexpbox     = 10;   % expansion box line object, userdata stores point for axis click
+    %imkline     = 11;   % mark line object, userdata has who was active when the mark was made 
+    %iax_owner   = 12;   % owner axis handle 
+    %iax_aux     = 13;   % underlying axis handle (if plots are overlayed, owner on top) 
+    %icurbase    = iax_aux; % base of cursors  @ last 'normal' object , cursors build from here
+                           % userdata stores associated line object handle  and color_track flag
+    %EXPMAXc     = 4;  % max number of expansions +1 saved, e.g. 4=(3 expansions) + (the original axis limits)
+    %EXPFLAGc    = 5;  % where the flag is kept
+    %UPDATE_ALLc = 1;  % update both main and overlay readouts 
+    %UPDATE_MAINc= 0;  % update only main cursor readouts
+    %FREE_SLOTc  =-1;  % free slot in cursor handle vector
+    
+    %NONEc       = 0;  % autoscale modes
+    %BOTHc       = 1;  
+    %XONLYc      = 2;
+    %YONLYc      = 3;
+%end_define
+
+    % For actions other than 'init', the cursor routine needs the cursor objects handle vector.
+    % The following retrieves the handle vector: hcur_ .
+ 
+    if ~strcmp(Action,'init')
+      % Cur_ID has an integer string representing the index into CUR_MAIN_HNDL
+      % CUR_MAIN_HNDL(Cur_ID) has the xaxis label handle. The userdata in the xaxis label 
+      % has all other handles including the owner axes and an auxilliary axis (on the bottom)
+      % if two are overlayed.
+      hcur_ = get(CUR_MAIN_HNDL(Cur_ID),'userdata');
+    end
+
+    nargin_shad=nargin;
+
+    if strcmp(Action,'init')
+        % For the init Action, CUR_ID is a poor variable name.
+        % It contains the owner axis handle and the (optional) auxiliary axis handle, and
+        % the (optional) parent figure handle!  
+        hcur_(12)=Cur_ID(1);
+        if length(Cur_ID)==2
+           hcur_(13)=Cur_ID(2);
+        else
+           hcur_(13)=0;
+        end
+        
+        hf = get(hcur_(12),'parent'); % force objects to be created in proper figure
+                                             % with figure handle obtained from axis  
+        if nargin_shad>=9
+           vis = In7;  % optional visibility arg
+        else
+           vis = 'on';
+        end
+    
+        % The global CUR_MAIN_HNDL holds the xlabel object handles. 
+        % For each new invocation of cursor, search for a FREE_SLOTc which means a free slot.
+%         if length(CUR_MAIN_HNDL)==0
+        if isempty(CUR_MAIN_HNDL)
+           Cur_ID =1;
+           slots=0;
+        else
+           slots=find(CUR_MAIN_HNDL==-1); 
+           if length(slots) >=1
+              Cur_ID = slots(1);                  % a free slot in the CUR_MAIN_HNDL  vector, use it
+           else
+              Cur_ID = 1+length(CUR_MAIN_HNDL);   % append to end, no free slots
+           end
+        end
+        
+        if Cur_ID > 200
+           disp('Something strange here, over 200 cursor.m inits have occured without corresponding clear actions');
+        end
+        
+        Out1 = Cur_ID;   % return ID to calling program for subsequent calls to the cursor
+        cur_idstr  = sprintf('%4.0f',Cur_ID);
+    
+        % check for line objects to attach cursor callbacks to...
+        h_lines=findobj(hcur_(12),'type','line'); % returns line objects in owner axis
+        nc = findobj(h_lines,'tag','NoCursor'); % lines that don't want a cursor
+        for i=1:length(nc); h_lines(find(h_lines==nc(i))) = []; end; % remove them        
+        axes(hcur_(12));  % just in case, select this as current axes object
+        set(hcur_(12),'Xgrid','off','Ygrid','off'); % for v5     
+        
+        % check readout colors, if black, track line color with readout background
+        if sum(In2(2,:))==0 trk=1; else trk=0; end;
+        
+        if ~isempty(h_lines)
+            % create main cursors .....
+            % What about multiple lines on same plot axes? 
+            % Each should have a cursor I guess...
+            In2n = length(In2(:,1));
+            l_main_lines = length(h_lines);
+            clines = l_main_lines;  if hcur_(13) ~=0  clines=clines+1; end;
+            
+            if In2n < clines + 4
+              % short on cursor colors, simply reproduce the last one specified in In2
+              % to fill in the required array.
+              for i=(In2n+1):(clines+4)
+                  In2(i,:) = In2(In2n,:);
+              end
+              % fprintf(1,'\nERROR: There are %d line objects so In2 must have %d colors\n',...
+              %           clines, clines+4);
+            end
+            
+            In4n  = length(In4);
+            if In4n < clines
+              for i=(In4n+1):(clines)
+                  In4(i) = In4(In4n);
+              end;
+              %  fprintf(1,'\nERROR: There are %d line objects so In4 must have %d styles\n',...
+              %            clines, clines);
+            end;
+            In2n         = length(In2(:,1));
+            obj_color    = In2(5:In2n,:);   % extract cursor colors
+            
+            for i=1:l_main_lines
+                xy=[get(h_lines(i),'Xdata');get(h_lines(i),'Ydata')];
+                if sum(obj_color(i,:)) ==0
+                   cur_color = get(h_lines(i),'color');
+                else
+                   cur_color= obj_color(i,:);
+                end;
+                hcur_(13+i)= line('Xdata',xy(1,1),'Ydata',xy(2,1),... 
+                                        'color',cur_color,...
+                                        'clipping','on',...
+                                        'visible',vis,...
+                                        'userdata',[h_lines(i),trk]);
+% 'erasemode','xor',...
+    
+                set(hcur_(13+i),'Marker',In4(i), 'MarkerSize',In5);
+                                 
+                %@*** stash associated line handles in userdata
+                % set owner axes line object callbacks 
+                set(h_lines(i),'ButtonDownFcn',['cursor(',cur_idstr,',''line_cb'',',int2str(i),');']);          
+            end
+            
+            % check for overlayed plot, only one line is legal
+            if  hcur_(13) ~=0
+                set(hcur_(13),'Xgrid','off','Ygrid','off'); % for v5     
+                h_lines = findobj(hcur_(13),'type','line'); % returns line objects in overlay axis
+                l_lines = length(h_lines);
+                if (l_lines)>1 disp('only 1 line allowed in overlayed axis cursor.m'); end;
+                xy=[get(h_lines(1),'Xdata');get(h_lines(1),'Ydata')];
+                if sum(obj_color(1+l_main_lines,:)) ==0
+                   cur_color = get(h_lines(1),'color');
+                else
+                   cur_color= obj_color(1+l_main_lines,:);
+                end;
+                axes(hcur_(13)); 
+                hcur_(13+l_main_lines+1)= line('Xdata',xy(1,1),'Ydata',xy(1,2),... 
+                                                     'erasemode','xor',...
+                                                     'color',cur_color,...
+                                                     'visible',vis,...
+                                                     'clipping','on',...
+                                                     'userdata',[h_lines(1),trk]); 
+                                           %@*** stash overlay line handle in userdata
+                
+                set(hcur_(13+l_main_lines+1),'Marker',In4(l_main_lines+1), 'MarkerSize',In5);
+       
+                axes(hcur_(12));    % return to owner axis for callbacks to work in overlay
+                set(h_lines(1),'ButtonDownFcn',['cursor(',cur_idstr,',''line_cb'',',int2str(1),');']);
+                set(hcur_(6),'visible',vis);  % used for aux axis y readout
+            end
+        else
+           disp('no lines to attach cursors to in cursor.m')
+        end
+
+        if max(max(In1))>2
+            unitt = 'Pixels';
+        else
+            unitt = 'Normal';
+        end
+       
+        % create labels and edit box objects
+        for i=1:2 
+          if i==1
+              cbStr = ',''scale_axis'',''x'');';
+          else
+              cbStr = ',''scale_axis'',''y'');';
+          end
+          
+          hcur_(i)  = uicontrol(hf,'Style','text','visible',vis,...
+                                'String',deblank(In3(i-1+1,:)),...
+                                'Units',unitt,'Position',In1(i,:),...
+                                'BackGroundColor',In2(1,:),...
+                                'HorizontalAlignment','center',...
+                                'ButtonDownFcn',['cursor(',cur_idstr,cbStr],...
+                                'callback',['cursor(',cur_idstr,cbStr]);
+            set(hcur_(i),'enable','inactive'); % bizzare requirement to get buttondownfcn to work in 5.2
+          
+        end % end for i=ixlabel:iylabel
+
+        for i=3:6
+          if trk ==1
+             obj_color  = [1 1 1]; % use white til a line is selected
+          else
+             obj_color  = In2(2,:);
+          end
+          %                  cursor id     Action      edit id
+          cbStr  = ['cursor(',cur_idstr,',''edit_cb'',',int2str(i-3),');'];
+          emax = 1;     % [PM]
+          if i==4 || i==6  
+                                % MATLAB bug where changing an objects visibility
+                                % forces a redraw of all plots. Unbelivably obnoxious 
+                                % when you have an expansion mode switch (on/off or off/on).
+                                % This workaround causes much grief. See item 4 in comments list
+                                % at beginning of this file. Seems to be fixed in V5, temporarily no doubt. 
+              emax=2;           % [PM]
+              obj_color = get(gcf,'color');   % match background of figure
+          end
+          hcur_(i)  = uicontrol(hf,'Style','edit','visible',vis,...
+                                'String',' ',...
+                                'Units',unitt,'Position',In1(i,:),...
+                                'BackGroundColor',obj_color,...
+                                'HorizontalAlignment','left',...
+                                'Max',emax,...
+                                'CallBack',cbStr);
+          if (i==4 || i==6)
+              % disp(' vis off #1')
+%               if hcur_(13) & i==6
+              if isgraphics(hcur_(13)) && i==6
+                 set(hcur_(i),'visible','on');
+              else
+                 set(hcur_(i),'visible','off');
+              end
+          end
+                           
+        end  % end for i=ixro:iyexp 
+        
+        % create peak/valley/mark buttons
+        hcur_(7)  =  uicontrol(hf,'Style','pushbutton','String','^',...
+                                  'Units',unitt,'Position',In1(7,:),'HorizontalAlignment','center',...
+                                  'CallBack',['cursor(',cur_idstr,',''peakval_cb'',''^'');'],...
+                                  'visible',vis,...
+                                  'userdata',-inf);
+     
+        hcur_(8) =  uicontrol(hf,'Style','pushbutton','String','v',...
+                                  'Units',unitt,'Position',In1(8,:),'HorizontalAlignment','center',...
+                                  'CallBack',['cursor(',cur_idstr,',''peakval_cb'',''v'');'],...
+                                  'visible',vis,...
+                                  'userdata',inf);
+       
+        hcur_(9)  =  uicontrol(hf,'Style','pushbutton','String','Mark',...
+                                  'Units',unitt,'Position',In1(9,:),'HorizontalAlignment','center',...
+                                  'CallBack',['cursor(',cur_idstr,',''mark_cb'','''');'],...
+                                  'visible',vis,...
+                                  'userdata','','enable','off');
+        
+        hcur_(11) = line('Xdata',[],'Ydata',[],... 
+                              'color',In2(4,:),'visible','off'); 
+% 'erasemode','xor',...
+                              
+        
+        set(hcur_(11),'Marker','+','MarkerSize',5*In5);
+
+                              
+        set(hcur_(2),'userdata',In6);    % stash format strings that were in In6 
+           
+        % expansion box line object
+        hcur_(10) =  line('Xdata',[],'Ydata',[],... 
+                               'visible','off',...
+                               'color',In2(3,:),...
+                               'ButtonDownFcn',['cursor(',cur_idstr,',''axis_cb'')']); 
+% 'erasemode','xor',...
+                               % what should clicking on the expansion box do?
+                               % probably an axis_cb
+        
+        % set axis callback
+        set(hcur_(12),'ButtonDownFcn',['cursor(',cur_idstr,',''axis_cb'');']);
+        % store primary handle (hcur_(ixlabel)) in owner axes userdata
+        % along with (optional) aux axis handle
+        
+        % set up mono flag 
+        if nargin_shad >=10
+            if ~isempty(In8)
+                mono_flag = In8;
+            else
+                mono_flag = -1;
+            end;
+        else
+            mono_flag = -1;
+        end
+        % setup axis limit change callback storage
+        if nargin_shad >=11
+           set(hcur_(4),'userdata',In9);
+        else
+           set(hcur_(4),'userdata','');
+        end
+      
+        if  hcur_(13) ~=0
+            % aux axis exists
+            set(hcur_(13),'ButtonDownFcn',['cursor(',cur_idstr,',''aux_axis_cb'');']);
+            ymain       =  get(hcur_(12),'Ylim');
+            yaux        =  get(hcur_(13),'Ylim');
+            yaux_ratio  =  diff(yaux)/diff(ymain); % slope a
+            % last cursor x,y values (initialize to 0)  plus save axis overlay axis info 
+            %                                  i_a          i_b     .....      see above i_xxx index definitions
+            set(hcur_(3),'userdata',[0,0,   yaux_ratio,  yaux(2)-yaux_ratio*ymain(2), 0 , 1 , 1, 1,mono_flag, 0 , 0, 0]);
+        else
+            % no overlay
+            set(hcur_(3),'userdata',[0,0,0,0,0,1,1,0,mono_flag,0,0,0]); % last cursor x,y values (initialize to 0)
+        end;
+        set(hcur_(6),'userdata','');       % cursor move callback 
+        set(hcur_(1),'userdata',hcur_);  % stash all handles related to this cursor 
+        
+        % enter new handle into CUR_MAIN_HNDL vector
+        if Cur_ID > length(CUR_MAIN_HNDL)
+            CUR_MAIN_HNDL = [CUR_MAIN_HNDL;hcur_(1)]; % no free slots, appends
+        else
+            CUR_MAIN_HNDL(Cur_ID) = hcur_(1);         % there is a free slot
+        end
+
+    %**************************** End init section ************************************
+    
+    elseif strcmp(Action,'expbox')
+       % draw an expansion box
+       a_pt  = get(hcur_(12),'currentpoint'); % new point
+       %x  = a_pt(1,1); %y  = a_pt(1,2);
+       % xylimit new point qqqq
+       xylim = [get(hcur_(12),'xlim'),get(hcur_(12),'ylim')];
+       x_cur = max(xylim(1),min(xylim(2),a_pt(1,1))); 
+       y_cur = max(xylim(3),min(xylim(4),a_pt(1,2)));
+       
+       a_pt   = get(hcur_(10),'userdata');   % old point  already xylimited qqqq
+       x_old  = a_pt(1);
+       y_old  = a_pt(2);
+       % check size of box, if not too small, draw it.
+       % This all may not be needed with double click scheme, its hard to 
+       % screw up. 
+       
+       % log axes presents its own problems
+       if strcmp (get(hcur_(12),'xscale'),'log')
+          dxy_ok = abs(log(x_old/x_cur)) >= 0.02*abs(log((xylim(1)+1e-4*xylim(2))/xylim(2)));
+       else
+          dxy_ok = abs(x_old-x_cur) >= 0.02*diff(xylim(1:2));
+       end;
+       if dxy_ok
+          if strcmp (get(hcur_(12),'yscale'),'log')
+             dxy_ok = abs(log(y_old/y_cur)) >= 0.02*abs(log(xylim(3)/xylim(4)));
+          else
+             dxy_ok = abs(y_old-y_cur) >= 0.02*diff(xylim(3:4));
+          end;
+       end;   
+       
+       %   min(abs(b_pt(1,1:2)-a_pt(1,1:2))) >= ...
+       %   min(0.02*[diff(get(hcur_(iax_owner),'xlim')) diff(get(hcur_(iax_owner),'ylim'))]), 
+        
+       if dxy_ok
+           set(hcur_(10),'Xdata',[x_old,x_cur,x_cur,x_old,x_old],...
+                              'Ydata',[y_old,y_old,y_cur,y_cur,y_old]);
+           fmt=get(hcur_(2),'userdata');  % formats stashed here
+        
+           if strcmp(get(hcur_(10),'Visible'),'off')
+               set(hcur_(10),'visible','on');
+               set(hcur_(3),'string',ftoa(fmt(1,:),x_old));
+               set(hcur_(5),'string',ftoa(fmt(2,:),y_old));  
+               set(hcur_(9),'enable','off');  % disable mark button
+               set(hcur_([4,6,3,5]),'enable','on'); 
+           end;
+           
+           color = get(hcur_(3),'backgroundcolor');
+           
+           % disp(' vis on #2')
+           set(hcur_(4),'string',ftoa(fmt(1,:),x_cur),'visible','on','Max',1,'backgroundcolor', color );
+           set(hcur_(6),'string',ftoa(fmt(2,:),y_cur),'visible','on','Max',1,'backgroundcolor', color );
+
+        end;
+        
+    
+    %-------------------------------------------------------------------------------    
+    elseif strcmp(Action,'axis_cb') || strcmp(Action,'line_cb')  
+    % AXIS and LINE callback methods   
+        clk_type = get(gcf,'SelectionType');      % get type of mouse click
+        misc     =  get(hcur_(3),'userdata');  % moved up here in v > 1.14
+        % add check for visibility. If the cursor labels are not visible, don't mess with 
+        % callbacks
+        vflg= strcmp(get(hcur_(1),'visible'),'on');
+        drag_enable = 1;
+        if   strcmp(get(hcur_(10),'Visible'),'off') && misc(10)==0 && misc(11)==0 && vflg
+           % no expansion box yet....
+           cur_idstr   = sprintf('%4.0f',Cur_ID);
+           if strcmp(clk_type,'open')
+                 % this is a 'left double click'
+                 % set up for expansion box , allow mark cursor to be on 
+                 % stash point for pick up by cursor('expbox') method
+                 a_pt  = get(hcur_(12),'currentpoint');
+                 % xylimit value qqqq
+                 xylim = [get(hcur_(12),'xlim'),get(hcur_(12),'ylim')];
+                 set(hcur_(10),'userdata',[max(xylim(1),min(xylim(2),a_pt(1,1))),max(xylim(3),min(xylim(4),a_pt(1,2)))]);
+                 % draw an expansion box if there is a drag
+                 set(gcf,'WindowButtonMotionFcn',['cursor(',cur_idstr,',''expbox'');']);
+                 % The following de-installs functions when WindowButtonUp occurs
+                 set(gcf,'WindowButtonUpFcn',...
+                        ['set(gcf,''WindowButtonMotionFcn'','''');',...
+                         'set(gcf,''WindowButtonUpFcn'','''');']);
+           % elseif  (strcmp(clk_type,'extend')&~beyondv4)  |  (strcmp(clk_type,'alt')&beyondv4)
+           elseif  strcmp(clk_type,'alt')
+              % A single right click backs up one in the previous zoomed 
+              % display list. 
+              cursor(Cur_ID,'scale','old');
+%               cursor(Cur_ID,'scale','auto','both');
+           end
+           if  strcmp(clk_type,'normal')  % removed v > 1.14 line_cb test
+              % I have endeavored to make the pointing natural. Time will tell. 
+              % A left click near a line will move the cursor to a position
+              % on the line nearest the click. Holding the button down drags
+              % the cursor. Things get tricky with relations e.g. Nyquist
+              %
+              a_pt  = get(hcur_(12),'currentpoint'); % new point
+              % x = a_pt(1,1); 
+              % y = a_pt(1,2);
+              
+              % xylimit point to not exceed coordinates qqqq
+              xylim = [get(hcur_(12),'xlim'),get(hcur_(12),'ylim')];
+              x_cur = max(xylim(1),min(xylim(2),a_pt(1,1))); 
+              y_cur = max(xylim(3),min(xylim(4),a_pt(1,2)));
+              
+              if ~strcmp(Action,'line_cb') % added v > 1.14
+                 
+                 %%%  the following is a workaround to compensate for the excessive extents of the axis 
+                 %%%  buttondownfcn 9/04/98, 12/14/98 rab
+                 if ~misc(12)
+                    ch  = get(gcbf,'children');
+                    if ~isempty(ch)
+                         swapflag   = 0;
+                         iaxis      = find(ch==hcur_(12));
+                         index      = find(ch==hcur_(1)); % now know where label is in stack
+                         if index > iaxis
+                            temp         = ch(iaxis);       % swap only with axis otherwise 
+                            ch(iaxis)    = hcur_(1);  % other orderings may affect object visibility
+                            ch(index)    = temp;            % e.g. check boxes after this swap ! 
+                            iaxis        = index;           % now iaxis is at index 12/14/98 
+                            swapflag     = 1;
+                         end;
+                      
+                         index  = find(ch==hcur_(2));
+                         if index > iaxis
+                            temp        = ch(iaxis);        % swap
+                            ch(iaxis)   = hcur_(2);
+                            ch(index)   = temp;
+                            swapflag    = 1;
+                         end;
+                         if swapflag
+                            set(gcbf,'children',ch); % this forces musical chairs with the menus ... not very pretty
+                            drawnow
+                         end;   
+                    end;
+                    %%% end of workaround 
+
+                    % a different approach would be to look at where the point is and then try to figure out 
+                    % if the click was on the iylabel or ixlabel. A good one for a rainy day. 
+                    %%   is point within the axis limits ?
+                    %%if ~(a_pt(1,1)==x_cur & a_pt(1,2)==y_cur)
+                        % need to map a_pt into pixels AND this will depend on log,lin scales 
+                        % of both the x and y axis, pain & agony. 
+                    %%    get(hcur_(iax_owner),'position');
+                    %%end;
+                 end        % test for killpatch 
+                 
+                 
+                 % force cursor movement with just axis callback v > 1.14
+                 if nargin_shad ==4
+                    % must be a result of edit_cb ....  v > 2.07
+                    % In1 is set to active cursor value by edit_cb
+                    a_pt(1,1)= In2;
+                    set(gcf,'WindowButtonUpFcn','');
+                    drag_enable = 0;     % must not enable drag or cursor will follow mouse
+                 else
+                    In1   = misc(7);
+                    nargin_shad =3;
+                 end;
+                 % the editbox or axis callbacks can get to this point. 
+                 % therefore should check to see that the active cursor is on a visible line ....
+                 line_handle = get(hcur_(13+In1),'userdata');
+                 
+                 if strcmp('on',get(line_handle(1),'visible'))
+                    % all is well
+                 else
+                    % look for a visible one
+                    for i=13+1:1:length(hcur_)
+                        line_handle = get(hcur_(i),'userdata');
+                        if strcmp('on',get(line_handle(1),'visible'))
+                           break;
+                        end;
+                    end;
+                    In1 = i-13;
+                 end;
+                 nargin_shad =3;
+              end;
+              
+              
+             % x_cur = max(xylim(1),min(xylim(2),a_pt(1,1))); 
+             % y_cur = max(xylim(3),min(xylim(4),a_pt(1,2)));
+              
+              
+              line_handle = get(hcur_(13+In1),'userdata'); % also has trk flag
+              xy =[get(line_handle(1),'Xdata');get(line_handle(1),'Ydata')];
+              %  nargin_shad will == 4 when dragging so don't go through the monotonic test.
+              if nargin_shad ==3
+                 set(hcur_(7), 'userdata',-inf); % reset peak valley finder
+                 set(hcur_(8),'userdata',inf);
+                 
+                 
+                 if misc(9)==-1
+                     % check if monotonic X, this was not spec'd on 'init'
+                     if diff(xy(1,:)) >=0 
+                        mono_flag =1;  % monotonic up
+                     elseif diff(xy(1,:)) <0  
+                        mono_flag =1;  % monotonic down
+                     else
+                        mono_flag = 0;
+                     end;
+                 else
+                     mono_flag= misc(9);  % user specified in 'init'
+                 end;
+                 if line_handle(2)==1
+                    % trk is on
+                    line_color = get(line_handle(1),'color');
+                 else
+                    line_color =get(hcur_(5),'backgroundcolor');
+                 end;
+                 if strcmp(get(hcur_(11),'visible'),'on')
+                    % in delta cursor mode....
+                     if get(hcur_(11),'userdata')==In1
+                        % on active line
+                        delta_flag =1;
+                     else
+                        delta_flag =0;
+                     end;
+                 else   
+                    delta_flag =0;
+                 end;
+              else 
+                 % must be a drag callback
+                 line_color =[];
+                 mono_flag=In2;
+                 delta_flag=In3;
+              end;
+              if mono_flag
+                  % just use horizontal position
+                  [junk,imin]=min(abs( x_cur-xy(1,:) ) ); 
+              else
+                  % find point on line closest to the click (non-euclidian metric should be ok)
+                  % normalize by axis limits
+                  [junk,imin]=min((abs( (x_cur-xy(1,:))/(xylim(2)-xylim(1))) + abs( y_cur-xy(2,:))/(xylim(4)-xylim(3)))); 
+              end;
+              cursor(Cur_ID,'main_cur',In1,imin,xy(1,imin),xy(2,imin),...
+                             delta_flag,line_color); 
+              if nargin_shad ==3  % 1st time its called, there is no drag
+                 % note the following cbStr has delta_flag at the end.
+                 % this causes nargin_shad ==5 so we don't re-execute this 
+                 % code if there is a drag.
+                 cbStr=['cursor(',cur_idstr,',''line_cb'',',int2str(In1),',', int2str(mono_flag),',',int2str(delta_flag),');'];
+                 
+                 if drag_enable set(gcf,'WindowButtonMotionFcn',cbStr); end;
+                 
+                 if (hcur_(13) ~=0) 
+                    cursor(Cur_ID,'aux_cur');  % update aux cursor
+                    % The objective here is to provide maximum tracking speed for the 
+                    % main cursor, and update the aux cursor when the drag is done.
+                    % The following de-installs functions when WindowButtonUp occurs.
+                    % What you can do with this stuff is truly amazing!!!!!
+                    cbStr= ['set(gcf,''WindowButtonMotionFcn'',''''); ',...
+                            'cursor(',cur_idstr,',''aux_cur'');',...
+                            'set(gcf,''WindowButtonUpFcn'','''');'];
+                    set(gcf,'WindowButtonUpFcn',cbStr);
+                 else   
+                    set(gcf,'WindowButtonUpFcn',...
+                           ['set(gcf,''WindowButtonMotionFcn'','''');',...
+                            'set(gcf,''WindowButtonUpFcn'','''');']);
+                 end;
+              end;
+              s = get(hcur_(6),'userdata');
+              if ~isempty(s)
+                 eval(s);     % user defined callback
+              end;   
+           end;
+            %  .                                                                              .   12/9/98
+        elseif (   strcmp(get(hcur_(10),'Visible'),'on') | misc(10) | misc(11)   ) & vflg
+            % EXPAND MODE, Expansion box on
+            % single left mouse click expands
+            % single right mouse click cancels expansion box
+            if strcmp(clk_type,'normal')
+               cursor(Cur_ID,'scale','new');
+               
+            % elseif (strcmp(clk_type,'extend')&~beyondv4)  |  (strcmp(clk_type,'alt')&beyondv4)   
+            elseif strcmp(clk_type,'alt')
+               % right mouse click
+               cursor(Cur_ID,'restore'); 
+            end;
+            misc(10) =0; misc(11) =0;
+            set(hcur_(3),'userdata',misc); 
+            
+        end;
+    %-------------------------------------------------------------------------------   
+    elseif strcmp(Action,'main_cur')
+             % active cursor = In1
+             % imin          = In2
+             % x             = In3
+             % y             = In4
+             % delta mode    = In5
+             % color         = In6
+             
+             % xylimit then update main cursor
+             xylim = [get(hcur_(12),'xlim'),get(hcur_(12),'ylim')];
+             set(hcur_(13+In1),'Xdata',max(xylim(1),min(xylim(2),In3)),...
+                                     'Ydata',max(xylim(3),min(xylim(4),In4)));
+             fmt =get(hcur_(2),'userdata');  % formats stashed here
+             misc=get(hcur_(3),'userdata');     % misc parameters
+             if nargin_shad == 8 && ~isempty(In6)
+                set([hcur_(3),hcur_(5)],'backgroundcolor',In6);
+                if (hcur_(13) ==0)
+                    % hide inactive cursor 
+%                     set(hcur_(13:length(hcur_)),'visible','off');
+                    set(hcur_(14:length(hcur_)),'visible','off');
+                    set(hcur_(13+In1),'visible','on');
+                end;
+                if hcur_(13) ~=0 || In5==1
+                     % overlayed 
+                     set([hcur_(6)],'backgroundcolor',In6,'Max',1);
+                end
+                
+                if beyondv4 >=5.2
+                    set(hcur_([1:2]),'enable','inactive'); % can you believe?
+                    set(hcur_(9),'enable','on');
+                else
+                    set(hcur_([9,1:2]),'enable','on');% x y axis buttons v > 1.14
+                end
+                
+             end
+%              set(hcur_(3),'string',ftoa(fmt(1,:),In3));
+%              set(hcur_(5),'string',ftoa(fmt(2,:),In4));
+             set(hcur_(3),'string',sprintf('%0.3e',In3));
+             set(hcur_(5),'string',sprintf('%0.3e',In4));
+    
+             if ~isempty(In5)
+                if In5==1
+                   % delta mode
+                   
+                   set(hcur_([4,6]),'BackGroundColor',get(hcur_(3),'BackGroundColor'),'Max',1,'visible','on');
+
+                   set(hcur_(4),'string',ftoa(fmt(1,:),  In3-get(hcur_(11),'Xdata') ));
+                   set(hcur_(6),'string',ftoa(fmt(2,:),  In4-get(hcur_(11),'Ydata') ));
+                end;
+             end;
+             misc(7)  = In1;  % active cursor number  1... and up.
+             misc(6) = In2;  % index into xy array
+             misc(1)    = In3;  % update numerical shadows
+             misc(2)    = In4;
+             set(hcur_(3),'userdata',misc);
+             
+    %-------------------------------------------------------------------------------        
+    elseif strcmp(Action,'aux_cur')
+            % Move aux cursor and update readout.
+            % the last cursor is always the aux cursor and it has the line handle.
+            fmt  = get(hcur_(2),'userdata');  % formats stashed here
+            misc = get(hcur_(3),'userdata');     % misc parameters
+            imin = misc(6);
+            ilast_cur   = length(hcur_);
+            line_handle = get(hcur_(ilast_cur),'userdata'); % always the last cursor in list 
+            xy          = [get(line_handle(1),'Xdata');get(line_handle(1),'Ydata')];
+            xylim       = [get(hcur_(13),'Xlim'),get(hcur_(13),'Ylim')];
+            
+            % xylimit fudge
+             xylen = length(xy(1,:)); if imin>xylen imin=xylen; end;  % [PM]
+             set(hcur_(ilast_cur),'Xdata', max(xylim(1),min(xylim(2),xy(1,imin))),...
+                                  'Ydata', max(xylim(3),min(xylim(4),xy(2,imin))));
+            
+            
+            if strcmp(get(hcur_(11),'visible'),'off')
+               if line_handle(2)==1
+                  % color tracking is on
+                  if misc(8)==1
+                     set(hcur_(6),'backgroundcolor',get(line_handle(1),'color'),'Max',1);
+                  else
+                    
+                        % disp('vis off #3')
+                        set(hcur_(6),'visible','off','Max',2);
+
+                  end;
+                 
+                     % disp('vis off #4')
+                     set(hcur_(4),'visible','off','Max',2);
+
+               end;
+               if misc(8)==1
+                  set(hcur_(6),'string',ftoa(fmt(2,:),xy(2,imin)));
+               else
+                 
+                     % disp('vis off #5')
+                     set(hcur_(6),'string','','visible','off','Max',2); 
+
+               end;
+            end;
+            misc(5) = xy(2,imin);
+            set(hcur_(3),'userdata',misc); 
+    %-------------------------------------------------------------------------------    
+    elseif strcmp(Action,'scale')
+        exp_his = get(hcur_(5),'userdata');  % retrieve the expansion history
+        %    exh_in=exp_his;  % handy for debugging
+        %    exh_in
+        % col 5 has a marker for the current expansion
+        if isempty(exp_his)
+            % 1st scale operation, save original axis limits and mark as current
+            exp_his =[get(hcur_(12),'Xlim'),get(hcur_(12),'Ylim'),1];
+        end
+        
+        
+        gridH = findobj(hcur_(12),'UserData','grid'); % adaptation for the PM gridline routine 
+        if ~isempty(gridH)
+           gvis  = get(gridH,'visible');
+           set(gridH,{'visible'},{'off'});  % to facilitate auto-scale using X or Yauto axis property
+        end   
+        
+        
+        
+        l_exp   = length(exp_his(:,1));  % get length of expansion history
+        cur_exp = find(exp_his(:,5)==1); % find current scale selection
+        
+        if strcmp(In1,'new')
+           % set axis scale limits per expansion box dimensions
+           xy      = [get(hcur_(10),'Xdata'),get(hcur_(10),'Ydata')];
+           exp_lim = [min(xy(1),xy(2)),max(xy(1),xy(2)),...
+                      min(xy(6),xy(8)),max(xy(6),xy(8))];
+           xy = [get(hcur_(12),'Xlim'),get(hcur_(12),'Ylim')];
+           if xy==exp_lim
+              % disp('same limits')
+              if ~isempty(cur_exp)
+                 % set current expansion marker to a 1
+                 exp_his(cur_exp,5)=1;
+              end;
+           else
+              if ~isempty(cur_exp)
+                 % set current expansion marker to a 0. (we will gen a new one)
+                 exp_his(cur_exp,5)=0;
+                 if max(cur_exp,l_exp) < 4 
+                     % simply append new data
+                    exp_his = [exp_his;[exp_lim,1]]; 
+                 else
+                    % the max depth has been attained, circulate expansions.
+                    if cur_exp ==4
+                       exp_his(2:4,:)=[exp_his(3:4,:);[exp_lim,1]];
+                    elseif cur_exp >= 1
+                       exp_his(cur_exp+1,:)=[exp_lim,1]; 
+                    end;
+                 end;
+              else
+                 % was autoscaled  (all zeros in EXPFLAG column)
+                 if l_exp < 4
+                    % room to add one more
+                    
+                    exp_his = [exp_his;[exp_lim,1]]; 
+                 else
+                    exp_his = [exp_his(l_exp-1,:);[exp_lim,1]];
+                 end;
+              end;
+           end;
+           auto_scale=0;
+        
+        elseif strcmp(In1,'old')
+            %  find where we are and back down history by 1 till rock bottom
+            %  then roll around. BEEP when original axis limits are hit.
+               if isempty(cur_exp)
+               % was autoscaled move to end
+                   cur_exp = l_exp;
+               else
+                   exp_his(cur_exp,5)=0;
+                   cur_exp = cur_exp-1;
+               end
+               % unit beep, we are @ original display limits 
+%                if cur_exp==1  fprintf(1,'%c',7);  end;  
+              
+               if cur_exp == 0
+                   auto_scale= 1;    % autoscale if we back through bottom 
+               else
+                   auto_scale=0;
+                   exp_lim=exp_his(cur_exp,1:4);
+                   exp_his(cur_exp,5)=1;
+               end
+        
+        elseif strcmp(In1,'auto')
+             if strcmp(In2,'x')
+                 auto_scale=2;
+             elseif strcmp(In2,'y')
+                 auto_scale=3;
+             elseif strcmp(In2,'both')
+                 auto_scale=1;
+             else
+                disp([In2,' not recognized in cursor(Cur_ID,scale,auto,In2)']);
+             end;
+        
+        else
+           disp([In1,' not recognized in cursor(Cur_ID,scale,In1)']);
+        end;
+        
+      
+        if auto_scale ==0
+           % use exp_lim scales
+           set(hcur_(12),'Xlim',sort(exp_lim(1:2)),...
+                                'Ylim',sort(exp_lim(3:4)));       % added sort 3/29/2k
+           no_hope = 0;
+        else
+           % auto scale axes and then update exp_lim for use if there is an aux axis
+           % move cursors onto an active line for the moment to facilitate autoscaling
+           num_lines=length(hcur_)-13;
+           minx=+inf;
+           maxx=-inf;
+           no_hope = 1; % pessimist
+           temp  = zeros(num_lines,2);
+           
+
+           line_list = [];
+           for i=1:num_lines
+               h_line=get(hcur_(13+i),'userdata');
+               if strcmp('on',get(h_line(1),'visible'))
+                  % line is visible, can have an active cursor on invisible line ... 
+                  % therefore this search is needed. 
+                  xdata   = get(h_line(1),'Xdata');
+                  minx    = min(minx,min(xdata)); % must consider Nyquist 
+                  maxx    = max(maxx,max(xdata)); % so min and max are not at ends
+                  if no_hope
+                     ydata   = get(h_line(1),'Ydata');
+                  end;
+                  no_hope = 0; % a line is alive
+                  line_list = [i,line_list]; 
+               end;
+           end;
+               
+           if no_hope 
+               s='You may have attempted to autoscale with no lines visible in the axis.';
+               msgbox(s,'Operator Warning','warn','modal');
+           else
+              for i=1:num_lines
+                  temp(i,:)=[get(hcur_(13+i),'xdata'),get(hcur_(13+i),'ydata')];
+                  set(hcur_(13+i),'xdata',xdata(1),'ydata',ydata(1));
+              end;
+          
+              %   Yaxis auto scales OK here, but Xaxis is suboptimal on zoomed data
+              %   therefore use min / max of Xdata to scale x axis.    
+              
+              
+              if auto_scale == 1
+                 set(hcur_(12),'YlimMode','Auto');  % Y autoscale
+                 exp_lim = [minx,maxx,get(hcur_(12),'Ylim'),1];    
+                 set(hcur_(12),'Xlim',exp_lim(1:2));  % X scale
+              elseif auto_scale == 2
+                 exp_lim = [minx,maxx,get(hcur_(12),'Ylim'),1];
+                 set(hcur_(12),'Xlim',exp_lim(1:2));  % X scale 
+              elseif auto_scale == 3
+                                                                                                                        
+                 misc=get(hcur_(3),'userdata');     % misc parameters
+                 if ismember(misc(7),line_list)
+                    h_line=get(hcur_(13+misc(7)),'userdata');
+                    ydata = get(h_line(1),'Ydata');
+                    ymax = max(ydata);
+                    ymin = min(ydata);
+                    
+                    dy   = 0.25*(ymax-ymin); % 9/15/98
+                    ymin = ymin - dy;
+                    ymax = ymax + dy;
+                    
+                    if ymin ~= ymax
+                       set(hcur_(12),'YlimMode','manual');     % 6/10/98
+                       set(hcur_(12),'Ylim',[ymin,ymax]);
+                       drawnow;                                       % 6/10/98
+                    else
+                       set(hcur_(12),'YlimMode','Auto');  drawnow; 
+                    end;
+
+                 else
+                    set(hcur_(12),'YlimMode','manual');  drawnow; % seems to make following Y autoscale reliable
+                    set(hcur_(12),'YlimMode','Auto');             % Y autoscale
+                 end;
+                    
+                    exp_lim = [get(hcur_(12),'Xlim'),get(hcur_(12),'Ylim'),1];
+              end;
+           
+              % restore cursor  positions
+              for i=1:num_lines
+                  set(hcur_(13+i),'xdata',temp(i,1),'ydata',temp(i,2));
+              end;    
+           end;     
+        end;
+        
+        if no_hope ==0
+           %  service overlayed plots.....   
+           %  1) see if one exists, 2) set x scales to be the same
+           %  3) set y' scale to be:  y'=ay+b  where y is the owners y axis
+           if  hcur_(13)~=0
+               % an aux exists, set aux axis limits
+               ixro_dat=get(hcur_(3),'userdata'); % get a and b 
+               set(hcur_(13),'Xlim',exp_lim(1:2),...
+                             'Ylim',ixro_dat(3)*exp_lim(3:4)+ixro_dat(4));
+           end;
+           set(hcur_(5),'userdata',exp_his);  % save history
+           cursor(Cur_ID,'restore');  % go back to cursor mode, rescale is complete
+           eval(get(hcur_(4),'userdata'));   % execute axis change callback stored in here v > 1.14
+         
+        end;
+        
+        
+        % adaptation for the PM gridline routine  
+        if ~isempty(gridH)
+           set(gridH,'visible',gvis);
+           gridline(hcur_(12),'update');
+        end;   
+        
+
+        
+        
+    %-------------------------------------------------------------------------------    
+    elseif strcmp(Action,'edit_cb')
+        % edit box callback method
+        x   = s2n(get(hcur_(3+In1),'string')); % get edit value
+        fmt = get(hcur_(2),'userdata');  % formats stashed here
+        misc=get(hcur_(3),'userdata');     % misc parameters
+        if strcmp(get(hcur_(10),'Visible'),'on') | misc(10) | misc(11) % v > 1.14
+             % get expansion box coordinates
+             xy = [get(hcur_(10),'Xdata'),get(hcur_(10),'Ydata')];
+             if In1 ==0 xold=xy(1); else xold=xy(3*In1); end;
+        else
+             xy=[get(hcur_(13+misc(7)),'Xdata'),get(hcur_(13+misc(7)),'Ydata')];
+             if In1==0 xold=xy(1);
+             elseif In1==2 xold=xy(2);
+             else xold=0;
+             end;
+        end;
+        % note: x does not refer to x coordinate, just a general variable
+        
+        if ~isempty(x)
+            % 1st, check for expansion box vis on
+            
+            if strcmp(get(hcur_(10),'Visible'),'on') | misc(10) | misc(11)  % v > 1.14
+                if In1 ==0         xy(4:5)=[x,x]; xy(1)  =x; 
+                elseif In1 ==1     xy(2:3)=[x,x];
+                elseif In1 ==2     xy(6:7)=[x,x]; xy(10) =x;
+                elseif In1 ==3     xy(8:9)=[x,x];
+                end;
+                set(hcur_(10),'Xdata',xy(1:5),'Ydata',xy(6:10));
+            else
+               % move cursor to defined point
+               if  In1==0
+                   % set(hcur_(icurbase+misc(i_act)),'Xdata',x,'Ydata',xy(2));
+                   cursor(Cur_ID,'axis_cb',misc(7),x); % perform same action as axis_cb with edit box x
+                   
+               elseif In1==2
+                   set(hcur_(13+misc(7)),'Xdata',xy(1),'Ydata',x);
+               else
+                   % must be a callback from iyexp edit box
+                   % may as well restore readout
+                   set(hcur_(3+In1),'string',ftoa(fmt((1+fix(In1/2)),:),misc(5)));
+                   % disp('What gives? The expansion box was off. error in cursor.m');
+               end;
+           end;
+       else
+           % bogus entry,  restore old strings ....
+           set(hcur_(3+In1),'string',ftoa(fmt((1+fix(In1/2)),:),xold));
+       end;    
+    %-------------------------------------------------------------------------------    
+    elseif strcmp(Action,'peakval_cb')
+    % PM's Peak / Valley finder, what will it do with a relation ? 
+    % get data from active line object
+         
+         misc        = get(hcur_(3),'userdata');
+         line_handle = get(hcur_(13+misc(7)),'userdata');
+         x           = get(line_handle(1),'Xdata');
+         y           = get(line_handle(1),'Ydata');
+         xlim        = get(hcur_(12), 'Xlim');  % get current x-axis limits
+         xx = find(x >= xlim(1)  &  x <= xlim(2));     % indicies within x limits
+        
+         if isempty(xx)
+            x = xlim(1);
+            xx = 1:length(x);
+            tmsg('Please click on the trace you wish to find the peak or valley of. ',1,[],'Cursor Message')
+         end;
+         
+         y = y(xx);  ly = length(y);                    % y data within x limits
+         if strcmp(In1,'^')                             % peak finder
+            ix=find(y > [-inf, y(1:ly-1)] & ...         % must be > point on left
+                    y > [y(2:ly), -inf]   & ...         % must be > point on right
+                    y < get(hcur_(7),'userdata')); % must be < previous peak
+         
+            if isempty(ix) 
+                 [y ix] = max(y);                       % no more peaks: go to max
+                 
+            else 
+                 [y i] =  max(y(ix)); 
+                    ix = ix(i);                         % there are more: go to biggest
+            end;
+            
+            set(hcur_(7),'userdata',y);            % save amplitude of the peak
+         elseif strcmp(In1,'v')                         % valley finder
+            
+            ix=find(y < [inf, y(1:ly-1)] & ...           % must be < point on left      
+                    y < [y(2:ly), inf]   & ...           % must be < point on right     
+                    y > get(hcur_(8),'userdata')); % must be > previous valley    
+            if isempty(ix) 
+                [y ix] = min(y);                         % no more valleys: go to min  
+            else 
+                [y i]  = min(y(ix));
+                    ix = ix(i);                          % there are more: go to smallest
+            end;                                                                    
+            set(hcur_(8),'userdata',y);            % save amplitude of the valley
+         end;
+
+         ix = ix + xx(1) - 1;    % translate index to point to full data block
+       
+         % allow pk val  finding with mark on v>2.07  
+         if strcmp(get(hcur_(11),'visible'),'on')
+            delta_flag =1;
+             line_handle = get(hcur_(13+misc(7)),'userdata'); % also has trk flag
+             if line_handle(2)==1
+             % trk is on
+                line_color = get(line_handle(1),'color');
+             else
+                line_color = get(hcur_(5),'backgroundcolor');
+             end;
+         else   
+            delta_flag = 0;
+            line_color = [];
+         end;
+    
+         cursor(Cur_ID,'main_cur',misc(7), ix, x(ix) ,y, delta_flag, line_color);
+         
+         if hcur_(13) ~=0
+            cursor(Cur_ID,'aux_cur'); % update aux cursor
+         end;
+         
+         
+    %-------------------------------------------------------------------------------    
+    elseif strcmp(Action,'mark_cb')
+         if strcmp(get(hcur_(11),'visible'),'off')
+             misc=get(hcur_(3),'userdata');     % misc parameters
+             set(hcur_(11),'visible','on','userdata',misc(7),...
+                                'Xdata',get(hcur_(13+misc(7)),'Xdata'),...
+                                'Ydata',get(hcur_(13+misc(7)),'Ydata'));
+         else
+             set(hcur_(11),'visible','off');
+             set(hcur_(7:8),'enable','on');
+             cursor(Cur_ID,'restore');
+         end;
+   %-------------------------------------------------------------------------------    
+    elseif strcmp(Action,'restore')
+        % terminate expansion and restore cursor readout 
+        misc = get(hcur_(3),'userdata');     % last x y cursor values
+        fmt  = get(hcur_(2),'userdata');  % formats stashed here
+        set(hcur_(3),'string',ftoa(fmt(1,:),misc(1)));
+        set(hcur_(5),'string',ftoa(fmt(2,:),misc(2)));
+        if hcur_(13) ~=0
+           line_handle = get(hcur_(length(hcur_)),'userdata'); % also has trk flag
+           if line_handle(2)==1
+              % color trk on
+              line_color = get(line_handle(1),'color');
+              set(hcur_(6),'string',ftoa(fmt(2,:),misc(5)),'enable','on' ,...
+                               'backgroundcolor',line_color,'Max',1);
+           else
+              set(hcur_(6),'string',ftoa(fmt(2,:),misc(5)),'enable','on')
+           end;
+           set(hcur_(10),'visible','off');
+          
+               % disp('vis off #6')
+               set([hcur_(4)],'string','','enable','off','visible','off','Max',2);
+
+           % xylimit
+           cursor(Cur_ID,'aux_cur');
+        else
+           set(hcur_(10),'visible','off');
+           if strcmp(get(hcur_(11),'visible'),'off')
+              
+                 % disp('vis off #7')
+                 set([hcur_(4),hcur_(6)],'string','','visible','off','Max',2);
+
+           else
+              % mark mode was on, leave delta readouts visible
+           end;
+        end;
+        
+        % xylimit then update main cursor 
+        misc    =  get(hcur_(3),'userdata');
+        xylim   = [get(hcur_(12),'xlim'),get(hcur_(12),'ylim')];
+        set(hcur_(13+misc(7)),'Xdata',max(xylim(1),min(xylim(2),misc(1) )),...
+                                        'Ydata',max(xylim(3),min(xylim(4),misc(2))));
+        if beyondv4 >=5.2
+            set(hcur_([1:2]),'enable','inactive'); % can you believe?
+            set(hcur_(9),'enable','on');
+        else
+            set(hcur_([9,1:2]),'enable','on');  % v > 1.14
+        end;
+    %-------------------------------------------------------------------------------    
+    elseif strcmp(Action,'set')
+    % SET ACTIONS follow
+        if strcmp(In1,'vis_on')
+             % set appropriate object vis
+             hset = hcur_(1:9);
+             hset = filter_valid_handles(hset);
+             if ~isempty(hset)
+                 set(hset,'visible','on');
+             end
+%              set(hcur_(13:length(hcur_)),'visible','on');
+             hset = hcur_(14:length(hcur_));
+             hset = filter_valid_handles(hset);
+             if ~isempty(hset)
+                 set(hset,'visible','on');
+             end
+             cursor(Cur_ID,'restore');
+        elseif strcmp(In1,'vis_off')
+             hset = [hcur_(1:11),hcur_(13:length(hcur_))];
+             hset = filter_valid_handles(hset);
+             if ~isempty(hset)
+                 set(hset,'visible','off');
+             end
+
+        elseif strcmp(In1,'y_ro&pos')
+              % RAB 8/11/00 
+              fmt=get(hcur_(2),'userdata');  % formats stashed here
+              set(hcur_(5),'string',ftoa(fmt(2,:),In2));  
+              misc    =  get(hcur_(3),'userdata');
+              %set(hcur_(icurbase+misc(i_act)),'Ydata',In2);
+              xylim   =  [get(hcur_(12),'xlim'),get(hcur_(12),'ylim')];
+              set(hcur_(13+misc(7)),'Ydata',max(xylim(3),min(xylim(4),In2)));
+
+              if strcmp(get(hcur_(11),'visible'),'on')
+                 set(hcur_(6),'string',ftoa(fmt(2,:),  In2-get(hcur_(11),'Ydata')));
+	      end;
+
+        elseif strcmp(In1,'position')     
+              %      In2 = [ x y w h    x label              1
+              %              x y w h    y label              2
+              %              x y w h    x cursor readout     3
+              %              x y w h    x cursor expansion   4
+              %              x y w h    y cursor readout     5
+              %              x y w h    y cursor expansion   6
+              %              x y w h    peak button          7
+              %              x y w h    valley button        8
+              %              x y w h    mark button          9 
+              for i=1:9
+                  set(hcur_(i),'position',In2(i,:))
+              end;
+        elseif strcmp(In1,'aux_off') 
+             misc          =  get(hcur_(3),'userdata');
+             misc(8) =  0;
+             set(hcur_(3),'userdata',misc);
+             
+             
+             % disp('vis off #8')
+             set([hcur_(6)],'visible','off','Max',2);
+
+             set(hcur_(length(hcur_)),'visible','off'); % turn off the aux stuff
+        elseif strcmp(In1,'aux_on') 
+             misc          =  get(hcur_(3),'userdata');
+             misc(8) =  1;
+             set(hcur_(3),'userdata',misc);
+             set(hcur_(6),'backgroundcolor',get(hcur_(5),'backgroundcolor'),'Max',1); % turn on the aux stuff
+             set(hcur_(length(hcur_)),'visible','on'); % turn on the aux stuff
+        elseif strcmp(In1,'xlab')
+             % x readout label
+             set(hcur_(1),'string',In2);
+        elseif strcmp(In1,'ylab')
+             % y readout label
+             set(hcur_(2),'string',In2);
+             
+        elseif strcmp(In1,'axis_cb')
+             % set axis limit change callback function
+             set(hcur_(4),'userdata',In2);  
+       
+        elseif strcmp(In1,'move_cb')
+             % set cursor move callback
+             set(hcur_(6),'userdata',In2); 
+             
+         elseif strcmp(In1,'xylim') | strcmp(In1,'ylim') | strcmp(In1,'xlim')
+             vertest = version; % check for MATLAB version GAH 020820
+             if size(findstr(vertest,'R11')) | size(findstr(vertest,'R12'))
+                 [swarn,f]=warning; % handle pre-R13 warning syntax GAH 020820
+                 warning off    % appears to be a MATLAB bug relating to get xlim RAB 8/14/00
+                 % had to redo this 8/22/00  for v5.3, since it does not handle the 
+                 % function form of warning() 
+             else
+                 swarn=warning('query','all'); % get status of warnings in R13 GAH 020820    
+                 warning off all; % turn off warning for one shot GAH 020820
+             end;
+             xy          = [get(hcur_(12),'xlim'),get(hcur_(12),'ylim')];
+             
+             if size(findstr(vertest,'R11')) | size(findstr(vertest,'R12'))
+                 eval(['warning ',swarn]);
+                 % warning(swarn); % restore warning state only in V6 and beyond arghhh.
+             else
+                 warning(swarn); % restore warning state in R13 on GAH 020820
+             end;
+             
+             old_eh      = get(hcur_(5),'userdata');
+             exp_his     = old_eh;
+             if ~isempty(exp_his)
+                 cur_exp = find(exp_his(:,5)==1); % find current scale selection
+                 if ~isempty(cur_exp)
+                     exp_his(cur_exp,5)=0;
+                 end;
+             end; 
+             
+             % attempt to save most of old expansion history by replacing only the 1st entry in list v >2.07
+             
+             if strcmp(In1,'xylim')
+                  xylim   = In2(:).';
+                  row5 = [xylim,1];
+                  if isempty(exp_his)
+                      exp_his = row5;
+                  else
+                      if size(exp_his,2) < 5
+                          exp_his = [exp_his, zeros(size(exp_his,1),5-size(exp_his,2))];
+                      end
+                      exp_his(1,1:5) = row5;
+                  end
+             elseif strcmp(In1,'ylim') 
+                  % In2 has main axis limits
+                  in2row = In2(:).';
+                  % xylim = [xy(1:2),In2];
+                  if ~isempty(old_eh)
+                    %  exp_his    =[[old_eh(1,1:2),In2,0];[xylim,1]];
+                    %% exp_his(1,:) = [old_eh(1,1:2),In2,1];
+                    %% xylim = [exp_his(1,1:2),In2];
+                    row5 = [xy(1:2),in2row,1];
+                    if size(exp_his,2) < 5
+                        exp_his = [exp_his, zeros(size(exp_his,1),5-size(exp_his,2))];
+                    end
+                    exp_his(1,1:5) = row5;
+                    xylim = [xy(1:2),in2row];
+                  else
+                     exp_his=[];
+                     xylim = [xy(1:2),in2row];
+                  end;
+             elseif strcmp(In1,'xlim')
+                  % xylim = [In2,xy(3:4)];
+                  in2row = In2(:).';
+                  if ~isempty(old_eh)
+                     %  exp_his   =[[In2,old_eh(1,3:4),0];[xylim,1]];
+                     %% exp_his(1,:) = [In2,old_eh(1,3:4),1];
+                     %% xylim  = [In2,exp_his(1,3:4)]; 
+                     row5 = [in2row,xy(3:4),1];
+                     if size(exp_his,2) < 5
+                         exp_his = [exp_his, zeros(size(exp_his,1),5-size(exp_his,2))];
+                     end
+                     exp_his(1,1:5) = row5;
+                     xylim  = [in2row,xy(3:4)];
+                  else
+                     exp_his=[];
+                     xylim = [in2row,xy(3:4)];
+                  end
+             end;
+             
+             % set new axis limits and expansion history
+             % xylim has limits
+
+             % use sort to fix axis limits that are not increasing 3/1/00
+             set(hcur_(12),'Xlim',sort(xylim(1:2)),'Ylim',sort(xylim(3:4)));
+             
+             set(hcur_(5),'userdata',exp_his); % set expansion history
+            
+             if hcur_(13)~=0
+                  if nargin_shad ==5
+                     xy = In3;   
+                  else
+                     xy = get(hcur_(13),'Ylim'); % must use old I guess
+                  end;
+                  set(hcur_(13),'Xlim',xylim(1:2),'Ylim',xy);
+                  yaux_ratio    =  diff(xy(1:2))/diff(xylim(3:4)); % slope 'a'
+                  misc          =  get(hcur_(3),'userdata');
+                  misc(3:4) =  [yaux_ratio, xy(2)-yaux_ratio*xylim(4)];
+                  set(hcur_(3),'userdata',misc);
+            end;
+            
+            if ~isempty(findobj(hcur_(12),'UserData','grid')); % adaptation for the PM gridline routine 
+                  gridline(hcur_(12),'update');
+            end;
+         
+         
+        elseif strcmp(In1,'clrpk')
+            set(hcur_(7), 'userdata',-inf);   % reset peak valley finder
+            set(hcur_(8),'userdata',inf);
+            
+        elseif strcmp(In1,'exp_his')
+            % restore expansion history and axis limits....
+            % first, check the size of what has been passed.... this 
+            % will determine how the data is to be handled. 
+            
+            if length(In2(1,:)) < 5
+               % can't do too much here since this is the previous way 
+               % of handling the restoration of cursor state... which 
+               % was incomplete...
+               cursor(Cur_ID,'set','xylim',In2);
+            elseif sum([(4+1) 5]==size(In2))==2
+               % right shape....
+               exp_his = [];
+               for i=1:4+1
+                   % crawl through and build the history
+                   if i<=4
+                      if In2(i,5) >=0
+                         exp_his=[exp_his;In2(i,:)];
+                         if In2(i,5)==1
+                            % this is the 'active' expansion
+                            xylim = In2(i,1:4);
+                            set(hcur_(12),'Xlim',In2(i,1:2),'Ylim',In2(i,3:4));
+                            if ~isempty(findobj(hcur_(12),'UserData','grid')); % adaptation for the PM gridline routine 
+                               gridline(hcur_(12),'update');
+                            end;
+                         end;
+                      end
+                   else
+                     % check for dual axis limits
+                     if In2(i,5) ==2
+                        % should have a dual axis
+                     %  set(hcur_(iax_aux),'Xlim',xylim(1:2),'Ylim',xy);
+                        set(hcur_(13),'Xlim',In2(i,1:2),'Ylim',In2(i,3:4));
+                     %  yaux_ratio    =  diff(xy(1:2))/diff(xylim(3:4)); % slope 'a'
+                        yaux_ratio    =  diff(In2(i,3:4))/diff(xylim(3:4)); % slope 'a'
+                        misc          =  get(hcur_(3),'userdata');
+                     %  misc(i_a:i_b) =  [yaux_ratio, xy(2)-yaux_ratio*xylim(4)];
+                        misc(3:4) =  [yaux_ratio, In2(i,4)-yaux_ratio*xylim(4)];
+                        set(hcur_(3),'userdata',misc);
+                     end;
+                   end;
+               end;
+               set(hcur_(5),'userdata',exp_his); 
+               
+            else
+                % Houston, we have a problem.
+                disp('error in cursor(cursor_id,set,exp_his,xxx), xxx is wrong shape');
+            end;
+            
+        end;
+        
+    %-------------------------------------------------------------------------------        
+    elseif strcmp(Action,'get')
+         % GET Actions
+         if strcmp(In1,'position')
+              % return x,y position of cursor in Out1
+              % returns corresponding index into data array in Out2
+	      % returns line number in Out3 RAB 8/11/00
+              misc = get(hcur_(3),'userdata'); 
+              if nargin_shad ==4
+                 line_num=In2;
+              else
+                 line_num=misc(7);
+              end;
+              Out1 = [get(hcur_(13+line_num),'xdata'),get(hcur_(13+line_num),'ydata')];
+              Out2 = misc(6); 
+              line_handle = get(hcur_(13+misc(7)),'userdata');  % handle to active line 
+              Out3 = line_handle(1);
+     
+          elseif strcmp(In1,'active_line')
+              misc = get(hcur_(3),'userdata');
+              Out1 = misc(7);                  % active line number
+              line_handle = get(hcur_(13+misc(7)),'userdata');  % handle to active line 
+              Out2 = line_handle(1);
+          
+          elseif strcmp(In1,'exp_his_shape')
+              Out1 = 5;
+              Out2 = 5;
+               
+          elseif strcmp(In1,'exp_his')
+            % need to return an array of a consistant shape 
+            % e.g 4x5 = EXPMAXc x EXPFLAGc ...  being [xmin,xmax,ymin,ymax,select_flag];
+            % plus the aux axis scales at end of array yielding a 5x5 array 
+            
+            % data in the 5th column is a flag...
+            % 0=valid expansion, not active
+            % 1=valid expansion, active ... there can only be one of these
+            %-1=invalid expansion, never active
+            % 2=valid expansion, for use by 2nd axis
+          
+            exp_his = get(hcur_(5),'userdata'); 
+            if isempty(exp_his)
+               % nobody home, we must make one....
+               xylim = [get(hcur_(12),'xlim'),get(hcur_(12),'ylim')];
+               Out1  = [[xylim,1];[zeros(4-1,5-1),-1*ones(4-1,1)]];
+            else
+               l=4-length(exp_his(:,1));
+               Out1  = [exp_his;[zeros(l,5-1),-1*ones(l,1)]];
+            end;
+            
+            if hcur_(13)~=0
+               % dual axis
+               xylim = [get(hcur_(13),'xlim'),get(hcur_(13),'ylim')];
+               Out1  = [Out1; [xylim,2]];  % note the 2 flag ....
+            else
+              Out1  = [Out1;[zeros(1,5-1),-1]];
+            end;
+            
+         else
+            disp('error in cursor.mi get action');
+         end;
+      
+        
+    %-------------------------------------------------------------------------------        
+    elseif strcmp(Action,'aux_axis_cb')
+        % This should not happen. The cursor has been called by the 
+        % underlying axis.
+        disp('potential error in cursor.m underlying axis callback');
+        axes(hcur_(12)); % try to change back to top axis
+    %------------------------------------------------------------------------------- 
+    elseif strcmp(Action,'clear')  % delete cursor objects & clear out slot
+        delete(hcur_([1:11 13+1:length(hcur_)]));
+        delete(CUR_MAIN_HNDL(Cur_ID));
+        if isgraphics(CUR_MAIN_HNDL(1)) && isgraphics(CUR_MAIN_HNDL(2))
+            clear global CUR_MAIN_HNDL
+        end
+%         CUR_MAIN_HNDL(Cur_ID)=-1;
+%         slots = find(CUR_MAIN_HNDL==-1);
+%         if length(slots)==length(CUR_MAIN_HNDL)
+%            % may as well get rid of the whole thing
+%            clear global CUR_MAIN_HNDL
+%         end;
+    
+   
+    %------------------------------------------------------------------------------- 
+    elseif strcmp(Action,'killpatch')
+    % added 1/4/99 for SMAP RAB
+        misc     =  get(hcur_(3),'userdata');
+        misc(12) = 1;
+        set(hcur_(3),'userdata',misc);
+    
+    %-------------------------------------------------------------------------------          
+    elseif strcmp(Action,'scale_axis')
+    % SCALE_AXIS v > 1.14
+        misc     =  get(hcur_(3),'userdata');
+        ofs      =  strcmp(In1,'y');              % zero for x axis, 1 for y
+        clk_type = get(gcf,'SelectionType');      % get type of mouse click
+        
+        if  strcmp(clk_type,'normal')
+           % single left click behaves the same as previous versions
+           if misc(10+ofs)==0
+              % we were not in explicit expand mode...
+              % display current axis limits of main plot
+              xy  = [get(hcur_(12),'xlim'), get(hcur_(12),'ylim')];  
+           
+              fmt  = get(hcur_(2),'userdata');  % formats stashed here
+              set(hcur_(3 +2*ofs),'string',ftoa(fmt(1+ofs,:),xy(1+2*ofs)),'enable','on' );
+              set(hcur_(4+2*ofs),'string',ftoa(fmt(1+ofs,:),xy(2+2*ofs)),'enable','on' ,...
+                                     'backgroundcolor',get(hcur_(3),'backgroundcolor'),...
+                                     'Max',1,'visible','on');
+              misc(10+ofs)=1; % cursor is now in scale mode
+
+              % check if alternate expansion is active
+              if misc(10)&misc(11)==1
+                 % one  explicit x / y scale is currently  active
+                 % don't setup expansion box, its already taken care of
+              else
+                 % set expansion box limits to current display limits 
+                 set(hcur_(10),'Xdata',[xy(1),xy(2),xy(2),xy(1),xy(1)],...
+                                    'Ydata',[xy(3),xy(3),xy(4),xy(4),xy(3)],...
+                                    'visible','on');
+              end;
+              set(hcur_(3),'userdata',misc);
+           else
+              cursor(Cur_ID,'scale','new');
+              misc(10) =0;
+              misc(11) =0;
+              set(hcur_(3),'userdata',misc); 
+           end;
+        elseif  strcmp(clk_type,'alt')
+            % A single right click, In1 has x or y information
+            cursor(Cur_ID,'scale','auto',In1);
+        end;
+
+    %------------------------------------------------------------------------------- 
+    
+    
+    else
+        clk_type=get(gcf,'SelectionType')  
+        disp([Action,' not recognized in cursor.m']);
+        if nargin_shad ==3
+           disp(['In1=',In1]);
+        end;
+    end;
+% end  cursor function
+
+function hset = filter_valid_handles(hset)
+mask = false(size(hset));
+for ii = 1:numel(hset)
+    try
+        if isnumeric(hset(ii)) && hset(ii) == 0
+            mask(ii) = false;
+            continue;
+        end
+        if isgraphics(hset(ii))
+            try
+                typ = get(hset(ii),'Type');
+                mask(ii) = ~strcmpi(typ,'root');
+            catch
+                mask(ii) = false;
+            end
+        else
+            mask(ii) = false;
+        end
+    catch
+        try
+            if ishghandle(hset(ii))
+                try
+                    typ = get(hset(ii),'Type');
+                    mask(ii) = ~strcmpi(typ,'root');
+                catch
+                    mask(ii) = false;
+                end
+            else
+                mask(ii) = false;
+            end
+        catch
+            mask(ii) = false;
+        end
+    end
+end
+hset = hset(mask);
+

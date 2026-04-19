@@ -1,0 +1,59 @@
+function drawplots
+%function drawplots
+
+   global hMCVIEW;
+
+   [vdlg1_s1 vdlg1_s2 junk junk owner MaxInputs]=v_dlg1('get','state');
+   [ActiveChans junk]=v_dlg1('get','clist');
+   PlotsInY = hMCVIEW.arrange(1);
+   PlotsInX = hMCVIEW.arrange(2);
+   for i = 1:PlotsInX*PlotsInY     
+       hMCVIEW.axis(i)=subplot(PlotsInY,PlotsInX,i);
+       % the "plot(1,1)" is necessary for the entire axes to appear correctly
+       plot(1,1); zoom on;
+       set(gca,'xlim',[0 1],'ylim',[0 1]);
+       set(hMCVIEW.axis(i),'parent',hMCVIEW.fig,...
+                   'units','normalized',...
+                   'color',[0 0 0],...
+                   'nextplot','add',...
+                   'SortMethod','childorder',...
+                   'XColor',[1 1 1],...
+                   'YColor',[1 1 1],...
+                   'ZColor',[1 1 1]);
+% 'drawmode','fast',...
+       % Can't use the canned MATLAB xlabel and title calls.
+       if strcmp(get(hMCVIEW.time,'checked'),'on')
+           hMCVIEW.xlabel(i) = xlabel('sec','color','white');
+       else
+           hMCVIEW.xlabel(i) = xlabel('Hz','color','white');    
+       end; 
+       % only apply an xlabel to the lower plots
+       if i<=PlotsInX*(PlotsInY-1)
+           set(hMCVIEW.xlabel(i),'string','');
+       end;
+       % associated line object with axis, one line per axis.
+       hMCVIEW.line(i)=line('parent',hMCVIEW.axis(i),...
+                           'color','black');
+% 'erasemode','background'
+       match=find(i==ActiveChans);
+       if isempty(match)
+           if hMCVIEW.arrange(1) == 1
+               rotation = 270;
+           else
+               rotation = 0;
+           end;
+           hMCVIEW.offtext(i)=text(.8,.8,['Ch ',num2str(i),' is Off'],...
+                               'fontunits','pixels',...
+                               'fontsize',12,...
+                               'fontweight','bold',...
+                               'rotation',rotation,...
+                               'color','red');
+       else
+           hMCVIEW.offtext(i)=text(.8,.8,['Ch ',num2str(i)],...
+                               'color','white',...
+                               'fontunits','pixels',...
+                               'fontweight','bold',...
+                               'fontsize',12);       
+       end;   
+   end;  % end for loop
+%end drawplots()

@@ -1,0 +1,17 @@
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.tmp
+*.log
+
+# MATLAB transient artifacts
+*.asv
+*.autosave
+*.mlx.autosave
+slprj/
+codegen/
+
+# Local recovery/session artifacts
+recovered_chats/
+state_*.sqlite*
+*.copytest

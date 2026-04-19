@@ -1,0 +1,561 @@
+  function [Out1, Out2, Out3]=v_dlg2(Action,In1,In2,In3,In4,In5,In6,In7);
+% function [Out1, Out2, Out3]=v_dlg2(Action,In1,In2,In3,In4,In5,In6,In7); 
+% Actions
+%  'init'       create all controls but leave hidden
+%               In1=position, In2=null, In3 has initial colors
+%               In4=Owner  In5=VDLG2_S1 In6=dlg_vis
+%               In7 [optional] has parent figure handle
+%  'get'
+%     'state'    get control state in Out1, null in Out2, vis status Out3
+%     'term_cnt' get average terminating count
+%     'wincor'   get window power correction factor
+%     'filedat'  window power cor fac in Out1(1), window index in Out1(2)
+%     'avg_mode' get averaging mode
+%  'set'
+%  'load'       loads control states from VDLG2_S1
+%
+%  'load_all'   loads colors, states, visibility, channel pointer
+%               In1=vis, In2=color, VDLG2_S1=In3;
+%
+%  'open'
+%  'close'        hide all objects if they were visible
+%  'clear'        clear globals
+%  'term_tog'     toggle terminal count and hide count menu iff OFF
+%  'set_ovlp'     set overlapped processing mode storage / hardware
+%  'set_avgmode'  set average mode / hardware
+%  'set_tcntro'
+%  'set_lamro'
+%  'aaf_tog'
+%  'show_cond'
+%     'all'
+%     'term'
+%     'exp_adapt'
+%     'term&exp'
+%     'win_on'
+%     'win_off'
+%   'vcap'        (vcap calls h_dlg1)
+%         'lock'     lock overlap controls for vcap
+%         'unlock'   unlock all of the above
+%
+% Dick Benson, DSP Technology 
+
+
+   global HVDLG2_;      % global handle vector
+   global VDLG2_S1;     % S1 holds the numerical states
+
+   % end global declarations
+
+% ************************************************************
+%include
+   vdlg2_h;   % handle index definitions
+   avgdef_h;  % averaging & overlap mode  definitions
+   vsld_h;    % slider modes
+   vcol_h;    % common color definitions
+   vsiz_h;    % size of controls OK_CAN CKS1 etc
+%end_include
+
+
+%define
+       ZPADONc   = 1;    % 0 for 2.24, 1 beyond 
+       TcMin     = 1;    % range of average count
+       TcMax     = 1e4;
+       LamMin    = 0.0;  % range of decay factor
+       LamMax    = 1;
+%end_define
+
+
+% ****************************************************
+
+   if strcmp(Action,'init'),
+   %INIT Command
+   
+       dl_pos      = In1;   % position
+                            % In2 not used
+       my_color    = In3;   % In3 contains color definitions
+       vdlg2_owner = In4;   % owner
+
+       if nargin>=7
+           % use input args for initial condx
+           VDLG2_S1 =In5;
+           dlg_vis  =In6;
+           if nargin ==8
+              hf = In7;
+           else
+              hf = gcf;
+           end;
+           
+           % Take care of new states here .... and in load_all section 
+           if length(VDLG2_S1) < ovldrej
+              VDLG2_S1= [VDLG2_S1,1,0];    % was 0,0 till olvd rej popup resurection 
+           elseif length(VDLG2_S1)==ovldrej 
+              VDLG2_S1= [VDLG2_S1,0];   % append new zpad state 
+           end;
+       else
+           % use default values
+           % vdlg_2 default definition
+           %        add,exp,peak
+           %           avgmode  tcnt  lambda  termckpb  winsel ovlpmode  ovldrej  zpad(new) dlback  titletxt
+           VDLG2_S1 = [1,       10,   LamMax, 1,        1,     1         0         0         0      0 ];
+           dlg_vis  ='off';
+           if nargin ==6
+              hf = In5;
+           else
+              hf = gcf;
+           end;
+       end;
+
+      %define
+       wdl    = 120;          % This dialog's  size
+       hdl    = 170;          % This dialog's  size
+       wlb    = 48;           % control label width
+       wsld   = wdl-2*LHOc;      % slider control width
+
+       wzpad   = 40;
+       wavgfd  = 70;
+
+       dlback_pos   = [dl_pos,wdl,hdl];
+       titletxt_pos = [dl_pos + [LHOc,hdl-HTXTc-1],wdl-2*LHOc,HTITLEc];
+       
+       avgmode_pos      = [dl_pos + [LHOc,hdl-1.75*VSc],wdl-2*LHOc,HPU1c];   % time domain average selector
+       vfd_avg_pos      = [dl_pos + [LHOc,hdl-1.75*VSc],wavgfd,HPU1c];% freq domain average selector
+       zpad_pos         = [dl_pos + [2*LHOc+wavgfd,hdl-1.75*VSc],wzpad-LHOc,HPU1c];
+      % lambda slider b2
+        lambda_pos   =  [dl_pos + [LHOc,hdl-2.75*VSc],wdl-2*LHOc];
+      % terminal count pb/slider
+        tcnt_pos     = lambda_pos;
+        termckpb_pos = [dl_pos + [LHOc,hdl-2.75*VSc], wdl-2*LHOc,HCKS1c];
+        ovldrej_pos  = [dl_pos + [LHOc,hdl-4.85*VSc],wdl-2*LHOc,0.95*HCKS1c];
+        ovlpmode_pos = [dl_pos + [LHOc,hdl-5.78*VSc],wdl-2*LHOc,HPU1c];
+        winsel_pos   = [dl_pos + [LHOc,hdl-6.7*VSc], wdl-2*LHOc,HPU1c];
+        
+      %end_define
+
+
+   % init ALL ui controls now
+      HVDLG2_(dlback)=uicontrol(hf,'Style','frame','visible','off',...
+                                'Position',dlback_pos,...
+                                'BackGroundColor',...
+                                 my_color(DLG_BKc,:));
+
+
+     HVDLG2_(titletxt) = uicontrol(hf,'Style','text','visible','off',...
+                                   'String','PROCESSING',...
+                                   'Position',titletxt_pos,...
+                                   'BackGroundColor',my_color(DTL_BKc,:),...
+                                   'ForeGroundColor',my_color(DTL_FRc,:),...
+                                   'userdata',vdlg2_owner); %@@@*** stash owner
+
+
+      s = AVGSTRc; 
+      avg_pos = avgmode_pos;
+      zpad_vis = 'off';
+      if strcmp(vdlg2_owner,'vos')
+         x= findstr(s,'|');
+         s = s(1:(x(ADAPTc)-1));
+      elseif ZPADONc&(strcmp(vdlg2_owner,'vsa') | strcmp(vdlg2_owner,'vna'))
+         avg_pos= vfd_avg_pos;
+         zpad_vis = 'on'; 
+      end;
+      HVDLG2_(avgmode)=uicontrol(hf,'Style','Popup','Visible','off',...
+                                 'Position',avg_pos,...
+                                 'BackgroundColor',my_color(PUP_BKc,:),...
+                                 'ForeGroundColor',my_color(PUP_FRc,:),...
+                                 'String',s,'HorizontalAlignment','left',...
+                                 'Value',VDLG2_S1(avgmode),...
+                                 'CallBack',...
+                                 ['v_dlg2(''set_avgmode'');',...
+                                  'v_dlg2(''show_cond'',''exp_adapt'');',...
+                                  'ls_',vdlg2_owner,'(''set_proc'');']);
+                                  
+      HVDLG2_(zpad)=uicontrol(hf,'Style','checkbox','Visible',zpad_vis,...
+                                 'Position',zpad_pos,...
+                                 'BackgroundColor',my_color(LBL_BKc,:),...
+                                 'ForeGroundColor',my_color(LBL_FRc,:),...
+                                 'String','Zp','HorizontalAlignment','left',...
+                                 'tooltipstring','Zero padding, on for correlation, otherwise off',...
+                                 'Value',VDLG2_S1(zpad),...
+                                 'CallBack',...
+                                 ['v_dlg2(''set_zpad'');',...
+                                  'ls_',vdlg2_owner,'(''set_proc'');']);                            
+                                  
+      HVDLG2_(tcnt) = islider([],'init',tcnt_pos,...
+                              [TcMin,TcMax/10,VDLG2_S1(tcnt), TcMin,TcMax],...
+                              '',...
+                              ['v_dlg2(''set_tcntro'');',...
+                               'ls_',vdlg2_owner,'(''set_proc'');'],...
+                              NotUsed,'off',[QUASILOGc,1],...
+                              [my_color(LBL_BKc,:);my_color(EDT_BKc,:);my_color(LBL_FRc,:);my_color(EDT_FRc,:)],...
+                              ['%3.0f';'%4.0f';'%4.0f'],hf);
+
+
+      HVDLG2_(lambda)= islider([],'init',lambda_pos,...
+                               [LamMin,LamMax,VDLG2_S1(lambda), LamMin,LamMax],...
+                               'Lambda',...
+                               ['v_dlg2(''set_lamro'');',...
+                                'ls_',vdlg2_owner,'(''set_proc'');'],...
+                               NotUsed,'off',LINc,...
+                               [my_color(LBL_BKc,:);my_color(EDT_BKc,:);my_color(LBL_FRc,:);my_color(EDT_FRc,:)],...
+                               ['%3.1f';'%5.4f';'%3.1f'],hf);
+
+      % Homebrew dynamic buttons (show state of control)
+      if VDLG2_S1(termckpb)==1, ss='Stop at Count'; else ss='Non Stop'; end;
+
+      HVDLG2_(termckpb)=uicontrol(hf,'Style','Pushbutton','Visible','off',...
+                                  'Position',termckpb_pos,...
+                                  'String',ss,...
+                                  'UserData',VDLG2_S1(termckpb),... % 'OFF' =0
+                                  'HorizontalAlignment','center',...
+                                  'Callback',...
+                                  ['v_dlg2(''term_tog'');',...
+                                   'ls_',vdlg2_owner,'(''set_proc'');']);
+
+      %*** end dynamic buttons  ***
+      if strcmp(vdlg2_owner,'vsa')
+        s= WINSTRc;
+      elseif strcmp(vdlg2_owner,'vna')
+        s=[WINSTRc,MODALWINc];
+      else
+        s='_';
+      end;
+
+      HVDLG2_(winsel)=uicontrol(hf,'Style','Popup','Visible','off',...
+                                'Position',winsel_pos,...
+                                'BackgroundColor',my_color(PUP_BKc,:),...
+                                'ForeGroundColor',my_color(PUP_FRc,:),...
+                                'String',s,'HorizontalAlignment','left',...
+                                'Value',VDLG2_S1(winsel),...
+                                'UserData',PWRCORc,...
+                                'Enable','on','CallBack',...
+                                ['v_dlg2(''set_win'');',...
+                                 'ls_',vdlg2_owner,'(''set_proc'');',...
+                                 'plot_',vdlg2_owner,'(''set'',''win_change'');']); % 6/25/98
+                                % @@@@@@@ stash power correction in userdata
+
+      HVDLG2_(ovlpmode)=uicontrol(hf,'Style','Popup','Visible','off',...
+                                  'Position',ovlpmode_pos,...
+                                  'BackgroundColor',my_color(PUP_BKc,:),...
+                                  'ForeGroundColor',my_color(PUP_FRc,:),...
+                                  'String',OVLPSTRc,'HorizontalAlignment','left',...
+                                  'Value',VDLG2_S1(ovlpmode),...
+                                  'CallBack',...
+                                   ['v_dlg2(''set_ovlp'');',...
+                                    'ls_',vdlg2_owner,'(''set_acq'');']);
+
+      % The "rejection" object has been through the mill. 
+      % It started as a popup, then went to a pushbutton. 
+      % Consequently, the numerical codes indicating what the mode is,  have suffered. 
+      % It was: 1 = no reject
+      %         0 = reject
+      %         2 = no reject
+      %  due to the popup -> button change
+      % now, going back to popup ... the new mapping will be: 
+      % 1        =        no reject
+      % 0 -> 2   =        ovld  rej
+      % 3        =        dblh  rej   in vna
+      % 4        =        ovld&dblh   in vna
+      
+      
+       
+      % old reject button used code == 0 to indicate ovld reject  
+      if VDLG2_S1(ovldrej)==0
+         VDLG2_S1(ovldrej) =2;      % map the 0 to a 2, for ovld rej
+      end;
+      
+      
+      if strcmp(vdlg2_owner,'vna')
+         srej = {'No Reject','Ovld Rej','Dblh Rej','Ovld&Dblh'};
+         stt  = 'Frame reject mode (Overload and Double Hit)';
+      else
+         srej = {'No Reject','Ovld Rej'};
+         stt  = 'Frame reject mode';
+      end;
+      
+      HVDLG2_(ovldrej)=uicontrol(hf,'Style','Popup','Visible','off',...
+                                    'Position',ovldrej_pos,...
+                                    'String',srej,...
+                                    'value', VDLG2_S1(ovldrej),...
+                                    'BackgroundColor',my_color(PUP_BKc,:),...
+                                    'ForeGroundColor',my_color(PUP_FRc,:),...
+                                    'HorizontalAlignment','left',...
+                                    'tooltip',stt,...
+                                    'Callback',...
+                                   ['v_dlg2(''set_ovldrej'');',...
+                                    'ls_',vdlg2_owner,'(''set_proc'');']);
+      
+      if strcmp(dlg_vis,'on')
+         v_dlg2('show_cond','all');
+      end;
+   %************  end init section ******************************
+
+   elseif strcmp(Action,'set_avgmode'),
+   % SET_AVGMODE
+          VDLG2_S1(avgmode) = get(HVDLG2_(avgmode) ,'Value');
+          if (VDLG2_S1(avgmode) == EXPc) | (VDLG2_S1(avgmode)== ADAPTc)
+            % go 'non-stop' in these modes
+            if(get(HVDLG2_(termckpb),'userdata') ==1),
+               VDLG2_S1(termckpb)= ckbtog(HVDLG2_(termckpb),'Non Stop','Stop at Count');
+            end;
+          end;
+
+   elseif strcmp(Action,'set_tcntro'),
+   % SET_TCNTRO
+          VDLG2_S1(tcnt)=islider(HVDLG2_(tcnt),'get');
+
+   elseif strcmp(Action,'set_lamro'),
+   % SET_LAMRO
+        VDLG2_S1(lambda)=islider(HVDLG2_(lambda),'get');
+
+   elseif strcmp(Action,'set_ovlp'),
+   % SET_OVLP
+       VDLG2_S1(ovlpmode)=get(HVDLG2_(ovlpmode),'Value');
+
+   elseif strcmp(Action,'set_ovldrej'),
+   % SET_OVLDREJ
+       % VDLG2_S1(ovldrej)  = ckbtog(HVDLG2_(ovldrej),'OvldRej = On','OvldRej = Off');
+         VDLG2_S1(ovldrej)  = get(HVDLG2_(ovldrej),'Value');
+
+   elseif strcmp(Action,'set_win'),
+   % SET_WIN
+       VDLG2_S1(winsel)=get(HVDLG2_(winsel),'Value');
+       
+
+   elseif strcmp(Action,'term_tog'),
+   % TERM_TOG
+       VDLG2_S1(termckpb)= ckbtog(HVDLG2_(termckpb),'Non Stop','Stop at Count');
+       v_dlg2('show_cond','term');
+       
+       
+   elseif strcmp(Action,'set_zpad')
+   % SET_ZPAD
+      VDLG2_S1(zpad)= get(HVDLG2_(zpad),'Value');
+
+   elseif strcmp(Action,'show_cond'),
+   % SHOW_COND  conditional show control objects
+       allflg  = 0;
+       expflg  = 0;
+       termflg = 0;
+       if strcmp(In1,'all'),
+              allflg  = 1;
+              termflg = 1;
+              expflg  = 1;
+       elseif strcmp(In1,'term'),
+              allflg  = 0;
+              termflg = 1;
+              expflg  = 0;
+       elseif strcmp(In1,'exp_adapt'),
+              allflg  = 0;
+              termflg = 0;
+              expflg  = 1;
+       elseif strcmp(In1,'term&exp'),
+              allflg  = 0;
+              termflg = 1;
+              expflg  = 1;
+
+       % the following provides window control for vna
+       elseif strcmp(In1,'win_on'),
+              set(HVDLG2_(winsel),'Visible','on');
+
+       elseif strcmp(In1,'win_off'),
+              set(HVDLG2_(winsel),'Visible','off');
+       else
+              % allflg  = 0;
+              % expflg  = 0;
+              % termflg = 0;
+              [In1,' is an unrecognized option in v_dlg2 show_cond']
+       end;
+
+       % ALL makes unconditional objects visible
+       if allflg ==1
+           vdlg2_owner =  get(HVDLG2_(titletxt),'userdata');    % titletxt userdata has owner
+           if ZPADONc&(strcmp(vdlg2_owner,'vsa') | strcmp(vdlg2_owner,'vna'))
+               set([HVDLG2_(avgmode),HVDLG2_(termckpb:zpad),HVDLG2_(dlback:titletxt)],'Visible','on');
+           else
+               set([HVDLG2_(avgmode),HVDLG2_(termckpb:ovldrej),HVDLG2_(dlback:titletxt)],'Visible','on');
+           end;
+           if strcmp(vdlg2_owner,'vos') 
+               set(HVDLG2_(winsel),'Visible','off');
+           elseif strcmp(vdlg2_owner,'vna')
+              if vna('get','linked?')
+                 set(HVDLG2_(winsel),'Visible','off'); % 11/26/98
+              end;
+           end;
+       end;
+
+       if termflg ==1,
+           if(get(HVDLG2_(termckpb),'userdata') ==1),
+              visb='off';
+              islider(HVDLG2_(tcnt),'set','vis_on','no_label');
+           else
+              visb='on';
+              islider(HVDLG2_(tcnt),'set','vis_off');
+           end;
+       end;
+
+       if expflg ==1,
+          n = get(HVDLG2_(avgmode),'value');
+          if (n == EXPc) | (n == ADAPTc)
+             visb='off';
+             islider(HVDLG2_(lambda),'set','vis_on');
+          else
+             visb='on';
+             islider(HVDLG2_(lambda),'set','vis_off');
+          end;
+
+          set(HVDLG2_(termckpb),'visible',visb);
+
+          if(get(HVDLG2_(termckpb),'userdata') ==1) & strcmp(visb,'on')
+             islider(HVDLG2_(tcnt),'set','vis_on','no_label');
+          else
+             islider(HVDLG2_(tcnt),'set','vis_off');
+          end;
+       end;
+
+
+   elseif strcmp(Action,'set')
+         vdlg2_owner =  get(HVDLG2_(titletxt),'userdata');    % titletxt userdata has owner
+         switch In1
+             case 'navg'
+                   VDLG2_S1(tcnt) = islider(HVDLG2_(tcnt),'set','value',In2);
+                   eval(['ls_',vdlg2_owner,'(''set_proc'');']);
+             
+             otherwise
+                  disp(['v_dlg2 set ',In1,' not recognized']);
+         end;
+   
+
+
+
+   elseif strcmp(Action,'get')
+   % GET command
+        if strcmp(In1,'state')
+          % return state of controls in 2 arrays  Out1, Out2
+          % one for numerical stuff, the other for text
+          Out1    = VDLG2_S1;
+          Out2    = [];    % no string storage
+          Out3    = get(HVDLG2_(titletxt),'Visible');
+
+        elseif strcmp(In1,'term_cnt')
+            if VDLG2_S1(termckpb)==1
+               Out1 = VDLG2_S1(tcnt); % terminate at this count
+            else
+               Out1 = 999999;  % per PM, this is "forever" as of 3-8-94
+            end;
+        elseif strcmp(In1,'wincor')
+            temp=get(HVDLG2_(winsel),'userdata');
+            Out2 = get(HVDLG2_(winsel), 'Value'); % added 4/3/98
+            Out1 = temp(Out2);  % correction factor 
+       
+            
+        elseif strcmp(In1,'avg_mode')
+            Out1=get(HVDLG2_(avgmode), 'Value');
+           
+        elseif strcmp(In1,'filedat')
+            temp=get(HVDLG2_(winsel),'userdata');
+            sel=get(HVDLG2_(winsel), 'Value');
+            Out1=[temp(sel),sel];      % power correction value,window index
+        else
+          error = [In1,' not recognized in v_dlg2(get,xxx)']
+        end;
+
+
+  elseif strcmp(Action,'load'),
+  % LOAD command
+          s1 = VDLG2_S1; % transfer VDLG1_S1 
+          set(HVDLG2_(avgmode), 'Value', s1(avgmode));
+
+          islider(HVDLG2_(tcnt),'set','value',VDLG2_S1(tcnt));
+          islider(HVDLG2_(lambda),'set','value',VDLG2_S1(lambda));
+
+          if s1(termckpb)==1, mark = 'Stop at Count'; else mark = 'Non Stop'; end;
+          set(HVDLG2_(termckpb), 'UserData', s1(termckpb),'String',mark);
+            set(HVDLG2_(ovlpmode), 'Value', s1(ovlpmode));
+          set(HVDLG2_(winsel), 'Value', s1(winsel));
+          set(HVDLG2_(ovlpmode), 'Value', s1(ovlpmode));
+        
+
+         if length(VDLG2_S1) < ovldrej
+            VDLG2_S1(ovldrej)=1;       % ancient file, make a slot and set to no reject
+            VDLG2_S1(zpad)   =0;       % also need a slot for zpad and dlback (??)
+            s1 = [s1,1,0,0];           %  ditto 
+         end;
+         % old reject button used code == 0 to indicate ovld reject  
+         if VDLG2_S1(ovldrej)==0
+            VDLG2_S1(ovldrej) =2;      % map the 0 to a 2, for ovld rej
+         end;
+        
+         set(HVDLG2_(ovldrej), 'value',s1(ovldrej));
+         
+
+         % if length(s1)<ovldrej s1=[s1,0,0]; end;
+         % if s1(ovldrej)==0, mark = 'OvldRej = On'; else mark = 'OvldRej = Off'; end;
+         % set(HVDLG2_(ovldrej), 'UserData', s1(ovldrej),'String',mark);
+
+         if length(VDLG2_S1) < zpad
+             VDLG2_S1(zpad)   =0;    % also need a slot for zpad and dlback (??)
+            s1 = [s1,0,0];           %  ditto 
+         end;
+          
+          if ZPADONc
+             set(HVDLG2_(zpad), 'Value', s1(zpad));
+          end;   
+
+   elseif strcmp(Action,'open'),
+   % OPEN Command
+       if strcmp('fast',In1) ~=1, v_dlg2('load'); end;
+       v_dlg2('show_cond','all');
+
+   elseif strcmp(Action,'vcap')
+   % VCAP section
+       if strcmp(In1,'lock')
+          set(HVDLG2_(ovlpmode),'enable','off');
+       elseif strcmp(In1,'unlock')
+          set(HVDLG2_(ovlpmode),'enable','on');
+       else
+          disp('error in v_dlg2 vcap section' )
+       end;
+   elseif strcmp(Action,'close'),
+   % CLOSE
+       if strcmp(get(HVDLG2_(titletxt),'Visible') ,'on'),
+            set([HVDLG2_(avgmode),HVDLG2_(termckpb:titletxt)],'Visible','off');
+            islider(HVDLG2_(tcnt),'set','vis_off');
+            islider(HVDLG2_(lambda),'set','vis_off');
+       end;
+
+   elseif strcmp(Action,'load_all'),
+   % LOAD_ALL Command
+   
+       % gotta be careful here, 
+       if length(In2) < length(VDLG2_S1)
+          for i=1:length(In2)
+              VDLG2_S1(i) = In2(i);  % had a big oops in here fixed 10/20/98
+          end;
+       else
+           VDLG2_S1 = In2;           % sets control state storage
+       end;
+       
+       
+       % old reject button used code == 0 to indicate ovld reject
+       
+       if length(VDLG2_S1) < ovldrej
+          VDLG2_S1= [VDLG2_S1,2]
+       elseif VDLG2_S1(ovldrej)==0 
+          VDLG2_S1(ovldrej) =2;      % map the 0 to a 2, for ovld rej
+       end;
+       
+       if strcmp(In1,'on'),
+           v_dlg2('load');
+           v_dlg2('show_cond','all');
+       else
+           v_dlg2('close');
+           v_dlg2('load');       % do only a load
+       end;
+
+   elseif strcmp(Action,'clear')
+   % CLEAR COMMAND
+       clear global HVDLG2_ VDLG2_S1
+
+   else
+   % OOPS
+        disp(['Error in v_dlg2 ',Action,' not recognized']);
+   end;
+%end function

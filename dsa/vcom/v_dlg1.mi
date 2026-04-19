@@ -1,0 +1,975 @@
+  function [Out1,Out2,Out3,Out4,Out5,Out6] = v_dlg1(Action,In1,In2,In3,In4,In5,In6,In7,In8,In9);
+% function [Out1,Out2,Out3,Out4,Out5,Out6] = v_dlg1(Action,In1,In2,In3,In4,In5,In6,In7,In8,In9);
+%
+% Labeled v_dlg1 for Vertical (channel setup controls) dialog
+% Actions are
+%       'init'       init the ui objects
+%                    In1=position, In2=number of input chan,
+%                    In3 has initial colors, In4 Owner to direct external callbacks
+%                    In5,6,7,8 have initial states
+%                    VDLG1_S1 =In5 VDLG1_S2 =In6 vdlg1_vis=In7 Chan_Ptr =In8
+%                    In9 [optional] has parent figure handle 
+%       'open'       open
+%           'full'   load & show all combo
+%           'fast'   show all only, no load
+%       'close'      conditionally hide
+%       'clear'      clear globals
+%       'show_cond'  display the ui objects with In1 selection
+%             'eu'   EU controls
+%             'ofs'  Offset controls
+%             'all'  All controls
+%          'eu_ofs'  Both EU and Offset
+%       'get'
+%          'state'   returns state of all controls
+%                    Out1=VDLG1_S1,   Out2=VDLG1_S2,
+%                    Out3 vis_status, Out4=chan_ptr
+%                    Out5 owner ,     Out6=max # of inputs
+%          'filedat' return ChanStat, ChanLabel, EU Label in Out1,2,3
+%          'chanv'   return channel (spec'd by (In2)) full scale voltage
+%          'cstate'  return Vfs,offset,EUfactor in Out1 (real vec) In2=chan
+%          'clist'   return vector of active chan numbers in Out1
+%                    return channel pointer in Out2 v > 1.14
+%          'edch'    return the channel being edited
+%          'cstate_edch' return state of active channel in Out1 and Out2
+%                    if In2 is specified, it returns the state of channel In2 (1 .... max number in system)
+%          's_fac'   return scale factor for active channels to accomidate
+%                    EU calculations
+%
+%       'load'       loads control states from VDLG1_S1/S2
+%                                  storage at chsel pointer (control)
+%       'load_all'   loads states, set visibility, channel pointer
+%                    In1=vis, In2=color, In3 S1, In4 S2, In5 Channel pointer
+%
+%       'eu_chk'     validate EU factor, it must be a number
+%       'store_str'  update string storage
+%       'set_ofsro'  update slider 1 value display
+%       'chen_tog'   toggle check button   ON/OFF
+%       'eu_tog'           toggle          ENG UNITS ON/OFF
+%       'set_vfs'    inform hardware et. al. of full scale voltage change
+%
+%      'vcap'        (vcap calls v_dlg1)
+%           'lock'    lock some controls for vcap
+%           'unlock'  unlock those puppies
+%           'set_vfs' sets full scale values 
+%      'set'
+%           'chena_lock'    lock channel enable button
+%           'chena_unlock'  unlock
+%           'clist'         used with new vna code
+% Dick Benson, DSP Technology 
+
+%define
+  MCSETUPc    = 1;      % if 0, remove mcsetup option
+  MAXTIMEc    = 1;      % 1 second to get bias info per GLS 6/24/98 
+  ENLIGHTENc  = 0;      % produce command window message if bias source detection fails. 2/23/99
+%end_define
+
+global HVDLG1_;     % main handle vector
+global VDLG1_S1;    % S1 holds the numerical states
+global VDLG1_S2;    % S2 holds the string states
+global VCAP_ALIVE;  % if vcap is active must notify of changes
+% end global declarations
+
+
+   % *******************************************************
+   %include
+     vdlg1_h;   % set up indexes into handle array HVDLG1_
+      vcol_h;   % common color definitions
+      vsld_h;   % slider modes
+       vhw_h;   % system info VMAXc etc
+      vsiz_h;   % size of controls OK_CAN CKS1 etc
+   %end_include
+   % *******************************************************
+
+   if strcmp(Action,'init') ~=1
+      Chan_Ptr=get(HVDLG1_(chsel),'value'); % needed for most Actions
+   end;
+
+
+   if strcmp(Action,'init'),
+   %INIT Command
+     
+         dl_pos      = In1; % position
+         Numin       = In2; % number of input channels
+         my_color    = In3; % initial colors passed here
+         vdlg1_owner = In4; % who launched me
+
+      if nargin >=9
+           % state passed in In5,6,7,8
+           VDLG1_S1 = In5;
+           
+           % eliminate 0 entries in 1st column (Vrng) 10/22/98 , see in load all  7/16/98
+           VDLG1_S1(:,1)=max(VDLG1_S1(:,1),1);
+           VDLG1_S2 = In6;
+           dlg_vis  = In7;
+           Chan_Ptr = min(In8,Numin); % don't go beyond number of channels
+
+           % disable channels that are beyond Numin 3-4-97
+           VDLG1_S1(:,chenck)=VDLG1_S1(:,chenck).*[ones(Numin,1);zeros(length(VDLG1_S1(:,chenck))-Numin,1)];
+           
+           if nargin ==10
+               hf = In9;
+           else
+               hf = gcf;
+           end;
+      else
+           % vdlg_1 state definition
+                     %             spare1 slot (index 4) is now 0dB ref (dbref)
+                     %    chenck   spare1    euckpb euvalue
+                     % vrng   coupling   offset
+           x         = [1  ,0,   0,   1,   0,   0,  1.0];% state of v_dlg1 controls 3..16
+           xp        = [1  ,1,   0,   1,   0,   0,  1.0];% state (1,2 enabled,leave for vid/vna) 1 & 2
+           VDLG1_S1  = [xp;xp;x;x;x;x;x;x;x;x;x;x;x;x;x;x]; % initial control states
+           VDLG1_S2  = ['Channel 1~Gs~      ';'Channel 2~Gs~      ';'Channel 3~Gs~      ';
+                        'Channel 4~Gs~      ';'Channel 5~Gs~      ';'Channel 6~Gs~      ';
+                        'Channel 7~Gs~      ';'Channel 8~Gs~      ';'Channel 9~Gs~      ';
+                        'Channel10~Gs~      ';'Channel11~Gs~      ';'Channel12~Gs~      ';
+                        'Channel13~Gs~      ';'Channel14~Gs~      ';'Channel15~Gs~      ';'Channel16~Gs~      '];
+           dlg_vis  ='off';
+           Chan_Ptr = 1;
+           if nargin ==6
+               hf = In5;
+           else
+               hf = gcf;
+           end;
+      end;
+
+
+     %define
+        wdl         = 120;
+        hdl         = 214;         % This dialog's  size
+        wlb         = 48;          % control label width
+        web         = 32;          % edit box width
+        wpu         = 57;          % pull up/down width , was 60
+     % the following positioning is done at init time
+
+       dl1_pos      = [dl_pos,wdl,hdl];
+       titletxt_pos = [dl_pos + [LHOc,hdl-HTXTc-1],wdl-2*LHOc,HTITLEc];
+     % channel select & enable
+       chsel_pos    = [dl_pos + [LHOc,hdl-1.75*VSc], wpu,HPU1c];
+       chenck_pos   = [dl_pos + [2*LHOc+wpu,hdl-1.75*VSc],CKS1c];
+       led1_pos     = [dl_pos + [2.25*LHOc+wpu+CKS1c(1),hdl-1.75*VSc],LEDS1c];
+
+     % range & coupling
+       vrng_pos     = [dl_pos + [LHOc,hdl-2.75*VSc],wpu,HPU1c];
+       cplckpb_pos  = [dl_pos + [2*LHOc+wpu,hdl-2.75*VSc],wdl-wpu-3*LHOc,HPU1c];
+
+     % offset slider
+       offset_pos   = [dl_pos + [LHOc,hdl-3.5*VSc],wdl-2*LHOc];
+
+     % channel name label
+       chlbl_pos    = [dl_pos + [LHOc, hdl-6.3*VSc+HTXTc] ,wdl-2*LHOc, HTXTc];
+       chname_pos   = [dl_pos + [LHOc, hdl-6.3*VSc-3] ,wdl-2*LHOc, HTXTc+3];     % >4
+
+     % EUs on/off
+       eua_pos      = [dl_pos + [LHOc,hdl-7.4*VSc],1.5*web,HTXTc+3];             % >4
+       eub_pos      = [dl_pos + [LHOc+1.5*web,hdl-7.4*VSc],1.5*web,HTXTc+3];     % >4
+       eublbl_pos   = [dl_pos + [LHOc+3.0*web,hdl-7.4*VSc],0.3*wlb,HTXTc+1];     % >4
+       euckpb_pos   = [dl_pos + [LHOc,hdl-8.4*VSc],1.2*WCKS1c,HCKS1c];
+       
+     % 0 dB ref for vsa 
+       dbreflbl_pos = [dl_pos + [LHOc+2.7*web,hdl-8.4*VSc],0.5*wlb,HTXTc];
+       dbref_pos    = [dl_pos + [LHOc+1.5*web,hdl-8.4*VSc],1.2*web,HTXTc+3];     % >4
+       
+     %end_define
+
+
+% init ALL ui controls now
+          HVDLG1_(dl1)=uicontrol(hf,'Style','frame','visible','off',...
+                                 'Position',dl1_pos,...
+                                 'BackGroundColor',my_color(DLG_BKc,:));
+
+          HVDLG1_(titletxt) = uicontrol(hf,'Style','text','visible','off',...
+                                        'String','CHANNEL SETUP',...
+                                        'Position',titletxt_pos,...
+                                        'BackGroundColor',my_color(DTL_BKc,:),...
+                                        'ForeGroundColor',my_color(DTL_FRc,:),...
+                                        'userdata',vdlg1_owner); %@**** stash owner in here
+
+
+          HVDLG1_(eublbl) = uicontrol(hf,'Style','text','visible','off',...
+                                      'String','/V',...
+                                      'Position',eublbl_pos,...
+                                      'BackGroundColor',my_color(LBL_BKc,:),...
+                                      'ForeGroundColor',my_color(LBL_FRc,:),...
+                                      'HorizontalAlignment','left');
+                                     
+          HVDLG1_(chlbl) = uicontrol(hf,'Style','text','visible','off',...
+                                     'String','Channel Label',...
+                                     'Position',chlbl_pos,...
+                                     'BackGroundColor',my_color(LBL_BKc,:),...
+                                     'ForeGroundColor',my_color(LBL_FRc,:),...
+                                     'HorizontalAlignment','center');
+
+
+          if strcmp('vid',vdlg1_owner)
+              % vid supports 2 channels
+              Numin=2;
+          end;
+
+          scb =  ['v_dlg1(''load'');',...
+                  'v_dlg1(''show_cond'',''eu_ofs'');'];  % removed ax1track
+
+          HVDLG1_(chsel)=uicontrol(hf,'Style','Popup','Visible','off',...
+                                   'Position',chsel_pos,...
+                                   'BackgroundColor',my_color(PUP_BKc,:),...
+                                   'ForeGroundColor',my_color(PUP_FRc,:),...
+                                   'String',chanstr(Numin),'HorizontalAlignment','left',...
+                                   'Value',Chan_Ptr,...
+                                   'CallBack',scb,...
+                                   'userdata',Numin);
+                                  % @ Note Numin
+
+          if MCSETUPc & ~strcmp('vid',vdlg1_owner)
+             % add mc setup menu 
+             scb = ['mcsetup(''init'',',int2str(Numin),');'];
+                     uimenu(hf,'Label','&MC Setup','accelerator','M',...
+                               'Callback',scb);                        
+          end;             
+              
+          if strcmp(vdlg1_owner,'vna') 
+             s= chanvstr('list_auto',VMAXc); % auto_range 
+          else
+             s= chanvstr('list',VMAXc);
+          end;
+
+
+          HVDLG1_(vrng)=uicontrol(hf,'Style','Popup','Visible','off',...
+                                  'Position',vrng_pos,...
+                                  'BackgroundColor',my_color(PUP_BKc,:),...
+                                  'ForeGroundColor',my_color(PUP_FRc,:),...
+                                  'String',s,'HorizontalAlignment','left',...
+                                  'Value',VDLG1_S1(Chan_Ptr,vrng),...
+                                  'CallBack',...
+                                  ['v_dlg1(''set_vfs'');',...
+                                   'ls_',vdlg1_owner,'(''set_chan'',v_dlg1(''get'',''edch''));',...
+                                   'plot_',vdlg1_owner,'(''chax_upd'',''fs_val'');'] );
+
+          if(VDLG1_S1(Chan_Ptr,vrng) >= V2P5c) % % 2.5 V and below
+            Vmax = VINOF2P5c;      % limited range
+          else
+            Vmax = VINOFMAXc;      % full range
+          end;
+
+          
+          HVDLG1_(offset) = islider([],'init',offset_pos,...
+                                   [-Vmax,Vmax , VDLG1_S1(Chan_Ptr,offset), -Vmax,Vmax],...
+                                   'Input Offset',...
+                                   ['v_dlg1(''set_ofsro'');',...
+                                    'ls_',vdlg1_owner,'(''set_chan'',v_dlg1(''get'',''edch''));'],...
+                                   NotUsed,'off',[QUASILOGc,0.001],...
+                                   [my_color(LBL_BKc,:);my_color(EDT_BKc,:);my_color(LBL_FRc,:);my_color(EDT_FRc,:)],...
+                                   ['%3w  ';'%6.3f';'%3w  '],hf);
+
+         
+          if VDLG1_S1(Chan_Ptr,chenck)==1, ss='On'; x=1; color  = GRNc;
+          else ss='Off'; x=0; color = REDc; end;
+          ena='on';
+          if strcmp(vdlg1_owner,'vid')  & Chan_Ptr <=2
+                           ena='off';
+          elseif strcmp(vdlg1_owner,'vna') & Chan_Ptr <=1
+                           ena='off';
+          end;
+
+
+          HVDLG1_(chenck)=uicontrol(hf,'Style','Pushbutton','Visible','off',...
+                                    'Position',chenck_pos,...
+                                    'String',ss,...
+                                    'UserData',x,...      % 'Off' =0, 'On'=1
+                                    'enable',ena,'Callback','v_dlg1(''chen_tog'');'); % removed chax_upd and ax1track
+
+
+          HVDLG1_(led1)=uicontrol(hf,'Style','frame','visible','off',...
+                                  'Position',led1_pos,...
+                                  'UserData',1,...
+                                  'BackGroundColor',color);
+                                  % @ userdata has global button enable  1=on 0=off
+                                  
+          BIASavail = -1;
+          telapsed   = 0;
+          
+          tic;
+          while (BIASavail < 0) & (telapsed < MAXTIMEc)
+             BIASavail = siglab('get','bias');   %  need a test here to see if hardware has BIAS capability
+             telapsed = toc;
+             drawnow;
+          end;
+          
+          % The following code was changed such that if the bias source 
+          % cannot be properly detected, it is assumed to exist.  Hmmmmm.
+          % Per the recommendation of GLS 2/23/99
+           if telapsed >= MAXTIMEc
+                BIASavail=1;  
+                if ENLIGHTENc
+                   disp('SigLab get bias call timed out in v_dlg1. Bias support may be available, but system fails to detect it.');
+                end;   
+           end;
+          
+          
+          if BIASavail == 1
+             ss = 'AC|DC|Bias';
+             x  = VDLG1_S1(Chan_Ptr,cplckpb)+1; % pre BIAS was 0 & 1
+          else
+            % if telapsed >= MAXTIMEc
+            %    disp('SigLab get bias call timed out in v_dlg1. Bias support may be available, but system fails to detect it.');
+            % end;
+             ss = 'AC|DC';
+             for i=1:Numin
+                 VDLG1_S1(i,cplckpb)  =  min(VDLG1_S1(i,cplckpb),1);    % 0 and 1 are legal with no bias source 
+             end;
+             x  = VDLG1_S1(Chan_Ptr,cplckpb)+1; % 1&2 are legal  and need to address whole array  ...
+          end;
+       
+          
+          HVDLG1_(cplckpb)=uicontrol(hf,'Style','popup','Visible','off',...
+                                        'Position',cplckpb_pos,...
+                                        'String',ss,...
+                                        'BackgroundColor',my_color(PUP_BKc,:),...
+                                        'ForeGroundColor',my_color(PUP_FRc,:),...
+                                        'value',x,...     % pre BIAS was 0 & 1
+                                        'Callback',...
+                                        ['v_dlg1(''cplsel'');',...
+                                         'ls_',vdlg1_owner,'(''set_chan'',v_dlg1(''get'',''edch''));']);
+                                      
+
+          if VDLG1_S1(Chan_Ptr,euckpb)==0, ss='EU Off'; x=0; else ss='EU On'; x=1; end;
+
+          HVDLG1_(euckpb)=uicontrol(hf,'Style','Pushbutton','Visible','off',...
+                                    'Position',euckpb_pos,...
+                                    'String',ss,...
+                                    'UserData',x,...
+                                    'Callback',...
+                                    ['v_dlg1(''eu_tog'');',...
+                                     'plot_',vdlg1_owner,'(''chax_upd'',''eu_on_off'');' ]);
+
+ % edit controls init section
+
+          
+          HVDLG1_(chname)=uicontrol(hf,'Style','edit','visible','off',...
+                                    'Position',chname_pos,...
+                                    'String',pullstr(VDLG1_S2(Chan_Ptr,:),1),...
+                                    'BackGroundColor',my_color(EDT_BKc,:),...
+                                    'ForeGroundColor',my_color(EDT_FRc,:),...
+                                    'Max',1,'Callback',...
+                                    ['v_dlg1(''store_str'');',...
+                                     'plot_',vdlg1_owner,'(''chax_upd'',''label'');' ]);
+
+
+          HVDLG1_(eua)=uicontrol(hf,'Style','edit','visible','off',...
+                                 'Position',eua_pos,...
+                                 'String',ftoa('%5w',VDLG1_S1(Chan_Ptr,euval)),...
+                                 'BackgroundColor',my_color(EDT_BKc,:),...
+                                 'ForeGroundColor',my_color(EDT_FRc,:),...
+                                 'Max',1,'Callback',...
+                                 ['v_dlg1(''eu_chk'');',...
+                                  'plot_',vdlg1_owner,'(''chax_upd'',''eu_val'');' ]);
+
+          HVDLG1_(eub)=uicontrol(hf,'Style','edit','visible','off',...
+                                 'Position',eub_pos,...
+                                 'BackgroundColor',my_color(EDT_BKc,:),...
+                                 'String',pullstr(VDLG1_S2(Chan_Ptr,:),2),...
+                                 'Max',1,'Callback',['v_dlg1(''store_str'');',...
+                                                    'plot_',vdlg1_owner,'(''chax_upd'',''eu_string'');'] );
+                                                    
+          
+          
+          
+          % add 0 dB ref suppport for vsa (& vna  03/13/98)
+          if VDLG1_S1(Chan_Ptr,dbref) ==0
+             % init to ones, zeros don't make any sense and are a result of being a "spare" state slot.
+             VDLG1_S1(:,dbref) = ones(length(VDLG1_S1(:,dbref)),1);
+          end;
+          
+          if strcmp('vsa',vdlg1_owner) | strcmp('vna',vdlg1_owner)
+                                                    
+             HVDLG1_(dbreflbl) =uicontrol(hf,'Style','text','visible','off',...
+                                          'String','0dB',...
+                                          'Position',dbreflbl_pos,...
+                                          'BackGroundColor',my_color(LBL_BKc,:),...
+                                          'ForeGroundColor',my_color(LBL_FRc,:),...
+                                          'HorizontalAlignment','left');                                          
+          
+             HVDLG1_(dbref)   = uicontrol(hf,'Style','edit','visible','off',...
+                                          'Position',dbref_pos,...
+                                          'BackgroundColor',my_color(EDT_BKc,:),...
+                                          'String',ftoa('%4w',VDLG1_S1(Chan_Ptr,dbref)),...
+                                          'HorizontalAlignment','left',...
+                                          'Max',1,'Callback',['v_dlg1(''set_dbref'');',...
+                                                              'plot_',vdlg1_owner,'(''chax_upd'',''dbref'');'] );                                          
+          end;
+          
+          if size(VCAP_ALIVE)
+             if VCAP_ALIVE ==1
+                 % get  vcap state  , use eval to for go compiling if its not alive.
+                 if eval('vcap(''get_mode'')') ==1
+                    % analog mode
+                    % no changes necessary we are enabled
+                 else
+                    % memory mode
+                    v_dlg1('vcap','lock'); % lock some controls
+                 end;
+             end;
+         end;
+         if strcmp(dlg_vis,'on')
+            v_dlg1('show_cond','all');
+         end;
+% *********************************************************************
+% initial control states are sent to hdwr in calling program init section
+
+
+%  ************** init section is complete here ***********************
+%
+   elseif strcmp(Action,'show_cond'),
+   % SHOW_COND  conditionally show control objects (ALL, OFS, EU, EU_OFS)
+       if strcmp(In1,'all'),
+           allflg=1;
+           euflg=1;
+           ofsflg=1;
+       elseif strcmp(In1,'ofs'),
+           allflg=0;
+           euflg=0;
+           ofsflg=1;
+       elseif strcmp(In1,'eu'),
+           allflg=0;
+           euflg=1;
+           ofsflg=0;
+       elseif strcmp(In1,'eu_ofs'),
+           allflg=0;
+           euflg=1;
+           ofsflg=1;
+       else
+           [In1,' is an unrecognized option in v_dlg1 show_cond']
+       end;
+       set(HVDLG1_(titletxt),'Visible','on');
+     % ALL VIS (these controls are unconditionally visible)
+       if allflg ==1,
+          set([HVDLG1_(vrng:cplckpb),HVDLG1_(euckpb),HVDLG1_(chsel),HVDLG1_(chlbl),...
+               HVDLG1_(chname),HVDLG1_(dl1:led1)],'Visible','on');
+               if strcmp(get(HVDLG1_(titletxt),'userdata'),'vsa') | strcmp(get(HVDLG1_(titletxt),'userdata'),'vna')
+                  % show 0dbref stuff in vsa and vna  (03/13/98) 
+                  set(HVDLG1_([dbref,dbreflbl]),'Visible','on');
+               end;
+       end;
+
+     % EU_VIS
+       if euflg == 1,
+          % if (get(HVDLG1_(euckpb),'UserData') == 1)
+          if VDLG1_S1(Chan_Ptr,euckpb) ==1
+             set([HVDLG1_(eublbl),HVDLG1_(eua),HVDLG1_(eub)],'Visible','on');
+          else
+             set([HVDLG1_(eublbl),HVDLG1_(eua),HVDLG1_(eub)],'Visible','off');
+          end;
+       end;
+
+    % OFS_VIS
+       if ofsflg == 1
+          if  VDLG1_S1(Chan_Ptr,cplckpb) ==1
+              % DC coupled
+              islider(HVDLG1_(offset),'set','vis_on');
+          else
+              % AC or BIAS 
+              islider(HVDLG1_(offset),'set','vis_off');
+          end;
+       end;
+
+
+
+   elseif strcmp(Action,'chen_tog'),     
+   % CHEN_TOG
+   
+       vdlg1_owner = get(HVDLG1_(titletxt),'userdata');
+       eval(['rs=plot_',vdlg1_owner,'(''get'',''rs'');']);
+   
+       if rs ==0
+          % check how many channels are on
+          if (sum(VDLG1_S1(1:get(HVDLG1_(chsel),'userdata'),chenck)) > 1)
+              state = ckbtog(HVDLG1_(chenck),'Off','On');
+          else
+             if VDLG1_S1(Chan_Ptr,chenck)==1
+             % prohibit channel 1 from going off
+                state = 1;
+             else
+                state = ckbtog(HVDLG1_(chenck),'Off','On');
+             end;
+          end;
+
+          VDLG1_S1(Chan_Ptr,chenck) = state;
+          if state == 0
+             set(HVDLG1_(led1),'BackGroundColor',REDc);
+             ovldstat('set',Chan_Ptr,'off');  % set states
+          else
+             set(HVDLG1_(led1),'BackGroundColor',GRNc);
+             ovldstat('set',Chan_Ptr,'on');
+          end;
+       
+       
+         s = [ 'ls_',vdlg1_owner,'(''set_acq'');',...
+               'ls_',vdlg1_owner,'(''set_proc'');',...
+               'plot_',vdlg1_owner,'(''set'',''clist'',v_dlg1(''get'',''clist''));'];
+         eval(s);
+         
+       else
+          % tmsg('Sorry, you cannot enable or disable channels while acquiring data, use the Stop button to terminate acquisition process.',...
+          %       3,'','SigLab Warning','modal');
+       
+          msgbox('Sorry, you cannot enable or disable channels while acquiring data. Use the Stop button to terminate acquisition process.',...
+                 'SigLab Warning',...
+                 'warn',...
+                 'modal');
+       end
+
+       % added by kds, 11/25/98
+       if ~isempty(VCAP_ALIVE)&VCAP_ALIVE ==1
+           eval('vcap(''set_acq'');');
+       end; % inform vcap
+          
+   elseif strcmp(Action,'cplsel')
+   % CPLSEL
+       VDLG1_S1(Chan_Ptr,cplckpb) = get(HVDLG1_(cplckpb),'value') -1; % -1 to map to old 0&1    
+       v_dlg1('show_cond','ofs');
+          
+   elseif strcmp(Action,'eu_tog'),
+   % EU_TOG
+          VDLG1_S1(Chan_Ptr,euckpb) = ckbtog(HVDLG1_(euckpb),'EU Off','EU On');
+          v_dlg1('show_cond','eu');
+
+
+   elseif strcmp(Action,'eu_chk'),
+   % EU_CHK
+          x=s2n(get(HVDLG1_(eua),'string'));
+          if isempty(x)
+             % put number string back as a string
+             set(HVDLG1_(eua),'string',ftoa('%5w',VDLG1_S1(Chan_Ptr,euval)));
+          elseif x==0   
+             set(HVDLG1_(eua),'string',ftoa('%5w',VDLG1_S1(Chan_Ptr,euval)));
+          else
+             VDLG1_S1(Chan_Ptr,euval)=x;  % update storage
+             set(HVDLG1_(eua),'string',ftoa('%5w',x));    % 6/6/98 for sz.m 
+          end;
+
+   elseif strcmp(Action,'eu2one'),
+   % EU2ONE
+          set(HVDLG1_(eua),'string','1.000'); % set to one, safe for now
+          VDLG1_S1(Chan_Ptr,euval)=1.0;       % update storage
+
+   elseif strcmp(Action,'store_str'),
+   % STORE_STR
+      s   = get(HVDLG1_(chname),'String');
+      ss  = get(HVDLG1_(eub),'String');
+      i   = length(VDLG1_S2(1,:));
+      del = i-(length(s)+length(ss));
+      if del <=1
+          s=s(1:(length(s)+del-2));
+          set(HVDLG1_(chname),'String',s)
+      end;
+
+      VDLG1_S2(Chan_Ptr ,:) = strpack(i,s,ss);
+
+   elseif strcmp(Action,'set_ofsro'),
+   % SET_OFSRO
+          VDLG1_S1(Chan_Ptr,offset)=islider(HVDLG1_(offset),'get');
+
+   elseif strcmp(Action,'set_offset'),
+   % SET_OFFSET
+        newval=islider(HVDLG1_(offset),'get');
+        if ~isempty(newval)
+           VDLG1_S1(Chan_Ptr,offset) =newval;
+        end;
+
+   elseif strcmp(Action,'set_vfs'),
+   % SET_VFS
+        newrng= get(HVDLG1_(vrng),'Value');
+        oldrng= VDLG1_S1(Chan_Ptr ,vrng);
+        VDLG1_S1(Chan_Ptr ,vrng)=newrng;
+        if oldrng < V2P5c & newrng < V2P5c
+            % no offset range change, just change gain
+        elseif oldrng >= V2P5c & newrng > V2P5c
+            % no offset range change, just change gain
+        else
+            % change offset range
+            if (newrng >=V2P5c)   % 2.5 V and below
+               Vmax = VINOF2P5c; % limited range
+            else
+               Vmax = VINOFMAXc; % full range
+            end;
+            VDLG1_S1(Chan_Ptr ,offset)=islider(HVDLG1_(offset),...
+                                      'set','minmax',[-Vmax,Vmax,-Vmax,Vmax]);
+            v_dlg1('set_offset');
+        end;
+
+
+   elseif strcmp(Action,'set_dbref')
+   % SET_DBREF
+       newval = s2n(get(HVDLG1_(dbref),'string'));
+       if ~isempty(newval)
+          if newval > 0 
+             VDLG1_S1(Chan_Ptr,dbref)=newval;
+             set(HVDLG1_(dbref),'string',ftoa('%4w',newval));  % for sz.m 6/6/98
+          else
+             set(HVDLG1_(dbref),'string',ftoa('%4w',VDLG1_S1(Chan_Ptr,dbref)));
+          end;
+       else
+          set(HVDLG1_(dbref),'string',ftoa('%4w',VDLG1_S1(Chan_Ptr,dbref)));
+       end;
+  
+
+   elseif strcmp(Action,'get'),
+   % GET command
+      % STATE
+      if strcmp(In1,'state'),
+        % return state of controls
+        Out1=VDLG1_S1;                           % numerical states
+        Out2=VDLG1_S2;                           % string states
+        Out3=get(HVDLG1_(titletxt),'Visible');   % visibility status
+        Out4=Chan_Ptr;                           % current channel
+        Out5=get(HVDLG1_(titletxt),'userdata');  % owner
+        Out6=get(HVDLG1_(chsel),'userdata');     % number of channels
+
+      elseif strcmp(In1,'chanv'),
+       % GET CHANV  returns voltage setting of a channel
+         Out1=chanvstr('volts',VMAXc,VDLG1_S1(In2,vrng));
+                                                 % vrng select code
+      elseif strcmp(In1,'cstate'),
+      % GET CSTATE
+      % return Vmax,dbref,EUfactor in Out1 (real vec)
+      % return Label~Axis~EUon/off~ in Out2 (string)
+      % get data from storage array
+
+         Out1=chanvstr('volts',VMAXc,VDLG1_S1(In2,vrng));  % vrng select code
+         Out1=[Out1,VDLG1_S1(In2,dbref)];                  % dbref, was offset but that was never used
+         Out1=[Out1,VDLG1_S1(In2,euval)];                  % append EU scale factor
+         
+         % string stuff next
+         s= VDLG1_S2(In2,:); % use 's' for less source text
+         % 1=channel label,  2= EU label in pullstr
+         Out2= pullstr(s,1);  % pulls channel label
+         if (VDLG1_S1(In2,euckpb)==1),% EUs are on
+            Out2=[Out2,'~',pullstr(s,2)]; % EU label
+            Out2=[Out2,'~','on','~'];
+         else                               % EUs are off
+            Out2=[Out2,'~','Volts'];
+            Out2=[Out2,'~','off','~'];
+         end;
+
+      elseif strcmp(In1,'clist'),
+      % GET CLIST  returns list of enabled channels supported by hardware
+         % mbsup1
+         Out1=find(VDLG1_S1(1:get(HVDLG1_(chsel),'userdata'),chenck));
+         Out2=Chan_Ptr;    % v > 1.14
+
+      elseif strcmp(In1,'s_fac'),
+      % GET S_FAC  returns scale factors in Out1 for enabled channels
+      % Scale factors are a function of EU on/off and EU value
+        ena_chan=find(VDLG1_S1(:,chenck));  % here is the list
+        Out1=[];
+        for i=1:length(ena_chan)
+            if VDLG1_S1(ena_chan(i),euckpb) ==1
+                % eng units on for this channel
+                Out1=[Out1,VDLG1_S1(ena_chan(i),euval)];
+            else
+                Out1=[Out1,1.0];  % 1.0 by default
+            end;
+        end;
+
+      elseif strcmp(In1,'edch'),
+      % GET EDCH  (edited channel ... current channel) somewhat obsolete but evolutionary
+         Out1 = Chan_Ptr;
+
+      elseif strcmp(In1,'cstate_edch')
+      % GET CSTATE_EDCH  (state of active channel)
+      % return Vmax,offset,EUfactor,EUstate,Channel in Out1 (real vec)
+      % return Label~Axis~EUon/off~ in Out2 (string)
+      % get data from storage array
+        
+         if nargin == 3
+            cp = In2;       % 12/19/97
+         else
+            cp = Chan_Ptr;
+         end;
+         Out1=[chanvstr('volts',VMAXc,VDLG1_S1(cp,vrng)),...;% vrng select code
+               VDLG1_S1(cp,offset),...                       % offset slider
+               VDLG1_S1(cp,euval),...                        % append EU scale factor
+               VDLG1_S1(cp,euckpb),...                       % append EU on/off        11/12/97
+               Chan_Ptr,...                                  % add the channel pointer 11/12/97
+               VDLG1_S1(cp,dbref)];                          % add db_ref 1/28/98
+         % string stuff next
+         % 1=channel label,  2= EU label in pullstr
+         Out2= pullstr(VDLG1_S2(cp,:),1);  % pulls channel label
+         if (VDLG1_S1(cp,euckpb)==1),% EUs are on
+            Out2=[Out2,'~',pullstr(VDLG1_S2(cp,:),2)]; % EU label
+            Out2=[Out2,'~','on','~'];
+         else                               % EUs are off
+            Out2=[Out2,'~','Volts'];
+            Out2=[Out2,'~','off','~'];
+         end;
+
+      elseif strcmp(In1,'filedat'),
+      % GET FILEDAT  data formatted to fit vi_file definition
+         % first , ChanStat is NCHx5 array where NCH is the number
+         % of active channels
+         enabled = find(VDLG1_S1(1:get(HVDLG1_(chsel),'userdata'),chenck)); % gets the enabled channels up to max avail
+         Out1 = zeros(length(enabled),5);
+         Out1(:,1)=enabled;                 % col_1 = enabled chan #s
+         Out1(:,2)=VDLG1_S1(enabled,euckpb);% col_2 = eng unit state
+         Out1(:,3)=VDLG1_S1(enabled,euval); % col_3 = eu value
+         Out1(:,4)=ovldstat('get','status',enabled); % overload status
+
+         % pull out full scale voltage settings
+         for i=1:length(enabled),
+            Out1(i,5)= chanvstr('volts',VMAXc,VDLG1_S1(enabled(i),vrng));
+         end;
+          
+         Out1(:,6)=VDLG1_S1(enabled,dbref);   % added 3/13/98   
+          
+         % next, ChanLabel  defined as 20 char long with ~ terminator
+           i=1;
+           Out2 = [strpack(19,pullstr(VDLG1_S2(enabled(i),:),1)),'~'];
+         for i=2:length(enabled)
+           Out2 =[Out2;[strpack(19,pullstr(VDLG1_S2(enabled(i),:),1)),'~']];
+         end;
+
+         % EULabel  defined as 20 char long with ~ terminator
+           i=1;
+           Out3 = [strpack(19,pullstr(VDLG1_S2(enabled(i),:),2)),'~'];
+         for i=2:length(enabled)
+           Out3 =[Out3;[strpack(19,pullstr(VDLG1_S2(enabled(i),:),2)),'~']];
+         end;
+
+      else
+          disp([In1,'  not recognized in v_dlg1(get,xxx)'])
+      end;               % get subcommand stuff
+
+  elseif strcmp(Action,'set'),
+   % SET command
+      if strcmp(In1,'chena_lock')
+           set(HVDLG1_(chenck),'enable','off');
+           set(HVDLG1_(led1),'userdata',0);
+      elseif strcmp(In1,'chena_unlock')
+           vdlg1_owner=get(HVDLG1_(titletxt),'userdata');
+           ena='on';
+           if strcmp(vdlg1_owner,'vid') & Chan_Ptr <=2                 
+              ena='off';
+           elseif strcmp(vdlg1_owner,'vna') & Chan_Ptr ==1
+                      ena='off';
+           end;
+           set(HVDLG1_(chenck),'enable',ena);
+           set(HVDLG1_(led1),'userdata',1);
+           
+           
+      elseif strcmp(In1,'clist')
+           % In2 has new clist, called from new mc plot_vna
+           VDLG1_S1(:,chenck)   = zeros(length(VDLG1_S1(:,chenck)),1);
+           VDLG1_S1(In2,chenck) = ones(length(In2),1);
+           s1     = VDLG1_S1(Chan_Ptr,:);
+           if s1(chenck)==1
+             mark  = 'On';
+             color = GRNc;
+           else
+             mark  = 'Off';
+             color = REDc;
+           end;
+           set(HVDLG1_(chenck), 'UserData', s1(chenck),'String',mark);        %  ,'enable','off');
+           set(HVDLG1_(led1),   'Value', s1(chenck),'BackGroundColor',color);
+           
+           
+           if ~isempty(findobj('tag','siglab_mc_setup'))
+               % call mcsetup and inform it that  the clist has changed  
+               eval( 'mcsetup(''fromvxx_clist'',In2)');  
+           end;
+           
+      else
+          disp('unrecognized set command in v_dlg1')
+      end;
+
+  elseif strcmp(Action,'load') | strcmp(Action,'load_mc')
+  % LOAD
+        % load @ current Chan_Ptr (this is a primary callback from chsel popup)
+        s1     = VDLG1_S1(Chan_Ptr,:); % transfer VVLG1_S1 / S2
+        s2     = VDLG1_S2(Chan_Ptr,:);
+        vdlg1_owner=get(HVDLG1_(titletxt),'userdata');
+
+        % HVDLG1_(led1) userdata has main enable
+        if strcmp(vdlg1_owner,'vna')
+            if  Chan_Ptr ==1 | get(HVDLG1_(led1),'userdata')==0
+               ena='off';
+            else
+               ena='on';
+            end;  % force 1 always to be on therefore disable button
+
+        elseif strcmp(vdlg1_owner,'vid')
+            ena='off';                     % channels 1 / 2 alway on, no more, no less
+        else
+            if get(HVDLG1_(led1),'userdata')==0
+               ena='off';
+            else
+               ena='on';
+            end;
+        end;
+
+        set(HVDLG1_(vrng), 'Value', max(s1(vrng),1));   % set to 10V if undefined (code 0)
+        if s1(chenck)==1,
+            mark  = 'On';
+            color = GRNc;
+        else
+            mark  = 'Off';
+            color = REDc;
+        end;
+        set(HVDLG1_(chenck), 'UserData', s1(chenck),'String',mark,'enable',ena);
+        set(HVDLG1_(led1),   'Value', s1(chenck),'BackGroundColor',color);
+
+       
+        if siglab('get','bias')
+           x  = VDLG1_S1(Chan_Ptr,cplckpb)+1; % pre BIAS was 0 & 1, need to add 1 for popup
+        else
+           for i=1:get(HVDLG1_(chsel),'userdata');  % has Numin 
+               VDLG1_S1(i,cplckpb) = min(VDLG1_S1(i,cplckpb),1);    % 0 and 1 are legal with no bias source 
+           end;
+           x  = VDLG1_S1(Chan_Ptr,cplckpb)+1; % 1&2 are legal for popup with no bias source
+        end;
+        set(HVDLG1_(cplckpb),'value',x); 
+
+        if s1(euckpb)==1, mark = 'EU On'; else mark = 'EU Off'; end;
+        set(HVDLG1_(euckpb), 'UserData', s1(euckpb),'String',mark);
+
+        if(s1(vrng)>=V2P5c) % % 2.5 V and below
+            Vmax = VINOF2P5c; % limited range
+        else
+            Vmax = VINOFMAXc; % full range
+        end;
+       
+        islider(HVDLG1_(offset),'set','minmax',[-Vmax,Vmax,-Vmax,Vmax]);
+        newval = islider(HVDLG1_(offset),'set','value',s1(offset));
+        
+        if newval ~= VDLG1_S1(Chan_Ptr ,offset)
+            disp('error in v_dlg1 search qqq');
+        end;
+
+        set(HVDLG1_(eua),   'String',ftoa('%5w',s1(euval)));
+        set(HVDLG1_(chname),'String',pullstr(s2,1));
+        set(HVDLG1_(eub),   'String',pullstr(s2,2));
+
+        % add 0 dB ref suppport for vsa (& vna  03/13/98)
+        if VDLG1_S1(Chan_Ptr,dbref) ==0
+           % init to ones, zeros don't make any sense and are a result of being a "spare" state slot.
+           VDLG1_S1(:,dbref) = ones(length(VDLG1_S1(:,dbref)),1);
+        end;
+
+        if strcmp(vdlg1_owner,'vsa') | strcmp(vdlg1_owner,'vna')
+           set(HVDLG1_(dbref),'string',ftoa('%4w',VDLG1_S1(Chan_Ptr,dbref)));
+        end;   
+        if strcmp(Action,'load_mc')
+            v_dlg1('show_cond','eu_ofs');
+            eval(['ls_',vdlg1_owner,'(''set_acq'');']);
+            eval(['ls_',vdlg1_owner,'(''set_proc'');']);
+            eval(['ls_',vdlg1_owner,'(''set_chan'');']);  % note only one arg, does massive change  
+            eval(['plot_',vdlg1_owner,'(''set'',''clist'', v_dlg1(''get'',''clist''),''setscales'');']); 
+            % clist call is very powerful (computationaly expensive!) ,
+            % KDS modified mcsetup to only change stuff when Apply button is pushed.
+        end;
+        
+        % added by kds, 11/25/98
+        if ~isempty(VCAP_ALIVE)&VCAP_ALIVE ==1
+            eval('vcap(''set_acq'');');
+        end; % inform vcap
+
+
+   elseif strcmp(Action,'open'),
+   % OPEN Command
+         if strcmp('fast',In1) ~=1, v_dlg1('load'); end;
+         v_dlg1('show_cond','all');
+
+   elseif strcmp(Action,'load_all'),
+   % LOAD_ALL Command
+       VDLG1_S1 = In2;
+       VDLG1_S2 = In3;
+       
+       % eliminate 0 entries in 1st column (Vrng)  7/16/98
+       VDLG1_S1(:,1)=max(VDLG1_S1(:,1),1);
+
+       % constrain to available channels
+       nchan    = get(HVDLG1_(chsel),'userdata');
+       lvdlg_s1 = length(VDLG1_S1(:,1));
+       set(HVDLG1_(chsel),'Value',min(In4,nchan));
+       VDLG1_S1(nchan+1:lvdlg_s1) = zeros(lvdlg_s1-nchan,1); % disable unavailable channels
+
+
+       if strcmp(In1,'on'),        % display this dialog it is visible ('on')
+           v_dlg1('load');
+           v_dlg1('show_cond','all');
+       else
+           v_dlg1('close');        % it might be open
+           v_dlg1('load');         % only do a load
+       end;
+
+   elseif strcmp(Action,'vcap')
+   %  VCAP section
+       if strcmp(In1,'lock')
+          set([HVDLG1_(chsel),HVDLG1_(vrng),HVDLG1_(chenck),HVDLG1_(cplckpb)],'enable','off');
+          islider(HVDLG1_(offset),'set','ena_off');
+       elseif strcmp(In1,'unlock')
+          set([HVDLG1_(chsel),HVDLG1_(vrng),HVDLG1_(chenck),HVDLG1_(cplckpb)],'enable','on');
+          islider(HVDLG1_(offset),'set','ena_on');
+       elseif strcmp(In1,'set_vfs')
+          % sets full scale values to agree with those used during the capture
+          % this is required (per GLS) to make scaling of data coming back from 
+          % siglab correct during memory replay.
+          % This is a colossal pain since offsets are range dependent. 
+          % This detail is not currently handled. 
+          % In2 has vector of full scale settings,
+          nchan       = get(HVDLG1_(chsel),'userdata');
+          vdlg1_owner = get(HVDLG1_(titletxt),'userdata');
+          for i = 1:nchan
+              if In2(i) ~= VDLG1_S1(i,vrng)
+                  newrange = In2(i);
+                  oldrange = VDLG1_S1(i,vrng);
+                  if i==Chan_Ptr
+                     set(HVDLG1_(vrng),'Value',newrange);
+                  end;
+                  VDLG1_S1(i,vrng)=newrange;
+                  eval(['ls_',vdlg1_owner,'(''set_chan'',',int2str(i),');']);
+              end;
+          end;
+       else
+          disp('error in v_dlg1 vcap section')
+       end;
+
+   elseif strcmp(Action,'close'),
+   % CLOSE
+         if strcmp(get(HVDLG1_(titletxt),'Visible') ,'on'),
+            set([HVDLG1_(vrng:euckpb),HVDLG1_(chname:titletxt)],'Visible','off');
+            islider(HVDLG1_(offset),'set','vis_off');
+         end;
+    elseif strcmp(Action,'clear'),
+   % CLEAR
+        clear global HVDLG1_ VDLG1_S1 VDLG1_S2
+        if MCSETUPc & ~isempty(findobj('tag','siglab_mc_setup'))
+            eval('mcsetup(''close'')');
+        end;
+
+   else
+   % OOPS
+        disp(['Error in v_dlg1:',Action,' not recognized']);
+   end; % end of MAGNUM IF
+   
+   % MC support 
+   if MCSETUPc
+         if strcmp(Action,'load_all')
+            if ~isempty(findobj('tag','siglab_mc_setup'))
+                % call mcsetup and inform that world has changed
+                eval( 'mcsetup(''fromvxx'',''all'')' );
+            end;
+         
+         elseif strcmp(Action,'chen_tog' )       |...
+                strcmp(Action,'eu_chk')          |...
+                strcmp(Action,'set_ofsro')       |...
+                strcmp(Action,'set_vfs')         |...
+                strcmp(Action,'set_dbref')       |...
+                strcmp(Action,'eu_tog')          |...
+                strcmp(Action,'store_str')
+               if ~isempty(findobj('tag','siglab_mc_setup'))
+                  % call mcsetup and inform it that  the data has changed  
+                  eval( 'mcsetup(''fromvxx'',Chan_Ptr)');
+               end;
+         end;
+   end;   
+   
+%end dialog function
