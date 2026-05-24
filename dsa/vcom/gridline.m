@@ -44,15 +44,15 @@ end;
 x=0; y=0;
 if     strcmp(Action,'off') Out=0;  z=0;
 elseif strcmp(Action,'on')  Out=1;  z=1;      % here for Action = 'on'
-  xl = double(get(ax,'Xlim'));  xt = double([xl(1) get(ax,'Xtick') xl(2)]);  n = length(xt);
-  yl = double(get(ax,'Ylim'));  yt = double([yl(1) get(ax,'Ytick') yl(2)]);  m = length(yt);
+  xl = get(ax,'Xlim');  xt = [xl(1) get(ax,'Xtick') xl(2)];  n = length(xt);
+  yl = get(ax,'Ylim');  yt = [yl(1) get(ax,'Ytick') yl(2)];  m = length(yt);
   if xt(1) >= xt(2)   xt = xt(2:n);   n=n-1; end;
   if yt(1) >= yt(2)   yt = yt(2:m);   m=m-1; end;
   if xt(n-1) >= xt(n) xt = xt(1:n-1); n=n-1; end;
   if yt(m-1) >= yt(m) yt = yt(1:m-1); m=m-1; end;
   s = ones(1,n+m-4);
   if length(s)
-    x = [1 n n];   y = [1 m m];  z = double(ones(3,1));
+    x = [1 n n];   y = [1 m m];  z = ones(3,1);
     x = [xt(x)' * ones(1,m-2)  z * xt(2:n-1)];
     y = [z * yt(2:m-1)  yt(y)' * ones(1,n-2)];
     z = [0; 0; NaN] * s;

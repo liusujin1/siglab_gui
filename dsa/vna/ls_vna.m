@@ -85,13 +85,6 @@
     %zpadx      =10;
  %end_define  
 
-   % Lazy-init safeguard: callbacks may hit ls_vna('get',...) during shutdown
-   % after globals were cleared.
-   if isempty(LS_VNA_STATE) || numel(LS_VNA_STATE) < 10
-      % [sys_clock numin numout state_chg int_flg old_mode auto_mode HW_ok nchan_box1 zpadx]
-      LS_VNA_STATE = [51200, 4, 1, 0, 0, -1, 0, 1, 4, 0];
-   end
-
    % nhw
    if strcmp(Action(1:3),'set') 
       if ~LS_VNA_STATE(8)
@@ -141,11 +134,7 @@
         elseif  strcmp(Var1,'ZPAD')
             Out1 =LS_VNA_STATE(10); 
         elseif  strcmp(Var1,'analog_trig')
-            if isempty(HDLG2_S1) || numel(HDLG2_S1) < 7
-                Out1 = 0;
-            else
-                Out1 = (HDLG2_S1(1) <=LS_VNA_STATE(2))  & ((HDLG2_S1(7) ==2) | (HDLG2_S1(7) ==4));
-            end
+            Out1 = (HDLG2_S1(1) <=LS_VNA_STATE(2))  & ((HDLG2_S1(7) ==2) | (HDLG2_S1(7) ==4));
         else
             disp([Var1,' not recognized in ls_vna(get,xxx)']);
             Out1=[];

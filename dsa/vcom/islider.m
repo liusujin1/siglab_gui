@@ -122,24 +122,6 @@
                         'Min',In2(1),'Max',In2(2),'Value',max(min(In2(3),In2(2)),In2(1)),...
                         'userdata',In2(3),...
                         'Callback',sprintf('islider(%d,''CBslide'')',Out1));    
-      % Compatibility tweak: Stop-at-count slider should step by 5.
-      if ischar(In4) && ~isempty(strfind(In4,'set_tcntro'))
-          rng = In2(2) - In2(1);
-          if rng > 0
-              stp = min(max(5/rng, eps), 1);
-              try
-                  set(h(2),'SliderStep',[stp stp]);
-              catch
-              end
-          end
-      end
-      % Record Length slider: 3 fixed levels (2048/4096/8192).
-      if ischar(In4) && ~isempty(strfind(lower(In4),'set_frmszro'))
-          try
-              set(h(2),'SliderStep',[0.5 0.5]);
-          catch
-          end
-      end
       
       h(3) =  uicontrol(hf,'Style','text','visible',In6,...
                         'String',min_str,...
@@ -185,12 +167,7 @@
               elseif h(6)==2     % nearest integer
                  newval= round(newval);
               elseif h(6)==3     % limit to 2^N
-                 cb = get(h(4),'userdata');
-                 if is_record_length_slider(cb)
-                    newval = quantize_record_length(newval, get(h(2),'min'), get(h(2),'max'));
-                 else
-                    newval = 2 ^ nextpow2(newval/1.414);
-                 end
+                 newval = 2 ^ nextpow2(newval/1.414);
               elseif h(6)==4    % quantize to value in h(quant)
                  newval=h(7)*round(newval/h(7));  
               else
@@ -218,91 +195,37 @@
                   % abs(min-max) < about 50
                   % the arrows won't move the slider
                                           
-              elseif h(6)==3
-                  cb = get(h(4),'userdata');
-                  if is_record_length_slider(cb)
-                      newval = quantize_record_length(newval, get(h(2),'min'), get(h(2),'max'));
-                      set(h(5),'String',ftoa(fmt(2,:),newval));
-                      set(h(2),'Value',newval,'userdata',newval);
-                      eval(get(h(4),'userdata'));
-                      return;
-                  end
-                  % power-of-two mode:
-                  % - large jump (track click): move one tick (2^N) by direction
-                  % - small move (drag/arrow): quantize to nearest 2^N
-                  smin = get(h(2),'min');
-                  smax = get(h(2),'max');
-                  oldval = get(h(2),'userdata');
-                  if oldval <= 0
-                      oldval = smin;
-                  end
-                  oldpow = 2^nextpow2(oldval);
-                  if oldpow > oldval
-                      oldpow = oldpow/2;
-                  end
-                  if oldpow < smin
-                      oldpow = smin;
-                  end
-                  if oldpow > smax
-                      oldpow = smax;
-                  end
-
-                  delta = newval - oldval;
-                  big_jump = abs(delta) > max((smax-smin)/8, max(oldpow,1)*0.3);
-                  if big_jump
-                      if delta > 0
-                          newval = min(oldpow*2, smax);
-                      elseif delta < 0
-                          newval = max(oldpow/2, smin);
-                      else
-                          newval = oldpow;
-                      end
+             elseif h(6)==3
+                  % limit to 2^N
+                  if newval >= get(h(2),'userdata')-eps
+                     newval=2^nextpow2(newval);
                   else
-                      if newval <= 0
-                          newval = smin;
-                      else
-                          newval = 2^round(log(newval)/log(2));
-                      end
-                  end
-                  newval = min(max(newval,smin),smax);
+                     newval=2^nextpow2(newval/2);
+                  end;
+                  if newval < get(h(2),'min')
+                     newval = get(h(2),'min');
+                  end;
                   
               elseif h(6)==4
                   % quantize to value in h(quant)
                   newval=h(7)*round(newval/h(7));
 
               elseif h(6)==5
-                  cb = get(h(4),'userdata');
-                  if force_linear_mode5(cb)
-                      % Compatibility override for specific controls:
-                      % Input Offset / Stop at Count / Delay.
-                      if ~isempty(strfind(cb,'set_tcntro'))
-                          q = 5;  % Stop at Count step
-                      elseif length(h) >= 7 && ~isempty(h(7))
-                          q = h(7);
+                  % quasi log steps
+                  % see what slider mode was pushed with sldclick
+                  click_type = sldclick(h(2));
+                  if (click_type ~= 0) && (click_type ~= 20)
+                      oldval     = get(h(2),'userdata');
+                      % h(quant) has minimum step size
+                      if abs(oldval)>0
+                         offset = -1.5;
+                         step  = click_type*max(10^( round(offset+log10(abs(oldval)))),h(7));
                       else
-                          q = 0;
-                      end
-                      if q > 0
-                          newval = q*round(newval/q);
-                      end
-                      newval = min(max(newval, get(h(2),'min')), get(h(2),'max'));
-                  else
-                      % quasi log steps
-                      % see what slider mode was pushed with sldclick
-                      click_type = sldclick(h(2));
-                      if (click_type ~= 0) && (click_type ~= 20)  
-                          oldval     = get(h(2),'userdata');
-                          % h(quant) has minimum step size
-                          if abs(oldval)>0 
-                             offset = -1.5;
-                             step  = click_type*max(10^( round(offset+log10(abs(oldval)))),h(7));
-                          else
-                             step  = click_type*h(7); 
-                          end;
-                          % make newval limited multiple of the step size....
-                          newval = min(max(step*round((oldval+step)/step), get(h(2),'min')),get(h(2),'max'));
+                         step  = click_type*h(7);
                       end;
-                  end
+                      % make newval limited multiple of the step size....
+                      newval = min(max(step*round((oldval+step)/step), get(h(2),'min')),get(h(2),'max'));
+                  end;
               else
                   disp([num2str(h(6)),': unsupported mode in islider.mi']);
               end;
@@ -316,8 +239,7 @@
            eminmax = get(h(5),'userdata');       % get edit minmax range
            set(h(5), 'string',ftoa(fmt(2,:),max(min(In2,eminmax(2)),eminmax(1))));   % set limited value
            Out1    = s2n(get(h(5),'String'));    % return limited, quantized value
-           newval  = max(min(get(h(2),'max'),Out1),get(h(2),'min'));
-           set(h(2),'value',newval,'userdata',newval); % keep slider history coherent for QUASILOG mode
+           set(h(2),'value',max(min(get(h(2),'max'),Out1),get(h(2),'min'))); % set limited value                                      % v5
       
        elseif strcmp(In1,'newquant')
            h(7) = In2;
@@ -344,8 +266,7 @@
            if newval ~=oldval
               set(h(5),'string',ftoa(fmt(2,:),newval));
            end;
-           newval = max(min(In2(2),newval),In2(1));
-           set(h(2),'min',In2(1),'max',In2(2),'value',newval,'userdata',newval); % v5
+           set(h(2),'min',In2(1),'max',In2(2),'value',max(min(In2(2),newval),In2(1))); % v5
            Out1=s2n(get(h(5),'String'));        % v5 return limited quantized value
            
            if nargin >=5
@@ -410,65 +331,3 @@
       disp([Action,': Action unrecognized in islider.m'])
    end;  % large if
 % end function islider
-
-function tf = force_linear_mode5(cb)
-tf = false;
-if isempty(cb)
-    return;
-end
-if iscell(cb)
-    try
-        cb = cb{1};
-    catch
-        cb = '';
-    end
-end
-if isstring(cb)
-    cb = char(cb);
-end
-if ~ischar(cb)
-    try
-        cb = char(cb);
-    catch
-        cb = '';
-    end
-end
-cb = lower(cb);
-tf = ~isempty(strfind(cb,'set_ofsro')) || ...
-     ~isempty(strfind(cb,'set_tcntro')) || ...
-     ~isempty(strfind(cb,'set_delayro'));
-
-function tf = is_record_length_slider(cb)
-if isempty(cb)
-    tf = false;
-    return;
-end
-if iscell(cb)
-    try
-        cb = cb{1};
-    catch
-        cb = '';
-    end
-end
-if isstring(cb)
-    cb = char(cb);
-end
-if ~ischar(cb)
-    try
-        cb = char(cb);
-    catch
-        cb = '';
-    end
-end
-cb = lower(cb);
-tf = ~isempty(strfind(cb,'set_frmszro'));
-
-function v = quantize_record_length(v, smin, smax)
-allowed = [2048 4096 8192];
-allowed = allowed(allowed >= smin & allowed <= smax);
-if isempty(allowed)
-    v = min(max(v,smin),smax);
-    return;
-end
-[~,ix] = min(abs(allowed - v));
-v = allowed(ix);

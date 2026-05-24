@@ -1,8 +1,15 @@
 # OS / editor noise
 .DS_Store
 Thumbs.db
+__pycache__/
+*.pyc
 *.tmp
 *.log
+.venv/
+*.spec
+*.egg-info/
+build/
+dist/
 
 # MATLAB transient artifacts
 *.asv
@@ -15,3 +22,4 @@ codegen/
 recovered_chats/
 state_*.sqlite*
 *.copytest
+tmp_*

@@ -1,0 +1,396 @@
+from __future__ import annotations
+
+from typing import Any
+
+import numpy as np
+
+from python_vna.daq.base import (
+    BackendCapability,
+    BackendDevice,
+    BackendFrame,
+    BaseDaqBackend,
+    DaqBackendError,
+    preferred_usb4431_device,
+)
+from python_vna.models import SessionConfig
+from python_vna.optional import require
+
+
+class NIDaqBackend(BaseDaqBackend):
+    """NI-DAQmx backend for USB-4431-class devices."""
+
+    def __init__(self) -> None:
+        self._nidaqmx = None
+        self._constants = None
+        self._stream_readers = None
+        self._device_name: str | None = None
+        self._session: SessionConfig | None = None
+        self._ai_task = None
+        self._ao_task = None
+        self._reader = None
+        self._frame_index = 0
+        self._channel_names: list[str] = []
+
+    IEPE_BIAS_CURRENT_MA = 2.1
+
+    @staticmethod
+    def _safe_getattr(obj: Any, attr_name: str, default: Any = None) -> Any:
+        try:
+            return getattr(obj, attr_name)
+        except Exception:
+            return default
+
+    def _load(self) -> None:
+        if self._nidaqmx is not None:
+            return
+        self._nidaqmx = require("nidaqmx", "python -m pip install -e .[ni]")
+        self._constants = require(
+            "nidaqmx.constants", "python -m pip install -e .[ni]"
+        )
+        self._stream_readers = require(
+            "nidaqmx.stream_readers", "python -m pip install -e .[ni]"
+        )
+
+    def _terminal_configuration(self):
+        terminal_config = self._constants.TerminalConfiguration
+        for attr_name in ("PSEUDODIFFERENTIAL", "PSEUDO_DIFF", "DIFF", "DEFAULT"):
+            if hasattr(terminal_config, attr_name):
+                return getattr(terminal_config, attr_name)
+        return None
+
+    def _excitation_source_internal(self):
+        excitation_source = self._constants.ExcitationSource
+        for attr_name in ("INTERNAL",):
+            if hasattr(excitation_source, attr_name):
+                return getattr(excitation_source, attr_name)
+        return None
+
+    @staticmethod
+    def _normalize_iepe_current_amps(current_ma: float) -> float:
+        supported_ma = (0.0, 2.1)
+        target = min(supported_ma, key=lambda value: abs(value - float(current_ma)))
+        return target / 1000.0
+
+    @staticmethod
+    def _uses_iepe_bias(channel) -> bool:
+        return bool(channel.iepe_enabled or channel.coupling.strip().lower() == "bias")
+
+    @staticmethod
+    def _frame_timestamps(frame_size: int, sample_rate: float) -> np.ndarray:
+        return np.arange(frame_size, dtype=float) / sample_rate
+
+    @staticmethod
+    def _normalize_physical_name(device_name: str, channel_name: str) -> str:
+        normalized = (channel_name or "").strip()
+        if not normalized:
+            raise DaqBackendError("Channel physical name is empty.")
+        if "/" not in normalized:
+            normalized = f"{device_name}/{normalized}"
+        return normalized
+
+    @staticmethod
+    def _channel_voltage_limits(channel) -> tuple[float, float]:
+        full_scale = abs(float(channel.full_scale or channel.max_value or 10.0))
+        if full_scale <= 0.0:
+            min_value = float(channel.min_value)
+            max_value = float(channel.max_value)
+            if max_value > min_value:
+                return min_value, max_value
+            full_scale = 10.0
+        return -full_scale, full_scale
+
+    def _coupling_constant(self, channel):
+        coupling = channel.coupling.strip().lower()
+        coupling_constants = self._safe_getattr(self._constants, "Coupling", None)
+        if coupling_constants is None:
+            return None
+        if coupling in {"ac", "bias"} and hasattr(coupling_constants, "AC"):
+            return coupling_constants.AC
+        if coupling == "dc" and hasattr(coupling_constants, "DC"):
+            return coupling_constants.DC
+        return None
+
+    def _configure_iepe_voltage_channel(self, ai_channel, channel) -> None:
+        excitation_source = self._excitation_source_internal()
+        excitation_type = self._safe_getattr(
+            self._safe_getattr(self._constants, "ExcitationVoltageOrCurrent", None),
+            "USE_CURRENT",
+            None,
+        )
+        if excitation_source is not None:
+            try:
+                ai_channel.ai_excit_src = excitation_source
+            except Exception as exc:  # pragma: no cover - hardware/runtime dependent
+                raise DaqBackendError(
+                    f"Failed to enable IEPE excitation for {channel.name}: {exc}"
+                ) from exc
+        if excitation_type is not None:
+            try:
+                ai_channel.ai_excit_voltage_or_current = excitation_type
+            except Exception as exc:  # pragma: no cover - hardware/runtime dependent
+                raise DaqBackendError(
+                    f"Failed to select IEPE current excitation for {channel.name}: {exc}"
+                ) from exc
+        try:
+            ai_channel.ai_excit_val = self._normalize_iepe_current_amps(
+                channel.iepe_current_ma or self.IEPE_BIAS_CURRENT_MA
+            )
+        except Exception as exc:  # pragma: no cover - hardware/runtime dependent
+            raise DaqBackendError(
+                f"Failed to set IEPE current for {channel.name}: {exc}"
+            ) from exc
+        try:
+            ai_channel.ai_excit_use_for_scaling = False
+        except Exception:
+            pass
+
+    def _apply_voltage_channel_properties(self, ai_channel, channel) -> None:
+        coupling = self._coupling_constant(channel)
+        if coupling is not None:
+            try:
+                ai_channel.ai_coupling = coupling
+            except Exception:
+                pass
+        if self._uses_iepe_bias(channel):
+            self._configure_iepe_voltage_channel(ai_channel, channel)
+
+    def list_devices(self) -> list[BackendDevice]:
+        self._load()
+        system = self._nidaqmx.system.System.local()
+        devices: list[BackendDevice] = []
+        for device in system.devices:
+            ai_channels = [chan.name for chan in device.ai_physical_chans]
+            ao_channels = [chan.name for chan in device.ao_physical_chans]
+            ai_max_rate = self._safe_getattr(device, "ai_max_single_chan_rate", None)
+            ao_max_rate = self._safe_getattr(device, "ao_max_rate", None)
+            devices.append(
+                BackendDevice(
+                    name=device.name,
+                    product_type=getattr(device, "product_type", device.name),
+                    ai_channels=ai_channels,
+                    ao_channels=ao_channels,
+                    capability=BackendCapability(
+                        supports_iepe=True,
+                        supports_output=len(ao_channels) > 0,
+                        supports_analog_trigger=True,
+                        supports_pretrigger=True,
+                        max_ai_sample_rate=ai_max_rate,
+                        max_ao_sample_rate=ao_max_rate,
+                    ),
+                )
+            )
+        return devices
+
+    def configure(self, session: SessionConfig, device_name: str | None = None) -> None:
+        self._load()
+        self.close()
+
+        enabled = [channel for channel in session.ai_channels if channel.enabled]
+        if not enabled:
+            raise DaqBackendError("At least one enabled input channel is required.")
+
+        devices = self.list_devices()
+        if not devices:
+            raise DaqBackendError("No NI-DAQmx devices found.")
+
+        selected = device_name or preferred_usb4431_device(devices) or devices[0].name
+        selected_device = next((device for device in devices if device.name == selected), None)
+        if selected_device is None:
+            raise DaqBackendError(f"NI device '{selected}' was not found.")
+        self._device_name = selected
+        self._session = session
+        self._channel_names = [channel.name for channel in enabled]
+        self._frame_index = 0
+
+        constants = self._constants
+        terminal_config = self._terminal_configuration()
+        self._ai_task = self._nidaqmx.Task(new_task_name=f"{selected}_ai")
+        for channel in enabled:
+            physical_name = self._normalize_physical_name(
+                selected, channel.physical_name or channel.name
+            )
+            min_val, max_val = self._channel_voltage_limits(channel)
+            ai_channel = self._ai_task.ai_channels.add_ai_voltage_chan(
+                physical_name,
+                name_to_assign_to_channel=channel.name,
+                terminal_config=terminal_config,
+                min_val=min_val,
+                max_val=max_val,
+            )
+            self._apply_voltage_channel_properties(ai_channel, channel)
+
+        sample_rate = session.acquisition.sample_rate
+        frame_size = session.acquisition.frame_size
+        self._ai_task.timing.cfg_samp_clk_timing(
+            rate=sample_rate,
+            sample_mode=constants.AcquisitionType.CONTINUOUS,
+            samps_per_chan=frame_size * session.acquisition.buffer_frames,
+        )
+
+        trigger = session.acquisition.trigger
+        if trigger.enabled and trigger.source != "immediate":
+            source = self._normalize_trigger_source(trigger.source, selected)
+            edge = (
+                constants.Edge.RISING
+                if trigger.slope == "rising"
+                else constants.Edge.FALLING
+            )
+            delay_setting = int(trigger.pretrigger_samples)
+            pretrigger_samples = (
+                int(round(abs(delay_setting) * frame_size / 100.0))
+                if delay_setting < 0
+                else 0
+            )
+            if pretrigger_samples > 0:
+                self._ai_task.triggers.reference_trigger.cfg_anlg_edge_ref_trig(
+                    trigger_source=source,
+                    pretrigger_samples=pretrigger_samples,
+                    trigger_slope=edge,
+                    trigger_level=trigger.level,
+                )
+            else:
+                self._ai_task.triggers.start_trigger.cfg_anlg_edge_start_trig(
+                    trigger_source=source,
+                    trigger_slope=edge,
+                    trigger_level=trigger.level,
+                )
+
+        if session.acquisition.excitation.enabled and session.ao_channel:
+            if not selected_device.capability.supports_output:
+                raise DaqBackendError(
+                    f"Device '{selected}' does not expose any AO channels. Disable excitation or choose a device with output."
+                )
+            self._ao_task = self._nidaqmx.Task(new_task_name=f"{selected}_ao")
+            ao_name = self._normalize_physical_name(selected, session.ao_channel)
+            self._ao_task.ao_channels.add_ao_voltage_chan(
+                ao_name,
+                min_val=-10.0,
+                max_val=10.0,
+            )
+            ao_rate_limit = selected_device.capability.max_ao_sample_rate or 96000.0
+            self._ao_task.timing.cfg_samp_clk_timing(
+                rate=min(sample_rate, ao_rate_limit),
+                sample_mode=constants.AcquisitionType.CONTINUOUS,
+                samps_per_chan=frame_size,
+            )
+
+        self._reader = self._stream_readers.AnalogMultiChannelReader(
+            self._ai_task.in_stream
+        )
+
+    @staticmethod
+    def _normalize_trigger_source(source: str, _device_name: str) -> str:
+        normalized = (source or "").strip()
+        if normalized.lower() == "immediate":
+            return "immediate"
+        # DAQmx analog edge triggers accept task virtual channel names. We assign
+        # channels as ai0/ai1/... above, so keep those names instead of expanding
+        # to /Dev1/ai0, which USB-4431 rejects for this task.
+        if normalized.startswith("ai"):
+            return normalized
+        return normalized
+
+    def start(self) -> None:
+        if self._ai_task is None or self._session is None:
+            raise DaqBackendError("Backend must be configured before start().")
+
+        if self._ao_task is not None:
+            waveform = self._build_excitation_waveform(self._session)
+            self._ao_task.write(waveform, auto_start=False)
+            self._ao_task.start()
+        self._ai_task.start()
+
+    def _build_excitation_waveform(self, session: SessionConfig) -> np.ndarray:
+        excitation = session.acquisition.excitation
+        sample_rate = min(session.acquisition.sample_rate, 96000.0)
+        frame_size = session.acquisition.frame_size
+        time_vector = np.arange(frame_size, dtype=float) / sample_rate
+        if excitation.mode == "tone":
+            waveform = excitation.amplitude * np.sin(
+                2.0 * np.pi * excitation.tone_hz * time_vector
+            )
+        elif excitation.mode == "chirp":
+            scipy_signal = require("scipy.signal", "python -m pip install -e .")
+            waveform = excitation.amplitude * scipy_signal.chirp(
+                time_vector,
+                f0=excitation.chirp_start_hz,
+                f1=excitation.chirp_stop_hz,
+                t1=max(time_vector[-1], 1.0 / sample_rate),
+                method="logarithmic",
+            )
+        elif excitation.mode == "random":
+            rng = np.random.default_rng(excitation.random_seed)
+            waveform = excitation.amplitude * rng.standard_normal(frame_size)
+        else:
+            waveform = np.zeros(frame_size, dtype=float)
+        return np.clip(waveform + excitation.offset, -10.0, 10.0)
+
+    def read_frame(self) -> BackendFrame:
+        if self._ai_task is None or self._reader is None or self._session is None:
+            raise DaqBackendError("Backend is not running.")
+
+        frame_size = self._session.acquisition.frame_size
+        num_channels = len(self._channel_names)
+        data = np.zeros((num_channels, frame_size), dtype=np.float64)
+        try:
+            self._reader.read_many_sample(
+                data,
+                number_of_samples_per_channel=frame_size,
+                timeout=self._session.acquisition.trigger.timeout_seconds,
+            )
+        except Exception as exc:  # pragma: no cover - requires NI runtime/hardware
+            raise DaqBackendError(f"NI-DAQmx read failed: {exc}") from exc
+
+        sample_rate = self._session.acquisition.sample_rate
+        timestamps = self._frame_timestamps(frame_size, sample_rate)
+        frame = BackendFrame(
+            sample_rate=sample_rate,
+            channel_names=self._channel_names,
+            data=data,
+            timestamps=timestamps,
+            frame_index=self._frame_index,
+            metadata={"backend": "ni", "device": self._device_name},
+        )
+        self._frame_index += 1
+        return frame
+
+    def stop(self) -> None:
+        self.abort()
+        if self._ai_task is not None:
+            try:
+                self._ai_task.stop()
+            except Exception:
+                pass
+        if self._ao_task is not None:
+            try:
+                self._ao_task.stop()
+            except Exception:
+                pass
+
+    def abort(self) -> None:
+        task_mode = self._safe_getattr(self._constants, "TaskMode", None)
+        abort_mode = self._safe_getattr(task_mode, "TASK_ABORT", None)
+        if self._ai_task is not None:
+            if abort_mode is not None:
+                try:
+                    self._ai_task.control(abort_mode)
+                except Exception:
+                    pass
+        if self._ao_task is not None:
+            if abort_mode is not None:
+                try:
+                    self._ao_task.control(abort_mode)
+                except Exception:
+                    pass
+
+    def close(self) -> None:
+        for task_name in ("_ai_task", "_ao_task"):
+            task = getattr(self, task_name, None)
+            if task is not None:
+                try:
+                    task.close()
+                except Exception:
+                    pass
+            setattr(self, task_name, None)
+        self._reader = None
+        self._session = None

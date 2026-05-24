@@ -1296,24 +1296,12 @@ global CUR_MAIN_HNDL;   % array of cursor 'xlabel' handles
     % SET ACTIONS follow
         if strcmp(In1,'vis_on')
              % set appropriate object vis
-             hset = hcur_(1:9);
-             hset = filter_valid_handles(hset);
-             if ~isempty(hset)
-                 set(hset,'visible','on');
-             end
+             set(hcur_(1:9),'visible','on');
 %              set(hcur_(13:length(hcur_)),'visible','on');
-             hset = hcur_(14:length(hcur_));
-             hset = filter_valid_handles(hset);
-             if ~isempty(hset)
-                 set(hset,'visible','on');
-             end
+             set(hcur_(14:length(hcur_)),'visible','on');
              cursor(Cur_ID,'restore');
         elseif strcmp(In1,'vis_off')
-             hset = [hcur_(1:11),hcur_(13:length(hcur_))];
-             hset = filter_valid_handles(hset);
-             if ~isempty(hset)
-                 set(hset,'visible','off');
-             end
+             set([hcur_(1:11),hcur_(13:length(hcur_))],'visible','off');
 
         elseif strcmp(In1,'y_ro&pos')
               % RAB 8/11/00 
@@ -1404,50 +1392,32 @@ global CUR_MAIN_HNDL;   % array of cursor 'xlabel' handles
              % attempt to save most of old expansion history by replacing only the 1st entry in list v >2.07
              
              if strcmp(In1,'xylim')
-                  xylim   = In2(:).';
-                  row5 = [xylim,1];
-                  if isempty(exp_his)
-                      exp_his = row5;
-                  else
-                      if size(exp_his,2) < 5
-                          exp_his = [exp_his, zeros(size(exp_his,1),5-size(exp_his,2))];
-                      end
-                      exp_his(1,1:5) = row5;
-                  end
+                  xylim   = In2;
+                  exp_his(1,:) = [xylim,1];
              elseif strcmp(In1,'ylim') 
                   % In2 has main axis limits
-                  in2row = In2(:).';
                   % xylim = [xy(1:2),In2];
                   if ~isempty(old_eh)
                     %  exp_his    =[[old_eh(1,1:2),In2,0];[xylim,1]];
                     %% exp_his(1,:) = [old_eh(1,1:2),In2,1];
                     %% xylim = [exp_his(1,1:2),In2];
-                    row5 = [xy(1:2),in2row,1];
-                    if size(exp_his,2) < 5
-                        exp_his = [exp_his, zeros(size(exp_his,1),5-size(exp_his,2))];
-                    end
-                    exp_his(1,1:5) = row5;
-                    xylim = [xy(1:2),in2row];
+                    exp_his(1,:) = [xy(1:2),In2,1];
+                    xylim = [xy(1:2),In2];
                   else
                      exp_his=[];
-                     xylim = [xy(1:2),in2row];
+                     xylim = [xy(1:2),In2];
                   end;
              elseif strcmp(In1,'xlim')
                   % xylim = [In2,xy(3:4)];
-                  in2row = In2(:).';
                   if ~isempty(old_eh)
                      %  exp_his   =[[In2,old_eh(1,3:4),0];[xylim,1]];
                      %% exp_his(1,:) = [In2,old_eh(1,3:4),1];
                      %% xylim  = [In2,exp_his(1,3:4)]; 
-                     row5 = [in2row,xy(3:4),1];
-                     if size(exp_his,2) < 5
-                         exp_his = [exp_his, zeros(size(exp_his,1),5-size(exp_his,2))];
-                     end
-                     exp_his(1,1:5) = row5;
-                     xylim  = [in2row,xy(3:4)];
+                     exp_his(1,:) = [In2,xy(3:4),1];
+                     xylim  = [In2,xy(3:4)];
                   else
                      exp_his=[];
-                     xylim = [in2row,xy(3:4)];
+                     xylim = [In2,xy(3:4)];
                   end
              end;
              
@@ -1676,41 +1646,4 @@ global CUR_MAIN_HNDL;   % array of cursor 'xlabel' handles
         end;
     end;
 % end  cursor function
-
-function hset = filter_valid_handles(hset)
-mask = false(size(hset));
-for ii = 1:numel(hset)
-    try
-        if isnumeric(hset(ii)) && hset(ii) == 0
-            mask(ii) = false;
-            continue;
-        end
-        if isgraphics(hset(ii))
-            try
-                typ = get(hset(ii),'Type');
-                mask(ii) = ~strcmpi(typ,'root');
-            catch
-                mask(ii) = false;
-            end
-        else
-            mask(ii) = false;
-        end
-    catch
-        try
-            if ishghandle(hset(ii))
-                try
-                    typ = get(hset(ii),'Type');
-                    mask(ii) = ~strcmpi(typ,'root');
-                catch
-                    mask(ii) = false;
-                end
-            else
-                mask(ii) = false;
-            end
-        catch
-            mask(ii) = false;
-        end
-    end
-end
-hset = hset(mask);
 

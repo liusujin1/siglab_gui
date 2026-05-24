@@ -49,28 +49,6 @@
 %%%%%%%%%%%%%%%%%%%%end_include
    % *******************************************************
 
-   % Shutdown-safe guard: callbacks may arrive after controls are destroyed.
-   if ~strcmp(Action,'init')
-      dlg_ok = 0;
-      if ~isempty(HEXDLG2_) && numel(HEXDLG2_) >= 6
-         try
-            dlg_ok = isgraphics(HEXDLG2_(6));
-         catch
-            try
-               dlg_ok = ishandle(HEXDLG2_(6));
-            catch
-               dlg_ok = 0;
-            end
-         end
-      end
-      if ~dlg_ok
-         Out1 = [];
-         Out2 = [];
-         Out3 = [];
-         return;
-      end
-   end
-
    if strcmp(Action,'init'),
    %INIT Command
       %define

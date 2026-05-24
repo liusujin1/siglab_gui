@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "python-vna"
+version = "1.0.0"
+description = "Python front-end and analysis pipeline for NI USB-4431 vibration testing."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "Proprietary"}
+authors = [
+  {name = "OpenAI Codex"}
+]
+dependencies = [
+  "numpy>=1.26",
+  "scipy>=1.13",
+  "h5py>=3.11",
+]
+
+[project.optional-dependencies]
+gui = [
+  "PySide6>=6.7",
+  "pyqtgraph>=0.13",
+]
+ni = [
+  "nidaqmx>=1.0",
+]
+dev = [
+  "pytest>=8.2",
+]
+
+[project.scripts]
+python-vna = "python_vna.app:main"
+
+[tool.setuptools.packages.find]
+include = ["python_vna*"]
