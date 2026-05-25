@@ -4,6 +4,7 @@ from collections import deque
 import json
 import os
 from pathlib import Path
+import sys
 import threading
 import time
 
@@ -47,6 +48,11 @@ LEGEND_Z = 10
 MARKER_Z = 20
 CURSOR_Z = 30
 DATA_TIP_Z = 40
+
+
+def resource_path(relative_path: str) -> Path:
+    base_path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
+    return base_path / relative_path
 
 
 class DetachedPlotWindow(QtWidgets.QDialog):
@@ -1295,6 +1301,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def __init__(self, controller: VnaController, session: SessionConfig | None = None):
         super().__init__()
+        icon_path = resource_path("assets/python_vna_icon.ico")
+        if icon_path.exists():
+            self.setWindowIcon(QtGui.QIcon(str(icon_path)))
         self.controller = controller
         self.session = session or default_session_config()
         self._last_plot_cache: dict[str, dict[str, tuple[np.ndarray, np.ndarray]]] = {}
@@ -7996,7 +8005,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"Saved session to {save_path}")
 
     def _default_vna_path(self) -> Path:
-        return Path(__file__).resolve().parents[2] / "dsa" / "vna" / "default.vna"
+        return resource_path("dsa/vna/default.vna")
 
     def _save_to_default_vna(self) -> Path:
         self._read_session_from_widgets()

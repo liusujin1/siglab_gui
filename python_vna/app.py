@@ -11,6 +11,11 @@ from python_vna.optional import require
 from python_vna.storage import default_session_config, load_legacy_vna
 
 
+def resource_path(relative_path: str) -> Path:
+    base_path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
+    return base_path / relative_path
+
+
 def build_backend(name: str):
     if name == "ni":
         return NIDaqBackend()
@@ -32,7 +37,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def default_vna_path() -> Path:
-    return Path(__file__).resolve().parents[1] / "dsa" / "vna" / "default.vna"
+    return resource_path("dsa/vna/default.vna")
 
 
 def load_startup_session(path: Path | None = None):
@@ -50,9 +55,13 @@ def main(argv: list[str] | None = None) -> int:
     append_log("app start")
     args = parse_args(argv)
     QtWidgets = require("PySide6.QtWidgets", "python -m pip install -e .[gui]")
+    QtGui = require("PySide6.QtGui", "python -m pip install -e .[gui]")
     from python_vna.ui.main_window import MainWindow
 
     app = QtWidgets.QApplication(sys.argv if argv is None else argv)
+    icon_path = resource_path("assets/python_vna_icon.ico")
+    if icon_path.exists():
+        app.setWindowIcon(QtGui.QIcon(str(icon_path)))
     backend = build_backend(args.backend)
     startup_session = load_startup_session()
     session_config = startup_session.config if startup_session is not None else default_session_config()
