@@ -58,11 +58,98 @@ class NIDaqBackend(BaseDaqBackend):
         )
 
     def _terminal_configuration(self):
-        terminal_config = self._constants.TerminalConfiguration
-        for attr_name in ("PSEUDODIFFERENTIAL", "PSEUDO_DIFF", "DIFF", "DEFAULT"):
-            if hasattr(terminal_config, attr_name):
-                return getattr(terminal_config, attr_name)
-        return None
+        return self._terminal_configuration_candidates()[0]
+
+    def _terminal_configuration_candidates(
+        self, physical_name: str | None = None
+    ) -> list[Any]:
+        terminal_config = self._safe_getattr(
+            self._constants, "TerminalConfiguration", None
+        )
+        if terminal_config is None:
+            return [None]
+        preferred = [
+            getattr(terminal_config, attr_name)
+            for attr_name in (
+                "PSEUDODIFFERENTIAL",
+                "PSEUDO_DIFF",
+                "DIFF",
+                "RSE",
+                "NRSE",
+                "DEFAULT",
+            )
+            if hasattr(terminal_config, attr_name)
+        ]
+        supported = self._ai_terminal_configurations_for_channel(physical_name)
+        if supported:
+            candidates = [
+                candidate
+                for candidate in preferred
+                if any(candidate == supported_config for supported_config in supported)
+            ]
+            candidates.extend(
+                supported_config
+                for supported_config in supported
+                if not any(supported_config == candidate for candidate in candidates)
+            )
+            return candidates or supported
+        return preferred or [None]
+
+    def _ai_terminal_configurations_for_channel(
+        self, physical_name: str | None
+    ) -> list[Any]:
+        if not physical_name:
+            return []
+        try:
+            devices = self._nidaqmx.system.System.local().devices
+        except Exception:
+            return []
+        normalized = physical_name.strip().lstrip("/")
+        for device in devices:
+            for ai_channel in self._safe_getattr(device, "ai_physical_chans", []):
+                channel_name = str(self._safe_getattr(ai_channel, "name", "")).strip().lstrip("/")
+                if channel_name != normalized:
+                    continue
+                try:
+                    return list(ai_channel.ai_term_cfgs)
+                except Exception:
+                    return []
+        return []
+
+    def _add_ai_voltage_channel(
+        self,
+        physical_name: str,
+        channel,
+        min_val: float,
+        max_val: float,
+    ):
+        candidates = self._terminal_configuration_candidates(physical_name)
+        last_exc: Exception | None = None
+        for terminal_config in candidates:
+            kwargs = {
+                "name_to_assign_to_channel": channel.name,
+                "min_val": min_val,
+                "max_val": max_val,
+            }
+            if terminal_config is not None:
+                kwargs["terminal_config"] = terminal_config
+            try:
+                ai_channel = self._ai_task.ai_channels.add_ai_voltage_chan(
+                    physical_name,
+                    **kwargs,
+                )
+                append_log(
+                    f"ni.configure: {channel.name} terminal_config={terminal_config}"
+                )
+                return ai_channel
+            except Exception as exc:  # pragma: no cover - requires NI runtime/hardware
+                last_exc = exc
+                append_log(
+                    f"ni.configure: {channel.name} terminal_config={terminal_config} failed: {exc}"
+                )
+        raise DaqBackendError(
+            f"Failed to configure AI channel {channel.name} ({physical_name}): {last_exc}"
+        ) from last_exc
 
     def _excitation_source_internal(self):
         excitation_source = self._constants.ExcitationSource
@@ -84,6 +171,15 @@ class NIDaqBackend(BaseDaqBackend):
     @staticmethod
     def _frame_timestamps(frame_size: int, sample_rate: float) -> np.ndarray:
         return np.arange(frame_size, dtype=float) / sample_rate
+
+    @staticmethod
+    def _trigger_delay_samples(session: SessionConfig) -> int:
+        trigger = session.acquisition.trigger
+        if not trigger.enabled or trigger.source == "immediate":
+            return 0
+        frame_size = int(session.acquisition.frame_size)
+        delay_percent = int(trigger.pretrigger_samples)
+        return int(round(frame_size * delay_percent / 100.0))
 
     @staticmethod
     def _normalize_physical_name(device_name: str, channel_name: str) -> str:
@@ -160,6 +256,38 @@ class NIDaqBackend(BaseDaqBackend):
         if self._uses_iepe_bias(channel):
             self._configure_iepe_voltage_channel(ai_channel, channel)
 
+    @staticmethod
+    def _measurement_type_names(ai_channel) -> set[str]:
+        try:
+            measurement_types = ai_channel.ai_meas_types
+        except Exception:
+            return set()
+        names: set[str] = set()
+        for measurement_type in measurement_types:
+            names.add(str(getattr(measurement_type, "name", measurement_type)).upper())
+        return names
+
+    @classmethod
+    def _device_supports_iepe(cls, device) -> bool:
+        product_type = str(getattr(device, "product_type", "")).lower()
+        if "4431" in product_type:
+            return True
+        iepe_tokens = {
+            "ACCELERATION_ACCELEROMETER_CURRENT_INPUT",
+            "SOUND_PRESSURE_MICROPHONE",
+            "FORCE_IEPE_SENSOR",
+            "VELOCITY_IEPE_SENSOR",
+        }
+        for ai_channel in getattr(device, "ai_physical_chans", []):
+            if cls._measurement_type_names(ai_channel).intersection(iepe_tokens):
+                return True
+        return False
+
+    @classmethod
+    def _device_supports_dsa_triggering(cls, device) -> bool:
+        product_type = str(getattr(device, "product_type", "")).lower()
+        return "4431" in product_type or cls._device_supports_iepe(device)
+
     def list_devices(self) -> list[BackendDevice]:
         self._load()
         system = self._nidaqmx.system.System.local()
@@ -169,6 +297,8 @@ class NIDaqBackend(BaseDaqBackend):
             ao_channels = [chan.name for chan in device.ao_physical_chans]
             ai_max_rate = self._safe_getattr(device, "ai_max_single_chan_rate", None)
             ao_max_rate = self._safe_getattr(device, "ao_max_rate", None)
+            supports_iepe = self._device_supports_iepe(device)
+            supports_dsa_triggering = self._device_supports_dsa_triggering(device)
             devices.append(
                 BackendDevice(
                     name=device.name,
@@ -176,10 +306,10 @@ class NIDaqBackend(BaseDaqBackend):
                     ai_channels=ai_channels,
                     ao_channels=ao_channels,
                     capability=BackendCapability(
-                        supports_iepe=True,
+                        supports_iepe=supports_iepe,
                         supports_output=len(ao_channels) > 0,
-                        supports_analog_trigger=True,
-                        supports_pretrigger=True,
+                        supports_analog_trigger=supports_dsa_triggering,
+                        supports_pretrigger=supports_dsa_triggering,
                         max_ai_sample_rate=ai_max_rate,
                         max_ao_sample_rate=ao_max_rate,
                     ),
@@ -204,6 +334,14 @@ class NIDaqBackend(BaseDaqBackend):
         selected_device = next((device for device in devices if device.name == selected), None)
         if selected_device is None:
             raise DaqBackendError(f"NI device '{selected}' was not found.")
+        if (
+            any(self._uses_iepe_bias(channel) for channel in enabled)
+            and not selected_device.capability.supports_iepe
+        ):
+            raise DaqBackendError(
+                f"Device '{selected}' ({selected_device.product_type}) does not support IEPE/current excitation. "
+                "Select the USB-4431 device or disable Bias/IEPE channels."
+            )
         self._device_name = selected
         append_log(f"ni.configure: selected={selected}")
         self._session = session
@@ -213,19 +351,17 @@ class NIDaqBackend(BaseDaqBackend):
         self._stop_requested = False
 
         constants = self._constants
-        terminal_config = self._terminal_configuration()
         self._ai_task = self._nidaqmx.Task(new_task_name=f"{selected}_ai")
         for channel in enabled:
             physical_name = self._normalize_physical_name(
                 selected, channel.physical_name or channel.name
             )
             min_val, max_val = self._channel_voltage_limits(channel)
-            ai_channel = self._ai_task.ai_channels.add_ai_voltage_chan(
+            ai_channel = self._add_ai_voltage_channel(
                 physical_name,
-                name_to_assign_to_channel=channel.name,
-                terminal_config=terminal_config,
                 min_val=min_val,
                 max_val=max_val,
+                channel=channel,
             )
             self._apply_voltage_channel_properties(ai_channel, channel)
 
@@ -363,7 +499,7 @@ class NIDaqBackend(BaseDaqBackend):
                 self._ai_task.start()
                 sample_rate = max(float(self._session.acquisition.sample_rate), 1.0)
                 frame_duration = frame_size / sample_rate
-                read_timeout = read_timeout + frame_duration + 1.0
+                read_timeout = max(read_timeout, frame_duration + 0.25)
                 self._wait_until_done_with_stop_poll(read_timeout)
             if self._finite_ai_sampling:
                 self._reader.read_many_sample(
@@ -402,6 +538,7 @@ class NIDaqBackend(BaseDaqBackend):
         frame_start_unix_ns = read_end_unix_ns - int(
             round(max(frame_size - 1, 0) * 1_000_000_000 / sample_rate)
         )
+        trigger_delay_samples = self._trigger_delay_samples(self._session)
         timestamps = self._frame_timestamps(frame_size, sample_rate)
         frame = BackendFrame(
             sample_rate=sample_rate,
@@ -412,6 +549,10 @@ class NIDaqBackend(BaseDaqBackend):
             metadata={
                 "backend": "ni",
                 "device": self._device_name,
+                "trigger_delay_percent": int(self._session.acquisition.trigger.pretrigger_samples)
+                if self._session.acquisition.trigger.enabled
+                else 0,
+                "trigger_delay_samples": trigger_delay_samples,
                 "frame_start_unix_ns": frame_start_unix_ns,
                 "read_end_unix_ns": read_end_unix_ns,
             },
@@ -487,21 +628,17 @@ class NIDaqBackend(BaseDaqBackend):
         wait_until_done = getattr(self._ai_task, "wait_until_done", None)
         if wait_until_done is None:
             return
-        deadline = time.monotonic() + max(float(timeout), 0.0)
+        poll_timeout = min(max(float(timeout), 0.01), 0.1)
         while True:
             if self._should_stop_read():
                 raise DaqBackendError("NI-DAQmx read stopped by user.")
-            remaining = deadline - time.monotonic()
-            if remaining <= 0.0:
-                wait_until_done(timeout=0.0)
-                return
             try:
-                wait_until_done(timeout=min(0.1, remaining))
+                wait_until_done(timeout=poll_timeout)
                 return
             except Exception as exc:  # pragma: no cover - requires NI runtime/hardware
                 if self._should_stop_read():
                     raise DaqBackendError("NI-DAQmx read stopped by user.") from exc
-                if "timeout" in str(exc).lower() and remaining > 0.0:
+                if "timeout" in str(exc).lower():
                     continue
                 raise DaqBackendError(
                     f"NI-DAQmx triggered acquisition failed: {exc}"

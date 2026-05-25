@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from python_vna.daq.base import BackendFrame
+from python_vna.daq.base import BackendFrame, DaqBackendError
 from python_vna.controller import VnaController
 from python_vna.daq.ni import NIDaqBackend
 from python_vna.models import (
@@ -553,7 +553,7 @@ class SignalPipelineTests(unittest.TestCase):
             )
         )
 
-    def test_ni_backend_frame_timestamps_are_relative_to_each_frame(self):
+    def test_ni_backend_frame_timestamps_start_at_frame_zero(self):
         sample_rate = 1000.0
         frame_size = 4
         timestamps = NIDaqBackend._frame_timestamps(frame_size, sample_rate)
@@ -685,6 +685,161 @@ class SignalPipelineTests(unittest.TestCase):
         self.assertEqual(assigned["ai_excit_voltage_or_current"], "use_current")
         self.assertAlmostEqual(assigned["ai_excit_val"], 0.0021)
         self.assertFalse(assigned["ai_excit_use_for_scaling"])
+
+    def test_ni_backend_uses_supported_ai_terminal_configuration(self):
+        class _Enum:
+            def __init__(self, **values):
+                for key, value in values.items():
+                    setattr(self, key, value)
+
+        class _Constants:
+            TerminalConfiguration = _Enum(
+                PSEUDODIFFERENTIAL="pseudo_diff",
+                RSE="rse",
+                DEFAULT="default",
+            )
+            Coupling = _Enum(AC="ac", DC="dc")
+            AcquisitionType = _Enum(CONTINUOUS="continuous")
+
+        class _AIChannel:
+            def __setattr__(self, _name, _value):
+                return None
+
+        class _AIChannels:
+            def __init__(self):
+                self.voltage_calls = []
+
+            def add_ai_voltage_chan(self, *args, **kwargs):
+                self.voltage_calls.append((args, kwargs))
+                return _AIChannel()
+
+        class _Timing:
+            def cfg_samp_clk_timing(self, **_kwargs):
+                return None
+
+        class _Triggers:
+            start_trigger = object()
+            reference_trigger = object()
+
+        class _Task:
+            created_tasks = []
+
+            def __init__(self, *_args, **_kwargs):
+                self.ai_channels = _AIChannels()
+                self.timing = _Timing()
+                self.triggers = _Triggers()
+                self.in_stream = object()
+                _Task.created_tasks.append(self)
+
+            def close(self):
+                return None
+
+        class _AIPhysicalChannel:
+            name = "Dev4/ai0"
+            ai_term_cfgs = ["rse"]
+
+        class _Device:
+            name = "Dev4"
+            product_type = "NI USB-4431"
+            ai_physical_chans = [_AIPhysicalChannel()]
+            ao_physical_chans = []
+
+        class _System:
+            devices = [_Device()]
+
+            @staticmethod
+            def local():
+                return _System()
+
+        class _Nidaqmx:
+            Task = _Task
+            system = type("system", (), {"System": _System})
+
+        class _Readers:
+            class AnalogMultiChannelReader:
+                def __init__(self, _stream):
+                    return None
+
+        session = SessionConfig(
+            ai_channels=[ChannelConfig(name="ai0", physical_name="ai0", enabled=True)]
+        )
+        backend = NIDaqBackend()
+        backend._nidaqmx = _Nidaqmx()
+        backend._constants = _Constants()
+        backend._stream_readers = _Readers()
+
+        backend.configure(session, device_name="Dev4")
+
+        _args, kwargs = _Task.created_tasks[-1].ai_channels.voltage_calls[0]
+        self.assertEqual(kwargs["terminal_config"], "rse")
+
+    def test_ni_backend_rejects_iepe_channels_on_non_iepe_device(self):
+        class _Enum:
+            def __init__(self, **values):
+                for key, value in values.items():
+                    setattr(self, key, value)
+
+        class _Constants:
+            TerminalConfiguration = _Enum(RSE="rse")
+            Coupling = _Enum(AC="ac", DC="dc")
+            AcquisitionType = _Enum(CONTINUOUS="continuous")
+
+        class _AIChannels:
+            def add_ai_voltage_chan(self, *_args, **_kwargs):
+                raise AssertionError("IEPE capability should be checked before channel creation")
+
+        class _Task:
+            def __init__(self, *_args, **_kwargs):
+                self.ai_channels = _AIChannels()
+
+            def close(self):
+                return None
+
+        class _AIPhysicalChannel:
+            name = "Dev4/ai0"
+            ai_term_cfgs = ["rse"]
+            ai_meas_types = ["VOLTAGE"]
+
+        class _Device:
+            name = "Dev4"
+            product_type = "USB-6000"
+            ai_physical_chans = [_AIPhysicalChannel()]
+            ao_physical_chans = []
+
+        class _System:
+            devices = [_Device()]
+
+            @staticmethod
+            def local():
+                return _System()
+
+        class _Nidaqmx:
+            Task = _Task
+            system = type("system", (), {"System": _System})
+
+        class _Readers:
+            class AnalogMultiChannelReader:
+                def __init__(self, _stream):
+                    return None
+
+        session = SessionConfig(
+            ai_channels=[
+                ChannelConfig(
+                    name="ai0",
+                    physical_name="ai0",
+                    enabled=True,
+                    coupling="bias",
+                    iepe_enabled=True,
+                )
+            ]
+        )
+        backend = NIDaqBackend()
+        backend._nidaqmx = _Nidaqmx()
+        backend._constants = _Constants()
+        backend._stream_readers = _Readers()
+
+        with self.assertRaisesRegex(DaqBackendError, "does not support IEPE"):
+            backend.configure(session, device_name="Dev4")
 
     def test_ni_every_frame_trigger_uses_finite_sampling_for_reference_trigger(self):
         class _Enum:
@@ -839,6 +994,52 @@ class SignalPipelineTests(unittest.TestCase):
         self.assertEqual(backend._ai_task.calls[1][0], "wait")
         self.assertLessEqual(backend._ai_task.calls[1][1], 0.1)
         self.assertEqual(backend._ai_task.calls[2], "stop")
+        np.testing.assert_allclose(frame.data, np.array([[1.0, 2.0, 3.0, 4.0]]))
+
+    def test_ni_finite_trigger_timeout_polls_until_frame_is_done(self):
+        class _Reader:
+            def read_many_sample(self, data, **_kwargs):
+                data[:] = np.array([[1.0, 2.0, 3.0, 4.0]])
+
+        class _Task:
+            def __init__(self):
+                self.calls = []
+                self.waits = 0
+
+            def start(self):
+                self.calls.append("start")
+
+            def wait_until_done(self, timeout):
+                self.calls.append(("wait", timeout))
+                self.waits += 1
+                if self.waits < 3:
+                    raise RuntimeError(
+                        "Wait Until Done did not indicate that the task was done within the specified timeout."
+                    )
+
+            def stop(self):
+                self.calls.append("stop")
+
+        session = SessionConfig(
+            ai_channels=[ChannelConfig(name="ai0", physical_name="ai0", enabled=True)]
+        )
+        session.acquisition.frame_size = 4
+        session.acquisition.sample_rate = 1000.0
+        session.acquisition.trigger.timeout_seconds = 1.0
+
+        backend = NIDaqBackend()
+        backend._ai_task = _Task()
+        backend._reader = _Reader()
+        backend._session = session
+        backend._channel_names = ["ai0"]
+        backend._finite_ai_sampling = True
+
+        frame = backend.read_frame()
+
+        wait_calls = [call for call in backend._ai_task.calls if isinstance(call, tuple)]
+        self.assertEqual(len(wait_calls), 3)
+        self.assertTrue(all(call[1] <= 0.1 for call in wait_calls))
+        self.assertEqual(backend._ai_task.calls[-1], "stop")
         np.testing.assert_allclose(frame.data, np.array([[1.0, 2.0, 3.0, 4.0]]))
 
     def test_ni_continuous_read_uses_short_chunks_for_responsive_stop(self):
