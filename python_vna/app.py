@@ -6,6 +6,7 @@ import sys
 
 from python_vna.controller import VnaController
 from python_vna.daq import NIDaqBackend, SimulatedDaqBackend
+from python_vna.diagnostics import append_log, enable_fault_log
 from python_vna.optional import require
 from python_vna.storage import default_session_config, load_legacy_vna
 
@@ -45,6 +46,8 @@ def load_startup_session(path: Path | None = None):
 
 
 def main(argv: list[str] | None = None) -> int:
+    enable_fault_log()
+    append_log("app start")
     args = parse_args(argv)
     QtWidgets = require("PySide6.QtWidgets", "python -m pip install -e .[gui]")
     from python_vna.ui.main_window import MainWindow

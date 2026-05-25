@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+import threading
 from typing import Any
 
 import numpy as np
@@ -64,6 +65,12 @@ class BaseDaqBackend(ABC):
     @abstractmethod
     def stop(self) -> None:
         raise NotImplementedError
+
+    def request_stop(self) -> None:
+        """Ask an in-flight read to return soon without touching driver state."""
+
+    def set_stop_event(self, stop_event: threading.Event | None) -> None:
+        """Share a worker-owned stop event with backends that poll during reads."""
 
     def abort(self) -> None:
         self.stop()

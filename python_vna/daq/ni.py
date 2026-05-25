@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from typing import Any
 
 import numpy as np
@@ -12,6 +14,7 @@ from python_vna.daq.base import (
     DaqBackendError,
     preferred_usb4431_device,
 )
+from python_vna.diagnostics import append_log
 from python_vna.models import SessionConfig
 from python_vna.optional import require
 
@@ -30,6 +33,9 @@ class NIDaqBackend(BaseDaqBackend):
         self._reader = None
         self._frame_index = 0
         self._channel_names: list[str] = []
+        self._finite_ai_sampling = False
+        self._stop_requested = False
+        self._external_stop_event: threading.Event | None = None
 
     IEPE_BIAS_CURRENT_MA = 2.1
 
@@ -183,6 +189,7 @@ class NIDaqBackend(BaseDaqBackend):
 
     def configure(self, session: SessionConfig, device_name: str | None = None) -> None:
         self._load()
+        append_log("ni.configure: closing previous task")
         self.close()
 
         enabled = [channel for channel in session.ai_channels if channel.enabled]
@@ -198,9 +205,12 @@ class NIDaqBackend(BaseDaqBackend):
         if selected_device is None:
             raise DaqBackendError(f"NI device '{selected}' was not found.")
         self._device_name = selected
+        append_log(f"ni.configure: selected={selected}")
         self._session = session
         self._channel_names = [channel.name for channel in enabled]
         self._frame_index = 0
+        self._finite_ai_sampling = False
+        self._stop_requested = False
 
         constants = self._constants
         terminal_config = self._terminal_configuration()
@@ -221,13 +231,24 @@ class NIDaqBackend(BaseDaqBackend):
 
         sample_rate = session.acquisition.sample_rate
         frame_size = session.acquisition.frame_size
+        trigger = session.acquisition.trigger
+        trigger_mode = trigger.mode.strip().lower()
+        finite_ai_sampling = trigger.enabled and (
+            trigger_mode == "every frame" or trigger_mode == "manual arm"
+        )
+        self._finite_ai_sampling = finite_ai_sampling
         self._ai_task.timing.cfg_samp_clk_timing(
             rate=sample_rate,
-            sample_mode=constants.AcquisitionType.CONTINUOUS,
-            samps_per_chan=frame_size * session.acquisition.buffer_frames,
+            sample_mode=(
+                constants.AcquisitionType.FINITE
+                if finite_ai_sampling
+                else constants.AcquisitionType.CONTINUOUS
+            ),
+            samps_per_chan=(
+                frame_size if finite_ai_sampling else frame_size * session.acquisition.buffer_frames
+            ),
         )
 
-        trigger = session.acquisition.trigger
         if trigger.enabled and trigger.source != "immediate":
             source = self._normalize_trigger_source(trigger.source, selected)
             edge = (
@@ -241,7 +262,7 @@ class NIDaqBackend(BaseDaqBackend):
                 if delay_setting < 0
                 else 0
             )
-            if pretrigger_samples > 0:
+            if pretrigger_samples > 0 and finite_ai_sampling:
                 self._ai_task.triggers.reference_trigger.cfg_anlg_edge_ref_trig(
                     trigger_source=source,
                     pretrigger_samples=pretrigger_samples,
@@ -294,11 +315,14 @@ class NIDaqBackend(BaseDaqBackend):
         if self._ai_task is None or self._session is None:
             raise DaqBackendError("Backend must be configured before start().")
 
+        append_log("ni.start")
+        self._stop_requested = False
         if self._ao_task is not None:
             waveform = self._build_excitation_waveform(self._session)
             self._ao_task.write(waveform, auto_start=False)
             self._ao_task.start()
-        self._ai_task.start()
+        if not self._finite_ai_sampling:
+            self._ai_task.start()
 
     def _build_excitation_waveform(self, session: SessionConfig) -> np.ndarray:
         excitation = session.acquisition.excitation
@@ -329,19 +353,55 @@ class NIDaqBackend(BaseDaqBackend):
         if self._ai_task is None or self._reader is None or self._session is None:
             raise DaqBackendError("Backend is not running.")
 
+        append_log(f"ni.read_frame: begin frame={self._frame_index}")
         frame_size = self._session.acquisition.frame_size
         num_channels = len(self._channel_names)
         data = np.zeros((num_channels, frame_size), dtype=np.float64)
+        read_timeout = self._session.acquisition.trigger.timeout_seconds
         try:
-            self._reader.read_many_sample(
-                data,
-                number_of_samples_per_channel=frame_size,
-                timeout=self._session.acquisition.trigger.timeout_seconds,
-            )
+            if self._finite_ai_sampling:
+                self._ai_task.start()
+                sample_rate = max(float(self._session.acquisition.sample_rate), 1.0)
+                frame_duration = frame_size / sample_rate
+                read_timeout = read_timeout + frame_duration + 1.0
+                self._wait_until_done_with_stop_poll(read_timeout)
+            if self._finite_ai_sampling:
+                self._reader.read_many_sample(
+                    data,
+                    number_of_samples_per_channel=frame_size,
+                    timeout=read_timeout,
+                )
+            else:
+                samples_read = 0
+                sample_rate = float(self._session.acquisition.sample_rate)
+                chunk_size = max(1, min(frame_size, int(round(sample_rate * 0.1))))
+                while samples_read < frame_size:
+                    if self._should_stop_read():
+                        raise DaqBackendError("NI-DAQmx read stopped by user.")
+                    remaining = frame_size - samples_read
+                    requested = min(chunk_size, remaining)
+                    chunk = np.zeros((num_channels, requested), dtype=np.float64)
+                    self._reader.read_many_sample(
+                        chunk,
+                        number_of_samples_per_channel=requested,
+                        timeout=min(max(requested / max(sample_rate, 1.0) + 0.25, 0.25), read_timeout),
+                    )
+                    data[:, samples_read : samples_read + requested] = chunk
+                    samples_read += requested
+            read_end_unix_ns = time.time_ns()
         except Exception as exc:  # pragma: no cover - requires NI runtime/hardware
             raise DaqBackendError(f"NI-DAQmx read failed: {exc}") from exc
+        finally:
+            if self._finite_ai_sampling:
+                try:
+                    self._ai_task.stop()
+                except Exception:
+                    pass
 
         sample_rate = self._session.acquisition.sample_rate
+        frame_start_unix_ns = read_end_unix_ns - int(
+            round(max(frame_size - 1, 0) * 1_000_000_000 / sample_rate)
+        )
         timestamps = self._frame_timestamps(frame_size, sample_rate)
         frame = BackendFrame(
             sample_rate=sample_rate,
@@ -349,25 +409,31 @@ class NIDaqBackend(BaseDaqBackend):
             data=data,
             timestamps=timestamps,
             frame_index=self._frame_index,
-            metadata={"backend": "ni", "device": self._device_name},
+            metadata={
+                "backend": "ni",
+                "device": self._device_name,
+                "frame_start_unix_ns": frame_start_unix_ns,
+                "read_end_unix_ns": read_end_unix_ns,
+            },
         )
         self._frame_index += 1
+        append_log(f"ni.read_frame: end frame={frame.frame_index}")
         return frame
 
     def stop(self) -> None:
-        self.abort()
-        if self._ai_task is not None:
-            try:
-                self._ai_task.stop()
-            except Exception:
-                pass
-        if self._ao_task is not None:
-            try:
-                self._ao_task.stop()
-            except Exception:
-                pass
+        append_log("ni.stop: begin")
+        self._stop_requested = True
+        for task in (self._ao_task, self._ai_task):
+            if task is not None:
+                try:
+                    task.stop()
+                except Exception:
+                    pass
+        append_log("ni.stop: end")
 
     def abort(self) -> None:
+        append_log("ni.abort: begin")
+        self._stop_requested = True
         task_mode = self._safe_getattr(self._constants, "TaskMode", None)
         abort_mode = self._safe_getattr(task_mode, "TASK_ABORT", None)
         if self._ai_task is not None:
@@ -382,8 +448,10 @@ class NIDaqBackend(BaseDaqBackend):
                     self._ao_task.control(abort_mode)
                 except Exception:
                     pass
+        append_log("ni.abort: end")
 
     def close(self) -> None:
+        append_log("ni.close: begin")
         for task_name in ("_ai_task", "_ao_task"):
             task = getattr(self, task_name, None)
             if task is not None:
@@ -394,3 +462,47 @@ class NIDaqBackend(BaseDaqBackend):
             setattr(self, task_name, None)
         self._reader = None
         self._session = None
+        self._finite_ai_sampling = False
+        self._stop_requested = False
+        self._external_stop_event = None
+        append_log("ni.close: end")
+
+    def request_stop(self) -> None:
+        append_log("ni.request_stop")
+        self._stop_requested = True
+
+    def set_stop_event(self, stop_event: threading.Event | None) -> None:
+        self._external_stop_event = stop_event
+
+    def _should_stop_read(self) -> bool:
+        return bool(
+            self._stop_requested
+            or (
+                self._external_stop_event is not None
+                and self._external_stop_event.is_set()
+            )
+        )
+
+    def _wait_until_done_with_stop_poll(self, timeout: float) -> None:
+        wait_until_done = getattr(self._ai_task, "wait_until_done", None)
+        if wait_until_done is None:
+            return
+        deadline = time.monotonic() + max(float(timeout), 0.0)
+        while True:
+            if self._should_stop_read():
+                raise DaqBackendError("NI-DAQmx read stopped by user.")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                wait_until_done(timeout=0.0)
+                return
+            try:
+                wait_until_done(timeout=min(0.1, remaining))
+                return
+            except Exception as exc:  # pragma: no cover - requires NI runtime/hardware
+                if self._should_stop_read():
+                    raise DaqBackendError("NI-DAQmx read stopped by user.") from exc
+                if "timeout" in str(exc).lower() and remaining > 0.0:
+                    continue
+                raise DaqBackendError(
+                    f"NI-DAQmx triggered acquisition failed: {exc}"
+                ) from exc

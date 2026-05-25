@@ -14,6 +14,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6 import QtCore, QtWidgets
 
 from python_vna.controller import VnaController
+from python_vna.continuous_recording import RecordingStatus
+from python_vna.daq.base import BackendFrame
 from python_vna.models import MeasurementSet, SavedSession
 from python_vna.storage import default_session_config
 import python_vna.ui.main_window as main_window_module
@@ -37,10 +39,14 @@ class _DummyBackend:
 class _SlowStopController:
     def __init__(self):
         self.abort_calls = 0
+        self.request_stop_calls = 0
 
     def abort(self):
         self.abort_calls += 1
         time.sleep(0.25)
+
+    def request_stop(self):
+        self.request_stop_calls += 1
 
 
 class MainWindowTests(unittest.TestCase):
@@ -106,6 +112,8 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(self.window.bottom_value_mode_combo.currentText(), "dB")
         self.assertEqual(self.window.avg_button.text(), "Avg")
         self.assertTrue(self.window.avg_button.isEnabled())
+        self.assertEqual(self.window.record_button.text(), "Record")
+        self.assertTrue(self.window.record_button.isEnabled())
         self.assertEqual(self.window.sample_rate_edit.value(), 2560.0)
         self.assertEqual(self.window.average_count_edit.value(), 20)
         self.assertEqual(self.window.refresh_devices_button.text(), "Refresh")
@@ -197,6 +205,7 @@ class MainWindowTests(unittest.TestCase):
             self.window.toolbar_data_tip_button,
             self.window.start_button,
             self.window.avg_button,
+            self.window.record_button,
             self.window.stop_button,
         ):
             expected = button.fontMetrics().horizontalAdvance(button.text()) + 26
@@ -360,6 +369,273 @@ class MainWindowTests(unittest.TestCase):
         self.assertFalse(self.controller.state.session.ai_channels[1].enabled)
         dialog.close()
 
+    def test_time_plot_auto_y_range_tracks_channel_full_scale(self):
+        measurement = self._measurement()
+        measurement.time_data["channels"] = {
+            "Excitation": np.array([0.0, 0.1, -0.1, 0.0], dtype=float)
+        }
+        measurement.metadata["frame_index"] = 0
+        self.window.channel_table.item(0, 10).setText("Excitation")
+        self.window.channel_grid.item(0, 5).setText("Excitation")
+        self.controller.state.session.ai_channels[0].label = "Excitation"
+        self.window.top_display_combo.setCurrentText("y(t)")
+        self.window.top_trace_list.clear()
+        self.window._manual_y_ranges["top"] = None
+
+        self.window._plot_measurement(measurement)
+        initial_y = self.window.top_plot.viewRange()[1]
+
+        self.window.channel_list.setCurrentRow(0)
+        self.window.channel_full_scale_combo.setCurrentText("1.25 V")
+        self.window._apply_channel_editor_to_row()
+        updated_y = self.window.top_plot.viewRange()[1]
+
+        self.assertLessEqual(updated_y[0], -1.5625)
+        self.assertGreaterEqual(updated_y[1], 1.5625)
+        self.assertGreater(abs(updated_y[1]), abs(initial_y[1]))
+        self.assertEqual(self.controller.state.session.ai_channels[0].full_scale, 1.25)
+
+    def test_time_plot_recovers_when_checked_trace_uses_old_channel_name(self):
+        measurement = self._measurement()
+        measurement.time_data["channels"] = {
+            "Excitation": np.array([0.0, 0.1, -0.1, 0.0], dtype=float)
+        }
+        self.window.channel_table.item(0, 10).setText("Excitation")
+        self.window.top_display_combo.setCurrentText("y(t)")
+        self.window._sync_trace_list_items(self.window.top_trace_list, "top", ["ai0"])
+
+        self.window._plot_measurement(measurement)
+
+        self.assertIn("Excitation", self.window._last_plot_cache["top"])
+
+    def test_channel_full_scale_change_resets_manual_time_y_range(self):
+        measurement = self._measurement()
+        measurement.time_data["channels"] = {
+            "Excitation": np.array([0.0, 0.1, -0.1, 0.0], dtype=float)
+        }
+        self.window.channel_table.item(0, 10).setText("Excitation")
+        self.controller.state.session.ai_channels[0].label = "Excitation"
+        self.window.top_display_combo.setCurrentText("y(t)")
+        self.window._manual_y_ranges["top"] = (-0.2, 0.2)
+        self.window._plot_measurement(measurement)
+
+        self.window.channel_list.setCurrentRow(0)
+        self.window.channel_full_scale_combo.setCurrentText("625 mV")
+        self.window._apply_channel_editor_to_row()
+
+        y_range = self.window.top_plot.viewRange()[1]
+        self.assertIsNone(self.window._manual_y_ranges["top"])
+        self.assertLessEqual(y_range[0], -0.78125)
+        self.assertGreaterEqual(y_range[1], 0.78125)
+        self.assertAlmostEqual(self.controller.state.session.ai_channels[0].full_scale, 0.625)
+
+    def test_time_auto_scale_uses_data_limits_not_channel_full_scale(self):
+        measurement = self._measurement()
+        measurement.time_data["channels"] = {
+            "ai0": np.array([0.0, 0.1, -0.1, 0.0], dtype=float)
+        }
+        self.window.top_display_combo.setCurrentText("y(t)")
+        self.window._manual_y_ranges["top"] = (-10.0, 10.0)
+        self.window._plot_measurement(measurement)
+
+        self.window._auto_scale_plot_xy("top")
+
+        y_range = self.window.top_plot.viewRange()[1]
+        self.assertLess(abs(y_range[0]), 1.0)
+        self.assertLess(abs(y_range[1]), 1.0)
+        self.assertIsNone(self.window._channel_full_scale_focus["top"])
+
+    def test_time_full_scale_range_follows_active_channel_even_when_all_channels_visible(self):
+        measurement = self._measurement()
+        measurement.time_data["channels"] = {
+            "ai0": np.array([0.0, 0.1, -0.1, 0.0], dtype=float),
+            "ai1": np.array([0.0, 0.2, -0.2, 0.0], dtype=float),
+            "ai2": np.array([0.0, 0.3, -0.3, 0.0], dtype=float),
+            "ai3": np.array([0.0, 0.4, -0.4, 0.0], dtype=float),
+        }
+        for row, full_scale in enumerate((10.0, 5.0, 2.5, 1.25)):
+            self.window.channel_table.item(row, 9).setText(f"{full_scale:g}")
+        self.window.top_display_combo.setCurrentText("y(t)")
+        self.window._manual_y_ranges["top"] = (-0.2, 0.2)
+        self.window._plot_measurement(measurement)
+
+        self.window.channel_list.setCurrentRow(3)
+        self.window.channel_full_scale_combo.setCurrentText("625 mV")
+
+        y_range = self.window.top_plot.viewRange()[1]
+        self.assertIsNone(self.window._manual_y_ranges["top"])
+        self.assertLessEqual(y_range[0], -0.78125)
+        self.assertGreaterEqual(y_range[1], 0.78125)
+        self.assertGreater(y_range[0], -2.0)
+        self.assertLess(y_range[1], 2.0)
+
+        self.window.channel_list.setCurrentRow(0)
+        self.window.channel_full_scale_combo.setCurrentText("5 V")
+
+        y_range = self.window.top_plot.viewRange()[1]
+        self.assertLessEqual(y_range[0], -6.25)
+        self.assertGreaterEqual(y_range[1], 6.25)
+        self.assertGreater(y_range[0], -12.0)
+        self.assertLess(y_range[1], 12.0)
+
+    def test_time_full_scale_range_persists_across_live_plot_refresh(self):
+        measurement = self._measurement()
+        measurement.time_data["channels"] = {
+            "ai0": np.array([0.0, 0.1, -0.1, 0.0], dtype=float),
+            "ai1": np.array([0.0, 0.2, -0.2, 0.0], dtype=float),
+        }
+        self.window.top_display_combo.setCurrentText("y(t)")
+        self.window._plot_measurement(measurement)
+
+        self.window.channel_list.setCurrentRow(1)
+        self.window.channel_full_scale_combo.setCurrentText("625 mV")
+        first_y_range = self.window.top_plot.viewRange()[1]
+
+        refreshed = self._measurement()
+        refreshed.time_data["channels"] = {
+            "ai0": np.array([0.0, 0.12, -0.12, 0.0], dtype=float),
+            "ai1": np.array([0.0, 0.18, -0.18, 0.0], dtype=float),
+        }
+        self.window._plot_measurement(refreshed)
+
+        refreshed_y_range = self.window.top_plot.viewRange()[1]
+        self.assertLessEqual(first_y_range[0], -0.78125)
+        self.assertGreaterEqual(first_y_range[1], 0.78125)
+        self.assertAlmostEqual(refreshed_y_range[0], first_y_range[0], places=6)
+        self.assertAlmostEqual(refreshed_y_range[1], first_y_range[1], places=6)
+
+    def test_time_full_scale_without_explicit_change_uses_data_range_not_largest_visible_channel(self):
+        measurement = self._measurement()
+        measurement.time_data["channels"] = {
+            "ai0": np.array([0.0, 0.1, -0.1, 0.0], dtype=float),
+            "ai1": np.array([0.0, 0.2, -0.2, 0.0], dtype=float),
+            "ai2": np.array([0.0, 0.3, -0.3, 0.0], dtype=float),
+            "ai3": np.array([0.0, 0.4, -0.4, 0.0], dtype=float),
+        }
+        for row, full_scale in enumerate((10.0, 5.0, 2.5, 0.625)):
+            self.window.channel_table.item(row, 9).setText(f"{full_scale:g}")
+        self.window.top_display_combo.setCurrentText("y(t)")
+        self.window._active_trace_names["top"] = "ai3"
+        self.window.channel_list.setCurrentRow(3)
+        self.window._channel_full_scale_focus["top"] = None
+        self.window._auto_y_follow_visible_x["top"] = False
+
+        self.window._plot_measurement(measurement)
+
+        y_range = self.window.top_plot.viewRange()[1]
+        self.assertGreater(y_range[0], -1.0)
+        self.assertLess(y_range[1], 1.0)
+
+    def test_channel_setup_selection_does_not_change_y_range_without_full_scale_change(self):
+        measurement = self._measurement()
+        measurement.time_data["channels"] = {
+            "ai0": np.array([0.0, 0.1, -0.1, 0.0], dtype=float),
+            "ai1": np.array([0.0, 0.2, -0.2, 0.0], dtype=float),
+            "ai2": np.array([0.0, 0.3, -0.3, 0.0], dtype=float),
+            "ai3": np.array([0.0, 0.4, -0.4, 0.0], dtype=float),
+        }
+        for row, full_scale in enumerate((10.0, 5.0, 2.5, 0.625)):
+            self.window.channel_table.item(row, 9).setText(f"{full_scale:g}")
+        self.window.top_display_combo.setCurrentText("y(t)")
+        self.window._active_trace_names["top"] = "ai0"
+        self.window.channel_list.setCurrentRow(3)
+        self.window._channel_full_scale_focus["top"] = None
+        self.window._auto_y_follow_visible_x["top"] = False
+
+        self.window._plot_measurement(measurement)
+
+        y_range = self.window.top_plot.viewRange()[1]
+        self.assertGreater(y_range[0], -1.0)
+        self.assertLess(y_range[1], 1.0)
+
+    def test_inst_start_preserves_channel_full_scale_focus_for_live_refresh(self):
+        measurement = self._measurement()
+        measurement.time_data["channels"] = {
+            "ai0": np.array([0.0, 0.1, -0.1, 0.0], dtype=float),
+            "ai1": np.array([0.0, 0.2, -0.2, 0.0], dtype=float),
+        }
+        self.window.top_display_combo.setCurrentText("y(t)")
+        self.window._plot_measurement(measurement)
+        self.window.channel_list.setCurrentRow(1)
+        self.window.channel_full_scale_combo.setCurrentText("625 mV")
+        first_y_range = self.window.top_plot.viewRange()[1]
+
+        self.window._clear_runtime_axis_ranges()
+        self.window._plot_measurement(measurement)
+
+        refreshed_y_range = self.window.top_plot.viewRange()[1]
+        self.assertEqual(self.window._channel_full_scale_focus["top"], "ai1")
+        self.assertAlmostEqual(refreshed_y_range[0], first_y_range[0], places=6)
+        self.assertAlmostEqual(refreshed_y_range[1], first_y_range[1], places=6)
+
+    def test_trace_selection_does_not_change_channel_setup_current_channel(self):
+        measurement = self._measurement()
+        measurement.time_data["channels"] = {
+            "ai0": np.array([0.0, 0.1, -0.1, 0.0], dtype=float),
+            "ai1": np.array([0.0, 0.2, -0.2, 0.0], dtype=float),
+        }
+        self.window.top_display_combo.setCurrentText("y(t)")
+        self.window._plot_measurement(measurement)
+        self.window.channel_list.setCurrentRow(0)
+
+        self.window._trace_selection_changed("top", "ai1")
+
+        self.assertEqual(self.window._active_trace_names["top"], "ai1")
+        self.assertEqual(self.window.channel_list.currentRow(), 0)
+        self.assertEqual(self.window.channel_select_combo.currentIndex(), 0)
+        self.assertEqual(self.window.channel_name_edit.text(), "ai0")
+
+    def test_clicking_curve_does_not_change_channel_setup_current_channel(self):
+        measurement = self._measurement()
+        measurement.time_data["channels"] = {
+            "ai0": np.array([0.0, 0.1, -0.1, 0.0], dtype=float),
+            "ai1": np.array([0.0, 0.2, -0.2, 0.0], dtype=float),
+        }
+        self.window.top_display_combo.setCurrentText("y(t)")
+        self.window._plot_measurement(measurement)
+        self.window.channel_list.setCurrentRow(0)
+
+        self.window._set_active_trace("top", "ai1")
+
+        self.assertEqual(self.window._active_trace_names["top"], "ai1")
+        self.assertEqual(self.window.channel_list.currentRow(), 0)
+        self.assertEqual(self.window.channel_select_combo.currentIndex(), 0)
+        self.assertEqual(self.window.channel_name_edit.text(), "ai0")
+
+    def test_channel_setup_uses_visible_channel_select_combo(self):
+        self.assertFalse(self.window.channel_select_combo.isHidden())
+        self.assertFalse(self.window.channel_select_combo.isEditable())
+        self.assertGreaterEqual(self.window.channel_select_combo.count(), 4)
+
+        self.window.channel_select_combo.setCurrentIndex(1)
+
+        self.assertEqual(self.window.channel_list.currentRow(), 1)
+        self.assertEqual(self.window.channel_name_edit.text(), "ai1")
+
+    def test_channel_setup_select_combo_rebuilds_with_labels(self):
+        self.window.channel_table.item(1, 10).setText("Resp")
+        self.window._rebuild_channel_list()
+
+        self.assertIn("ai1", self.window.channel_select_combo.itemText(1))
+        self.assertIn("Resp", self.window.channel_select_combo.itemText(1))
+
+    def test_mc_setup_full_scale_change_resets_manual_time_y_range(self):
+        measurement = self._measurement()
+        self.window.top_display_combo.setCurrentText("y(t)")
+        self.window._manual_y_ranges["top"] = (-0.2, 0.2)
+        self.window._plot_measurement(measurement)
+        dialog = MCSetupDialog(self.window)
+
+        dialog.table.item(0, 1).setText("625 mV")
+        dialog._apply_to_main()
+
+        y_range = self.window.top_plot.viewRange()[1]
+        self.assertIsNone(self.window._manual_y_ranges["top"])
+        self.assertLessEqual(y_range[0], -0.78125)
+        self.assertGreaterEqual(y_range[1], 0.78125)
+        self.assertAlmostEqual(self.controller.state.session.ai_channels[0].full_scale, 0.625)
+        dialog.close()
+
     def test_mc_setup_keeps_at_least_one_channel_enabled(self):
         dialog = MCSetupDialog(self.window)
         for row in range(dialog.table.rowCount()):
@@ -381,6 +657,84 @@ class MainWindowTests(unittest.TestCase):
         elapsed = time.perf_counter() - started
 
         self.assertLess(elapsed, 0.1)
+        self.assertEqual(controller.request_stop_calls, 0)
+
+    def test_worker_prestart_stop_requests_controller_from_worker_thread(self):
+        class _Controller:
+            def __init__(self):
+                self.request_stop_calls = 0
+                self.stop_calls = 0
+                self.averaging = []
+
+            def set_averaging_enabled(self, enabled):
+                self.averaging.append(enabled)
+
+            def configure(self, device_name=None):
+                self.device_name = device_name
+
+            def start(self):
+                raise AssertionError("start should not run after stop")
+
+            def read_and_process(self):
+                raise AssertionError("read should not run after stop")
+
+            def request_stop(self):
+                self.request_stop_calls += 1
+
+            def stop(self):
+                self.stop_calls += 1
+
+        controller = _Controller()
+        worker = AcquisitionWorker(controller, "Dev1")
+
+        worker.request_stop()
+        worker.run()
+
+        self.assertEqual(controller.request_stop_calls, 1)
+        self.assertEqual(controller.stop_calls, 1)
+
+    def test_worker_stop_before_backend_start_does_not_abort_during_configure(self):
+        class _Controller:
+            def __init__(self):
+                self.abort_calls = 0
+                self.stop_calls = 0
+                self.request_stop_calls = 0
+                self.configured = False
+                self.started = False
+                self.averaging = []
+
+            def set_averaging_enabled(self, enabled):
+                self.averaging.append(enabled)
+
+            def configure(self, device_name=None):
+                self.configured = True
+
+            def start(self):
+                self.started = True
+
+            def read_and_process(self):
+                raise AssertionError("read should not run after a pre-start stop")
+
+            def abort(self):
+                self.abort_calls += 1
+
+            def stop(self):
+                self.stop_calls += 1
+
+            def request_stop(self):
+                self.request_stop_calls += 1
+
+        controller = _Controller()
+        worker = AcquisitionWorker(controller, "Dev1")
+
+        worker.request_stop()
+        worker.run()
+
+        self.assertTrue(controller.configured)
+        self.assertFalse(controller.started)
+        self.assertEqual(controller.abort_calls, 0)
+        self.assertEqual(controller.stop_calls, 1)
+        self.assertEqual(controller.request_stop_calls, 1)
 
     def test_avg_measurement_status_shows_average_progress(self):
         measurement = self._measurement()
@@ -396,6 +750,28 @@ class MainWindowTests(unittest.TestCase):
         QtWidgets.QApplication.processEvents()
 
         self.assertIn("avg:2/4", self.window.run_info_label.text())
+        self.assertIn("Avg frame 2/4 acquired", self.window.statusBar().currentMessage())
+
+    def test_avg_measurement_status_hides_internal_zero_based_frame_number(self):
+        measurement = self._measurement()
+        measurement.metadata.update(
+            {
+                "frame_index": 0,
+                "averaging_enabled": True,
+                "average_count": 1,
+                "average_target": 20,
+            }
+        )
+
+        self.window._handle_worker_measurement(measurement)
+        QtWidgets.QApplication.processEvents()
+
+        self.assertIn("State: avg frame 1", self.window.run_info_label.text())
+        self.assertEqual(
+            self.window.statusBar().currentMessage(),
+            "Avg frame 1/20 acquired",
+        )
+        self.assertNotIn("Frame 0 acquired", self.window.statusBar().currentMessage())
 
     def test_avg_start_uses_current_average_count_widget_value(self):
         captured = {}
@@ -445,11 +821,35 @@ class MainWindowTests(unittest.TestCase):
 
             self.assertTrue(captured["average_run"])
             self.assertEqual(captured["target_average_count"], 20)
+            self.assertAlmostEqual(captured["display_interval_seconds"], 1.0)
         finally:
             main_window_module.AcquisitionWorker = original_worker
             main_window_module.QtCore.QThread = original_thread
 
-    def test_avg_worker_discards_settle_frames_before_averaging(self):
+    def test_acquisition_display_interval_follows_frame_duration_with_limits(self):
+        session = default_session_config()
+        session.acquisition.sample_rate = 2560.0
+        session.acquisition.frame_size = 4096
+        self.assertAlmostEqual(
+            self.window._acquisition_display_interval_seconds(session),
+            1.0,
+        )
+
+        session.acquisition.sample_rate = 51200.0
+        session.acquisition.frame_size = 4096
+        self.assertAlmostEqual(
+            self.window._acquisition_display_interval_seconds(session),
+            0.25,
+        )
+
+        session.acquisition.sample_rate = 2560.0
+        session.acquisition.frame_size = 2048
+        self.assertAlmostEqual(
+            self.window._acquisition_display_interval_seconds(session),
+            0.8,
+        )
+
+    def test_avg_worker_never_discards_frames_before_averaging(self):
         class _Backend:
             def __init__(self):
                 self.discard_reads = 0
@@ -464,6 +864,7 @@ class MainWindowTests(unittest.TestCase):
                 self.processed_reads = 0
                 self.set_averaging_calls = []
                 self.aborted = False
+                self.stopped = False
 
             def set_averaging_enabled(self, enabled):
                 self.set_averaging_calls.append(enabled)
@@ -489,64 +890,12 @@ class MainWindowTests(unittest.TestCase):
             def abort(self):
                 self.aborted = True
 
+            def stop(self):
+                self.stopped = True
+
             @staticmethod
             def window_measurement():
                 return MainWindowTests._measurement()
-
-        controller = _Controller()
-        worker = AcquisitionWorker(
-            controller,
-            "Dev1",
-            average_run=True,
-            target_average_count=1,
-            settle_frames=2,
-        )
-
-        worker.run()
-
-        self.assertEqual(controller.backend.discard_reads, 2)
-        self.assertEqual(controller.processed_reads, 1)
-        self.assertEqual(controller.set_averaging_calls[:2], [True, True])
-        self.assertTrue(controller.aborted)
-
-    def test_avg_worker_does_not_discard_settle_frames_by_default(self):
-        class _Backend:
-            def __init__(self):
-                self.discard_reads = 0
-
-            def read_frame(self):
-                self.discard_reads += 1
-                return object()
-
-        class _Controller:
-            def __init__(self):
-                self.backend = _Backend()
-                self.processed_reads = 0
-                self.aborted = False
-
-            def set_averaging_enabled(self, _enabled):
-                return None
-
-            def configure(self, device_name=None):
-                self.device_name = device_name
-
-            def start(self):
-                return None
-
-            def read_and_process(self):
-                self.processed_reads += 1
-                measurement = MainWindowTests._measurement()
-                measurement.metadata.update(
-                    {
-                        "averaging_enabled": True,
-                        "average_count": self.processed_reads,
-                        "average_target": 1,
-                    }
-                )
-                return measurement
-
-            def abort(self):
-                self.aborted = True
 
         controller = _Controller()
         worker = AcquisitionWorker(
@@ -560,7 +909,93 @@ class MainWindowTests(unittest.TestCase):
 
         self.assertEqual(controller.backend.discard_reads, 0)
         self.assertEqual(controller.processed_reads, 1)
-        self.assertTrue(controller.aborted)
+        self.assertEqual(controller.set_averaging_calls[0], True)
+        self.assertFalse(controller.aborted)
+        self.assertTrue(controller.stopped)
+
+    def test_worker_user_stop_does_not_close_controller_immediately(self):
+        class _Controller:
+            def __init__(self):
+                self.stop_calls = 0
+                self.close_calls = 0
+                self.set_averaging_calls = []
+
+            def set_averaging_enabled(self, enabled):
+                self.set_averaging_calls.append(enabled)
+
+            def configure(self, device_name=None):
+                return None
+
+            def start(self):
+                return None
+
+            def request_stop(self):
+                return None
+
+            def read_and_process(self):
+                raise AssertionError("read should not run after user stop")
+
+            def stop(self):
+                self.stop_calls += 1
+
+            def close(self):
+                self.close_calls += 1
+
+        controller = _Controller()
+        worker = AcquisitionWorker(controller, "Dev1")
+
+        worker.request_stop()
+        worker.run()
+
+        self.assertEqual(controller.stop_calls, 1)
+        self.assertEqual(controller.close_calls, 0)
+
+    def test_worker_normal_completion_closes_controller(self):
+        class _Controller:
+            def __init__(self):
+                self.stop_calls = 0
+                self.close_calls = 0
+                self.reads = 0
+
+            def set_averaging_enabled(self, _enabled):
+                return None
+
+            def configure(self, device_name=None):
+                return None
+
+            def start(self):
+                return None
+
+            def read_and_process(self):
+                self.reads += 1
+                measurement = MainWindowTests._measurement()
+                measurement.metadata.update(
+                    {
+                        "averaging_enabled": True,
+                        "average_count": 1,
+                        "average_target": 1,
+                    }
+                )
+                return measurement
+
+            def stop(self):
+                self.stop_calls += 1
+
+            def close(self):
+                self.close_calls += 1
+
+        controller = _Controller()
+        worker = AcquisitionWorker(
+            controller,
+            "Dev1",
+            average_run=True,
+            target_average_count=1,
+        )
+
+        worker.run()
+
+        self.assertEqual(controller.stop_calls, 1)
+        self.assertEqual(controller.close_calls, 1)
 
     def test_inst_start_bypasses_trigger_and_clears_imported_axis_ranges(self):
         captured = {}
@@ -619,6 +1054,235 @@ class MainWindowTests(unittest.TestCase):
         finally:
             main_window_module.AcquisitionWorker = original_worker
             main_window_module.QtCore.QThread = original_thread
+
+    def test_inst_start_after_stop_allows_measurement_updates(self):
+        captured = {}
+        original_worker = main_window_module.AcquisitionWorker
+        original_thread = main_window_module.QtCore.QThread
+
+        class _Worker(QtCore.QObject):
+            started = QtCore.Signal(object)
+            measurement_ready = QtCore.Signal(object)
+            status_changed = QtCore.Signal(str)
+            error = QtCore.Signal(str)
+            finished = QtCore.Signal()
+
+            def __init__(self, _controller, _device_name, **kwargs):
+                super().__init__()
+                captured.update(kwargs)
+
+            def moveToThread(self, _thread):
+                return None
+
+            def run(self):
+                return None
+
+            def request_stop(self):
+                return None
+
+        class _Thread(QtCore.QObject):
+            started = QtCore.Signal()
+            finished = QtCore.Signal()
+
+            def start(self):
+                return None
+
+            def quit(self):
+                return None
+
+            def deleteLater(self):
+                return None
+
+        try:
+            main_window_module.AcquisitionWorker = _Worker
+            main_window_module.QtCore.QThread = lambda _parent=None: _Thread()
+            self.window._stop_requested_for_current_run = True
+
+            self.window._start_acquisition()
+            self.window._handle_worker_measurement(self._measurement())
+            QtWidgets.QApplication.processEvents()
+
+            self.assertFalse(self.window._stop_requested_for_current_run)
+            self.assertIn("Frame", self.window.statusBar().currentMessage())
+            self.assertIn("acquired", self.window.statusBar().currentMessage())
+        finally:
+            main_window_module.AcquisitionWorker = original_worker
+            main_window_module.QtCore.QThread = original_thread
+
+    def test_record_button_starts_continuous_recording_in_selected_folder(self):
+        captured = {}
+        original_worker = main_window_module.ContinuousRecordingWorker
+        original_thread = main_window_module.QtCore.QThread
+
+        class _Worker(QtCore.QObject):
+            started = QtCore.Signal(object)
+            preview_ready = QtCore.Signal(object)
+            status_changed = QtCore.Signal(str)
+            recording_status = QtCore.Signal(object)
+            error = QtCore.Signal(str)
+            finished = QtCore.Signal()
+
+            def __init__(self, _controller, _device_name, output_dir, **kwargs):
+                super().__init__()
+                captured["output_dir"] = Path(output_dir)
+                captured.update(kwargs)
+
+            def moveToThread(self, _thread):
+                return None
+
+            def run(self):
+                return None
+
+            def request_stop(self):
+                return None
+
+        class _Thread(QtCore.QObject):
+            started = QtCore.Signal()
+            finished = QtCore.Signal()
+
+            def start(self):
+                return None
+
+            def quit(self):
+                return None
+
+            def deleteLater(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            try:
+                main_window_module.ContinuousRecordingWorker = _Worker
+                main_window_module.QtCore.QThread = lambda _parent=None: _Thread()
+                with mock.patch.object(
+                    QtWidgets.QFileDialog,
+                    "getExistingDirectory",
+                    return_value=tmpdir,
+                ):
+                    self.window._start_continuous_recording()
+
+                self.assertEqual(captured["output_dir"].parent, Path(tmpdir))
+                self.assertTrue(captured["output_dir"].name.startswith("recording_"))
+                self.assertFalse(self.window.start_button.isEnabled())
+                self.assertFalse(self.window.avg_button.isEnabled())
+                self.assertFalse(self.window.record_button.isEnabled())
+                self.assertTrue(self.window.stop_button.isEnabled())
+            finally:
+                main_window_module.ContinuousRecordingWorker = original_worker
+                main_window_module.QtCore.QThread = original_thread
+
+    def test_recording_status_updates_elapsed_segment_and_samples(self):
+        status = RecordingStatus(
+            output_dir=Path("D:/records/session"),
+            manifest_path=Path("D:/records/session/manifest.json"),
+            segment_index=2,
+            elapsed_seconds=65.0,
+            total_samples=12345,
+            total_frames=3,
+        )
+
+        self.window._handle_recording_status(status)
+
+        self.assertIn("00:01:05", self.window.run_info_label.text())
+        self.assertIn("segment 2", self.window.run_info_label.text())
+        self.assertIn("samples 12345", self.window.run_info_label.text())
+
+    def test_continuous_recording_worker_writes_frames_without_processing(self):
+        class _Backend:
+            def __init__(self):
+                self.reads = 0
+
+            def read_frame(self):
+                self.reads += 1
+                if self.reads > 2:
+                    raise RuntimeError("stop test")
+                return BackendFrame(
+                    sample_rate=2560.0,
+                    channel_names=["ai0", "ai1"],
+                    data=np.ones((2, 4), dtype=float) * self.reads,
+                    timestamps=np.arange(4, dtype=float) / 2560.0,
+                    frame_index=self.reads,
+                    metadata={},
+                )
+
+        class _Controller:
+            def __init__(self):
+                self.backend = _Backend()
+                self.state = type("State", (), {"session": default_session_config()})()
+                self.processed_reads = 0
+                self.aborted = False
+                self.stopped = False
+
+            def set_averaging_enabled(self, _enabled):
+                return None
+
+            def configure(self, device_name=None):
+                self.device_name = device_name
+
+            def start(self):
+                return None
+
+            def read_and_process(self):
+                self.processed_reads += 1
+                return MainWindowTests._measurement()
+
+            def abort(self):
+                self.aborted = True
+
+            def stop(self):
+                self.stopped = True
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "recording"
+            controller = _Controller()
+            worker = main_window_module.ContinuousRecordingWorker(
+                controller,
+                "Dev1",
+                output_dir,
+                preview_interval_seconds=0.0,
+            )
+
+            worker.run()
+
+            self.assertEqual(controller.processed_reads, 0)
+            self.assertFalse(controller.aborted)
+            self.assertTrue(controller.stopped)
+            self.assertTrue((output_dir / "manifest.json").exists())
+            self.assertTrue((output_dir / "segment_0001.dat").exists())
+
+    def test_continuous_recording_worker_creates_files_before_first_frame(self):
+        class _Backend:
+            def read_frame(self):
+                raise RuntimeError("no frame")
+
+        class _Controller:
+            def __init__(self):
+                self.backend = _Backend()
+                self.state = type("State", (), {"session": default_session_config()})()
+
+            def set_averaging_enabled(self, _enabled):
+                return None
+
+            def configure(self, device_name=None):
+                self.device_name = device_name
+
+            def start(self):
+                return None
+
+            def abort(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "recording"
+            worker = main_window_module.ContinuousRecordingWorker(
+                _Controller(),
+                "Dev1",
+                output_dir,
+            )
+
+            worker.run()
+
+            self.assertTrue((output_dir / "manifest.json").exists())
+            self.assertTrue((output_dir / "segment_0001.dat").exists())
 
     def test_acquisition_tab_contains_legacy_style_trigger_panel(self):
         groups = {
@@ -716,7 +1380,7 @@ class MainWindowTests(unittest.TestCase):
         session = self.window._read_session_from_widgets()
         self.assertEqual(session.acquisition.processing_window, "flattop")
         self.assertFalse(self.window.aa_filters_button.isEnabled())
-        self.assertFalse(self.window.overlap_combo.isEnabled())
+        self.assertTrue(self.window.overlap_combo.isEnabled())
 
         self.window.overlap_combo.setCurrentText("Max Overlap")
         session = self.window._read_session_from_widgets()
@@ -1635,9 +2299,9 @@ class MainWindowTests(unittest.TestCase):
     def test_legacy_axis_ranges_for_coherence_phase_xfer_and_nyquist(self):
         measurement = self._measurement()
         self.controller.state.measurement = measurement
-        self.window._auto_y_follow_visible_x["top"] = False
 
         self.window.top_display_combo.setCurrentText("coh")
+        self.window._auto_y_follow_visible_x["top"] = False
         self.window._plot_measurement(measurement)
         _x_range, y_range = self.window.top_plot.viewRange()
         self.assertAlmostEqual(y_range[0], 0.0, places=6)
@@ -1645,23 +2309,27 @@ class MainWindowTests(unittest.TestCase):
 
         self.window.top_display_combo.setCurrentText("xfer")
         self.window.top_value_mode_combo.setCurrentText("phase")
+        self.window._auto_y_follow_visible_x["top"] = False
         self.window._plot_measurement(measurement)
         _x_range, y_range = self.window.top_plot.viewRange()
         self.assertAlmostEqual(y_range[0], -250.0, places=6)
         self.assertAlmostEqual(y_range[1], 250.0, places=6)
 
         self.window.top_value_mode_combo.setCurrentText("phase u")
+        self.window._auto_y_follow_visible_x["top"] = False
         self.window._plot_measurement(measurement)
         _x_range, y_range = self.window.top_plot.viewRange()
         self.assertAlmostEqual(y_range[0], -800.0, places=6)
         self.assertAlmostEqual(y_range[1], 250.0, places=6)
 
         self.window.top_value_mode_combo.setCurrentText("dB")
+        self.window._auto_y_follow_visible_x["top"] = False
         self.window._plot_measurement(measurement)
         _x_range, y_range = self.window.top_plot.viewRange()
         self.assertAlmostEqual(y_range[1] - y_range[0], 100.0, places=6)
 
         self.window.top_value_mode_combo.setCurrentText("nyquist")
+        self.window._auto_y_follow_visible_x["top"] = False
         self.window._plot_measurement(measurement)
         x_range, y_range = self.window.top_plot.viewRange()
         self.assertAlmostEqual(x_range[0], y_range[0], places=6)
@@ -1825,6 +2493,45 @@ class MainWindowTests(unittest.TestCase):
 
         self.assertIsNone(self.window._manual_x_ranges["bottom"])
         self.assertIsNone(self.window._manual_y_ranges["bottom"])
+
+    def test_display_mode_change_reenables_auto_fit_for_aspec(self):
+        measurement = self._measurement()
+        measurement.spectra["f"] = np.array([1.0, 2.0, 3.0, 4.0], dtype=float)
+        measurement.spectra["autospectrum"] = {
+            "ai0": np.array([1e-9, 2e-4, 3e-4, 20.0], dtype=float)
+        }
+        self.controller.state.measurement = measurement
+        self.window.top_display_combo.setCurrentText("time")
+        self.window._auto_y_follow_visible_x["top"] = False
+        self.window._manual_y_ranges["top"] = (-100.0, 100.0)
+
+        self.window.top_display_combo.setCurrentText("aspec")
+        self.window.top_value_mode_combo.setCurrentText("Log rms^2/Hz")
+
+        self.assertTrue(self.window._auto_y_follow_visible_x["top"])
+        self.assertIsNone(self.window._manual_y_ranges["top"])
+        _x_range, y_range = self.window.top_plot.viewRange()
+        self.assertGreater(y_range[0], -10.0)
+        self.assertLess(y_range[0], -7.0)
+
+    def test_display_mode_change_reenables_auto_fit_for_xfer(self):
+        measurement = self._measurement()
+        measurement.spectra["f"] = np.array([1.0, 2.0, 3.0, 4.0], dtype=float)
+        measurement.frf = {
+            "ai0->ai1": np.array([1e-4 + 0j, 2e-2 + 0j, 3e-2 + 0j, 4e-2 + 0j])
+        }
+        self.controller.state.measurement = measurement
+        self.window.bottom_display_combo.setCurrentText("y(t)")
+        self.window._auto_y_follow_visible_x["bottom"] = False
+        self.window._manual_y_ranges["bottom"] = (-100.0, 100.0)
+
+        self.window.bottom_display_combo.setCurrentText("xfer")
+
+        self.assertTrue(self.window._auto_y_follow_visible_x["bottom"])
+        self.assertIsNone(self.window._manual_y_ranges["bottom"])
+        _x_range, y_range = self.window.bottom_plot.viewRange()
+        self.assertGreater(y_range[0], -90.0)
+        self.assertLess(y_range[1], -20.0)
 
     def test_reset_plot_display_state_clears_previous_import_scales(self):
         self.window.bottom_display_combo.setCurrentText("aspec")
@@ -2443,6 +3150,20 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(self.window.channel_grid.item(1, 2).text(), "10")
         self.window.channel_grid.item(1, 4).setText("0.5")
         self.assertEqual(self.window.channel_table.item(1, 11).text(), "0.5")
+
+    def test_channel_grid_full_scale_text_accepts_mv_units(self):
+        measurement = self._measurement()
+        self.window.top_display_combo.setCurrentText("y(t)")
+        self.window._manual_y_ranges["top"] = (-0.2, 0.2)
+        self.window._plot_measurement(measurement)
+
+        self.window.channel_grid.item(0, 2).setText("625 mV")
+
+        y_range = self.window.top_plot.viewRange()[1]
+        self.assertEqual(self.window.channel_table.item(0, 9).text(), "0.625")
+        self.assertIsNone(self.window._manual_y_ranges["top"])
+        self.assertLessEqual(y_range[0], -0.78125)
+        self.assertGreaterEqual(y_range[1], 0.78125)
 
     def test_mc_setup_dialog_reflects_imported_legacy_channel_config(self):
         from python_vna.storage import load_legacy_vna

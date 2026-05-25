@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -100,7 +101,10 @@ class SimulatedDaqBackend(BaseDaqBackend):
             data=frame,
             timestamps=time_vector,
             frame_index=self._state.frame_index,
-            metadata={"backend": "simulated"},
+            metadata={
+                "backend": "simulated",
+                "frame_start_unix_ns": time.time_ns(),
+            },
         )
         self._state.frame_index += 1
         self._state.time_offset = float(time_vector[-1] + 1.0 / sample_rate)

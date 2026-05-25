@@ -5,6 +5,7 @@ import unittest
 import numpy as np
 
 from python_vna.daq.base import BackendFrame
+from python_vna.controller import VnaController
 from python_vna.daq.ni import NIDaqBackend
 from python_vna.models import (
     AcquisitionConfig,
@@ -26,6 +27,44 @@ from python_vna.signal_pipeline import (
     exponential_window,
     force_window,
 )
+
+
+class _SequenceBackend:
+    def __init__(self, frames: list[np.ndarray]) -> None:
+        self.frames = frames
+        self.read_count = 0
+
+    def list_devices(self):
+        return []
+
+    def configure(self, session, device_name=None):
+        self.session = session
+
+    def start(self):
+        return None
+
+    def read_frame(self):
+        index = min(self.read_count, len(self.frames) - 1)
+        data = np.asarray(self.frames[index], dtype=float)
+        frame = BackendFrame(
+            sample_rate=float(self.session.acquisition.sample_rate),
+            channel_names=["ai0"],
+            data=data[None, :],
+            timestamps=np.arange(data.size, dtype=float) / self.session.acquisition.sample_rate,
+            frame_index=self.read_count,
+            metadata={"raw_index": self.read_count},
+        )
+        self.read_count += 1
+        return frame
+
+    def stop(self):
+        return None
+
+    def abort(self):
+        return None
+
+    def close(self):
+        return None
 
 
 class SignalPipelineTests(unittest.TestCase):
@@ -56,6 +95,79 @@ class SignalPipelineTests(unittest.TestCase):
         coherence = compute_coherence_from_spectra(gxx, gyy, gxy)
 
         np.testing.assert_allclose(coherence, np.array([0.25, 0.64]))
+
+    def test_controller_50_percent_overlap_slides_processing_frames(self):
+        session = SessionConfig(
+            ai_channels=[ChannelConfig(name="ai0", physical_name="ai0", enabled=True)]
+        )
+        session.acquisition.sample_rate = 8.0
+        session.acquisition.frame_size = 4
+        session.acquisition.overlap_percent = 50
+        backend = _SequenceBackend(
+            [
+                np.array([0.0, 1.0, 2.0, 3.0]),
+                np.array([4.0, 5.0, 6.0, 7.0]),
+            ]
+        )
+        controller = VnaController(backend, session)
+        controller.configure("Dev1")
+
+        first = controller.read_and_process()
+        second = controller.read_and_process()
+        third = controller.read_and_process()
+
+        np.testing.assert_allclose(first.time_data["channels"]["ai0"], [0.0, 1.0, 2.0, 3.0])
+        np.testing.assert_allclose(second.time_data["channels"]["ai0"], [2.0, 3.0, 4.0, 5.0])
+        np.testing.assert_allclose(third.time_data["channels"]["ai0"], [4.0, 5.0, 6.0, 7.0])
+        self.assertEqual(second.metadata["overlap_percent"], 50)
+        self.assertEqual(second.metadata["overlap_hop_size"], 2)
+        self.assertEqual(second.metadata["overlap_keep_size"], 2)
+
+    def test_controller_max_overlap_uses_small_hop(self):
+        session = SessionConfig(
+            ai_channels=[ChannelConfig(name="ai0", physical_name="ai0", enabled=True)]
+        )
+        session.acquisition.sample_rate = 16.0
+        session.acquisition.frame_size = 8
+        session.acquisition.overlap_percent = 100
+        backend = _SequenceBackend(
+            [
+                np.arange(8, dtype=float),
+                np.arange(8, 16, dtype=float),
+            ]
+        )
+        controller = VnaController(backend, session)
+        controller.configure("Dev1")
+
+        first = controller.read_and_process()
+        second = controller.read_and_process()
+
+        np.testing.assert_allclose(first.time_data["channels"]["ai0"], np.arange(8, dtype=float))
+        np.testing.assert_allclose(second.time_data["channels"]["ai0"], np.arange(1, 9, dtype=float))
+        self.assertEqual(second.metadata["overlap_hop_size"], 1)
+        self.assertEqual(second.metadata["overlap_keep_size"], 7)
+
+    def test_controller_no_overlap_reads_one_raw_frame_per_processing_frame(self):
+        session = SessionConfig(
+            ai_channels=[ChannelConfig(name="ai0", physical_name="ai0", enabled=True)]
+        )
+        session.acquisition.sample_rate = 8.0
+        session.acquisition.frame_size = 4
+        session.acquisition.overlap_percent = 0
+        backend = _SequenceBackend(
+            [
+                np.array([0.0, 1.0, 2.0, 3.0]),
+                np.array([4.0, 5.0, 6.0, 7.0]),
+            ]
+        )
+        controller = VnaController(backend, session)
+        controller.configure("Dev1")
+
+        first = controller.read_and_process()
+        second = controller.read_and_process()
+
+        np.testing.assert_allclose(first.time_data["channels"]["ai0"], [0.0, 1.0, 2.0, 3.0])
+        np.testing.assert_allclose(second.time_data["channels"]["ai0"], [4.0, 5.0, 6.0, 7.0])
 
     def test_fft_and_aspec_use_rms_units_like_vna_storage(self):
         sample_rate = 1024.0
@@ -574,7 +686,202 @@ class SignalPipelineTests(unittest.TestCase):
         self.assertAlmostEqual(assigned["ai_excit_val"], 0.0021)
         self.assertFalse(assigned["ai_excit_use_for_scaling"])
 
-    def test_ni_stop_aborts_tasks_before_stop(self):
+    def test_ni_every_frame_trigger_uses_finite_sampling_for_reference_trigger(self):
+        class _Enum:
+            def __init__(self, **values):
+                for key, value in values.items():
+                    setattr(self, key, value)
+
+        class _Constants:
+            TerminalConfiguration = _Enum(DEFAULT="default")
+            Coupling = _Enum(AC="ac", DC="dc")
+            ExcitationSource = _Enum(INTERNAL="internal", NONE="none")
+            ExcitationVoltageOrCurrent = _Enum(USE_CURRENT="use_current")
+            AcquisitionType = _Enum(CONTINUOUS="continuous", FINITE="finite")
+            Edge = _Enum(RISING="rising", FALLING="falling")
+
+        class _AIChannel:
+            def __setattr__(self, _name, _value):
+                return None
+
+        class _AIChannels:
+            def add_ai_voltage_chan(self, *_args, **_kwargs):
+                return _AIChannel()
+
+        class _Timing:
+            def __init__(self):
+                self.kwargs = None
+
+            def cfg_samp_clk_timing(self, **kwargs):
+                self.kwargs = kwargs
+
+        class _Trigger:
+            def __init__(self):
+                self.calls = []
+
+            def cfg_anlg_edge_ref_trig(self, **kwargs):
+                self.calls.append(("ref", kwargs))
+
+            def cfg_anlg_edge_start_trig(self, **kwargs):
+                self.calls.append(("start", kwargs))
+
+        class _Triggers:
+            def __init__(self):
+                self.start_trigger = _Trigger()
+                self.reference_trigger = _Trigger()
+
+        class _Task:
+            created_tasks = []
+
+            def __init__(self, *_args, **_kwargs):
+                self.ai_channels = _AIChannels()
+                self.timing = _Timing()
+                self.triggers = _Triggers()
+                self.in_stream = object()
+                _Task.created_tasks.append(self)
+
+            def close(self):
+                return None
+
+        class _AIPhysicalChannel:
+            def __init__(self, name):
+                self.name = name
+
+        class _Device:
+            name = "Dev1"
+            product_type = "NI USB-4431"
+            ai_physical_chans = [_AIPhysicalChannel("Dev1/ai0")]
+            ao_physical_chans = []
+
+        class _System:
+            devices = [_Device()]
+
+            @staticmethod
+            def local():
+                return _System()
+
+        class _Nidaqmx:
+            Task = _Task
+            system = type("system", (), {"System": _System})
+
+        class _Readers:
+            class AnalogMultiChannelReader:
+                def __init__(self, _stream):
+                    return None
+
+        session = SessionConfig(
+            ai_channels=[
+                ChannelConfig(name="ai0", physical_name="ai0", enabled=True)
+            ]
+        )
+        session.acquisition.frame_size = 4096
+        session.acquisition.buffer_frames = 8
+        session.acquisition.trigger.enabled = True
+        session.acquisition.trigger.mode = "Every Frame"
+        session.acquisition.trigger.source = "ai0"
+        session.acquisition.trigger.level = 0.5
+        session.acquisition.trigger.pretrigger_samples = -10
+
+        backend = NIDaqBackend()
+        backend._nidaqmx = _Nidaqmx()
+        backend._constants = _Constants()
+        backend._stream_readers = _Readers()
+
+        backend.configure(session, device_name="Dev1")
+
+        task = _Task.created_tasks[-1]
+        self.assertEqual(task.timing.kwargs["sample_mode"], "finite")
+        self.assertEqual(task.timing.kwargs["samps_per_chan"], 4096)
+        self.assertEqual(task.triggers.start_trigger.calls, [])
+        self.assertEqual(len(task.triggers.reference_trigger.calls), 1)
+        call_name, kwargs = task.triggers.reference_trigger.calls[0]
+        self.assertEqual(call_name, "ref")
+        self.assertEqual(kwargs["trigger_source"], "ai0")
+        self.assertEqual(kwargs["pretrigger_samples"], 410)
+
+    def test_ni_finite_triggered_read_rearms_each_frame(self):
+        class _Reader:
+            def read_many_sample(self, data, **_kwargs):
+                data[:] = np.array([[1.0, 2.0, 3.0, 4.0]])
+
+        class _Task:
+            def __init__(self):
+                self.calls = []
+
+            def start(self):
+                self.calls.append("start")
+
+            def wait_until_done(self, timeout):
+                self.calls.append(("wait", timeout))
+
+            def stop(self):
+                self.calls.append("stop")
+
+        session = SessionConfig(
+            ai_channels=[
+                ChannelConfig(name="ai0", physical_name="ai0", enabled=True)
+            ]
+        )
+        session.acquisition.frame_size = 4
+        session.acquisition.sample_rate = 1000.0
+        session.acquisition.trigger.timeout_seconds = 1.0
+
+        backend = NIDaqBackend()
+        backend._ai_task = _Task()
+        backend._reader = _Reader()
+        backend._session = session
+        backend._channel_names = ["ai0"]
+        backend._finite_ai_sampling = True
+
+        frame = backend.read_frame()
+
+        self.assertEqual(backend._ai_task.calls[0], "start")
+        self.assertEqual(backend._ai_task.calls[1][0], "wait")
+        self.assertLessEqual(backend._ai_task.calls[1][1], 0.1)
+        self.assertEqual(backend._ai_task.calls[2], "stop")
+        np.testing.assert_allclose(frame.data, np.array([[1.0, 2.0, 3.0, 4.0]]))
+
+    def test_ni_continuous_read_uses_short_chunks_for_responsive_stop(self):
+        class _Reader:
+            def __init__(self):
+                self.calls = []
+                self.flags = []
+                self.next_value = 1.0
+
+            def read_many_sample(self, data, **kwargs):
+                self.flags.append((data.flags["C_CONTIGUOUS"], data.flags["WRITEABLE"]))
+                self.calls.append(kwargs)
+                data[:] = self.next_value
+                self.next_value += 1.0
+
+        session = SessionConfig(
+            ai_channels=[
+                ChannelConfig(name="ai0", physical_name="ai0", enabled=True)
+            ]
+        )
+        session.acquisition.frame_size = 1000
+        session.acquisition.sample_rate = 1000.0
+        session.acquisition.trigger.timeout_seconds = 5.0
+
+        backend = NIDaqBackend()
+        backend._ai_task = object()
+        backend._reader = _Reader()
+        backend._session = session
+        backend._channel_names = ["ai0"]
+        backend._finite_ai_sampling = False
+
+        frame = backend.read_frame()
+
+        sample_counts = [
+            call["number_of_samples_per_channel"]
+            for call in backend._reader.calls
+        ]
+        self.assertEqual(sample_counts, [100] * 10)
+        self.assertTrue(all(is_contiguous and is_writeable for is_contiguous, is_writeable in backend._reader.flags))
+        self.assertLessEqual(max(call["timeout"] for call in backend._reader.calls), 0.35)
+        self.assertEqual(frame.data.shape, (1, 1000))
+
+    def test_ni_stop_stops_tasks_without_abort(self):
         class _Task:
             def __init__(self):
                 self.calls = []
@@ -598,8 +905,8 @@ class SignalPipelineTests(unittest.TestCase):
 
         backend.stop()
 
-        self.assertEqual(backend._ai_task.calls, [("control", "abort"), ("stop", None)])
-        self.assertEqual(backend._ao_task.calls, [("control", "abort"), ("stop", None)])
+        self.assertEqual(backend._ai_task.calls, [("stop", None)])
+        self.assertEqual(backend._ao_task.calls, [("stop", None)])
 
     def test_ni_abort_does_not_wait_for_stop(self):
         class _Task:

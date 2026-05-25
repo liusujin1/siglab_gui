@@ -10,6 +10,11 @@ import time
 import numpy as np
 
 from python_vna.controller import VnaController
+from python_vna.continuous_recording import (
+    ContinuousDatWriter,
+    RecordingStatus,
+    recording_directory_name,
+)
 from python_vna.display_transforms import (
     align_vector_to_values,
     legacy_frequency_int_vector,
@@ -18,8 +23,9 @@ from python_vna.display_transforms import (
     transform_curve,
     transform_legacy_autospectrum,
 )
-from python_vna.models import ChannelConfig, SessionConfig
+from python_vna.models import ChannelConfig, MeasurementSet, SessionConfig
 from python_vna.optional import require
+from python_vna import __version__ as PYTHON_VNA_VERSION
 from python_vna.storage import (
     default_session_config,
     load_legacy_vna,
@@ -781,7 +787,10 @@ class MCSetupDialog(QtWidgets.QDialog):
 
     def _apply_to_main(self) -> None:
         target = self.main_window.channel_table
+        full_scale_changed_aliases: set[str] = set()
         for row in range(min(self.table.rowCount(), target.rowCount())):
+            old_aliases = self.main_window._channel_aliases_for_table_row(row)
+            old_full_scale = self.main_window._channel_table_full_scale(row)
             enabled_item = self.table.item(row, 0)
             target.item(row, 0).setCheckState(
                 QtCore.Qt.Checked
@@ -789,10 +798,9 @@ class MCSetupDialog(QtWidgets.QDialog):
                 else QtCore.Qt.Unchecked
             )
             full_scale_text = self.table.item(row, 1).text().strip()
-            if full_scale_text.lower() == "auto":
-                target.item(row, 9).setText("-1")
-            else:
-                target.item(row, 9).setText(f"{self.main_window._parse_float(full_scale_text.replace('V', '').strip(), 10.0):.6g}")
+            target.item(row, 9).setText(
+                f"{self.main_window._parse_full_scale_text(full_scale_text, 10.0):.6g}"
+            )
             target.item(row, 6).setText(self.table.item(row, 2).text().strip() or "ac")
             target.item(row, 6).setText(target.item(row, 6).text().strip().lower())
             target.item(row, 11).setText(f"{self.main_window._parse_float(self.table.item(row, 3).text(), 0.0):.6g}")
@@ -802,18 +810,25 @@ class MCSetupDialog(QtWidgets.QDialog):
             target.item(row, 12).setText(self.table.item(row, 7).text().strip() or "/Volt")
             target.item(row, 13).setText(f"{self.main_window._parse_float(self.table.item(row, 9).text(), 1.0):.6g}")
             self.main_window._apply_bias_defaults_to_table_row(row)
+            new_full_scale = self.main_window._channel_table_full_scale(row)
+            if not np.isclose(old_full_scale, new_full_scale, rtol=1e-12, atol=1e-12):
+                full_scale_changed_aliases.update(old_aliases)
+                full_scale_changed_aliases.update(self.main_window._channel_aliases_for_table_row(row))
         self.main_window._rebuild_channel_list()
         self.main_window._sync_channel_grid()
         self.main_window._reload_channel_selectors()
         self.main_window._load_channel_editor_from_row(self.main_window.channel_list.currentRow())
         self.main_window._read_session_from_widgets()
         self.main_window._refresh_current_measurement_view()
+        if full_scale_changed_aliases:
+            self.main_window._refresh_full_scale_axis_ranges_for_channels(
+                list(full_scale_changed_aliases),
+                force_auto_y=True,
+            )
         self.main_window.statusBar().showMessage("MC Setup applied")
 
 
 class AcquisitionWorker(QtCore.QObject):
-    DEFAULT_AVG_SETTLE_FRAMES = 0
-
     started = QtCore.Signal(object)
     measurement_ready = QtCore.Signal(object)
     status_changed = QtCore.Signal(str)
@@ -824,10 +839,9 @@ class AcquisitionWorker(QtCore.QObject):
         self,
         controller: VnaController,
         device_name: str | None,
-        display_interval_seconds: float = 0.1,
+        display_interval_seconds: float = 0.25,
         average_run: bool = False,
         target_average_count: int | None = None,
-        settle_frames: int | None = None,
     ) -> None:
         super().__init__()
         self._controller = controller
@@ -835,13 +849,8 @@ class AcquisitionWorker(QtCore.QObject):
         self._display_interval_seconds = display_interval_seconds
         self._average_run = average_run
         self._target_average_count = target_average_count
-        self._settle_frames = (
-            self.DEFAULT_AVG_SETTLE_FRAMES
-            if settle_frames is None and average_run
-            else max(0, int(settle_frames or 0))
-        )
         self._stop_requested = threading.Event()
-        self._stop_interrupt_thread: threading.Thread | None = None
+        self._backend_started = threading.Event()
 
     @QtCore.Slot()
     def run(self) -> None:
@@ -853,20 +862,17 @@ class AcquisitionWorker(QtCore.QObject):
             self.status_changed.emit("State: starting")
             self._controller.set_averaging_enabled(self._average_run)
             self._controller.configure(device_name=self._device_name)
+            self._set_controller_stop_event(self._stop_requested)
             if self._stop_requested.is_set():
+                self._request_controller_stop()
                 return
             self._controller.start()
+            self._backend_started.set()
+            if self._stop_requested.is_set():
+                self._request_controller_stop()
+                return
             self.started.emit(self._device_name)
             self.status_changed.emit("State: running")
-            for settle_index in range(self._settle_frames):
-                if self._stop_requested.is_set():
-                    return
-                self.status_changed.emit(
-                    f"State: settling {settle_index + 1}/{self._settle_frames}"
-                )
-                self._controller.backend.read_frame()
-            if self._settle_frames:
-                self._controller.set_averaging_enabled(self._average_run)
             while not self._stop_requested.is_set():
                 measurement = self._controller.read_and_process()
                 latest_measurement = measurement
@@ -884,36 +890,203 @@ class AcquisitionWorker(QtCore.QObject):
                 ):
                     stop_needed = True
                     break
-            if latest_measurement is not None and not emitted_latest:
+            if latest_measurement is not None and not emitted_latest and not self._stop_requested.is_set():
                 self.measurement_ready.emit(latest_measurement)
         except Exception as exc:
             if not self._stop_requested.is_set():
                 self.error.emit(str(exc))
         finally:
-            if self._stop_requested.is_set() or stop_needed:
+            user_requested_stop = self._stop_requested.is_set()
+            try:
+                self._controller.stop()
+            except Exception:
+                pass
+            if not user_requested_stop:
                 try:
-                    self._controller.abort()
+                    self._controller.close()
                 except Exception:
                     pass
+            try:
+                self._set_controller_stop_event(None)
+            except Exception:
+                pass
             self._controller.set_averaging_enabled(False)
             self.finished.emit()
 
     def request_stop(self) -> None:
         self._stop_requested.set()
-        if self._stop_interrupt_thread is not None and self._stop_interrupt_thread.is_alive():
-            return
-        self._stop_interrupt_thread = threading.Thread(
-            target=self._interrupt_backend,
-            name="vna-daq-stop",
-            daemon=True,
-        )
-        self._stop_interrupt_thread.start()
 
-    def _interrupt_backend(self) -> None:
+    @property
+    def stop_event(self) -> threading.Event:
+        return self._stop_requested
+
+    def _request_controller_stop(self) -> None:
         try:
-            self._controller.abort()
+            self._controller.request_stop()
         except Exception:
             pass
+
+    def _set_controller_stop_event(self, stop_event: threading.Event | None) -> None:
+        setter = getattr(self._controller, "set_stop_event", None)
+        if setter is None:
+            return
+        try:
+            setter(stop_event)
+        except Exception:
+            pass
+
+
+class ContinuousRecordingWorker(QtCore.QObject):
+    started = QtCore.Signal(object)
+    preview_ready = QtCore.Signal(object)
+    status_changed = QtCore.Signal(str)
+    recording_status = QtCore.Signal(object)
+    error = QtCore.Signal(str)
+    finished = QtCore.Signal()
+
+    def __init__(
+        self,
+        controller: VnaController,
+        device_name: str | None,
+        output_dir: str | Path,
+        preview_interval_seconds: float = 1.0,
+        segment_seconds: float = 600.0,
+    ) -> None:
+        super().__init__()
+        self._controller = controller
+        self._device_name = device_name
+        self._output_dir = Path(output_dir)
+        self._preview_interval_seconds = float(preview_interval_seconds)
+        self._segment_seconds = float(segment_seconds)
+        self._stop_requested = threading.Event()
+        self._backend_started = threading.Event()
+        self._writer: ContinuousDatWriter | None = None
+
+    @QtCore.Slot()
+    def run(self) -> None:
+        last_preview = 0.0
+        completed = False
+        error_message: str | None = None
+        try:
+            self.status_changed.emit("State: preparing record")
+            self._controller.set_averaging_enabled(False)
+            self._controller.configure(device_name=self._device_name)
+            self._set_controller_stop_event(self._stop_requested)
+            if self._stop_requested.is_set():
+                self._request_controller_stop()
+                return
+            channel_names = [
+                channel.name
+                for channel in self._controller.state.session.ai_channels
+                if channel.enabled
+            ]
+            self._writer = ContinuousDatWriter(
+                self._output_dir,
+                self._controller.state.session,
+                device_name=self._device_name,
+                channel_names=channel_names,
+                software_version=PYTHON_VNA_VERSION,
+                segment_seconds=self._segment_seconds,
+            )
+            self._writer.start()
+            self._controller.start()
+            self._backend_started.set()
+            if self._stop_requested.is_set():
+                self._request_controller_stop()
+                completed = True
+                return
+            self.started.emit(self._device_name)
+            self.status_changed.emit("State: recording")
+            while not self._stop_requested.is_set():
+                frame = self._controller.backend.read_frame()
+                if not self._writer.channel_names and frame.channel_names:
+                    self._writer.channel_names = list(frame.channel_names)
+                status = self._writer.write_frame(frame)
+                self.recording_status.emit(status)
+                now = time.monotonic()
+                if now - last_preview >= self._preview_interval_seconds:
+                    self.preview_ready.emit(self._preview_measurement(frame, status))
+                    last_preview = now
+            completed = True
+        except Exception as exc:
+            if self._stop_requested.is_set():
+                completed = True
+                error_message = None
+            else:
+                error_message = str(exc)
+                self.error.emit(error_message)
+        finally:
+            user_requested_stop = self._stop_requested.is_set()
+            try:
+                self._controller.stop()
+            except Exception:
+                pass
+            if not user_requested_stop:
+                try:
+                    self._controller.close()
+                except Exception:
+                    pass
+            try:
+                if self._writer is not None:
+                    self._writer.close(completed=completed, error=error_message)
+            except Exception as exc:
+                if not self._stop_requested.is_set():
+                    self.error.emit(f"Recording close failed: {exc}")
+            try:
+                self._set_controller_stop_event(None)
+            except Exception:
+                pass
+            self._controller.set_averaging_enabled(False)
+            self.finished.emit()
+
+    def request_stop(self) -> None:
+        self._stop_requested.set()
+
+    @property
+    def stop_event(self) -> threading.Event:
+        return self._stop_requested
+
+    def _request_controller_stop(self) -> None:
+        try:
+            self._controller.request_stop()
+        except Exception:
+            pass
+
+    def _set_controller_stop_event(self, stop_event: threading.Event | None) -> None:
+        setter = getattr(self._controller, "set_stop_event", None)
+        if setter is None:
+            return
+        try:
+            setter(stop_event)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _preview_measurement(frame, status: RecordingStatus) -> MeasurementSet:
+        return MeasurementSet(
+            sample_rate=frame.sample_rate,
+            time_data={
+                "t": frame.timestamps,
+                "channels": {
+                    name: frame.data[index].copy()
+                    for index, name in enumerate(frame.channel_names)
+                },
+            },
+            spectra={"f": np.array([], dtype=float), "fft": {}, "autospectrum": {}},
+            frf={},
+            coherence={},
+            cross_spectra={},
+            correlations={},
+            impulse_responses={},
+            metadata={
+                "frame_index": frame.frame_index,
+                "recording_preview": True,
+                "recording_elapsed_seconds": status.elapsed_seconds,
+                "recording_total_samples": status.total_samples,
+                "recording_segment_index": status.segment_index,
+                "recording_output_dir": str(status.output_dir),
+            },
+        )
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -1176,6 +1349,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "bottom": None,
         }
         self._auto_y_follow_visible_x: dict[str, bool] = {"top": True, "bottom": True}
+        self._channel_full_scale_focus: dict[str, str | None] = {"top": None, "bottom": None}
         self._channel_editor_loading = False
         self._controls_visible = True
         self._controls_last_sizes = [320, 880]
@@ -1192,8 +1366,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bottom_trace_strip_combo = QtWidgets.QComboBox()
         self._acquisition_thread: QtCore.QThread | None = None
         self._acquisition_worker: AcquisitionWorker | None = None
+        self._acquisition_stop_event: threading.Event | None = None
+        self._recording_thread: QtCore.QThread | None = None
+        self._recording_worker: ContinuousRecordingWorker | None = None
+        self._recording_stop_event: threading.Event | None = None
+        self._recording_output_dir: Path | None = None
         self._pending_measurement = None
         self._plot_update_scheduled = False
+        self._stop_requested_for_current_run = False
         self._build_ui()
         self._build_menus()
         self._apply_legacy_theme()
@@ -2908,6 +3088,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.start_button = QtWidgets.QPushButton("Inst")
         self.start_button.setToolTip("Instant acquisition")
         self.avg_button = QtWidgets.QPushButton("Avg")
+        self.record_button = QtWidgets.QPushButton("Record")
+        self.record_button.setToolTip("Continuously record time data to DAT files")
         self.stop_button = QtWidgets.QPushButton("Stop")
         self.stop_button.setObjectName("dangerButton")
         self.stop_button.setEnabled(False)
@@ -2926,6 +3108,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.controls_button.toggled.connect(self._toggle_control_panel)
         self.start_button.clicked.connect(self._start_acquisition)
         self.avg_button.clicked.connect(self._start_average_acquisition)
+        self.record_button.clicked.connect(self._start_continuous_recording)
         self.stop_button.clicked.connect(self._stop_acquisition)
         self.export_button.clicked.connect(self._export_data)
         self.save_session_button.clicked.connect(self._save_session)
@@ -2939,6 +3122,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.toolbar_data_tip_button,
             self.start_button,
             self.avg_button,
+            self.record_button,
             self.stop_button,
             self.controls_button,
         ):
@@ -3591,7 +3775,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_legacy_channel_panel(self) -> QtWidgets.QWidget:
         panel, layout = self._legacy_panel("CHANNEL SETUP")
         top_row = QtWidgets.QHBoxLayout()
-        top_row.addWidget(self.channel_name_edit, 1)
+        top_row.addWidget(self.channel_select_combo, 1)
         top_row.addWidget(self.channel_enabled_checkbox, 1)
         top_row.addWidget(self._legacy_label("", "legacyCell"), 0)
         layout.addLayout(top_row)
@@ -3694,9 +3878,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.overlap_combo.addItems(["No Overlap", "50% Overlap", "Max Overlap"])
         self.overlap_combo.setCurrentText("No Overlap")
         self._make_compact_combo(self.overlap_combo, 9)
-        self.overlap_combo.setEnabled(False)
         self.overlap_combo.setToolTip(
-            "Legacy overlap processing is not enabled in this real-time NI-DAQmx path yet."
+            "Overlap processing: No / 50% / Max. Applies to Inst/Avg processing frames; Record still stores raw time data."
         )
         self.window_combo = QtWidgets.QComboBox()
         self.window_combo.addItems(list(self.PROCESSING_WINDOW_LABELS.values()))
@@ -3800,8 +3983,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         editor_panel = QtWidgets.QWidget()
         self.channel_enabled_checkbox = QtWidgets.QCheckBox("Enabled")
+        self.channel_select_combo = QtWidgets.QComboBox()
+        self.channel_select_combo.setEditable(False)
         self.channel_name_edit = QtWidgets.QLineEdit()
         self.channel_name_edit.setReadOnly(True)
+        self.channel_name_edit.hide()
         self.channel_physical_edit = QtWidgets.QLineEdit()
         self.channel_label_edit = QtWidgets.QLineEdit()
         self.channel_reference_checkbox = QtWidgets.QCheckBox("Reference")
@@ -3881,7 +4067,7 @@ class MainWindow(QtWidgets.QMainWindow):
         basic_form = QtWidgets.QFormLayout(basic_group)
         basic_form.setContentsMargins(8, 6, 8, 6)
         basic_form.addRow(self.channel_enabled_checkbox)
-        basic_form.addRow("Channel", self.channel_name_edit)
+        basic_form.addRow("Channel", self.channel_select_combo)
         basic_form.addRow("Label", self.channel_label_edit)
         basic_form.addRow(self.channel_reference_checkbox)
         basic_form.addRow("Coupling", self.channel_coupling_combo)
@@ -3932,6 +4118,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.channel_per_eu_combo.currentTextChanged.connect(self._apply_channel_editor_to_row)
         self.channel_db_ref_edit.valueChanged.connect(self._apply_channel_editor_to_row)
         self.channel_full_scale_combo.currentTextChanged.connect(self._apply_channel_editor_to_row)
+        self.channel_select_combo.currentIndexChanged.connect(self._channel_select_combo_changed)
         self.channel_physical_edit.editingFinished.connect(self._apply_channel_editor_to_row)
         self.channel_label_edit.editingFinished.connect(self._apply_channel_editor_to_row)
         self.channel_unit_edit.editingFinished.connect(self._apply_channel_editor_to_row)
@@ -3950,10 +4137,29 @@ class MainWindow(QtWidgets.QMainWindow):
             return f"{millivolts:.3g} mV"
         return f"{value:.6g} V"
 
-    def _full_scale_from_combo(self) -> float:
-        text = self.channel_full_scale_combo.currentText().strip().lower()
-        if text == "auto":
+    @staticmethod
+    def _parse_full_scale_text(text: str, default: float) -> float:
+        stripped = str(text).strip().lower()
+        if stripped == "auto":
             return -1.0
+        multiplier = 1.0
+        if stripped.endswith("mv"):
+            multiplier = 1e-3
+            stripped = stripped[:-2]
+        elif stripped.endswith("uv"):
+            multiplier = 1e-6
+            stripped = stripped[:-2]
+        elif stripped.endswith("kv"):
+            multiplier = 1e3
+            stripped = stripped[:-2]
+        elif stripped.endswith("v"):
+            stripped = stripped[:-1]
+        try:
+            return float(stripped.strip()) * multiplier
+        except ValueError:
+            return default
+
+    def _full_scale_from_combo(self) -> float:
         match_index = self.channel_full_scale_combo.findText(
             self.channel_full_scale_combo.currentText(),
             QtCore.Qt.MatchFixedString,
@@ -3962,14 +4168,7 @@ class MainWindow(QtWidgets.QMainWindow):
             data = self.channel_full_scale_combo.itemData(match_index)
             if data is not None:
                 return float(data)
-        cleaned = text.replace("mv", "").replace("v", "").strip()
-        try:
-            value = float(cleaned)
-        except ValueError:
-            return 10.0
-        if "mv" in text:
-            return value / 1000.0
-        return value
+        return self._parse_full_scale_text(self.channel_full_scale_combo.currentText(), 10.0)
 
     def _rebuild_channel_list(self) -> None:
         if not hasattr(self, "channel_list"):
@@ -3977,6 +4176,9 @@ class MainWindow(QtWidgets.QMainWindow):
         current_row = self.channel_list.currentRow()
         self.channel_list.blockSignals(True)
         self.channel_list.clear()
+        if hasattr(self, "channel_select_combo"):
+            self.channel_select_combo.blockSignals(True)
+            self.channel_select_combo.clear()
         for row in range(self.channel_table.rowCount()):
             name = self.channel_table.item(row, 1).text()
             label_item = self.channel_table.item(row, 10) if self.channel_table.columnCount() > 10 else None
@@ -3985,13 +4187,39 @@ class MainWindow(QtWidgets.QMainWindow):
             display_name = f"{name}  {label_text}".strip() if label_text else name
             item_text = display_name if enabled else f"{display_name} (off)"
             self.channel_list.addItem(item_text)
+            if hasattr(self, "channel_select_combo"):
+                self.channel_select_combo.addItem(item_text, row)
         self.channel_list.blockSignals(False)
         if self.channel_list.count():
             target_row = current_row if 0 <= current_row < self.channel_list.count() else 0
             self.channel_list.setCurrentRow(target_row)
+            if hasattr(self, "channel_select_combo"):
+                self.channel_select_combo.setCurrentIndex(target_row)
         else:
             self._load_channel_editor_from_row(-1)
+        if hasattr(self, "channel_select_combo"):
+            self.channel_select_combo.blockSignals(False)
         self._sync_channel_grid()
+
+    def _sync_channel_select_combo(self, row: int) -> None:
+        if not hasattr(self, "channel_select_combo"):
+            return
+        self.channel_select_combo.blockSignals(True)
+        if 0 <= row < self.channel_select_combo.count():
+            self.channel_select_combo.setCurrentIndex(row)
+        else:
+            self.channel_select_combo.setCurrentIndex(-1)
+        self.channel_select_combo.blockSignals(False)
+
+    def _channel_select_combo_changed(self, index: int) -> None:
+        if self._channel_editor_loading or not hasattr(self, "channel_list"):
+            return
+        row = self.channel_select_combo.itemData(index)
+        if row is None:
+            row = index
+        row = int(row)
+        if 0 <= row < self.channel_list.count() and self.channel_list.currentRow() != row:
+            self.channel_list.setCurrentRow(row)
 
     def _sync_channel_grid(self) -> None:
         if not hasattr(self, "channel_grid"):
@@ -4051,13 +4279,15 @@ class MainWindow(QtWidgets.QMainWindow):
         if row < 0 or row >= self.channel_table.rowCount():
             return
         text = item.text().strip()
+        old_aliases = self._channel_aliases_for_table_row(row)
+        old_full_scale = self._channel_table_full_scale(row)
         if col == 0:
             self.channel_table.item(row, 0).setCheckState(
                 QtCore.Qt.Checked if text.lower() in {"on", "1", "true", "yes"} else QtCore.Qt.Unchecked
             )
         elif col == 2:
             self.channel_table.item(row, 9).setText(
-                f"{-1.0 if text.lower() == 'auto' else self._parse_float(text, 10.0):.6g}"
+                f"{self._parse_full_scale_text(text, 10.0):.6g}"
             )
         elif col == 3:
             self.channel_table.item(row, 6).setText(text or "ac")
@@ -4077,6 +4307,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._rebuild_channel_list()
         self.channel_list.setCurrentRow(row)
         self._reload_channel_selectors()
+        self._read_session_from_widgets()
+        if col == 2:
+            new_aliases = self._channel_aliases_for_table_row(row)
+            new_full_scale = self._channel_table_full_scale(row)
+            if not np.isclose(old_full_scale, new_full_scale, rtol=1e-12, atol=1e-12):
+                self._refresh_full_scale_axis_ranges_for_channels(
+                    list(old_aliases | new_aliases),
+                    force_auto_y=True,
+                )
 
     def _apply_bias_defaults_to_table_row(self, row: int) -> None:
         coupling = self.channel_table.item(row, 6).text().strip().lower()
@@ -4100,6 +4339,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _load_channel_editor_from_row(self, row: int) -> None:
         self._channel_editor_loading = True
         widgets = (
+            self.channel_select_combo,
             self.channel_enabled_checkbox,
             self.channel_name_edit,
             self.channel_physical_edit,
@@ -4133,10 +4373,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.channel_per_eu_combo.setCurrentText("/Volt")
             self.channel_db_ref_edit.setValue(1.0)
             self.channel_full_scale_combo.setCurrentText(self._format_full_scale_option(10.0))
+            self._sync_channel_select_combo(-1)
             if hasattr(self, "channel_grid"):
                 self.channel_grid.clearSelection()
             self._channel_editor_loading = False
             return
+        self._sync_channel_select_combo(row)
         if hasattr(self, "channel_grid") and self.channel_grid.currentRow() != row:
             self.channel_grid.blockSignals(True)
             self.channel_grid.selectRow(row)
@@ -4176,18 +4418,45 @@ class MainWindow(QtWidgets.QMainWindow):
         row = self.channel_list.currentRow()
         if row < 0 or row >= self.channel_table.rowCount():
             return
+        sender = self.sender()
+        full_scale_only = sender is self.channel_full_scale_combo
         rows = (
             range(self.channel_table.rowCount())
             if self.channel_set_all_checkbox.isChecked()
             else [row]
         )
-        for target_row in rows:
-            self._write_channel_editor_to_table_row(target_row)
+        target_rows = list(rows)
+        old_full_scales = {
+            target_row: self._channel_table_full_scale(target_row)
+            for target_row in target_rows
+        }
+        old_aliases = {
+            target_row: self._channel_aliases_for_table_row(target_row)
+            for target_row in target_rows
+        }
+        for target_row in target_rows:
+            self._write_channel_editor_to_table_row(target_row, full_scale_only=full_scale_only)
         self._rebuild_channel_list()
         self.channel_list.setCurrentRow(row)
         self._reload_channel_selectors()
+        self._read_session_from_widgets()
+        full_scale_changed_aliases: set[str] = set()
+        for target_row in target_rows:
+            new_full_scale = self._channel_table_full_scale(target_row)
+            if not np.isclose(old_full_scales[target_row], new_full_scale, rtol=1e-12, atol=1e-12):
+                full_scale_changed_aliases.update(old_aliases[target_row])
+                full_scale_changed_aliases.update(self._channel_aliases_for_table_row(target_row))
+        self._refresh_full_scale_axis_ranges_for_channels(
+            list(full_scale_changed_aliases)
+            if full_scale_changed_aliases
+            else [self.channel_table.item(target_row, 1).text() for target_row in target_rows],
+            force_auto_y=bool(full_scale_changed_aliases),
+        )
 
-    def _write_channel_editor_to_table_row(self, row: int) -> None:
+    def _write_channel_editor_to_table_row(self, row: int, full_scale_only: bool = False) -> None:
+        if full_scale_only:
+            self.channel_table.item(row, 9).setText(f"{self._full_scale_from_combo():.6g}")
+            return
         self.channel_table.item(row, 0).setCheckState(
             QtCore.Qt.Checked if self.channel_enabled_checkbox.isChecked() else QtCore.Qt.Unchecked
         )
@@ -5127,13 +5396,68 @@ class MainWindow(QtWidgets.QMainWindow):
     def _start_average_acquisition(self) -> None:
         self._start_run(average_run=True)
 
+    def _start_continuous_recording(self) -> None:
+        if self._acquisition_thread is not None or self._recording_thread is not None:
+            return
+        parent_dir = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select Continuous Recording Folder",
+            str(Path.cwd()),
+        )
+        if not parent_dir:
+            return
+        output_dir = Path(parent_dir) / recording_directory_name()
+        self._map_channels_to_selected_device()
+        self.average_count_edit.interpretText()
+        session = self._read_session_from_widgets()
+        self._clear_runtime_axis_ranges()
+        self._pending_measurement = None
+        self._plot_update_scheduled = False
+        self._stop_requested_for_current_run = False
+        device_name = self.device_combo.currentData()
+        worker = ContinuousRecordingWorker(
+            self.controller,
+            device_name,
+            output_dir,
+        )
+        stop_event = self._worker_stop_event(worker)
+        thread = QtCore.QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.started.connect(self._recording_started)
+        worker.preview_ready.connect(self._handle_recording_preview)
+        worker.recording_status.connect(self._handle_recording_status)
+        worker.status_changed.connect(self.run_info_label.setText)
+        worker.error.connect(self._handle_worker_error)
+        worker.finished.connect(self._recording_worker_finished)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._recording_thread_finished)
+        thread.finished.connect(thread.deleteLater)
+        self._recording_worker = worker
+        self._recording_thread = thread
+        self._recording_stop_event = stop_event
+        self._recording_output_dir = output_dir
+        self.start_button.setEnabled(False)
+        self.avg_button.setEnabled(False)
+        self.record_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+        self.backend_combo.setEnabled(False)
+        self.device_combo.setEnabled(False)
+        self.refresh_devices_button.setEnabled(False)
+        self.run_info_label.setText("State: starting record")
+        self.device_info_label.setText(f"Device: {device_name}")
+        self.statusBar().showMessage(f"Starting continuous recording to {output_dir}")
+        thread.start()
+
     def _clear_runtime_axis_ranges(self) -> None:
         for key in ("top", "bottom"):
             self._manual_x_ranges[key] = None
             self._manual_y_ranges[key] = None
+            self._auto_y_follow_visible_x[key] = False
 
     def _start_run(self, average_run: bool) -> None:
-        if self._acquisition_thread is not None:
+        if self._acquisition_thread is not None or self._recording_thread is not None:
             return
         self._map_channels_to_selected_device()
         self.average_count_edit.interpretText()
@@ -5146,18 +5470,24 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage("Manual trigger mode requires Arm before acquisition")
             return
         self._clear_runtime_axis_ranges()
+        self._pending_measurement = None
+        self._plot_update_scheduled = False
+        self._stop_requested_for_current_run = False
         device_name = self.device_combo.currentData()
         target_average_count = (
             session.acquisition.averaging.count
             if average_run and session.acquisition.averaging.mode in {"linear", "peak"}
             else None
         )
+        display_interval = self._acquisition_display_interval_seconds(session)
         worker = AcquisitionWorker(
             self.controller,
             device_name,
             average_run=average_run,
             target_average_count=target_average_count,
+            display_interval_seconds=display_interval,
         )
+        stop_event = self._worker_stop_event(worker)
         thread = QtCore.QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -5165,14 +5495,17 @@ class MainWindow(QtWidgets.QMainWindow):
         worker.measurement_ready.connect(self._handle_worker_measurement)
         worker.status_changed.connect(self.run_info_label.setText)
         worker.error.connect(self._handle_worker_error)
-        worker.finished.connect(self._acquisition_finished)
+        worker.finished.connect(self._acquisition_worker_finished)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._acquisition_thread_finished)
         thread.finished.connect(thread.deleteLater)
         self._acquisition_worker = worker
         self._acquisition_thread = thread
+        self._acquisition_stop_event = stop_event
         self.start_button.setEnabled(False)
         self.avg_button.setEnabled(False)
+        self.record_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.backend_combo.setEnabled(False)
         self.device_combo.setEnabled(False)
@@ -5182,19 +5515,47 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Starting averaged acquisition" if average_run else "Starting acquisition")
         thread.start()
 
+    @staticmethod
+    def _acquisition_display_interval_seconds(session: SessionConfig) -> float:
+        sample_rate = max(float(session.acquisition.sample_rate), 1.0)
+        frame_size = max(int(session.acquisition.frame_size), 1)
+        frame_duration = frame_size / sample_rate
+        return float(np.clip(frame_duration, 0.25, 1.0))
+
+    @staticmethod
+    def _worker_stop_event(worker: object) -> threading.Event:
+        stop_event = getattr(worker, "stop_event", None)
+        if isinstance(stop_event, threading.Event):
+            return stop_event
+        return threading.Event()
+
     def _stop_acquisition(self) -> None:
+        if self._recording_worker is not None:
+            self.stop_button.setEnabled(False)
+            self.avg_button.setEnabled(False)
+            self.record_button.setEnabled(False)
+            self.run_info_label.setText("State: stopping record")
+            self.statusBar().showMessage("Stopping continuous recording")
+            if self._recording_stop_event is not None:
+                self._recording_stop_event.set()
+            return
         if self._acquisition_worker is None:
             self.start_button.setEnabled(True)
             self.avg_button.setEnabled(True)
+            self.record_button.setEnabled(True)
             self.stop_button.setEnabled(False)
             if self.run_info_label.text() not in {"State: idle", "State: error"}:
                 self.run_info_label.setText("State: stopped")
             return
         self.stop_button.setEnabled(False)
         self.avg_button.setEnabled(False)
+        self.record_button.setEnabled(False)
+        self._pending_measurement = None
+        self._stop_requested_for_current_run = True
         self.run_info_label.setText("State: stopping")
         self.statusBar().showMessage("Stopping acquisition")
-        self._acquisition_worker.request_stop()
+        if self._acquisition_stop_event is not None:
+            self._acquisition_stop_event.set()
 
     @QtCore.Slot(object)
     def _acquisition_started(self, device_name: str | None) -> None:
@@ -5203,7 +5564,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Acquisition running")
 
     @QtCore.Slot(object)
+    def _recording_started(self, device_name: str | None) -> None:
+        self.device_info_label.setText(f"Device: {device_name}")
+        self.run_info_label.setText("State: recording")
+        if self._recording_output_dir is not None:
+            self.statusBar().showMessage(f"Recording to {self._recording_output_dir}")
+        else:
+            self.statusBar().showMessage("Recording")
+
+    @QtCore.Slot(object)
     def _handle_worker_measurement(self, measurement) -> None:
+        if self._stop_requested_for_current_run:
+            return
         if "manual" in self._current_combo_value(self.trigger_mode_combo).strip().lower() and self.trigger_enable.isChecked():
             self.trigger_enable.setChecked(False)
             self._sync_trigger_arm_button()
@@ -5219,31 +5591,72 @@ class MainWindow(QtWidgets.QMainWindow):
         self._plot_update_scheduled = False
         if measurement is None:
             return
+        if self._stop_requested_for_current_run:
+            return
         self._plot_measurement(measurement)
         average_count = measurement.metadata.get("average_count", 0)
         average_target = measurement.metadata.get("average_target", 0)
+        averaging_enabled = measurement.metadata.get("averaging_enabled", False)
         average_suffix = (
             f" | avg:{average_count}/{average_target}"
-            if measurement.metadata.get("averaging_enabled", False) and average_target
+            if averaging_enabled and average_target
             else f" | avg:{average_count}"
-            if measurement.metadata.get("averaging_enabled", False)
+            if averaging_enabled
             else ""
         )
+        frame_label = (
+            f"avg frame {max(1, int(average_count or 0))}"
+            if averaging_enabled and average_count
+            else f"frame {measurement.metadata.get('frame_index', '?')}"
+        )
         self.run_info_label.setText(
-            "State: frame "
-            f"{measurement.metadata.get('frame_index', '?')}"
+            f"State: {frame_label}"
             f"{average_suffix}"
             f" | dblhit={measurement.metadata.get('double_hit_rejected', False)}"
             f" | ovld={measurement.metadata.get('overload_rejected', False)}"
         )
-        self.statusBar().showMessage(
-            f"Frame {measurement.metadata.get('frame_index', '?')} acquired"
+        if averaging_enabled and average_count:
+            status = f"Avg frame {int(average_count)}"
+            if average_target:
+                status += f"/{int(average_target)}"
+            status += " acquired"
+        else:
+            status = f"Frame {measurement.metadata.get('frame_index', '?')} acquired"
+        self.statusBar().showMessage(status)
+
+    @QtCore.Slot(object)
+    def _handle_recording_preview(self, measurement) -> None:
+        self._plot_measurement_view(
+            self.top_plot,
+            measurement,
+            "time",
+            self._value_mode(self.top_value_mode_combo),
         )
+        self._plot_measurement_view(
+            self.bottom_plot,
+            measurement,
+            "time",
+            self._value_mode(self.bottom_value_mode_combo),
+        )
+
+    @QtCore.Slot(object)
+    def _handle_recording_status(self, status: RecordingStatus) -> None:
+        elapsed = int(status.elapsed_seconds)
+        hours, remainder = divmod(elapsed, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        text = (
+            f"Recording: {hours:02d}:{minutes:02d}:{seconds:02d} stored"
+            f" | segment {status.segment_index}"
+            f" | samples {status.total_samples}"
+        )
+        self.run_info_label.setText(text)
+        self.statusBar().showMessage(text)
 
     @QtCore.Slot(str)
     def _handle_worker_error(self, message: str) -> None:
         self.start_button.setEnabled(True)
         self.avg_button.setEnabled(True)
+        self.record_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.backend_combo.setEnabled(True)
         self.device_combo.setEnabled(True)
@@ -5253,11 +5666,17 @@ class MainWindow(QtWidgets.QMainWindow):
         QtWidgets.QMessageBox.critical(self, "Acquisition Failed", message)
 
     @QtCore.Slot()
-    def _acquisition_finished(self) -> None:
+    def _acquisition_worker_finished(self) -> None:
+        self.run_info_label.setText("State: finalizing")
+
+    @QtCore.Slot()
+    def _acquisition_thread_finished(self) -> None:
         self._acquisition_worker = None
         self._acquisition_thread = None
+        self._acquisition_stop_event = None
         self.start_button.setEnabled(True)
         self.avg_button.setEnabled(True)
+        self.record_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.backend_combo.setEnabled(True)
         self.device_combo.setEnabled(True)
@@ -5265,6 +5684,30 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.run_info_label.text() not in {"State: error"}:
             self.run_info_label.setText("State: stopped")
             self.statusBar().showMessage("Acquisition stopped")
+
+    @QtCore.Slot()
+    def _recording_worker_finished(self) -> None:
+        self.run_info_label.setText("State: finalizing record")
+
+    @QtCore.Slot()
+    def _recording_thread_finished(self) -> None:
+        output_dir = self._recording_output_dir
+        self._recording_worker = None
+        self._recording_thread = None
+        self._recording_stop_event = None
+        self.start_button.setEnabled(True)
+        self.avg_button.setEnabled(True)
+        self.record_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        self.backend_combo.setEnabled(True)
+        self.device_combo.setEnabled(True)
+        self.refresh_devices_button.setEnabled(True)
+        if self.run_info_label.text() not in {"State: error"}:
+            self.run_info_label.setText("State: stopped")
+            if output_dir is not None:
+                self.statusBar().showMessage(f"Continuous recording saved to {output_dir}")
+            else:
+                self.statusBar().showMessage("Continuous recording stopped")
 
     def _plot_measurement(self, measurement) -> None:
         self._plot_measurement_view(
@@ -5283,16 +5726,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_axis_labels()
         self._apply_axis_scale(
             "top",
-            y_scope="visible" if self._auto_y_follow_visible_x.get("top", False) else "legacy",
+            y_scope=self._axis_y_scope_for_plot("top"),
         )
         self._apply_axis_scale(
             "bottom",
-            y_scope="visible" if self._auto_y_follow_visible_x.get("bottom", False) else "legacy",
+            y_scope=self._axis_y_scope_for_plot("bottom"),
         )
         self._refresh_markers("top")
         self._refresh_markers("bottom")
         self._update_marker_readout("top")
         self._update_marker_readout("bottom")
+
+    def _axis_y_scope_for_plot(self, key: str) -> str:
+        if self._channel_full_scale_focus.get(key) is not None:
+            return "channel_full_scale"
+        if self._auto_y_follow_visible_x.get(key, False):
+            return "visible"
+        if self._display_mode(self._display_combo_for_key(key)) == "time":
+            return "channel_full_scale"
+        return "legacy"
 
     @staticmethod
     def _value_mode_options(display_mode: str) -> list[str]:
@@ -5395,6 +5847,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for key in ("top", "bottom"):
             self._manual_x_ranges[key] = None
             self._manual_y_ranges[key] = None
+            self._channel_full_scale_focus[key] = None
             self._auto_y_follow_visible_x[key] = True
             self._preferred_trace_checks[key] = None
             self._active_trace_names[key] = None
@@ -5472,6 +5925,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _display_mode_changed(self, key: str) -> None:
         self._manual_x_ranges[key] = None
         self._manual_y_ranges[key] = None
+        self._channel_full_scale_focus[key] = None
+        self._auto_y_follow_visible_x[key] = True
         self._apply_default_value_mode(key)
         self._apply_default_axis_modes(key)
         self._refresh_trace_lists_from_available_sources()
@@ -5479,6 +5934,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _value_mode_changed(self, key: str) -> None:
         self._manual_y_ranges[key] = None
+        self._channel_full_scale_focus[key] = None
+        self._auto_y_follow_visible_x[key] = True
         display_mode = self._display_mode(self._display_combo_for_key(key))
         value_mode = self._value_mode(self._value_combo_for_key(key))
         self._set_combo_text_silent(
@@ -5553,6 +6010,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     if xmax > xmin and (xscale != "log" or xmin > 0.0):
                         self._manual_x_ranges[key] = (xmin, xmax)
                     self._manual_y_ranges[key] = None
+                    self._channel_full_scale_focus[key] = None
                     self._auto_y_follow_visible_x[key] = True
             trace_names = panel_state.get("trace_names")
             if isinstance(trace_names, list):
@@ -5845,7 +6303,13 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._plot_curve_items[cache_key] = {}
         self._plot_curve_colors[cache_key] = {}
-        visible_names = self._checked_trace_names(cache_key)
+        raw_visible_names = self._checked_trace_names(cache_key)
+        def selected_names(available_names: list[str]) -> set[str]:
+            if not raw_visible_names:
+                return set()
+            resolved_names = self._resolve_trace_names(list(raw_visible_names), available_names)
+            return set(resolved_names)
+
         self._configure_plot_xscale(plot, cache_key)
         for line in self._marker_lines[cache_key]:
             plot.addItem(line, ignoreBounds=True)
@@ -5896,6 +6360,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if mode == "time":
             time_t = measurement.time_data["t"]
             available_names = list(measurement.time_data["channels"].keys())
+            visible_names = selected_names(available_names)
             for idx, (name, values) in enumerate(measurement.time_data["channels"].items()):
                 if visible_names and name not in visible_names:
                     continue
@@ -5923,6 +6388,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if int_vec.size == 0:
                 int_vec = 1.0
             available_names = list(measurement.spectra["autospectrum"].keys())
+            visible_names = selected_names(available_names)
             for idx, (name, values) in enumerate(measurement.spectra["autospectrum"].items()):
                 if visible_names and name not in visible_names:
                     continue
@@ -5953,6 +6419,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if mode == "fft":
             available_names = list(measurement.spectra["fft"].keys())
+            visible_names = selected_names(available_names)
             for idx, (name, values) in enumerate(measurement.spectra["fft"].items()):
                 if visible_names and name not in visible_names:
                     continue
@@ -5977,6 +6444,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if mode == "coherence":
             available_names = list(measurement.coherence.keys())
+            visible_names = selected_names(available_names)
             for idx, (name, values) in enumerate(measurement.coherence.items()):
                 if visible_names and name not in visible_names:
                     continue
@@ -5995,6 +6463,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if mode == "frf":
             available_names = list(measurement.frf.keys())
+            visible_names = selected_names(available_names)
             for idx, (name, values) in enumerate(measurement.frf.items()):
                 if visible_names and name not in visible_names:
                     continue
@@ -6022,6 +6491,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if mode == "cross_spectrum":
             available_names = list(measurement.cross_spectra.keys())
+            visible_names = selected_names(available_names)
             for idx, (name, values) in enumerate(measurement.cross_spectra.items()):
                 if visible_names and name not in visible_names:
                     continue
@@ -6050,6 +6520,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if mode in {"auto_correlation", "cross_correlation"}:
             correlation_map = measurement.correlations
             available_names = list(correlation_map.keys())
+            visible_names = selected_names(available_names)
             for idx, (name, values) in enumerate(correlation_map.items()):
                 if visible_names and name not in visible_names:
                     continue
@@ -6070,6 +6541,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if mode == "impulse_response":
             available_names = list(measurement.impulse_responses.keys())
+            visible_names = selected_names(available_names)
             for idx, (name, values) in enumerate(measurement.impulse_responses.items()):
                 if visible_names and name not in visible_names:
                     continue
@@ -6317,6 +6789,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_markers(key)
         self._update_marker_readout(key)
 
+    def _select_channel_editor_for_trace(self, trace_name: str | None) -> None:
+        row = self._channel_row_for_trace(trace_name)
+        if row is None or not hasattr(self, "channel_list"):
+            return
+        if self.channel_list.currentRow() != row:
+            self.channel_list.setCurrentRow(row)
+
+    def _channel_row_for_trace(self, trace_name: str | None) -> int | None:
+        if not trace_name or not hasattr(self, "channel_table"):
+            return None
+        response_name = self._trace_response_name(str(trace_name))
+        candidates = {str(trace_name), response_name}
+        candidates.update(self._trace_aliases(response_name))
+        for row in range(self.channel_table.rowCount()):
+            if self._channel_aliases_for_table_row(row).intersection(candidates):
+                return row
+        return None
+
     def _selected_curve(
         self, key: str
     ) -> tuple[str | None, tuple[np.ndarray, np.ndarray] | None]:
@@ -6425,6 +6915,10 @@ class MainWindow(QtWidgets.QMainWindow):
             legacy_extent = self._legacy_y_extent_for_display(key, curves)
             if legacy_extent is not None:
                 return legacy_extent
+        if scope == "channel_full_scale":
+            full_scale_extent = self._full_scale_y_extent_for_display(key, curves)
+            if full_scale_extent is not None:
+                return full_scale_extent
         x_visible_range = self._current_visible_x_range(key) if scope == "visible" else None
         values: list[np.ndarray] = []
         for x_data, y_data in curves.values():
@@ -6529,6 +7023,133 @@ class MainWindow(QtWidgets.QMainWindow):
         if not values:
             return np.array([], dtype=float)
         return np.concatenate(values)
+
+    def _full_scale_y_extent_for_display(
+        self, key: str, curves: dict[str, tuple[np.ndarray, np.ndarray]]
+    ) -> tuple[float, float] | None:
+        if self._display_mode(self._display_combo_for_key(key)) != "time":
+            return None
+        focus_trace = self._full_scale_focus_trace_for_display(key, curves)
+        if focus_trace is not None:
+            focused_full_scale = self._channel_full_scale_extent_by_name(
+                self._trace_response_name(focus_trace)
+            )
+            if focused_full_scale is not None and focused_full_scale > 0.0:
+                yover = 1.25
+                return -yover * focused_full_scale, yover * focused_full_scale
+        return None
+
+    def _full_scale_focus_trace_for_display(
+        self, key: str, curves: dict[str, tuple[np.ndarray, np.ndarray]]
+    ) -> str | None:
+        if not curves:
+            return None
+
+        def resolve_candidate(candidate: str | None) -> str | None:
+            if not candidate:
+                return None
+            if candidate in curves:
+                return candidate
+            candidate_aliases = self._trace_aliases(str(candidate))
+            for trace_name in curves:
+                if not self._trace_aliases(trace_name).isdisjoint(candidate_aliases):
+                    return trace_name
+            return None
+
+        focused = resolve_candidate(self._channel_full_scale_focus.get(key))
+        if focused is not None:
+            return focused
+        return None
+
+    def _channel_table_full_scale(self, row: int) -> float:
+        if not hasattr(self, "channel_table") or row < 0 or row >= self.channel_table.rowCount():
+            return 10.0
+        item = self.channel_table.item(row, 9)
+        if item is None:
+            return 10.0
+        return self._parse_full_scale_text(item.text(), 10.0)
+
+    def _channel_aliases_for_table_row(self, row: int) -> set[str]:
+        if not hasattr(self, "channel_table") or row < 0 or row >= self.channel_table.rowCount():
+            return set()
+        name_item = self.channel_table.item(row, 1)
+        label_item = self.channel_table.item(row, 10)
+        aliases = {
+            f"Ch {row + 1}",
+            f"Channel {row + 1}",
+        }
+        if name_item is not None and name_item.text().strip():
+            aliases.add(name_item.text().strip())
+        if label_item is not None and label_item.text().strip():
+            aliases.add(label_item.text().strip())
+        return aliases
+
+    def _channel_full_scale_by_name(self, channel_name: str) -> float | None:
+        normalized_name = channel_name.strip()
+        if hasattr(self, "channel_table"):
+            for row in range(self.channel_table.rowCount()):
+                full_scale_item = self.channel_table.item(row, 9)
+                if full_scale_item is None:
+                    continue
+                if normalized_name not in self._channel_aliases_for_table_row(row):
+                    continue
+                full_scale = self._parse_full_scale_text(full_scale_item.text(), 10.0)
+                return full_scale if full_scale > 0.0 else None
+        for channel in self.controller.state.session.ai_channels:
+            if channel.name == normalized_name or channel.label == normalized_name:
+                full_scale = float(channel.full_scale)
+                return full_scale if full_scale > 0.0 else None
+        return None
+
+    def _channel_full_scale_extent_by_name(self, channel_name: str) -> float | None:
+        normalized_name = channel_name.strip()
+        if hasattr(self, "channel_table"):
+            for row in range(self.channel_table.rowCount()):
+                if normalized_name not in self._channel_aliases_for_table_row(row):
+                    continue
+                full_scale = self._channel_table_full_scale(row)
+                sensitivity_item = self.channel_table.item(row, 7)
+                sensitivity = self._parse_float(sensitivity_item.text(), 1.0) if sensitivity_item is not None else 1.0
+                if full_scale > 0.0:
+                    return abs(full_scale * sensitivity)
+                return None
+        for channel in self.controller.state.session.ai_channels:
+            if channel.name == normalized_name or channel.label == normalized_name:
+                full_scale = float(channel.full_scale)
+                if full_scale > 0.0:
+                    return abs(full_scale * float(channel.sensitivity))
+        return None
+
+    def _refresh_full_scale_axis_ranges_for_channels(
+        self, channel_names: list[str], force_auto_y: bool = False
+    ) -> None:
+        changed: set[str] = set()
+        for name in channel_names:
+            changed.update(self._trace_aliases(name))
+        if not changed:
+            return
+        for key in ("top", "bottom"):
+            if self._display_mode(self._display_combo_for_key(key)) != "time":
+                continue
+            if self._manual_y_ranges.get(key) is not None and not force_auto_y:
+                continue
+            curves = self._last_plot_cache.get(key, {})
+            if not curves:
+                continue
+            visible_channels: set[str] = set()
+            focus_trace_name: str | None = None
+            for name in curves:
+                aliases = self._trace_aliases(name)
+                visible_channels.update(aliases)
+                if focus_trace_name is None and not aliases.isdisjoint(changed):
+                    focus_trace_name = name
+            if visible_channels.isdisjoint(changed):
+                continue
+            if force_auto_y:
+                self._manual_y_ranges[key] = None
+            self._channel_full_scale_focus[key] = focus_trace_name or self._active_trace_names.get(key)
+            self._auto_y_follow_visible_x[key] = False
+            self._apply_axis_scale(key, preserve_x=True, y_scope="channel_full_scale")
 
     def _legacy_log_floor(self, key: str, values: np.ndarray) -> float | None:
         positive = np.asarray(values, dtype=float)
@@ -6680,19 +7301,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self._manual_x_ranges[key] = None
         self._apply_axis_scale(
             key,
-            y_scope="visible" if self._auto_y_follow_visible_x.get(key, False) else "legacy",
+            y_scope=self._axis_y_scope_for_plot(key),
         )
         self.statusBar().showMessage(f"Auto-scaled {key} X axis")
 
     def _auto_scale_plot_xy(self, key: str) -> None:
         self._manual_x_ranges[key] = None
         self._manual_y_ranges[key] = None
+        self._channel_full_scale_focus[key] = None
         self._auto_y_follow_visible_x[key] = True
         self._apply_axis_scale(key, y_scope="visible")
         self.statusBar().showMessage(f"Auto-scaled {key} X/Y axes")
 
     def _auto_fit_y_to_visible_x(self, key: str) -> None:
         self._manual_y_ranges[key] = None
+        self._channel_full_scale_focus[key] = None
         self._apply_axis_scale(key, preserve_x=True, y_scope="visible")
         self.statusBar().showMessage(f"Auto-fit {key} Y axis to visible X range")
 
@@ -6753,6 +7376,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if auto_y:
             self._manual_y_ranges[key] = None
+            self._channel_full_scale_focus[key] = None
             self._auto_y_follow_visible_x[key] = True
         else:
             if ymin is None or ymax is None:
@@ -6776,7 +7400,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._apply_axis_scale(
             key,
-            y_scope="visible" if self._auto_y_follow_visible_x.get(key, False) else "legacy",
+            y_scope=self._axis_y_scope_for_plot(key),
         )
         self.statusBar().showMessage(f"Updated {key} axis ranges")
         return True
@@ -6958,6 +7582,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return
         self._auto_y_follow_visible_x[key] = False
+        self._channel_full_scale_focus[key] = None
         self._manual_y_ranges[key] = (ymin, ymax)
         self._apply_axis_scale(key, preserve_x=True)
         self.statusBar().showMessage(f"Set {key} Y range to {ymin:.4g} .. {ymax:.4g}")
@@ -7371,8 +7996,18 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
         try:
+            if self._recording_worker is not None:
+                if self._recording_stop_event is not None:
+                    self._recording_stop_event.set()
+            if self._recording_thread is not None:
+                self._recording_thread.quit()
+                if not self._recording_thread.wait(1500):
+                    event.ignore()
+                    self.statusBar().showMessage("Waiting for continuous recording to stop")
+                    return
             if self._acquisition_worker is not None:
-                self._acquisition_worker.request_stop()
+                if self._acquisition_stop_event is not None:
+                    self._acquisition_stop_event.set()
             if self._acquisition_thread is not None:
                 self._acquisition_thread.quit()
                 if not self._acquisition_thread.wait(1500):
