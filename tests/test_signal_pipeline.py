@@ -17,12 +17,14 @@ from python_vna.models import (
 from python_vna.signal_pipeline import (
     FrameProcessor,
     RunningAverager,
+    analyze_double_hit,
     apply_modal_processing,
     compute_autospectrum,
     compute_coherence,
     compute_coherence_from_spectra,
     compute_fft,
     compute_frf,
+    detect_overload,
     detect_double_hit,
     exponential_window,
     force_window,
@@ -461,6 +463,45 @@ class SignalPipelineTests(unittest.TestCase):
         self.assertFalse(detect_double_hit(reference, threshold=0.5, delay_fraction=0.4))
         self.assertTrue(detect_double_hit(reference, threshold=0.5, delay_fraction=0.2))
 
+    def test_double_hit_reject_detects_realistic_short_hammer_double_hit(self):
+        sample_rate = 2560.0
+        reference = np.zeros(4096)
+        first = 256
+        second = first + int(sample_rate * 0.035)
+        decay = np.exp(-np.arange(80) / 7.0)
+        reference[first : first + decay.size] += decay
+        reference[second : second + decay.size] += 0.75 * decay
+
+        result = analyze_double_hit(
+            reference,
+            threshold=0.5,
+            delay_fraction=0.2,
+            sample_rate=sample_rate,
+        )
+
+        self.assertTrue(result.rejected)
+        self.assertEqual(result.first_peak_index, first)
+        self.assertEqual(result.second_peak_index, second)
+        self.assertLess(result.min_spacing_seconds, 0.05)
+
+    def test_double_hit_reject_ignores_single_hit_ringing(self):
+        sample_rate = 2560.0
+        reference = np.zeros(4096)
+        start = 256
+        ringing = np.exp(-np.arange(120) / 18.0) * (
+            1.0 + 0.45 * np.sin(2.0 * np.pi * np.arange(120) / 8.0)
+        )
+        reference[start : start + ringing.size] = ringing
+
+        result = analyze_double_hit(
+            reference,
+            threshold=0.5,
+            delay_fraction=0.2,
+            sample_rate=sample_rate,
+        )
+
+        self.assertFalse(result.rejected)
+
     def test_modal_metadata_documents_legacy_processing_flow(self):
         sample_rate = 1024.0
         samples = 256
@@ -498,6 +539,7 @@ class SignalPipelineTests(unittest.TestCase):
             data=np.vstack([ref, resp]),
             timestamps=t,
             frame_index=0,
+            metadata={"channel_full_scales": {"ref": 1.0, "resp": 1.0}},
         )
         modal = ModalProcessingConfig(
             enabled=True,
@@ -520,6 +562,112 @@ class SignalPipelineTests(unittest.TestCase):
         self.assertTrue(flags["rejected"])
         np.testing.assert_allclose(processed.data[0], ref * force_window(10, 0.3))
         np.testing.assert_allclose(processed.data[1], resp * exponential_window(10, 0.5))
+
+    def test_overload_reject_uses_full_scale_not_frame_peak(self):
+        data = np.array([[0.1, 0.4, 0.5]], dtype=float)
+
+        self.assertFalse(
+            detect_overload(
+                data,
+                ["ref"],
+                {"channel_full_scales": {"ref": 10.0}},
+            )
+        )
+        self.assertTrue(
+            detect_overload(
+                data,
+                ["ref"],
+                {"channel_full_scales": {"ref": 0.5}},
+            )
+        )
+        self.assertTrue(
+            detect_overload(data, ["ref"], {"overload_channels": ["ref"]})
+        )
+
+    def test_rejected_modal_frame_does_not_enter_average(self):
+        sample_rate = 1024.0
+        samples = 1024
+        t = np.arange(samples, dtype=float) / sample_rate
+        acquisition = AcquisitionConfig()
+        acquisition.reference_channel = "ref"
+        acquisition.response_channels = ["resp"]
+        acquisition.averaging = AveragingConfig(mode="linear", count=3)
+        acquisition.modal = ModalProcessingConfig(
+            enabled=True,
+            reject_double_hit=True,
+            double_hit_threshold=0.5,
+            double_hit_delay_fraction=0.2,
+        )
+        processor = FrameProcessor(acquisition, averaging_enabled=True)
+        clean_ref = np.zeros(samples, dtype=float)
+        clean_ref[100] = 1.0
+        rejected_ref = clean_ref.copy()
+        rejected_ref[500] = 0.9
+
+        clean_frame = BackendFrame(
+            sample_rate=sample_rate,
+            channel_names=["ref", "resp"],
+            data=np.vstack([clean_ref, 0.5 * clean_ref]),
+            timestamps=t,
+            frame_index=0,
+        )
+        rejected_frame = BackendFrame(
+            sample_rate=sample_rate,
+            channel_names=["ref", "resp"],
+            data=np.vstack([rejected_ref, 0.5 * rejected_ref]),
+            timestamps=t,
+            frame_index=1,
+        )
+
+        first = processor.process(clean_frame)
+        rejected = processor.process(rejected_frame)
+        third = processor.process(clean_frame)
+
+        peak = int(np.argmin(np.abs(first.spectra["f"] - 32.0)))
+        self.assertEqual(first.metadata["average_count"], 1)
+        self.assertTrue(rejected.metadata["rejected"])
+        self.assertTrue(rejected.metadata["double_hit_rejected"])
+        self.assertEqual(rejected.metadata["average_count"], 1)
+        self.assertFalse(rejected.spectra["autospectrum"])
+        self.assertEqual(third.metadata["average_count"], 2)
+        self.assertAlmostEqual(
+            third.spectra["autospectrum"]["ref"][peak],
+            first.spectra["autospectrum"]["ref"][peak],
+            places=9,
+        )
+
+    def test_double_hit_reject_does_not_require_modal_processing_enabled(self):
+        sample_rate = 1024.0
+        samples = 1024
+        t = np.arange(samples, dtype=float) / sample_rate
+        acquisition = AcquisitionConfig()
+        acquisition.reference_channel = "ref"
+        acquisition.response_channels = ["resp"]
+        acquisition.averaging = AveragingConfig(mode="linear", count=3)
+        acquisition.modal = ModalProcessingConfig(
+            enabled=False,
+            reject_double_hit=True,
+            double_hit_threshold=0.5,
+            double_hit_delay_fraction=0.2,
+        )
+        processor = FrameProcessor(acquisition, averaging_enabled=True)
+        ref = np.zeros(samples, dtype=float)
+        ref[100] = 1.0
+        ref[500] = 0.9
+        frame = BackendFrame(
+            sample_rate=sample_rate,
+            channel_names=["ref", "resp"],
+            data=np.vstack([ref, 0.5 * ref]),
+            timestamps=t,
+            frame_index=0,
+        )
+
+        measurement = processor.process(frame)
+
+        self.assertTrue(measurement.metadata["rejected"])
+        self.assertTrue(measurement.metadata["double_hit_rejected"])
+        self.assertEqual(measurement.metadata["average_count"], 0)
+        self.assertFalse(measurement.spectra["autospectrum"])
 
     def test_processing_window_changes_fft_result(self):
         acquisition = AcquisitionConfig()

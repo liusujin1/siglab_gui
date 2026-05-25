@@ -148,22 +148,201 @@ def exponential_window(frame_size: int, decay_fraction: float) -> np.ndarray:
     return np.geomspace(1.0, stop_value, num=frame_size)
 
 
+@dataclass(slots=True)
+class DoubleHitResult:
+    rejected: bool
+    peak_count: int
+    threshold_level: float
+    first_peak_index: int | None
+    second_peak_index: int | None
+    first_peak_value: float
+    second_peak_value: float
+    min_spacing_samples: int
+    min_spacing_seconds: float
+
+
+def _double_hit_spacing_samples(
+    frame_size: int,
+    delay_fraction: float,
+    sample_rate: float | None,
+) -> int:
+    legacy_spacing = int(frame_size * np.clip(delay_fraction, 0.0, 1.0))
+    if sample_rate is None or sample_rate <= 0.0:
+        return max(1, legacy_spacing)
+
+    # Legacy SigLab receives the delay as "% of frame", but applying that
+    # literally to long Python frames misses common hammer double hits.  Treat
+    # it as a short post-impact ignore window while never exceeding the legacy
+    # full-frame interpretation.
+    practical_seconds = float(np.clip(delay_fraction, 0.0, 1.0)) * 0.1
+    practical_spacing = int(round(sample_rate * practical_seconds))
+    return max(1, min(max(1, legacy_spacing), max(1, practical_spacing)))
+
+
+def analyze_double_hit(
+    reference_signal: np.ndarray,
+    threshold: float,
+    delay_fraction: float = 0.1,
+    sample_rate: float | None = None,
+) -> DoubleHitResult:
+    """Detect a second independent hammer impact on the reference channel."""
+    values = np.asarray(reference_signal, dtype=float).ravel()
+    if values.size == 0:
+        return DoubleHitResult(False, 0, 0.0, None, None, 0.0, 0.0, 1, 0.0)
+
+    centered = values - float(np.median(values))
+    max_abs_index = int(np.argmax(np.abs(centered)))
+    polarity = 1.0 if centered[max_abs_index] >= 0.0 else -1.0
+    force_like = polarity * centered
+    force_like = np.maximum(force_like, 0.0)
+    peak = float(np.max(force_like, initial=0.0))
+    min_spacing = _double_hit_spacing_samples(values.size, delay_fraction, sample_rate)
+    min_spacing_seconds = (
+        float(min_spacing) / float(sample_rate)
+        if sample_rate is not None and sample_rate > 0.0
+        else 0.0
+    )
+    if peak <= 0.0:
+        return DoubleHitResult(
+            False,
+            0,
+            0.0,
+            None,
+            None,
+            0.0,
+            0.0,
+            min_spacing,
+            min_spacing_seconds,
+        )
+
+    threshold_fraction = float(threshold)
+    if threshold_fraction > 1.0:
+        threshold_fraction /= 100.0
+    threshold_fraction = float(np.clip(threshold_fraction, 0.0, 1.0))
+    threshold_level = peak * threshold_fraction
+    peak_distance = max(1, min_spacing // 4)
+    peaks, properties = signal.find_peaks(
+        force_like,
+        height=threshold_level,
+        distance=peak_distance,
+        prominence=max(peak * 0.03, np.finfo(float).eps),
+    )
+    peak_count = int(len(peaks))
+    if peak_count < 2:
+        return DoubleHitResult(
+            False,
+            peak_count,
+            threshold_level,
+            int(peaks[0]) if peak_count else None,
+            None,
+            float(properties["peak_heights"][0]) if peak_count else 0.0,
+            0.0,
+            min_spacing,
+            min_spacing_seconds,
+        )
+
+    heights = np.asarray(properties["peak_heights"], dtype=float)
+    first_peak = int(peaks[0])
+    first_value = float(heights[0])
+    early_spacing = max(1, min_spacing // 2)
+    for peak_index, peak_value in zip(peaks[1:], heights[1:]):
+        peak_index = int(peak_index)
+        peak_value = float(peak_value)
+        spacing = peak_index - first_peak
+        if spacing >= min_spacing:
+            return DoubleHitResult(
+                True,
+                peak_count,
+                threshold_level,
+                first_peak,
+                peak_index,
+                first_value,
+                peak_value,
+                min_spacing,
+                min_spacing_seconds,
+            )
+        if sample_rate is not None and sample_rate > 0.0 and spacing >= early_spacing:
+            valley = float(np.min(force_like[first_peak : peak_index + 1], initial=peak))
+            valley_ratio = valley / max(min(first_value, peak_value), np.finfo(float).eps)
+            if valley_ratio <= 0.2:
+                return DoubleHitResult(
+                    True,
+                    peak_count,
+                    threshold_level,
+                    first_peak,
+                    peak_index,
+                    first_value,
+                    peak_value,
+                    min_spacing,
+                    min_spacing_seconds,
+                )
+
+    return DoubleHitResult(
+        False,
+        peak_count,
+        threshold_level,
+        first_peak,
+        None,
+        first_value,
+        0.0,
+        min_spacing,
+        min_spacing_seconds,
+    )
+
+
 def detect_double_hit(
     reference_signal: np.ndarray,
     threshold: float,
     delay_fraction: float = 0.1,
+    sample_rate: float | None = None,
 ) -> bool:
     """Approximate legacy double-hit reject for impact/modal tests."""
-    magnitude = np.abs(reference_signal)
-    peak = float(np.max(magnitude))
-    if peak <= 0.0:
+    return analyze_double_hit(
+        reference_signal,
+        threshold,
+        delay_fraction,
+        sample_rate=sample_rate,
+    ).rejected
+
+
+def detect_overload(
+    data: np.ndarray,
+    channel_names: list[str],
+    metadata: dict,
+    threshold: float = 0.999,
+) -> bool:
+    """Return True when DAQ metadata or full-scale clipping indicates overload."""
+    overload_channels = metadata.get("overload_channels")
+    if isinstance(overload_channels, (list, tuple, set)):
+        return bool(overload_channels)
+    if isinstance(overload_channels, np.ndarray):
+        return bool(overload_channels.size and np.any(overload_channels))
+    if bool(metadata.get("overload", False)):
+        return True
+
+    full_scales = metadata.get("channel_full_scales", {})
+    if not full_scales:
         return False
-    peaks, _ = signal.find_peaks(magnitude, height=peak * max(0.0, threshold))
-    if len(peaks) < 2:
-        return False
-    min_spacing = max(1, int(magnitude.size * np.clip(delay_fraction, 0.0, 1.0)))
-    first_peak = int(peaks[0])
-    return any(int(peak_index) - first_peak >= min_spacing for peak_index in peaks[1:])
+    if isinstance(full_scales, dict):
+        scale_by_name = full_scales
+    else:
+        scale_by_name = {
+            name: full_scales[index]
+            for index, name in enumerate(channel_names)
+            if index < len(full_scales)
+        }
+
+    for index, name in enumerate(channel_names):
+        try:
+            full_scale = abs(float(scale_by_name.get(name, 0.0)))
+        except (TypeError, ValueError, AttributeError):
+            full_scale = 0.0
+        if full_scale <= 0.0 or index >= data.shape[0]:
+            continue
+        channel_peak = float(np.max(np.abs(data[index]), initial=0.0))
+        if channel_peak >= threshold * full_scale:
+            return True
+    return False
 
 
 def apply_modal_processing(
@@ -179,19 +358,33 @@ def apply_modal_processing(
     }
     data = frame.data.copy()
 
-    if modal.enabled and modal.reject_double_hit and reference_name in channel_index:
+    if modal.reject_double_hit and reference_name in channel_index:
         ref_signal = data[channel_index[reference_name]]
-        if detect_double_hit(
+        double_hit = analyze_double_hit(
             ref_signal,
             modal.double_hit_threshold,
             modal.double_hit_delay_fraction,
-        ):
+            sample_rate=frame.sample_rate,
+        )
+        flags.update(
+            {
+                "double_hit_reference_channel": reference_name,
+                "double_hit_peak_count": double_hit.peak_count,
+                "double_hit_threshold_level": double_hit.threshold_level,
+                "double_hit_first_peak_index": double_hit.first_peak_index,
+                "double_hit_second_peak_index": double_hit.second_peak_index,
+                "double_hit_first_peak_value": double_hit.first_peak_value,
+                "double_hit_second_peak_value": double_hit.second_peak_value,
+                "double_hit_min_spacing_samples": double_hit.min_spacing_samples,
+                "double_hit_min_spacing_seconds": double_hit.min_spacing_seconds,
+            }
+        )
+        if double_hit.rejected:
             flags["double_hit_rejected"] = True
             flags["rejected"] = True
 
-    if modal.enabled and modal.reject_overload:
-        overload = np.any(np.abs(data) >= 0.999 * np.max(np.abs(data), initial=0.0))
-        if overload:
+    if modal.reject_overload:
+        if detect_overload(data, list(frame.channel_names), frame.metadata):
             flags["overload_rejected"] = True
             flags["rejected"] = True
 
@@ -273,6 +466,7 @@ class FrameProcessor:
     acquisition: AcquisitionConfig = field(default_factory=AcquisitionConfig)
     averaging_enabled: bool = True
     _processed_frames: int = field(default=0, init=False)
+    _accepted_frames: int = field(default=0, init=False)
     _fft_averager: RunningAverager = field(init=False)
     _autospectrum_averager: RunningAverager = field(init=False)
     _cross_spectrum_averager: RunningAverager = field(init=False)
@@ -311,6 +505,10 @@ class FrameProcessor:
             frame, channel_index, reference_name, self.acquisition.modal
         )
         frame.metadata["processing_window"] = self.acquisition.processing_window
+        if modal_flags.get("rejected", False):
+            return self._rejected_measurement(frame, reference_name, response_names, modal_flags)
+
+        self._accepted_frames += 1
         frequencies, fft_data = compute_fft(frame)
         power_scale = _legacy_power_spectrum_scale(self.acquisition.processing_window)
         autospectra = (np.abs(fft_data) ** 2) * power_scale
@@ -344,7 +542,7 @@ class FrameProcessor:
                 averaged_cross = self._cross_spectrum_averager.update(cross_values_array)
                 coherence_autospectra = averaged_autospectra
                 coherence_cross = averaged_cross
-                coherence_average_count = self._processed_frames
+                coherence_average_count = self._accepted_frames
                 reference_power = averaged_autospectra[ref_index]
                 for pair_index, (key, resp_index) in enumerate(cross_keys):
                     response_power = averaged_autospectra[resp_index]
@@ -367,7 +565,7 @@ class FrameProcessor:
             if self.averaging_enabled
             else 0
         )
-        reported_average_count = self._processed_frames if self.averaging_enabled else 0
+        reported_average_count = self._accepted_frames if self.averaging_enabled else 0
         if (
             self.averaging_enabled
             and self.acquisition.averaging.mode in {"linear", "peak"}
@@ -421,7 +619,75 @@ class FrameProcessor:
                 "cross_functions_require_avg": True,
                 "cross_functions_available": self.averaging_enabled,
                 "modal_processing_note": LEGACY_MODAL_NOTES
-                if self.acquisition.modal.enabled
+                if (
+                    self.acquisition.modal.enabled
+                    or self.acquisition.modal.reject_double_hit
+                    or self.acquisition.modal.reject_overload
+                )
+                else "",
+                **modal_flags,
+            },
+        )
+
+    def _rejected_measurement(
+        self,
+        frame: BackendFrame,
+        reference_name: str,
+        response_names: list[str],
+        modal_flags: dict[str, bool],
+    ) -> MeasurementSet:
+        average_target = (
+            self.acquisition.averaging.count
+            if self.averaging_enabled
+            else 0
+        )
+        reported_average_count = self._accepted_frames if self.averaging_enabled else 0
+        if (
+            self.averaging_enabled
+            and self.acquisition.averaging.mode in {"linear", "peak"}
+            and average_target > 0
+        ):
+            reported_average_count = min(reported_average_count, average_target)
+        return MeasurementSet(
+            sample_rate=frame.sample_rate,
+            time_data={
+                "t": frame.timestamps,
+                "channels": {
+                    name: frame.data[idx] for idx, name in enumerate(frame.channel_names)
+                },
+            },
+            spectra={"f": np.array([], dtype=float), "fft": {}, "autospectrum": {}},
+            frf={},
+            coherence={},
+            cross_spectra={},
+            correlations={},
+            impulse_responses={},
+            metadata={
+                "frame_index": frame.frame_index,
+                "rbw_hz": 0.0,
+                "processing_window": self.acquisition.processing_window,
+                "overlap_percent": int(self.acquisition.overlap_percent),
+                "overlap_hop_size": frame.metadata.get("overlap_hop_size"),
+                "overlap_keep_size": frame.metadata.get("overlap_keep_size"),
+                "legacy_power_spectrum_scale": _legacy_power_spectrum_scale(
+                    self.acquisition.processing_window
+                ),
+                "reference_channel": reference_name,
+                "response_channels": response_names,
+                "averaging_enabled": self.averaging_enabled,
+                "average_count": reported_average_count,
+                "average_target": average_target,
+                "coherence_average_count": reported_average_count,
+                "legacy_inst_functions": list(LEGACY_INST_FUNCTIONS),
+                "legacy_avg_functions": list(LEGACY_AVG_FUNCTIONS),
+                "cross_functions_require_avg": True,
+                "cross_functions_available": self.averaging_enabled,
+                "modal_processing_note": LEGACY_MODAL_NOTES
+                if (
+                    self.acquisition.modal.enabled
+                    or self.acquisition.modal.reject_double_hit
+                    or self.acquisition.modal.reject_overload
+                )
                 else "",
                 **modal_flags,
             },

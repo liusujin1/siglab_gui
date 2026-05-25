@@ -15,16 +15,22 @@ def log_path() -> Path:
 
 
 def append_log(message: str) -> None:
-    path = log_path()
-    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(f"{timestamp} {message}\n")
+    try:
+        path = log_path()
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(f"{timestamp} {message}\n")
+    except OSError:
+        pass
 
 
 def enable_fault_log() -> None:
     global _FAULT_HANDLE
     if _FAULT_HANDLE is not None:
         return
-    _LOG_DIR.mkdir(parents=True, exist_ok=True)
-    _FAULT_HANDLE = (_LOG_DIR / "python_vna_fault.log").open("a", encoding="utf-8")
-    faulthandler.enable(file=_FAULT_HANDLE, all_threads=True)
+    try:
+        _LOG_DIR.mkdir(parents=True, exist_ok=True)
+        _FAULT_HANDLE = (_LOG_DIR / "python_vna_fault.log").open("a", encoding="utf-8")
+        faulthandler.enable(file=_FAULT_HANDLE, all_threads=True)
+    except OSError:
+        _FAULT_HANDLE = None

@@ -93,7 +93,7 @@ class SimulatedDaqBackend(BaseDaqBackend):
             signal_data = 0.4 * resonance + 0.6 * delayed_ref + noise
             if channel.is_reference:
                 signal_data = reference + noise
-            frame[idx, :] = signal_data * channel.sensitivity
+            frame[idx, :] = signal_data
 
         backend_frame = BackendFrame(
             sample_rate=sample_rate,
@@ -104,6 +104,10 @@ class SimulatedDaqBackend(BaseDaqBackend):
             metadata={
                 "backend": "simulated",
                 "frame_start_unix_ns": time.time_ns(),
+                "channel_full_scales": {
+                    channel.name: abs(float(channel.full_scale or channel.max_value or 0.0))
+                    for channel in enabled
+                },
             },
         )
         self._state.frame_index += 1

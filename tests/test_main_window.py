@@ -773,6 +773,52 @@ class MainWindowTests(unittest.TestCase):
         )
         self.assertNotIn("Frame 0 acquired", self.window.statusBar().currentMessage())
 
+    def test_rejected_avg_measurement_status_keeps_average_count(self):
+        measurement = self._measurement()
+        measurement.metadata.update(
+            {
+                "frame_index": 5,
+                "averaging_enabled": True,
+                "average_count": 1,
+                "average_target": 20,
+                "rejected": True,
+                "double_hit_rejected": True,
+            }
+        )
+
+        self.window._handle_worker_measurement(measurement)
+        QtWidgets.QApplication.processEvents()
+
+        self.assertIn("avg:1/20", self.window.run_info_label.text())
+        self.assertEqual(
+            self.window.statusBar().currentMessage(),
+            "Rejected frame 5 (double hit) | avg 1/20",
+        )
+
+    def test_double_hit_status_shows_reference_and_candidate_peak_count(self):
+        measurement = self._measurement()
+        measurement.metadata.update(
+            {
+                "frame_index": 5,
+                "averaging_enabled": True,
+                "average_count": 1,
+                "average_target": 20,
+                "rejected": True,
+                "double_hit_rejected": True,
+                "double_hit_reference_channel": "ai0",
+                "double_hit_peak_count": 2,
+            }
+        )
+
+        self.window._handle_worker_measurement(measurement)
+        QtWidgets.QApplication.processEvents()
+
+        self.assertIn("ref=ai0 peaks=2", self.window.run_info_label.text())
+        self.assertEqual(
+            self.window.statusBar().currentMessage(),
+            "Rejected frame 5 (double hit) | ref=ai0 peaks=2 | avg 1/20",
+        )
+
     def test_avg_start_uses_current_average_count_widget_value(self):
         captured = {}
         original_worker = main_window_module.AcquisitionWorker
@@ -1367,6 +1413,7 @@ class MainWindowTests(unittest.TestCase):
         session = self.window._read_session_from_widgets()
         self.assertTrue(session.acquisition.modal.reject_double_hit)
         self.assertFalse(session.acquisition.modal.reject_overload)
+        self.assertFalse(session.acquisition.modal.enabled)
 
         self.window.reject_combo.setCurrentText("Overload Reject")
         session = self.window._read_session_from_widgets()
@@ -2243,6 +2290,44 @@ class MainWindowTests(unittest.TestCase):
             np.maximum(((3.0 / 6.0) ** 2) * measurement.spectra["autospectrum"]["ai0"], 1e-307)
         )
         np.testing.assert_allclose(cached_y, expected)
+
+    def test_live_time_display_applies_channel_engineering_scale(self):
+        measurement = self._measurement()
+        measurement.time_data["channels"] = {
+            "ai0": np.array([1.0, -2.0, 0.5, -0.25], dtype=float)
+        }
+        self.window.session.ai_channels[0].sensitivity = 800.0
+        self.window.session.ai_channels[0].engineering_unit = "N"
+        self.window.session.ai_channels[0].per_eu_mode = "/Volt"
+        self.window.top_display_combo.setCurrentText("y(t)")
+        self.window.top_value_mode_combo.setCurrentText("real")
+        self.controller.state.measurement = measurement
+
+        self.window._plot_measurement(measurement)
+
+        _cached_x, cached_y = self.window._last_plot_cache["top"]["ai0"]
+        np.testing.assert_allclose(cached_y, np.array([800.0, -1600.0, 400.0, -200.0]))
+
+    def test_live_time_display_leaves_voltage_when_engineering_units_off(self):
+        measurement = self._measurement()
+        measurement.time_data["channels"] = {"ai0": np.array([1.0, -2.0], dtype=float)}
+        self.window.session.ai_channels[0].sensitivity = 800.0
+        self.window.session.ai_channels[0].per_eu_mode = "Off"
+        self.window.top_display_combo.setCurrentText("y(t)")
+        self.window.top_value_mode_combo.setCurrentText("real")
+        self.controller.state.measurement = measurement
+
+        self.window._plot_measurement(measurement)
+
+        _cached_x, cached_y = self.window._last_plot_cache["top"]["ai0"]
+        np.testing.assert_allclose(cached_y, np.array([1.0, -2.0]))
+
+    def test_effective_engineering_scale_matches_legacy_per_voltage_modes(self):
+        self.assertEqual(self.window._effective_euscale_fac(800.0, "/Volt"), 800.0)
+        self.assertEqual(self.window._effective_euscale_fac(800.0, "/mV"), 800_000.0)
+        self.assertEqual(self.window._effective_euscale_fac(800.0, "/uV"), 800_000_000.0)
+        self.assertEqual(self.window._effective_euscale_fac(800.0, "/kV"), 0.8)
+        self.assertEqual(self.window._effective_euscale_fac(800.0, "Off"), 1.0)
 
     def test_live_xfer_display_applies_response_over_reference_engineering_scale(self):
         measurement = self._measurement()

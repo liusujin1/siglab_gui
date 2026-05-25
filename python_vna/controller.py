@@ -57,10 +57,7 @@ class VnaController:
             retained = self.state.measurement
             retained.metadata = {
                 **retained.metadata,
-                "frame_index": measurement.metadata.get("frame_index", retained.metadata.get("frame_index")),
-                "rejected": True,
-                "double_hit_rejected": measurement.metadata.get("double_hit_rejected", False),
-                "overload_rejected": measurement.metadata.get("overload_rejected", False),
+                **measurement.metadata,
             }
             return retained
         self.state.measurement = measurement

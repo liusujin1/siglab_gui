@@ -4659,6 +4659,8 @@ class MainWindow(QtWidgets.QMainWindow):
         normalized = text.strip().lower()
         self.reject_overload_checkbox.setChecked("overload" in normalized)
         self.reject_double_hit_checkbox.setChecked("double" in normalized)
+        if "overload" in normalized or "double" in normalized:
+            self.statusBar().showMessage(f"Reject mode set to {text}")
 
     def _build_acquisition_tab(self):
         widget = QtWidgets.QWidget()
@@ -5046,12 +5048,14 @@ class MainWindow(QtWidgets.QMainWindow):
             if index >= 0:
                 self.overlap_combo.setCurrentIndex(index)
         if hasattr(self, "reject_combo"):
+            self.reject_combo.blockSignals(True)
             if self.session.acquisition.modal.reject_double_hit:
                 self.reject_combo.setCurrentText("Double Hit Reject")
             elif self.session.acquisition.modal.reject_overload:
                 self.reject_combo.setCurrentText("Overload Reject")
             else:
                 self.reject_combo.setCurrentText("No Reject")
+            self.reject_combo.blockSignals(False)
         self._reload_channel_selectors()
         self._update_axis_labels()
         self._refresh_trace_lists_from_available_sources()
@@ -5609,13 +5613,35 @@ class MainWindow(QtWidgets.QMainWindow):
             if averaging_enabled and average_count
             else f"frame {measurement.metadata.get('frame_index', '?')}"
         )
+        double_hit_suffix = ""
+        if measurement.metadata.get("double_hit_reference_channel"):
+            double_hit_suffix = (
+                f" | ref={measurement.metadata.get('double_hit_reference_channel')}"
+                f" peaks={measurement.metadata.get('double_hit_peak_count', 0)}"
+            )
         self.run_info_label.setText(
             f"State: {frame_label}"
             f"{average_suffix}"
             f" | dblhit={measurement.metadata.get('double_hit_rejected', False)}"
             f" | ovld={measurement.metadata.get('overload_rejected', False)}"
+            f"{double_hit_suffix}"
         )
-        if averaging_enabled and average_count:
+        if measurement.metadata.get("rejected", False):
+            reasons = []
+            if measurement.metadata.get("double_hit_rejected", False):
+                reasons.append("double hit")
+            if measurement.metadata.get("overload_rejected", False):
+                reasons.append("overload")
+            reason_text = ", ".join(reasons) if reasons else "reject"
+            status = f"Rejected frame {measurement.metadata.get('frame_index', '?')} ({reason_text})"
+            if measurement.metadata.get("double_hit_reference_channel"):
+                status += (
+                    f" | ref={measurement.metadata.get('double_hit_reference_channel')}"
+                    f" peaks={measurement.metadata.get('double_hit_peak_count', 0)}"
+                )
+            if averaging_enabled and average_target:
+                status += f" | avg {int(average_count)}/{int(average_target)}"
+        elif averaging_enabled and average_count:
             status = f"Avg frame {int(average_count)}"
             if average_target:
                 status += f"/{int(average_target)}"
@@ -6153,6 +6179,23 @@ class MainWindow(QtWidgets.QMainWindow):
             return trace_name.split("->", 1)[0].strip()
         return default
 
+    @staticmethod
+    def _effective_euscale_fac(sensitivity: float, per_eu_mode: str | None = "/Volt") -> float:
+        normalized = (per_eu_mode or "/Volt").strip().lower()
+        if normalized in {"", "off", "none"}:
+            return 1.0
+        per_voltage_factor = {
+            "/volt": 1.0,
+            "/v": 1.0,
+            "/mv": 1_000.0,
+            "/millivolt": 1_000.0,
+            "/uv": 1_000_000.0,
+            "/microvolt": 1_000_000.0,
+            "/kv": 0.001,
+            "/kilovolt": 0.001,
+        }.get(normalized, 1.0)
+        return float(sensitivity) * per_voltage_factor
+
     def _legacy_channel_display_params(self, measurement, trace_name: str) -> dict[str, float | str]:
         metadata = getattr(measurement, "metadata", {})
         legacy_channels = metadata.get("legacy_channels", {})
@@ -6169,10 +6212,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 return {
                     "name": channel.name,
                     "label": channel.label,
-                    "euscale_fac": float(channel.sensitivity),
+                    "euscale_fac": self._effective_euscale_fac(
+                        channel.sensitivity, channel.per_eu_mode
+                    ),
                     "db_ref": float(channel.db_reference),
                     "fs_val": float(channel.full_scale),
                     "eu_string": channel.engineering_unit,
+                    "per_eu_mode": channel.per_eu_mode,
                 }
         return {
             "name": trace_name,
@@ -6185,6 +6231,18 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _channel_display_params(self, measurement, trace_name: str) -> dict[str, float | str]:
         return self._legacy_channel_display_params(measurement, trace_name)
+
+    def _transform_time_for_trace(
+        self,
+        measurement,
+        trace_name: str,
+        values: np.ndarray,
+        value_mode: str,
+    ) -> np.ndarray:
+        channel_params = self._channel_display_params(measurement, trace_name)
+        scale = float(channel_params.get("euscale_fac", 1.0))
+        scaled = np.asarray(values) * scale
+        return self._transform_curve(scaled, value_mode)
 
     def _legacy_panel_state(self, measurement, key: str) -> dict:
         metadata = getattr(measurement, "metadata", {})
@@ -6364,7 +6422,7 @@ class MainWindow(QtWidgets.QMainWindow):
             for idx, (name, values) in enumerate(measurement.time_data["channels"].items()):
                 if visible_names and name not in visible_names:
                     continue
-                y = self._transform_curve(values, value_mode)
+                y = self._transform_time_for_trace(measurement, name, values, value_mode)
                 x_plot, y_plot = self._prepare_curve_xy(cache_key, time_t, y)
                 if x_plot.size == 0:
                     continue
@@ -7110,14 +7168,21 @@ class MainWindow(QtWidgets.QMainWindow):
                 full_scale = self._channel_table_full_scale(row)
                 sensitivity_item = self.channel_table.item(row, 7)
                 sensitivity = self._parse_float(sensitivity_item.text(), 1.0) if sensitivity_item is not None else 1.0
+                per_eu_item = self.channel_table.item(row, 12)
+                per_eu_mode = per_eu_item.text() if per_eu_item is not None else "/Volt"
                 if full_scale > 0.0:
-                    return abs(full_scale * sensitivity)
+                    return abs(full_scale * self._effective_euscale_fac(sensitivity, per_eu_mode))
                 return None
         for channel in self.controller.state.session.ai_channels:
             if channel.name == normalized_name or channel.label == normalized_name:
                 full_scale = float(channel.full_scale)
                 if full_scale > 0.0:
-                    return abs(full_scale * float(channel.sensitivity))
+                    return abs(
+                        full_scale
+                        * self._effective_euscale_fac(
+                            channel.sensitivity, channel.per_eu_mode
+                        )
+                    )
         return None
 
     def _refresh_full_scale_axis_ranges_for_channels(

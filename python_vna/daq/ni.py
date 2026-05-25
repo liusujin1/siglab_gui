@@ -555,6 +555,11 @@ class NIDaqBackend(BaseDaqBackend):
                 "trigger_delay_samples": trigger_delay_samples,
                 "frame_start_unix_ns": frame_start_unix_ns,
                 "read_end_unix_ns": read_end_unix_ns,
+                "channel_full_scales": {
+                    channel.name: abs(float(channel.full_scale or channel.max_value or 0.0))
+                    for channel in self._session.ai_channels
+                    if channel.enabled
+                },
             },
         )
         self._frame_index += 1
