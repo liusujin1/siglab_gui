@@ -831,7 +831,7 @@ class MCSetupDialog(QtWidgets.QDialog):
                 full_scale_changed_aliases.update(self.main_window._channel_aliases_for_table_row(row))
         self.main_window._rebuild_channel_list()
         self.main_window._sync_channel_grid()
-        self.main_window._reload_channel_selectors()
+        self.main_window._reload_channel_selectors(include_new_responses=True)
         self.main_window._load_channel_editor_from_row(self.main_window.channel_list.currentRow())
         self.main_window._read_session_from_widgets()
         self.main_window._refresh_current_measurement_view()
@@ -1321,6 +1321,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "bottom": deque(maxlen=6),
         }
         self._preferred_trace_checks: dict[str, set[str] | None] = {"top": None, "bottom": None}
+        self._trace_checks_user_modified: dict[str, bool] = {"top": False, "bottom": False}
         self._cursor_enabled = True
         self._markers_enabled = False
         self._manual_x_ranges: dict[str, tuple[float, float] | None] = {
@@ -4402,7 +4403,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._rebuild_channel_list()
         self.channel_list.setCurrentRow(row)
-        self._reload_channel_selectors()
+        self._reload_channel_selectors(include_new_responses=(col == 0))
         self._read_session_from_widgets()
         if col == 2:
             new_aliases = self._channel_aliases_for_table_row(row)
@@ -4534,7 +4535,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._write_channel_editor_to_table_row(target_row, full_scale_only=full_scale_only)
         self._rebuild_channel_list()
         self.channel_list.setCurrentRow(row)
-        self._reload_channel_selectors()
+        self._reload_channel_selectors(include_new_responses=not full_scale_only)
         self._read_session_from_widgets()
         full_scale_changed_aliases: set[str] = set()
         for target_row in target_rows:
@@ -5370,7 +5371,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._load_channel_editor_from_row(current_row)
         self._reload_channel_selectors()
 
-    def _reload_channel_selectors(self) -> None:
+    def _reload_channel_selectors(self, *, include_new_responses: bool = False) -> None:
         channels = []
         for row in range(self.channel_table.rowCount()):
             if self.channel_table.item(row, 0).checkState() == QtCore.Qt.Checked:
@@ -5389,6 +5390,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.response_channel_list.clear()
         selected_responses = set(self.session.acquisition.response_channels)
         current_reference = self.reference_channel_combo.currentText()
+        available_responses = [channel for channel in channels if channel != current_reference]
+        if include_new_responses:
+            selected_responses.update(available_responses)
         for channel in channels:
             if channel == current_reference:
                 continue
@@ -5514,8 +5518,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         output_dir = Path(parent_dir) / recording_directory_name()
         self._map_channels_to_selected_device()
+        self._reload_channel_selectors(include_new_responses=True)
         self.average_count_edit.interpretText()
         session = self._read_session_from_widgets()
+        self._prepare_trace_selection_for_acquisition()
         self._clear_runtime_axis_ranges()
         self._pending_measurement = None
         self._plot_update_scheduled = False
@@ -5562,12 +5568,23 @@ class MainWindow(QtWidgets.QMainWindow):
             self._manual_y_ranges[key] = None
             self._auto_y_follow_visible_x[key] = False
 
+    def _prepare_trace_selection_for_acquisition(self) -> None:
+        for key in ("top", "bottom"):
+            if self._trace_checks_user_modified.get(key, False):
+                continue
+            display_mode = self._display_mode(self._display_combo_for_key(key))
+            names = self._configured_trace_names_for_display(display_mode)
+            if names:
+                self._preferred_trace_checks[key] = set(names)
+
     def _start_run(self, average_run: bool) -> None:
         if self._acquisition_thread is not None or self._recording_thread is not None:
             return
         self._map_channels_to_selected_device()
+        self._reload_channel_selectors(include_new_responses=True)
         self.average_count_edit.interpretText()
         session = self._read_session_from_widgets()
+        self._prepare_trace_selection_for_acquisition()
         if not average_run:
             session.acquisition.trigger.enabled = False
             session.acquisition.trigger.source = "immediate"
@@ -5981,6 +5998,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._auto_y_follow_visible_x[key] = True
             self._preferred_trace_checks[key] = None
             self._active_trace_names[key] = None
+            self._trace_checks_user_modified[key] = False
         for combo in (
             self.top_xscale_combo,
             self.bottom_xscale_combo,
@@ -6057,6 +6075,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._manual_y_ranges[key] = None
         self._channel_full_scale_focus[key] = None
         self._auto_y_follow_visible_x[key] = True
+        self._preferred_trace_checks[key] = None
+        self._trace_checks_user_modified[key] = False
         self._apply_default_value_mode(key)
         self._apply_default_axis_modes(key)
         self._refresh_trace_lists_from_available_sources()
@@ -6476,7 +6496,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._plot_curve_items[cache_key] = {}
         self._plot_curve_colors[cache_key] = {}
         raw_visible_names = self._checked_trace_names(cache_key)
+        preferred_visible_names = self._preferred_trace_checks.get(cache_key)
         def selected_names(available_names: list[str]) -> set[str]:
+            if preferred_visible_names is not None:
+                preferred_names = set(preferred_visible_names).intersection(available_names)
+                if not preferred_names:
+                    preferred_names = set(
+                        self._resolve_trace_names(list(preferred_visible_names), available_names)
+                    )
+                if preferred_names:
+                    return preferred_names
             if not raw_visible_names:
                 return set()
             resolved_names = self._resolve_trace_names(list(raw_visible_names), available_names)
@@ -6945,6 +6974,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return {name: curve for name, curve in curves.items() if name in checked}
 
     def _trace_visibility_changed(self, key: str) -> None:
+        self._trace_checks_user_modified[key] = True
         visible = self._filter_visible_curves(key, self._last_plot_cache.get(key, {}))
         active = self._active_trace_names.get(key)
         if active not in visible and visible:

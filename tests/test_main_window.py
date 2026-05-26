@@ -1678,6 +1678,60 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(self.window.top_trace_list.item(0).data(QtCore.Qt.UserRole), "ai0->ai1")
         self.assertEqual(self.window.top_trace_list.item(0).text(), "1  Ch 2")
 
+    def test_enabled_channels_are_added_to_response_selection_before_acquisition(self):
+        self.window.session.acquisition.response_channels = ["ai1"]
+        for row in range(4):
+            self.window.channel_table.item(row, 0).setCheckState(QtCore.Qt.Checked)
+
+        self.window._reload_channel_selectors(include_new_responses=True)
+        session = self.window._read_session_from_widgets()
+
+        self.assertEqual(session.acquisition.reference_channel, "ai0")
+        self.assertEqual(session.acquisition.response_channels, ["ai1", "ai2", "ai3"])
+
+    def test_xfer_and_coherence_plot_all_available_response_traces_after_acquisition_prepare(self):
+        freq_axis = np.array([1.0, 2.0, 4.0, 8.0], dtype=float)
+        relation_values = {
+            f"ai0->ai{index}": np.full(freq_axis.shape, index + 0.0j, dtype=complex)
+            for index in (1, 2, 3)
+        }
+        measurement = MeasurementSet(
+            sample_rate=100.0,
+            time_data={
+                "t": np.arange(4, dtype=float) / 100.0,
+                "channels": {f"ai{index}": np.ones(4) * index for index in range(4)},
+            },
+            spectra={"f": freq_axis, "fft": {}, "autospectrum": {}},
+            frf=relation_values,
+            coherence={name: np.linspace(0.1, 0.9, 4) for name in relation_values},
+            cross_spectra={},
+            correlations={},
+            impulse_responses={},
+            metadata={},
+        )
+        self.controller.state.measurement = measurement
+        self.window.session.acquisition.response_channels = ["ai1"]
+        for row in range(4):
+            self.window.channel_table.item(row, 0).setCheckState(QtCore.Qt.Checked)
+        self.window.bottom_display_combo.setCurrentText("xfer")
+        self.window._reload_channel_selectors(include_new_responses=True)
+        self.window._read_session_from_widgets()
+        self.window._prepare_trace_selection_for_acquisition()
+
+        self.window._plot_measurement(measurement)
+
+        self.assertEqual(
+            set(self.window._last_plot_cache["bottom"]),
+            {"ai0->ai1", "ai0->ai2", "ai0->ai3"},
+        )
+        self.window.bottom_display_combo.setCurrentText("coh")
+        self.window._prepare_trace_selection_for_acquisition()
+        self.window._plot_measurement(measurement)
+        self.assertEqual(
+            set(self.window._last_plot_cache["bottom"]),
+            {"ai0->ai1", "ai0->ai2", "ai0->ai3"},
+        )
+
     def test_current_plot_window_uses_existing_upper_lower_plot_cache(self):
         measurement = self._measurement()
         self.controller.state.measurement = measurement
