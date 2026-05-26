@@ -356,6 +356,10 @@ def read_dat_header(path: str | Path) -> dict[str, Any]:
     return header
 
 
+def read_dat_table_info(path: str | Path) -> tuple[dict[str, Any], list[str], int]:
+    return _read_text_header_with_data_start(path)
+
+
 def iter_dat_frames(path: str | Path):
     header, columns = _read_text_header(path)
     has_local_time = len(columns) > 1 and columns[1] == "local_time"
@@ -452,13 +456,19 @@ def _write_text_header(handle: Any, header: dict[str, Any]) -> None:
 
 
 def _read_text_header(path: str | Path) -> tuple[dict[str, Any], list[str]]:
+    header, columns, _data_start_line = _read_text_header_with_data_start(path)
+    return header, columns
+
+
+def _read_text_header_with_data_start(path: str | Path) -> tuple[dict[str, Any], list[str], int]:
     parsed_header: dict[str, Any] = {}
     columns: list[str] | None = None
+    data_start_line = 0
     with Path(path).open("r", encoding="utf-8-sig", newline="") as handle:
         first_line = handle.readline()
         if not first_line.startswith("# Python VNA continuous DAT"):
             raise ValueError("Not a readable Python VNA continuous DAT file.")
-        for line in handle:
+        for line_number, line in enumerate(handle, start=2):
             stripped = line.strip()
             if not stripped:
                 continue
@@ -473,6 +483,7 @@ def _read_text_header(path: str | Path) -> tuple[dict[str, Any], list[str]]:
                     parsed_header[key] = value
                 continue
             columns = stripped.split("\t")
+            data_start_line = line_number
             break
     if columns is None:
         columns = list(parsed_header.get("columns", []))
@@ -480,4 +491,4 @@ def _read_text_header(path: str | Path) -> tuple[dict[str, Any], list[str]]:
         raise ValueError("Python VNA DAT header is missing.")
     if "columns" not in parsed_header:
         parsed_header["columns"] = columns
-    return parsed_header, columns
+    return parsed_header, columns, data_start_line

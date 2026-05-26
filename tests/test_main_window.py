@@ -148,8 +148,10 @@ class MainWindowTests(unittest.TestCase):
         self.assertIn("File", menu_actions)
         self.assertIn("Setup", menu_actions)
         self.assertIn("Modal", menu_actions)
+        self.assertIn("Analysis", menu_actions)
         self.assertIsNone(menu_actions["Setup"].menu())
         self.assertIsNone(menu_actions["Modal"].menu())
+        self.assertIsNone(menu_actions["Analysis"].menu())
         self.assertIsNot(self.window.excitation_setup_page, self.window.modal_setup_page)
         self.assertNotIn("Units", menu_actions)
         file_menu = menu_actions["File"].menu()
@@ -159,7 +161,10 @@ class MainWindowTests(unittest.TestCase):
             for action in file_menu.actions()
             if not action.isSeparator()
         ]
-        self.assertEqual(file_action_texts, ["Open VNA", "Save VNA", "Save to Default", "Export Data", "Exit"])
+        self.assertEqual(
+            file_action_texts,
+            ["Open VNA", "Save VNA", "Save to Default", "Export Data", "Exit"],
+        )
         display_menu = menu_actions["Display"].menu()
         self.assertIsNotNone(display_menu)
         display_action_texts = {
@@ -1714,6 +1719,19 @@ class MainWindowTests(unittest.TestCase):
         raise_mock.assert_not_called()
         activate_mock.assert_not_called()
 
+    def test_analysis_viewer_opens_as_independent_window_not_child_modal(self):
+        measurement = self._measurement()
+        self.controller.state.measurement = measurement
+        self.window._open_analysis_viewer()
+
+        viewer = self.window._analysis_viewer
+        self.assertIsNotNone(viewer)
+        self.assertIsNone(viewer.parent())
+        self.assertFalse(viewer.isModal())
+        self.assertEqual(viewer.dataset_list.count(), 1)
+        self.assertIn("Current Measurement", viewer.dataset_list.item(0).text())
+        viewer.close()
+
     def test_current_plot_window_context_menu_supports_data_tips(self):
         measurement = self._measurement()
         self.controller.state.measurement = measurement
@@ -1824,6 +1842,57 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(state["bottom"]["mode"], "frf")
         self.assertEqual(state["bottom"]["value_mode"], "dB")
         self.assertEqual(state["bottom"]["trace_names"], ["ai0->ai1"])
+
+    def test_snapshot_filters_disabled_channel_measurement_data(self):
+        time_axis = np.array([0.0, 0.1], dtype=float)
+        freq_axis = np.array([0.0, 10.0], dtype=float)
+        measurement = MeasurementSet(
+            sample_rate=100.0,
+            time_data={
+                "t": time_axis,
+                "channels": {
+                    "ai0": np.array([1.0, 2.0]),
+                    "ai1": np.array([3.0, 4.0]),
+                    "ai2": np.array([5.0, 6.0]),
+                    "ai3": np.array([7.0, 8.0]),
+                },
+            },
+            spectra={
+                "f": freq_axis,
+                "fft": {
+                    "ai0": np.array([1.0, 2.0]),
+                    "ai1": np.array([3.0, 4.0]),
+                    "ai2": np.array([5.0, 6.0]),
+                },
+                "autospectrum": {
+                    "ai0": np.array([1.0, 2.0]),
+                    "ai1": np.array([3.0, 4.0]),
+                    "ai2": np.array([5.0, 6.0]),
+                },
+            },
+            frf={"ai0->ai1": np.array([1.0 + 0.0j]), "ai0->ai2": np.array([2.0 + 0.0j])},
+            coherence={"ai0->ai1": np.array([1.0]), "ai0->ai2": np.array([0.5])},
+            cross_spectra={"ai0->ai1": np.array([1.0 + 0.0j]), "ai0->ai2": np.array([2.0 + 0.0j])},
+            correlations={"ai0:auto": np.array([1.0]), "ai2:auto": np.array([2.0])},
+            impulse_responses={"ai0->ai1": np.array([1.0]), "ai0->ai2": np.array([2.0])},
+            metadata={},
+        )
+        self.controller.state.measurement = measurement
+        self.window.channel_table.item(2, 0).setCheckState(QtCore.Qt.Unchecked)
+        self.window.channel_table.item(3, 0).setCheckState(QtCore.Qt.Unchecked)
+        self.window._read_session_from_widgets()
+
+        snapshot = self.window._snapshot_with_current_display_state()
+        saved = snapshot.measurement
+
+        self.assertEqual(set(saved.time_data["channels"]), {"ai0", "ai1"})
+        self.assertEqual(set(saved.spectra["autospectrum"]), {"ai0", "ai1"})
+        self.assertEqual(set(saved.spectra["fft"]), {"ai0", "ai1"})
+        self.assertEqual(set(saved.frf), {"ai0->ai1"})
+        self.assertEqual(set(saved.coherence), {"ai0->ai1"})
+        self.assertEqual(set(saved.cross_spectra), {"ai0->ai1"})
+        self.assertEqual(set(saved.correlations), {"ai0:auto"})
+        self.assertEqual(set(saved.impulse_responses), {"ai0->ai1"})
 
     def test_chan_sel_checklist_filters_visible_traces(self):
         measurement = self._measurement()
@@ -2908,6 +2977,25 @@ class MainWindowTests(unittest.TestCase):
         curve = self.window._plot_curve_items["top"]["ai0"]
         self.assertGreater(self.window._cursor_texts["top"].zValue(), curve.zValue())
 
+    def test_cursor_readout_follows_refreshed_live_data_at_same_x(self):
+        measurement = self._measurement()
+        self.controller.state.measurement = measurement
+        self.window.top_display_combo.setCurrentText("time")
+        self.window._plot_measurement(measurement)
+        self.window.top_trace_combo.setCurrentIndex(
+            self.window.top_trace_combo.findData("ai0")
+        )
+        self.window._move_cursor_to_point("top", 0.2, 0.5)
+
+        refreshed = self._measurement()
+        refreshed.time_data["channels"]["ai0"] = np.array([9.0, 8.0, 7.0, 6.0], dtype=float)
+        self.controller.state.measurement = refreshed
+        self.window._plot_measurement(refreshed)
+
+        self.assertAlmostEqual(self.window._cursor_positions["top"][0], 0.2, places=6)
+        self.assertAlmostEqual(self.window._cursor_positions["top"][1], 7.0, places=6)
+        self.assertIn("Y 7", self.window._cursor_texts["top"].toPlainText())
+
     def test_axis_history_restore_matches_matlab_zoom_back_behavior(self):
         measurement = self._measurement()
         self.controller.state.measurement = measurement
@@ -3202,6 +3290,24 @@ class MainWindowTests(unittest.TestCase):
 
         self.assertIsInstance(data_tip["text"], main_window_module.DataTipText)
         self.assertIsNotNone(data_tip["text"]._on_context_menu)
+
+    def test_main_data_tip_context_menu_suppresses_plot_context_menu(self):
+        self.window._suppress_plot_context_menu_once()
+
+        self.assertTrue(self.window._suppress_next_plot_context_menu)
+
+        with mock.patch.object(self.window, "_build_plot_context_menu") as build_menu:
+            self.window._show_plot_context_menu(self.window.top_plot, "top", QtCore.QPoint(0, 0))
+
+        build_menu.assert_not_called()
+        self.assertFalse(self.window._suppress_next_plot_context_menu)
+
+    def test_detached_data_tip_context_menu_suppresses_plot_context_menu(self):
+        detached = self.window._detached_plot_window
+
+        detached._suppress_plot_context_menu_once()
+
+        self.assertTrue(detached._suppress_next_plot_context_menu)
 
     def test_clear_all_data_tips_removes_top_and_bottom_labels(self):
         measurement = self._measurement()

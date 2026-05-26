@@ -24,7 +24,8 @@ from python_vna.display_transforms import (
     transform_curve,
     transform_legacy_autospectrum,
 )
-from python_vna.models import ChannelConfig, MeasurementSet, SessionConfig
+from python_vna.measurement_filter import filter_measurement_to_enabled_channels
+from python_vna.models import ChannelConfig, MeasurementSet, SavedSession, SessionConfig
 from python_vna.optional import require
 from python_vna import __version__ as PYTHON_VNA_VERSION
 from python_vna.storage import (
@@ -75,6 +76,7 @@ class DetachedPlotWindow(QtWidgets.QDialog):
             "top": [],
             "bottom": [],
         }
+        self._suppress_next_plot_context_menu = False
 
         layout = QtWidgets.QVBoxLayout(self)
         toolbar = QtWidgets.QHBoxLayout()
@@ -415,12 +417,16 @@ class DetachedPlotWindow(QtWidgets.QDialog):
         return menu, actions
 
     def _show_data_tip_menu(self, key: str, data_tip: dict[str, object], screen_pos) -> None:
+        self._suppress_plot_context_menu_once()
         menu, actions = self._build_data_tip_menu()
         action = menu.exec(QtCore.QPoint(int(screen_pos.x()), int(screen_pos.y())))
         if action is actions["delete_this"]:
             self._delete_data_tip(key, data_tip)
         elif action is actions["delete_all"]:
             self._clear_all_data_tips()
+
+    def _suppress_plot_context_menu_once(self) -> None:
+        self._suppress_next_plot_context_menu = True
 
     def _build_plot_context_menu(
         self, key: str, scene_pos=None
@@ -453,6 +459,9 @@ class DetachedPlotWindow(QtWidgets.QDialog):
             if not plot.sceneBoundingRect().contains(event.scenePos()):
                 return
             event.accept()
+            if self._suppress_next_plot_context_menu:
+                self._suppress_next_plot_context_menu = False
+                return
             self._show_plot_context_menu(key, event.scenePos(), event.screenPos())
 
         plot.scene().sigMouseClicked.connect(_handle_click)
@@ -1333,6 +1342,7 @@ class MainWindow(QtWidgets.QMainWindow):
         }
         self._data_tip_enabled = False
         self._data_tip_items: dict[str, list[dict[str, object]]] = {"top": [], "bottom": []}
+        self._suppress_next_plot_context_menu = False
         self._marker_next_index: dict[str, int] = {"top": 0, "bottom": 0}
         self._active_marker_index: dict[str, int] = {"top": 0, "bottom": 0}
         self._marker_lines: dict[str, list[pg.InfiniteLine]] = {"top": [], "bottom": []}
@@ -1380,6 +1390,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recording_worker: ContinuousRecordingWorker | None = None
         self._recording_stop_event: threading.Event | None = None
         self._recording_output_dir: Path | None = None
+        self._analysis_viewer = None
         self._pending_measurement = None
         self._plot_update_scheduled = False
         self._stop_requested_for_current_run = False
@@ -1624,9 +1635,14 @@ class MainWindow(QtWidgets.QMainWindow):
         for plot in (getattr(self, "top_plot", None), getattr(self, "bottom_plot", None)):
             if plot is not None:
                 self._apply_plot_theme(plot, theme)
+        if hasattr(self, "_cursor_lines"):
+            self._apply_cursor_theme()
         detached = getattr(self, "_detached_plot_window", None)
         if detached is not None:
             detached.apply_theme(theme)
+        analysis_viewer = getattr(self, "_analysis_viewer", None)
+        if analysis_viewer is not None:
+            analysis_viewer.apply_theme(theme)
 
     @staticmethod
     def _plot_workspace_stylesheet(theme: dict[str, object]) -> str:
@@ -2023,6 +2039,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.reject_overload_action.setCheckable(True)
         self.reject_overload_action.triggered.connect(self.reject_overload_checkbox.setChecked)
 
+        self.analysis_viewer_action = menu_bar.addAction("Analysis")
+        self.analysis_viewer_action.triggered.connect(self._open_analysis_viewer)
+
+    def _open_analysis_viewer(self) -> None:
+        if self._analysis_viewer is None:
+            from python_vna.ui.analysis_viewer import AnalysisViewer
+
+            self._analysis_viewer = AnalysisViewer(None, theme=self._theme())
+            self._analysis_viewer.set_current_measurement_provider(
+                lambda: (self.controller.state.measurement, self.session)
+            )
+        self._analysis_viewer.apply_theme(self._theme())
+        self._analysis_viewer.sync_current_measurement(
+            self.controller.state.measurement,
+            session_config=self.session,
+        )
+        self._analysis_viewer.show()
+        self.statusBar().showMessage("Analysis Viewer opened")
+
     def _open_mc_setup_dialog(self) -> None:
         dialog = MCSetupDialog(self)
         dialog.exec()
@@ -2273,7 +2308,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._cursor_texts[key].setVisible(False)
 
     def _create_cursor_items(self, plot, key: str) -> None:
-        line = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("#f6f1df", width=1.0))
+        palette = self._cursor_palette()
+        line = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen(palette["line"], width=1.4))
         line.setZValue(CURSOR_Z)
         line.setVisible(False)
         plot.addItem(line, ignoreBounds=True)
@@ -2281,7 +2317,7 @@ class MainWindow(QtWidgets.QMainWindow):
             size=10,
             symbol="+",
             brush=pg.mkBrush(255, 255, 255, 0),
-            pen=pg.mkPen("#f6f1df", width=1.4),
+            pen=pg.mkPen(palette["line"], width=1.8),
             pxMode=True,
         )
         point.setZValue(CURSOR_Z + 1)
@@ -2289,10 +2325,10 @@ class MainWindow(QtWidgets.QMainWindow):
         plot.addItem(point)
         text = pg.TextItem(
             text="",
-            color="#111111",
+            color=palette["text"],
             anchor=(-0.05, 1.05),
-            fill=pg.mkBrush(246, 241, 223, 225),
-            border=pg.mkPen("#111111", width=0.8),
+            fill=pg.mkBrush(palette["fill"]),
+            border=pg.mkPen(palette["border"], width=0.9),
         )
         text.setZValue(CURSOR_Z + 2)
         text.setVisible(False)
@@ -2300,6 +2336,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self._cursor_lines[key] = line
         self._cursor_points[key] = point
         self._cursor_texts[key] = text
+
+    def _cursor_palette(self) -> dict[str, object]:
+        return _cursor_palette_for_background(str(self._theme().get("plot_bg", "#ffffff")))
+
+    def _apply_cursor_theme(self) -> None:
+        palette = self._cursor_palette()
+        for key in ("top", "bottom"):
+            if self._cursor_lines.get(key) is not None:
+                self._cursor_lines[key].setPen(pg.mkPen(palette["line"], width=1.4))
+            if self._cursor_points.get(key) is not None:
+                self._cursor_points[key].setPen(pg.mkPen(palette["line"], width=1.8))
+                self._cursor_points[key].setBrush(pg.mkBrush(255, 255, 255, 0))
+            if self._cursor_texts.get(key) is not None:
+                _apply_text_item_style(
+                    self._cursor_texts[key],
+                    color=palette["text"],
+                    fill=palette["fill"],
+                    border=palette["border"],
+                )
 
     def _attach_cursor_tracking(self, plot, key: str) -> None:
         def _handle_mouse_move(event):
@@ -2453,6 +2508,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _show_plot_context_menu(self, plot, key: str, pos: QtCore.QPoint) -> None:
+        if self._suppress_next_plot_context_menu:
+            self._suppress_next_plot_context_menu = False
+            return
         menu, actions = self._build_plot_context_menu(plot, key)
         action = menu.exec(plot.mapToGlobal(pos))
         if action is None:
@@ -2741,6 +2799,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return True
 
     def _show_data_tip_menu(self, key: str, data_tip: dict[str, object], screen_pos) -> None:
+        self._suppress_plot_context_menu_once()
         menu = QtWidgets.QMenu(self)
         delete_this = menu.addAction("Delete This Data Tip")
         delete_all = menu.addAction("Delete All Data Tips")
@@ -2749,6 +2808,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._delete_data_tip(key, data_tip)
         elif action is delete_all:
             self._clear_all_data_tips()
+
+    def _suppress_plot_context_menu_once(self) -> None:
+        self._suppress_next_plot_context_menu = True
 
     @staticmethod
     def _mouse_button_name(button) -> str:
@@ -5798,6 +5860,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "bottom",
             y_scope=self._axis_y_scope_for_plot("bottom"),
         )
+        self._refresh_cursor_for_current_curve("top")
+        self._refresh_cursor_for_current_curve("bottom")
         self._refresh_markers("top")
         self._refresh_markers("bottom")
         self._update_marker_readout("top")
@@ -6145,11 +6209,21 @@ class MainWindow(QtWidgets.QMainWindow):
         snapshot = self.controller.snapshot()
         if snapshot.measurement is None:
             return snapshot
-        snapshot.measurement.metadata = {
-            **snapshot.measurement.metadata,
+        filtered_measurement = filter_measurement_to_enabled_channels(
+            snapshot.measurement,
+            snapshot.config,
+        )
+        if filtered_measurement is None:
+            return snapshot
+        filtered_measurement.metadata = {
+            **filtered_measurement.metadata,
             "legacy_display_state": self._capture_current_legacy_display_state(),
         }
-        return snapshot
+        return SavedSession(
+            config=snapshot.config,
+            measurement=filtered_measurement,
+            source_path=snapshot.source_path,
+        )
 
     @staticmethod
     def _transform_curve(values: np.ndarray, value_mode: str) -> np.ndarray:
@@ -7749,6 +7823,48 @@ class MainWindow(QtWidgets.QMainWindow):
             index -= 1
         return float(x_arr[index]), float(y_arr[index])
 
+    def _nearest_curve_point_by_x_for_trace(
+        self, key: str, trace_name: str | None, marker_x: float
+    ) -> tuple[float | None, float | None, str | None]:
+        curves = self._last_plot_cache.get(key, {})
+        if not curves:
+            return None, None, None
+        resolved_trace = trace_name if trace_name in curves else None
+        if resolved_trace is None:
+            resolved_trace = next(iter(curves))
+        x_data, y_data = curves[resolved_trace]
+        x_arr = np.asarray(x_data, dtype=float)
+        y_arr = np.asarray(y_data, dtype=float)
+        if x_arr.size == 0 or y_arr.size == 0:
+            return None, None, resolved_trace
+        point_count = min(x_arr.size, y_arr.size)
+        x_arr = x_arr[:point_count]
+        y_arr = y_arr[:point_count]
+        finite = np.isfinite(x_arr) & np.isfinite(y_arr)
+        if not np.any(finite):
+            return None, None, resolved_trace
+        x_arr = x_arr[finite]
+        y_arr = y_arr[finite]
+        index = int(np.clip(np.searchsorted(x_arr, marker_x), 0, x_arr.size - 1))
+        if index > 0 and abs(x_arr[index - 1] - marker_x) <= abs(x_arr[index] - marker_x):
+            index -= 1
+        return float(x_arr[index]), float(y_arr[index]), resolved_trace
+
+    def _refresh_cursor_for_current_curve(self, key: str) -> None:
+        if not self._cursor_enabled:
+            return
+        cursor = self._cursor_positions.get(key)
+        if cursor is None:
+            return
+        cursor_x, _cursor_y = cursor
+        trace_name = self._active_trace_names.get(key)
+        next_x, next_y, resolved_trace = self._nearest_curve_point_by_x_for_trace(
+            key, trace_name, cursor_x
+        )
+        if next_x is None or next_y is None:
+            return
+        self._set_cursor_position(key, next_x, next_y, resolved_trace, announce=False)
+
     def _nearest_curve_point_2d(
         self, key: str, click_x: float, click_y: float
     ) -> tuple[float | None, float | None]:
@@ -8127,3 +8243,38 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "_detached_plot_window"):
             self._detached_plot_window.close()
         super().closeEvent(event)
+
+
+def _cursor_palette_for_background(background: str) -> dict[str, object]:
+    text = str(background or "").strip()
+    rgb = (255, 255, 255)
+    if text.startswith("#") and len(text) in {4, 7}:
+        if len(text) == 4:
+            rgb = tuple(int(char * 2, 16) for char in text[1:4])
+        else:
+            rgb = (
+                int(text[1:3], 16),
+                int(text[3:5], 16),
+                int(text[5:7], 16),
+            )
+    luminance = (0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]) / 255.0
+    if luminance > 0.55:
+        return {
+            "line": "#0f4c81",
+            "text": "#071827",
+            "fill": (255, 226, 89, 235),
+            "border": "#071827",
+        }
+    return {
+        "line": "#fff176",
+        "text": "#111111",
+        "fill": (255, 245, 157, 230),
+        "border": "#f6f1df",
+    }
+
+
+def _apply_text_item_style(text_item, *, color, fill, border) -> None:
+    text_item.setColor(color)
+    text_item.fill = pg.mkBrush(fill)
+    text_item.border = pg.mkPen(border, width=0.9)
+    text_item.update()

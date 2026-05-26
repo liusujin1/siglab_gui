@@ -913,20 +913,25 @@ def save_legacy_vna(session: SavedSession, path: str | Path) -> Path:
         scmeas[0, index]["euscale_fac"] = np.array([[sensitivity]], dtype=float)
         scmeas[0, index]["eu_val"] = np.array([[sensitivity]], dtype=float)
         scmeas[0, index]["eu_on_off"] = np.array([[1.0 if per_eu != "Off" else 0.0]], dtype=float)
-        scmeas[0, index]["tdmeas"] = _mat_column(
-            _measurement_channel_values(time_channels, channel_name, label, empty_time),
-            dtype=float,
-        )
-        scmeas[0, index]["fft"] = _mat_column(
-            _measurement_channel_values(fft_channels, channel_name, label, empty_complex),
-            dtype=complex,
-        )
-        scmeas[0, index]["aspec"] = _mat_column(
-            _measurement_channel_values(
-                autospectrum_channels, channel_name, label, empty_power
-            ),
-            dtype=float,
-        )
+        if enabled:
+            scmeas[0, index]["tdmeas"] = _mat_column(
+                _measurement_channel_values(time_channels, channel_name, label, empty_time),
+                dtype=float,
+            )
+            scmeas[0, index]["fft"] = _mat_column(
+                _measurement_channel_values(fft_channels, channel_name, label, empty_complex),
+                dtype=complex,
+            )
+            scmeas[0, index]["aspec"] = _mat_column(
+                _measurement_channel_values(
+                    autospectrum_channels, channel_name, label, empty_power
+                ),
+                dtype=float,
+            )
+        else:
+            scmeas[0, index]["tdmeas"] = np.empty((0, 0), dtype=float)
+            scmeas[0, index]["fft"] = np.empty((0, 0), dtype=complex)
+            scmeas[0, index]["aspec"] = np.empty((0, 0), dtype=float)
 
     for index in range(channel_count, max_legacy_channels):
         vdlg1_s1[index, 0] = 1
