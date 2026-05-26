@@ -125,6 +125,9 @@ class MainWindowTests(unittest.TestCase):
         self.assertIsInstance(self.window.toolbar_data_tip_button, QtWidgets.QPushButton)
         self.assertEqual(self.window.start_button.text(), "Inst")
         self.assertIsNotNone(self.window.mc_setup_action)
+        available = self.window._screen_available_geometry()
+        self.assertLessEqual(self.window.width(), available.width())
+        self.assertLessEqual(self.window.height(), available.height())
         self.assertEqual(self.window.left_panel.objectName(), "legacyLeftPanel")
         legacy_titles = [
             label.text()
@@ -1420,6 +1423,11 @@ class MainWindowTests(unittest.TestCase):
         self.assertFalse(session.acquisition.modal.reject_double_hit)
         self.assertTrue(session.acquisition.modal.reject_overload)
 
+        self.window.reject_combo.setCurrentText("Both Reject")
+        session = self.window._read_session_from_widgets()
+        self.assertTrue(session.acquisition.modal.reject_double_hit)
+        self.assertTrue(session.acquisition.modal.reject_overload)
+
         self.window.window_combo.setCurrentText("Hanning")
         session = self.window._read_session_from_widgets()
         self.assertEqual(session.acquisition.processing_window, "hanning")
@@ -1432,6 +1440,14 @@ class MainWindowTests(unittest.TestCase):
         self.window.overlap_combo.setCurrentText("Max Overlap")
         session = self.window._read_session_from_widgets()
         self.assertEqual(session.acquisition.overlap_percent, 100)
+
+    def test_reject_combo_displays_both_reject_when_both_flags_are_loaded(self):
+        self.window.session.acquisition.modal.reject_double_hit = True
+        self.window.session.acquisition.modal.reject_overload = True
+
+        self.window._load_session_to_widgets()
+
+        self.assertEqual(self.window.reject_combo.currentText(), "Both Reject")
 
     def test_modal_parameters_match_legacy_percent_ranges(self):
         self.assertEqual(self.window.double_hit_threshold_edit.minimum(), 0.01)

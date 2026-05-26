@@ -1690,10 +1690,31 @@ class MainWindow(QtWidgets.QMainWindow):
             title = f"{title} - {self._current_source_path.name}"
         self.setWindowTitle(title)
 
+    def _screen_available_geometry(self) -> QtCore.QRect:
+        screen = self.screen() or QtWidgets.QApplication.primaryScreen()
+        if screen is None:
+            return QtCore.QRect(0, 0, 1180, 760)
+        return screen.availableGeometry()
+
+    def _apply_adaptive_window_size(self) -> None:
+        available = self._screen_available_geometry()
+        available_width = max(640, int(available.width()))
+        available_height = max(480, int(available.height()))
+        target_width = min(1180, max(720, int(available_width * 0.92)))
+        target_height = min(760, max(520, int(available_height * 0.88)))
+        minimum_width = min(target_width, max(700, int(available_width * 0.74)))
+        minimum_height = min(target_height, max(460, int(available_height * 0.70)))
+        self._adaptive_plot_min_height = max(150, min(240, int(target_height * 0.27)))
+        self.setMinimumSize(minimum_width, minimum_height)
+        self.resize(target_width, target_height)
+        self.move(
+            available.x() + max(0, (available_width - target_width) // 2),
+            available.y() + max(0, (available_height - target_height) // 2),
+        )
+
     def _build_ui(self) -> None:
         self.setWindowTitle("VNA - USB-4431")
-        self.resize(1180, 760)
-        self.setMinimumSize(980, 640)
+        self._apply_adaptive_window_size()
 
         central = QtWidgets.QWidget(self)
         self.setCentralWidget(central)
@@ -1782,7 +1803,7 @@ class MainWindow(QtWidgets.QMainWindow):
         legend.setZValue(LEGEND_Z)
         plot.setBackground(str(theme["plot_bg"]))
         plot.showGrid(x=True, y=True, alpha=float(theme["grid_alpha"]))
-        plot.setMinimumHeight(240)
+        plot.setMinimumHeight(getattr(self, "_adaptive_plot_min_height", 220))
         plot.setDownsampling(auto=True, mode="peak")
         plot.setClipToView(True)
         plot.getPlotItem().setMenuEnabled(False)
@@ -3879,8 +3900,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.average_count_edit.valueChanged.connect(self.average_count_slider.setValue)
         layout.addWidget(self.average_count_slider)
         self.reject_combo = QtWidgets.QComboBox()
-        self.reject_combo.addItems(["No Reject", "Overload Reject", "Double Hit Reject"])
-        self.reject_combo.setToolTip("Reject mode: No Reject / Overload Reject / Double Hit Reject")
+        self.reject_combo.addItems(
+            ["No Reject", "Overload Reject", "Double Hit Reject", "Both Reject"]
+        )
+        self.reject_combo.setToolTip(
+            "Reject mode: No Reject / Overload Reject / Double Hit Reject / Both Reject"
+        )
         self._make_compact_combo(self.reject_combo, 9)
         self.reject_combo.currentTextChanged.connect(self._reject_mode_changed)
         self.overlap_combo = QtWidgets.QComboBox()
@@ -4666,8 +4691,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _reject_mode_changed(self, text: str) -> None:
         normalized = text.strip().lower()
-        self.reject_overload_checkbox.setChecked("overload" in normalized)
-        self.reject_double_hit_checkbox.setChecked("double" in normalized)
+        both = "both" in normalized
+        self.reject_overload_checkbox.setChecked(both or "overload" in normalized)
+        self.reject_double_hit_checkbox.setChecked(both or "double" in normalized)
         if "overload" in normalized or "double" in normalized:
             self.statusBar().showMessage(f"Reject mode set to {text}")
 
@@ -5058,7 +5084,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.overlap_combo.setCurrentIndex(index)
         if hasattr(self, "reject_combo"):
             self.reject_combo.blockSignals(True)
-            if self.session.acquisition.modal.reject_double_hit:
+            if (
+                self.session.acquisition.modal.reject_double_hit
+                and self.session.acquisition.modal.reject_overload
+            ):
+                self.reject_combo.setCurrentText("Both Reject")
+            elif self.session.acquisition.modal.reject_double_hit:
                 self.reject_combo.setCurrentText("Double Hit Reject")
             elif self.session.acquisition.modal.reject_overload:
                 self.reject_combo.setCurrentText("Overload Reject")
