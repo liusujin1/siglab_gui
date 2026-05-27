@@ -13,11 +13,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6 import QtCore, QtWidgets
 
 from python_vna.analysis_algorithms import (
+    FilterConfig,
+    apply_filter_to_signal,
     compute_cumulative_spectrum,
     compute_dynamic_stiffness,
     compute_transfer_function_welch,
     compute_welch_psd,
     compute_periodogram_psd,
+    third_octave_bands,
     compute_third_octave_velocity_rms,
     convert_acceleration_psd,
     convert_acceleration_time_series,
@@ -29,6 +32,15 @@ from python_vna.models import MeasurementSet
 from python_vna.storage import default_session_config
 from python_vna.ui.analysis_viewer import AnalysisViewer
 from python_vna.ui.main_window import DataTipText, VnaAxisItem
+
+
+def _matlab_sd_round(value: float, digits: int, multiple: int) -> float:
+    decade = np.ceil(np.log10(abs(value)))
+    if abs(value) - 10.0**decade == 0.0:
+        decade += 1.0
+    scale = 10.0 ** (digits - decade)
+    buffer = scale / multiple
+    return float(np.floor(buffer * value + 0.5) / buffer)
 
 
 class AnalysisAlgorithmTests(unittest.TestCase):
@@ -85,6 +97,30 @@ class AnalysisAlgorithmTests(unittest.TestCase):
         stiff_f, stiffness = compute_dynamic_stiffness(freqs, frf, 1.0, 800.0)
         self.assertEqual(stiff_f.shape, stiffness.shape)
         self.assertTrue(np.all(stiffness > 0.0))
+
+    def test_highpass_filter_trim_matches_matlab_padding_limit(self):
+        sample_rate = 2560.0
+        time_s = np.arange(4096, dtype=float) / sample_rate
+        signal = 0.2 + np.sin(2.0 * np.pi * 20.0 * time_s)
+
+        filtered, trim = apply_filter_to_signal(
+            signal,
+            sample_rate,
+            FilterConfig(highpass_enabled=True, highpass_hz=5.0, order=4),
+        )
+
+        self.assertEqual(filtered.shape, signal.shape)
+        self.assertTrue(np.all(np.isfinite(filtered)))
+        self.assertLess(trim, 64)
+
+    def test_third_octave_band_edges_follow_matlab_unrounded_centers(self):
+        centers, lower_edges, upper_edges = third_octave_bands(1.0, 100.0)
+        index = int(np.argmin(np.abs(centers - 20.0)))
+        raw_center = 1000.0 / (10.0 ** (3.0 / (10.0 * 3.0))) ** 17
+
+        self.assertAlmostEqual(centers[index], 20.0)
+        self.assertAlmostEqual(lower_edges[index], _matlab_sd_round(raw_center / (2.0 ** (1.0 / 6.0)), 3, 5))
+        self.assertAlmostEqual(upper_edges[index], _matlab_sd_round(raw_center * (2.0 ** (1.0 / 6.0)), 3, 5))
 
 
 class AnalysisDataTests(unittest.TestCase):
@@ -161,7 +197,6 @@ class AnalysisViewerUiTests(unittest.TestCase):
             viewer = AnalysisViewer()
             try:
                 viewer._load_path(path)
-                self.assertEqual(viewer.dataset_list.count(), 1)
                 self.assertEqual(viewer.series_list.count(), 1)
                 self.assertEqual(viewer.series_list.item(0).text(), "data.csv+ch1")
                 self.assertFalse(viewer.series_list.item(0).isSelected())
@@ -229,6 +264,79 @@ class AnalysisViewerUiTests(unittest.TestCase):
             finally:
                 viewer.close()
 
+    def test_vna_raw_aspec_psd_matches_main_display_density_scaling(self):
+        session = default_session_config()
+        measurement = MeasurementSet(
+            sample_rate=100.0,
+            time_data={
+                "t": np.array([0.0, 0.1], dtype=float),
+                "channels": {"ai0": np.array([1.0, 2.0], dtype=float)},
+            },
+            spectra={
+                "f": np.array([0.0, 10.0, 20.0], dtype=float),
+                "autospectrum": {"ai0": np.array([9.0, 18.0, 36.0], dtype=float)},
+            },
+            frf={},
+            coherence={},
+            cross_spectra={},
+            correlations={},
+            impulse_responses={},
+            metadata={
+                "rbw_hz": 2.0,
+                "legacy_runtime_wincor": 2.0 / 3.0,
+                "legacy_channels": {"ai0": {"euscale_fac": 3.0, "eu_string": "m/s^2"}},
+            },
+        )
+        dataset = dataset_from_measurement(measurement, session_config=session, name="current")
+        viewer = AnalysisViewer()
+        try:
+            series = dataset.series[0]
+            f, psd = viewer._psd_for_series(dataset, series, scale=float(series.scale))
+
+            np.testing.assert_allclose(f, [10.0, 20.0])
+            np.testing.assert_allclose(psd, [18.0 * (3.0**2) / 2.0, 36.0 * (3.0**2) / 2.0])
+        finally:
+            viewer.close()
+
+    def test_foundation_vibration_uses_matlab_aspec_without_window_correction(self):
+        session = default_session_config()
+        freqs = np.arange(0.0, 101.0, 1.0)
+        aspec = np.full_like(freqs, 4.0)
+        measurement = MeasurementSet(
+            sample_rate=256.0,
+            time_data={
+                "t": np.array([0.0, 0.1], dtype=float),
+                "channels": {"ai0": np.array([1.0, 2.0], dtype=float)},
+            },
+            spectra={"f": freqs, "autospectrum": {"ai0": aspec}},
+            frf={},
+            coherence={},
+            cross_spectra={},
+            correlations={},
+            impulse_responses={},
+            metadata={
+                "rbw_hz": 1.0,
+                "legacy_runtime_wincor": 0.25,
+                "legacy_channels": {"ai0": {"euscale_fac": 2.0, "eu_string": "m/s^2"}},
+            },
+        )
+        dataset = dataset_from_measurement(measurement, session_config=session, name="foundation")
+        viewer = AnalysisViewer()
+        try:
+            centers, velocity = viewer._foundation_vibration_curve(dataset, dataset.series[0])
+            expected_f = freqs[1:]
+            expected_psd = aspec[1:] * (2.0**2) / 1.0
+            expected_centers, expected_velocity = compute_third_octave_velocity_rms(
+                expected_f,
+                expected_psd,
+                1.0,
+            )
+
+            np.testing.assert_allclose(centers, expected_centers)
+            np.testing.assert_allclose(velocity, expected_velocity)
+        finally:
+            viewer.close()
+
     def test_viewer_loads_multiple_files_and_matches_matlab_series_names(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             first = Path(tmpdir) / "first.csv"
@@ -242,7 +350,7 @@ class AnalysisViewerUiTests(unittest.TestCase):
                     return_value=([str(first), str(second)], ""),
                 ):
                     viewer._load_file()
-                self.assertEqual(viewer.dataset_list.count(), 2)
+                self.assertFalse(hasattr(viewer, "dataset_list"))
                 labels = [viewer.series_list.item(index).text() for index in range(viewer.series_list.count())]
                 self.assertEqual(labels, ["first.csv+ch1", "first.csv+ch2", "second.csv+ch1"])
 
@@ -271,7 +379,7 @@ class AnalysisViewerUiTests(unittest.TestCase):
                     viewer._load_folder()
 
                 warning.assert_not_called()
-                self.assertEqual(viewer.dataset_list.count(), 1)
+                self.assertEqual(viewer.series_list.count(), 2)
                 self.assertIn("failed 1", viewer.statusBar().currentMessage())
             finally:
                 viewer.close()
@@ -360,6 +468,27 @@ class AnalysisViewerUiTests(unittest.TestCase):
         finally:
             viewer.close()
 
+    def test_single_analysis_plot_window_follows_theme(self):
+        viewer = AnalysisViewer(theme={"plot_bg": "#ffffff", "window_bg": "#f4f7fb"})
+        try:
+            plot = viewer.main_plots[0]
+            viewer._plot_curves[plot] = {"trace": (np.array([1.0, 2.0]), np.array([3.0, 4.0]))}
+            viewer._open_plot_window_for_plot(plot)
+            self.assertEqual(len(viewer._single_plot_windows), 1)
+            dialog = viewer._single_plot_windows[0]
+            detached_plot = dialog.findChildren(type(plot))[0]
+            self.assertIn("background: #f4f7fb;", dialog.styleSheet())
+            self.assertEqual(detached_plot.backgroundBrush().color().name(), "#ffffff")
+
+            viewer.apply_theme({"plot_bg": "#000000", "window_bg": "#111827"})
+
+            self.assertIn("background: #111827;", dialog.styleSheet())
+            self.assertEqual(detached_plot.backgroundBrush().color().name(), "#000000")
+        finally:
+            for dialog in list(viewer._single_plot_windows):
+                dialog.close()
+            viewer.close()
+
     def test_export_uses_active_plot_curves_only(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             destination = Path(tmpdir) / "active.csv"
@@ -407,7 +536,7 @@ class AnalysisViewerUiTests(unittest.TestCase):
         try:
             synced = viewer.sync_current_measurement(measurement, default_session_config())
             self.assertTrue(synced)
-            self.assertEqual(viewer.dataset_list.count(), 1)
+            self.assertEqual(viewer.series_list.count(), 2)
             labels = [viewer.series_list.item(index).text() for index in range(viewer.series_list.count())]
             self.assertEqual(labels, ["Current Measurement+ch1", "Current Measurement+ch2"])
         finally:
@@ -555,8 +684,12 @@ class AnalysisViewerUiTests(unittest.TestCase):
         viewer = AnalysisViewer()
         try:
             self.assertEqual(viewer.main_mode_combos[2].currentText(), "Trans")
-            self.assertEqual(viewer.export_button.text(), "Export")
+            self.assertEqual(viewer.export_button.text(), "导出数据")
             self.assertEqual(viewer._foundation_reference_channel(), 1)
+            self.assertEqual(viewer.tabs.tabText(0), "主界面")
+            self.assertEqual(viewer.tabs.tabText(1), "地面振动")
+            self.assertEqual(len(viewer.main_open_buttons), 3)
+            self.assertEqual(len(viewer.foundation_export_buttons), 3)
         finally:
             viewer.close()
 
@@ -567,6 +700,23 @@ class AnalysisViewerUiTests(unittest.TestCase):
             viewer._remember_axis_range(plot)
             viewer._remember_axis_range(plot)
             self.assertEqual(len(viewer._axis_history[plot]), 1)
+        finally:
+            viewer.close()
+
+    def test_log_auto_range_handles_flat_small_values_without_huge_floor(self):
+        viewer = AnalysisViewer()
+        try:
+            plot = viewer.main_plots[0]
+            x = np.array([10.0, 20.0, 40.0, 80.0], dtype=float)
+            y = np.full(4, 2.0e-8, dtype=float)
+
+            viewer._auto_range_plot(plot, [x], [y], log_x=True, log_y=True)
+
+            x_range, y_range = plot.viewRange()
+            self.assertGreater(x_range[0], 0.9)
+            self.assertLess(x_range[1], 2.0)
+            self.assertGreater(y_range[0], -9.0)
+            self.assertLess(y_range[1], -7.0)
         finally:
             viewer.close()
 
@@ -630,13 +780,13 @@ class AnalysisViewerUiTests(unittest.TestCase):
 
                 viewer.refresh_data_sources()
 
-                self.assertEqual(viewer.dataset_list.count(), 2)
+                self.assertEqual(len(viewer._datasets), 2)
                 current = viewer._datasets[0]
                 reloaded = viewer._datasets[1]
                 self.assertEqual(current.name, "Current Measurement")
                 _time_s, values = reloaded.load_time_series(reloaded.series[0].channel_key)
                 np.testing.assert_allclose(values, [10.0, 30.0, 50.0])
-                self.assertEqual(viewer.refresh_button.text(), "Refresh")
+                self.assertEqual(viewer.refresh_button.text(), "刷新")
             finally:
                 viewer.close()
 

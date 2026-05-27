@@ -4,8 +4,10 @@ import json
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 import time
 from typing import Any
+import zipfile
 
 import numpy as np
 
@@ -16,6 +18,7 @@ from python_vna.models import SessionConfig
 DEFAULT_SEGMENT_SECONDS = 600.0
 TEXT_DAT_FORMAT = "python_vna_continuous_text_dat"
 TEXT_DAT_VERSION = 3
+SEGMENT_COMPRESSION_FORMAT = "zip"
 
 
 @dataclass(slots=True)
@@ -105,6 +108,7 @@ class ContinuousDatWriter:
         software_version: str,
         segment_seconds: float = DEFAULT_SEGMENT_SECONDS,
         manifest_interval_seconds: float = 5.0,
+        compress_closed_segments: bool = True,
         time_fn=time.time_ns,
         monotonic_fn=time.monotonic,
     ) -> None:
@@ -115,6 +119,7 @@ class ContinuousDatWriter:
         self.software_version = software_version
         self.segment_seconds = float(segment_seconds)
         self.manifest_interval_seconds = float(manifest_interval_seconds)
+        self.compress_closed_segments = bool(compress_closed_segments)
         self._time_fn = time_fn
         self._monotonic_fn = monotonic_fn
         self.manifest_path = self.output_dir / "manifest.json"
@@ -279,19 +284,65 @@ class ContinuousDatWriter:
         assert self._segment is not None
         self._segment.file.flush()
         self._segment.file.close()
+        segment_path = self._segment.path
+        raw_bytes = segment_path.stat().st_size
+        manifest_path = segment_path.name
+        compressed = False
+        compression_error = None
+        if self.compress_closed_segments:
+            try:
+                archive_path = self._compress_segment(segment_path)
+            except Exception as exc:
+                compression_error = str(exc)
+            else:
+                manifest_path = archive_path.name
+                compressed = True
         self._segments.append(
             {
                 "index": self._segment.index,
-                "path": self._segment.path.name,
+                "path": manifest_path,
+                "raw_path": segment_path.name,
                 "start_unix_ns": self._segment.start_unix_ns,
                 "start_time_local": local_timestamp_from_unix_ns(self._segment.start_unix_ns),
                 "start_time_utc": utc_timestamp_from_unix_ns(self._segment.start_unix_ns),
                 "frames": self._segment.frames,
                 "samples": self._segment.samples,
-                "bytes": self._segment.path.stat().st_size,
+                "bytes": (archive_path if compressed else segment_path).stat().st_size,
+                "raw_bytes": raw_bytes,
+                "compressed": compressed,
+                "compression": SEGMENT_COMPRESSION_FORMAT if compressed else None,
+                "compression_error": compression_error,
             }
         )
         self._segment = None
+
+    def _compress_segment(self, segment_path: Path) -> Path:
+        archive_path = segment_path.with_suffix(".zip")
+        with NamedTemporaryFile(
+            "wb",
+            delete=False,
+            dir=str(segment_path.parent),
+            prefix=f".{segment_path.stem}_",
+            suffix=".zip.tmp",
+        ) as tmp_handle:
+            tmp_path = Path(tmp_handle.name)
+        try:
+            with zipfile.ZipFile(
+                tmp_path,
+                mode="w",
+                compression=zipfile.ZIP_DEFLATED,
+                compresslevel=6,
+            ) as archive:
+                archive.write(segment_path, arcname=segment_path.name)
+            tmp_path.replace(archive_path)
+            segment_path.unlink()
+            return archive_path
+        except Exception:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
 
     def _manifest_payload(self, *, completed: bool, error: str | None = None) -> dict[str, Any]:
         now_unix_ns = int(self._time_fn())
@@ -330,6 +381,7 @@ class ContinuousDatWriter:
             "total_frames": self._total_frames,
             "total_samples": self._total_samples,
             "segment_seconds": self.segment_seconds,
+            "segment_compression": SEGMENT_COMPRESSION_FORMAT if self.compress_closed_segments else None,
             "segments": self._segments,
             "active_segment": active_segment,
         }
@@ -384,7 +436,7 @@ def iter_dat_frames(path: str | Path):
             "data": data,
         }
 
-    with Path(path).open("r", encoding="utf-8-sig", newline="") as handle:
+    with _open_dat_text(path) as handle:
         for line in handle:
             if not line.strip() or line.startswith("#"):
                 continue
@@ -464,7 +516,7 @@ def _read_text_header_with_data_start(path: str | Path) -> tuple[dict[str, Any],
     parsed_header: dict[str, Any] = {}
     columns: list[str] | None = None
     data_start_line = 0
-    with Path(path).open("r", encoding="utf-8-sig", newline="") as handle:
+    with _open_dat_text(path) as handle:
         first_line = handle.readline()
         if not first_line.startswith("# Python VNA continuous DAT"):
             raise ValueError("Not a readable Python VNA continuous DAT file.")
@@ -492,3 +544,33 @@ def _read_text_header_with_data_start(path: str | Path) -> tuple[dict[str, Any],
     if "columns" not in parsed_header:
         parsed_header["columns"] = columns
     return parsed_header, columns, data_start_line
+
+
+def _open_dat_text(path: str | Path):
+    source = Path(path)
+    if source.suffix.lower() == ".zip":
+        archive = zipfile.ZipFile(source, mode="r")
+        dat_names = [
+            name
+            for name in archive.namelist()
+            if not name.endswith("/") and name.lower().endswith(".dat")
+        ]
+        if not dat_names:
+            archive.close()
+            raise ValueError("Compressed recording segment does not contain a DAT file.")
+        raw_handle = archive.open(dat_names[0], mode="r")
+        import io
+
+        text_handle = io.TextIOWrapper(raw_handle, encoding="utf-8-sig", newline="")
+
+        class _ZipTextContext:
+            def __enter__(self):
+                return text_handle
+
+            def __exit__(self, exc_type, exc, tb):
+                text_handle.close()
+                archive.close()
+                return False
+
+        return _ZipTextContext()
+    return source.open("r", encoding="utf-8-sig", newline="")

@@ -387,11 +387,7 @@ class NIDaqBackend(BaseDaqBackend):
 
         if trigger.enabled and trigger.source != "immediate":
             source = self._normalize_trigger_source(trigger.source, selected)
-            edge = (
-                constants.Edge.RISING
-                if trigger.slope == "rising"
-                else constants.Edge.FALLING
-            )
+            trigger_level = abs(float(trigger.level))
             delay_setting = int(trigger.pretrigger_samples)
             pretrigger_samples = (
                 int(round(abs(delay_setting) * frame_size / 100.0))
@@ -399,17 +395,19 @@ class NIDaqBackend(BaseDaqBackend):
                 else 0
             )
             if pretrigger_samples > 0 and finite_ai_sampling:
-                self._ai_task.triggers.reference_trigger.cfg_anlg_edge_ref_trig(
+                self._ai_task.triggers.reference_trigger.cfg_anlg_window_ref_trig(
                     trigger_source=source,
                     pretrigger_samples=pretrigger_samples,
-                    trigger_slope=edge,
-                    trigger_level=trigger.level,
+                    window_top=trigger_level,
+                    window_bottom=-trigger_level,
+                    trigger_when=constants.WindowTriggerCondition1.LEAVING_WINDOW,
                 )
             else:
-                self._ai_task.triggers.start_trigger.cfg_anlg_edge_start_trig(
+                self._ai_task.triggers.start_trigger.cfg_anlg_window_start_trig(
                     trigger_source=source,
-                    trigger_slope=edge,
-                    trigger_level=trigger.level,
+                    window_top=trigger_level,
+                    window_bottom=-trigger_level,
+                    trigger_when=constants.WindowTriggerCondition1.LEAVING_WINDOW,
                 )
 
         if session.acquisition.excitation.enabled and session.ao_channel:

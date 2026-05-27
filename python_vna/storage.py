@@ -1079,7 +1079,7 @@ def save_legacy_vna(session: SavedSession, path: str | Path) -> Path:
             int(round(hdlg1_previous[6])) if len(hdlg1_previous) >= 7 else sample_index,
             sample_index,
         ]],
-        dtype=float,
+        dtype=np.uint16,
     )
     avg_mode_index = _LEGACY_AVERAGE_MODE_INDEX_BY_VALUE.get(
         config.acquisition.averaging.mode, 1
@@ -1131,9 +1131,12 @@ def save_legacy_vna(session: SavedSession, path: str | Path) -> Path:
             channel_count,
             1,
         ]],
-        dtype=float,
+        dtype=np.int16,
     )
     excitation = config.acquisition.excitation
+    linked_excitation = bool(excitation.enabled)
+    hdlg2_vis = "off" if linked_excitation else "on"
+    exdlg2_vis = "on" if linked_excitation else "off"
     exdlg2_s1 = np.array(
         [[
             float(excitation.amplitude),
@@ -1314,18 +1317,18 @@ def save_legacy_vna(session: SavedSession, path: str | Path) -> Path:
         destination,
         {
             "key": "DSPt vna_2 file",
-            "SampleRate": np.array([[legacy_sample_rate]], dtype=float),
-            "CenterFreq": np.array([[0.0]], dtype=float),
-            "num_io": np.array([[channel_count, 1]], dtype=float),
-            "SystemClk": np.array([[system_clock]], dtype=float),
-            "UniformFlg": np.array([[1]], dtype=float),
-            "ch_ptr": np.array([[1]], dtype=float),
+            "SampleRate": np.array([[round(legacy_sample_rate)]], dtype=np.uint16),
+            "CenterFreq": np.array([[0]], dtype=np.uint8),
+            "num_io": np.array([[channel_count, 1]], dtype=np.uint8),
+            "SystemClk": np.array([[system_clock]], dtype=np.uint16),
+            "UniformFlg": np.array([[1]], dtype=np.uint8),
+            "ch_ptr": np.array([[1]], dtype=np.uint8),
             "grids": "off",
             "hdlg1_s1": hdlg1_s1,
             "hdlg2_s1": hdlg2_s1,
-            "hdlg2_vis": "off",
+            "hdlg2_vis": hdlg2_vis,
             "exdlg2_s1": exdlg2_s1,
-            "exdlg2_vis": "off",
+            "exdlg2_vis": exdlg2_vis,
             "vdlg2_s1": vdlg2_s1,
             "xplot_s1": xplot_s1,
             "xplot_s2": np.array([[252, 11, 640, 436]], dtype=float),

@@ -24,6 +24,11 @@ from python_vna.display_transforms import (
     transform_curve,
     transform_legacy_autospectrum,
 )
+from python_vna.analysis_algorithms import (
+    compute_cumulative_spectrum,
+    compute_dynamic_stiffness,
+    compute_third_octave_velocity_rms,
+)
 from python_vna.measurement_filter import filter_measurement_to_enabled_channels
 from python_vna.models import ChannelConfig, MeasurementSet, SavedSession, SessionConfig
 from python_vna.optional import require
@@ -134,6 +139,7 @@ class DetachedPlotWindow(QtWidgets.QDialog):
             self._curves[key] = {}
             if not isinstance(curves, dict):
                 continue
+            trace_colors = MainWindow.trace_colors_for_theme(self._theme)
             for index, (trace_name, curve) in enumerate(curves.items()):
                 x_data, y_data = curve
                 x_arr = np.asarray(x_data, dtype=float)
@@ -150,7 +156,7 @@ class DetachedPlotWindow(QtWidgets.QDialog):
                     color_map.get(trace_name)
                     if isinstance(color_map, dict)
                     else None
-                ) or MainWindow.TRACE_COLORS[index % len(MainWindow.TRACE_COLORS)]
+                ) or trace_colors[index % len(trace_colors)]
                 plot.plot(
                     x_arr[:point_count],
                     y_arr[:point_count],
@@ -1132,6 +1138,8 @@ class MainWindow(QtWidgets.QMainWindow):
         "modal_user": "User Modal",
     }
     BANDWIDTH_OPTIONS_HZ = {
+        "BW=0.39KHz": 390.625,
+        "BW=0.50KHz": 500.0,
         "BW=0.64KHz": 640.0,
         "BW=1.0KHz": 1000.0,
         "BW=2.0KHz": 2000.0,
@@ -1165,10 +1173,10 @@ class MainWindow(QtWidgets.QMainWindow):
         "1st-Manual Arm": "1st-Manual",
     }
     TRIGGER_LEVEL_PERCENT_VALUES = [
-        round(level * 100.0 * np.sqrt(2.0) / (32.0 / 2.0), 6)
+        round(abs(level * 100.0 * np.sqrt(2.0) / (32.0 / 2.0)), 6)
         for level in range(
             round(0.7 * 32.0 / (2.0 * np.sqrt(2.0))),
-            -round(0.7 * 32.0 / (2.0 * np.sqrt(2.0))) - 1,
+            -1,
             -1,
         )
     ]
@@ -1184,6 +1192,16 @@ class MainWindow(QtWidgets.QMainWindow):
         "#ff9f43",
         "#9be15d",
         "#f7a8ff",
+    ]
+    LIGHT_TRACE_COLORS = [
+        "#1f77b4",
+        "#d95f02",
+        "#1b8a5a",
+        "#c2185b",
+        "#6d3fc5",
+        "#007c89",
+        "#7a5195",
+        "#4b5563",
     ]
     UI_THEMES = {
         "dark": {
@@ -1255,8 +1273,13 @@ class MainWindow(QtWidgets.QMainWindow):
     DISPLAY_MODE_ITEMS = [
         ("y(t)", "time"),
         ("aspec", "autospectrum"),
+        ("CumPSD", "cumulative_psd"),
         ("xfer", "frf"),
         ("coh", "coherence"),
+        ("地基振动", "foundation_vibration"),
+        ("动刚度", "dynamic_stiffness"),
+    ]
+    ADVANCED_DISPLAY_MODE_ITEMS = [
         ("cspec", "cross_spectrum"),
         ("acor", "auto_correlation"),
         ("ccor", "cross_correlation"),
@@ -1281,6 +1304,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ("Log pk", "log_pk"),
             ("Log p-p", "log_p2p"),
         ],
+        "cumulative_psd": [("3 sigma", "3sigma")],
         "frf": [
             ("real", "real"),
             ("mag", "mag"),
@@ -1292,6 +1316,9 @@ class MainWindow(QtWidgets.QMainWindow):
             ("nyquist", "nyquist"),
         ],
         "coherence": [("mag", "mag")],
+        "foundation_vibration": [("um/s", "velocity_rms")],
+        "dynamic_stiffness": [("N/m", "stiffness")],
+        "advanced": ADVANCED_DISPLAY_MODE_ITEMS,
         "cross_spectrum": [
             ("real", "real"),
             ("mag", "mag"),
@@ -1356,6 +1383,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._marker_history_texts: dict[str, list[pg.TextItem]] = {"top": [], "bottom": []}
         self._marker_dragging_key: str | None = None
         self._active_trace_names: dict[str, str | None] = {"top": None, "bottom": None}
+        self._active_plot_key = "top"
         self._plot_curve_items: dict[str, dict[str, object]] = {"top": {}, "bottom": {}}
         self._plot_curve_colors: dict[str, dict[str, str]] = {"top": {}, "bottom": {}}
         self._axis_scaling_key: str | None = None
@@ -1433,6 +1461,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _theme(self) -> dict[str, object]:
         return self.UI_THEMES.get(self._theme_name, self.UI_THEMES["dark"])
+
+    @classmethod
+    def trace_colors_for_theme(cls, theme: dict[str, object]) -> list[str]:
+        plot_bg = str(theme.get("plot_bg", "#000000")).lower()
+        return cls.LIGHT_TRACE_COLORS if plot_bg in {"#ffffff", "white"} else cls.TRACE_COLORS
+
+    def _trace_colors(self) -> list[str]:
+        return self.trace_colors_for_theme(self._theme())
 
     @staticmethod
     def _theme_stylesheet(template: str, theme: dict[str, object]) -> str:
@@ -1960,8 +1996,6 @@ class MainWindow(QtWidgets.QMainWindow):
         file_menu.addAction("Save VNA", self._save_session)
         file_menu.addAction("Save to Default", self._save_to_default_vna)
         file_menu.addSeparator()
-        file_menu.addAction("Export Data", self._export_data)
-        file_menu.addSeparator()
         file_menu.addAction("Exit", self.close)
 
         self.mc_setup_action = menu_bar.addAction("MC Setup")
@@ -2016,6 +2050,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.axis_labels_action.triggered.connect(self._update_axis_labels)
         display_menu.addSeparator()
         display_menu.addAction("Open Current Plots", self._open_current_plot_window)
+        advanced_menu = display_menu.addMenu("Advanced Plot")
+        self.advanced_display_actions: dict[str, QtGui.QAction] = {}
+        for label, mode in self.ADVANCED_DISPLAY_MODE_ITEMS:
+            action = advanced_menu.addAction(label)
+            action.triggered.connect(
+                lambda _checked=False, display_mode=mode: self._set_active_plot_display_mode(
+                    display_mode
+                )
+            )
+            self.advanced_display_actions[mode] = action
         display_menu.addSeparator()
         self.light_theme_action = QtGui.QAction("Light Theme", self)
         self.light_theme_action.setCheckable(True)
@@ -2434,6 +2478,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return self._set_cursor_position(key, cursor_x, cursor_y)
 
     def _move_cursor_from_scene_pos(self, key: str, scene_pos) -> bool:
+        self._set_active_plot_key(key)
         plot = self._plot_widget_for_key(key)
         if not plot.sceneBoundingRect().contains(scene_pos):
             return False
@@ -2926,6 +2971,7 @@ class MainWindow(QtWidgets.QMainWindow):
         def _handle_click(event):
             if not plot.sceneBoundingRect().contains(event.scenePos()):
                 return
+            self._set_active_plot_key(key)
             mouse_point = plot.getPlotItem().vb.mapSceneToView(event.scenePos())
             click_x = self._x_from_plot_coord(key, float(mouse_point.x()))
             click_y = self._y_from_plot_coord(key, float(mouse_point.y()))
@@ -2978,6 +3024,8 @@ class MainWindow(QtWidgets.QMainWindow):
         response_label = self._join_units(response_units)
         if display_mode == "time":
             return ("Seconds", displayed_label)
+        if display_mode == "cumulative_psd":
+            return ("Hertz", f"3 sigma ({displayed_label})")
         if display_mode == "autospectrum":
             if value_mode in {"dB", "dB_per_sqrt_hz"}:
                 db_refs = self._active_db_refs()
@@ -2996,6 +3044,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return ("Hertz", f"{value_label} ({response_label})/{reference_unit}")
         if display_mode == "coherence":
             return ("Hertz", "Coherence")
+        if display_mode == "foundation_vibration":
+            return ("Third-octave center frequency (Hz)", "RMS velocity (um/s)")
+        if display_mode == "dynamic_stiffness":
+            return ("Hertz", "Magnitude (N/m)")
         if display_mode == "cross_spectrum":
             if value_mode == "nyquist":
                 return (
@@ -3127,6 +3179,12 @@ class MainWindow(QtWidgets.QMainWindow):
         data = combo.currentData()
         return str(data) if data else combo.currentText()
 
+    def _effective_display_mode_for_key(self, key: str) -> str:
+        display_mode = self._display_mode(self._display_combo_for_key(key))
+        if display_mode == "advanced":
+            return self._value_mode(self._value_combo_for_key(key))
+        return display_mode
+
     @staticmethod
     def _value_mode(combo: QtWidgets.QComboBox) -> str:
         data = combo.currentData()
@@ -3147,10 +3205,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.bottom_plot.setLabel("left", "")
             return
         top_x, top_y = self._axis_label_for(
-            self._display_mode(self.top_display_combo), self._value_mode(self.top_value_mode_combo)
+            self._effective_display_mode_for_key("top"), self._value_mode(self.top_value_mode_combo)
         )
         bottom_x, bottom_y = self._axis_label_for(
-            self._display_mode(self.bottom_display_combo),
+            self._effective_display_mode_for_key("bottom"),
             self._value_mode(self.bottom_value_mode_combo),
         )
         self.top_plot.setLabel("bottom", top_x)
@@ -3172,7 +3230,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_devices_button = QtWidgets.QPushButton("Refresh")
         self.refresh_devices_button.setToolTip("Refresh Devices")
         self.refresh_devices_button.clicked.connect(self._refresh_devices)
-        self.open_vna_button = QtWidgets.QPushButton("Open VNA")
+        self.open_vna_button = QtWidgets.QPushButton("Open")
         self.open_vna_button.setToolTip("Open legacy VNA and apply its setup/data")
         self.toolbar_data_tip_button = QtWidgets.QPushButton("Data Tip")
         self.toolbar_data_tip_button.setToolTip("Toggle MATLAB-style data tip labels")
@@ -3188,7 +3246,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stop_button.setEnabled(False)
         self.export_button = QtWidgets.QPushButton("Export")
         self.export_button.setToolTip("Export current measurement")
-        self.save_session_button = QtWidgets.QPushButton("Save VNA")
+        self.save_session_button = QtWidgets.QPushButton("Save")
         self.save_session_button.setToolTip("Save VNA")
         self.load_session_button = QtWidgets.QPushButton("Load")
         self.load_session_button.setToolTip("Load Session")
@@ -3210,6 +3268,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.open_vna_button.clicked.connect(self._import_legacy_vna)
 
         for widget in (
+            self.controls_button,
             self.open_vna_button,
             self.save_session_button,
             self.toolbar_data_tip_button,
@@ -3217,7 +3276,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.avg_button,
             self.record_button,
             self.stop_button,
-            self.controls_button,
         ):
             if isinstance(widget, (QtWidgets.QPushButton, QtWidgets.QToolButton)):
                 self._fit_button_text(widget)
@@ -3997,15 +4055,10 @@ class MainWindow(QtWidgets.QMainWindow):
         source_row.addWidget(self.trigger_level_percent_combo, 1)
         layout.addLayout(source_row)
 
-        slope_row = QtWidgets.QHBoxLayout()
-        slope_row.addStretch(1)
-        if not hasattr(self, "trigger_slope_button"):
-            self.trigger_slope_button = QtWidgets.QPushButton("Pos")
-            self.trigger_slope_button.setMinimumWidth(54)
-            self.trigger_slope_button.clicked.connect(self._toggle_trigger_slope)
-        slope_row.addWidget(self.trigger_slope_button)
-        slope_row.addStretch(1)
-        layout.addLayout(slope_row)
+        abs_label = self._legacy_label("Abs Level", "legacyText")
+        abs_label.setAlignment(QtCore.Qt.AlignCenter)
+        abs_label.setToolTip("Trigger fires when the absolute input amplitude exceeds the selected level.")
+        layout.addWidget(abs_label)
 
         layout.addWidget(self._legacy_label("Delay", "legacyGrayCell"))
         delay_row = QtWidgets.QHBoxLayout()
@@ -4638,11 +4691,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.trigger_enable.setChecked(False)
         self._sync_trigger_arm_button()
 
-    def _toggle_trigger_slope(self) -> None:
-        next_text = "Neg" if self.trigger_slope_button.text() == "Pos" else "Pos"
-        self.trigger_slope_button.setText(next_text)
-        self.trigger_slope_combo.setCurrentText(next_text)
-
     def _toggle_trigger_arm(self) -> None:
         if "manual" not in self._current_combo_value(self.trigger_mode_combo).strip().lower():
             self.trigger_enable.setChecked(False)
@@ -4670,14 +4718,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._trigger_level_percent_changed(self.trigger_level_percent_combo.currentText())
 
     def _trigger_level_percent_changed(self, text: str) -> None:
-        percent = self._parse_trigger_percent_text(text)
+        percent = abs(self._parse_trigger_percent_text(text))
         channel_index = self._trigger_channel_index()
         full_scale = self._channel_full_scale_for_trigger(channel_index)
         self.trigger_level_edit.setValue(full_scale * percent / 100.0)
-
-    def _trigger_slope_combo_changed(self, text: str) -> None:
-        if hasattr(self, "trigger_slope_button"):
-            self.trigger_slope_button.setText(text)
 
     def _trigger_channel_index(self) -> int:
         text = self.trigger_source_combo.currentText()
@@ -4704,7 +4748,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _set_trigger_percent_from_level(self, level: float) -> None:
         full_scale = self._channel_full_scale_for_trigger(self._trigger_channel_index())
-        percent = 0.0 if full_scale == 0.0 else level * 100.0 / full_scale
+        percent = 0.0 if full_scale == 0.0 else abs(level) * 100.0 / full_scale
         index = min(
             range(len(self.TRIGGER_LEVEL_PERCENT_VALUES)),
             key=lambda i: abs(self.TRIGGER_LEVEL_PERCENT_VALUES[i] - percent),
@@ -4817,7 +4861,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._make_compact_combo(self.trigger_source_combo, 4)
         self.trigger_source_combo.currentTextChanged.connect(self._trigger_source_combo_changed)
         self.trigger_level_edit = QtWidgets.QDoubleSpinBox()
-        self.trigger_level_edit.setRange(-10.0, 10.0)
+        self.trigger_level_edit.setRange(0.0, 10.0)
         self.trigger_level_edit.setDecimals(3)
         self.trigger_level_percent_combo = QtWidgets.QComboBox()
         self.trigger_level_percent_combo.addItems(self.TRIGGER_LEVEL_PERCENT_OPTIONS)
@@ -4827,9 +4871,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._trigger_level_percent_changed
         )
         self.trigger_slope_combo = QtWidgets.QComboBox()
-        self.trigger_slope_combo.addItems(["Pos", "Neg"])
+        self.trigger_slope_combo.addItem("Abs", "either")
         self.trigger_slope_combo.hide()
-        self.trigger_slope_combo.currentTextChanged.connect(self._trigger_slope_combo_changed)
         self.pretrigger_samples_edit = QtWidgets.QSpinBox()
         self.pretrigger_samples_edit.setRange(-65536, 65536)
         self.pretrigger_samples_edit.setValue(0)
@@ -4866,13 +4909,10 @@ class MainWindow(QtWidgets.QMainWindow):
         row.addWidget(self.trigger_level_percent_combo, 1)
         layout.addLayout(row)
 
-        slope_row = QtWidgets.QHBoxLayout()
-        slope_row.addStretch(1)
-        self.trigger_slope_button = QtWidgets.QPushButton("Pos")
-        self.trigger_slope_button.clicked.connect(self._toggle_trigger_slope)
-        slope_row.addWidget(self.trigger_slope_button)
-        slope_row.addStretch(1)
-        layout.addLayout(slope_row)
+        abs_label = QtWidgets.QLabel("Abs Level")
+        abs_label.setAlignment(QtCore.Qt.AlignCenter)
+        abs_label.setToolTip("Trigger fires when the absolute input amplitude exceeds the selected level.")
+        layout.addWidget(abs_label)
 
         delay_label = QtWidgets.QLabel("Delay")
         delay_label.setAlignment(QtCore.Qt.AlignCenter)
@@ -5074,7 +5114,7 @@ class MainWindow(QtWidgets.QMainWindow):
             except ValueError:
                 trigger_channel = 1
             self.trigger_source_combo.setCurrentText(f"Ch{min(max(trigger_channel, 1), 4)}")
-        self.trigger_level_edit.setValue(self.session.acquisition.trigger.level)
+        self.trigger_level_edit.setValue(abs(self.session.acquisition.trigger.level))
         stored_trigger_percent = getattr(self.session.acquisition.trigger, "level_percent", None)
         if stored_trigger_percent is None:
             self._set_trigger_percent_from_level(self.session.acquisition.trigger.level)
@@ -5087,9 +5127,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.trigger_level_percent_combo.setCurrentIndex(percent_index)
             self.trigger_level_percent_combo.blockSignals(False)
             self._trigger_level_percent_changed(self.trigger_level_percent_combo.currentText())
-        slope_text = "Neg" if self.session.acquisition.trigger.slope == "falling" else "Pos"
-        self.trigger_slope_combo.setCurrentText(slope_text)
-        self.trigger_slope_button.setText(slope_text)
+        self.trigger_slope_combo.setCurrentIndex(0)
         self.pretrigger_samples_edit.setValue(self.session.acquisition.trigger.pretrigger_samples)
         self.trigger_timeout_edit.setValue(self.session.acquisition.trigger.timeout_seconds)
         self.exc_enable.setChecked(self.session.acquisition.excitation.enabled)
@@ -5284,13 +5322,11 @@ class MainWindow(QtWidgets.QMainWindow):
             if session.acquisition.trigger.enabled
             else "immediate"
         )
-        session.acquisition.trigger.level = self.trigger_level_edit.value()
-        session.acquisition.trigger.level_percent = self._parse_trigger_percent_text(
-            self.trigger_level_percent_combo.currentText()
+        session.acquisition.trigger.level = abs(self.trigger_level_edit.value())
+        session.acquisition.trigger.level_percent = abs(
+            self._parse_trigger_percent_text(self.trigger_level_percent_combo.currentText())
         )
-        session.acquisition.trigger.slope = (
-            "falling" if self.trigger_slope_combo.currentText() == "Neg" else "rising"
-        )
+        session.acquisition.trigger.slope = "either"
         session.acquisition.trigger.pretrigger_samples = self.pretrigger_samples_edit.value()
         session.acquisition.trigger.timeout_seconds = self.trigger_timeout_edit.value()
         session.acquisition.excitation.enabled = self.exc_enable.isChecked()
@@ -5435,7 +5471,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _configured_trace_names_for_display(self, display_mode: str) -> list[str]:
         channels = self._enabled_channel_names()
-        if display_mode in {"time", "autospectrum", "fft", "auto_correlation"}:
+        if display_mode in {
+            "time",
+            "autospectrum",
+            "cumulative_psd",
+            "foundation_vibration",
+            "fft",
+            "auto_correlation",
+        }:
             return channels
         reference = self._current_reference_name()
         responses = [
@@ -5448,6 +5491,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if display_mode in {
             "frf",
             "coherence",
+            "dynamic_stiffness",
             "cross_spectrum",
             "cross_correlation",
             "impulse_response",
@@ -5461,11 +5505,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return []
         if display_mode == "time":
             return list(measurement.time_data.get("channels", {}).keys())
-        if display_mode == "autospectrum":
+        if display_mode in {"autospectrum", "cumulative_psd", "foundation_vibration"}:
             return list(measurement.spectra.get("autospectrum", {}).keys())
         if display_mode == "fft":
             return list(measurement.spectra.get("fft", {}).keys())
-        if display_mode == "frf":
+        if display_mode in {"frf", "dynamic_stiffness"}:
             return list(measurement.frf.keys())
         if display_mode == "coherence":
             return list(measurement.coherence.keys())
@@ -5478,7 +5522,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return []
 
     def _available_trace_names_for_key(self, key: str) -> list[str]:
-        display_mode = self._display_mode(self._display_combo_for_key(key))
+        display_mode = self._effective_display_mode_for_key(key)
         measurement = self.controller.state.measurement
         names = self._measurement_trace_names_for_display(measurement, display_mode)
         if names:
@@ -5566,13 +5610,13 @@ class MainWindow(QtWidgets.QMainWindow):
         for key in ("top", "bottom"):
             self._manual_x_ranges[key] = None
             self._manual_y_ranges[key] = None
-            self._auto_y_follow_visible_x[key] = False
+            self._auto_y_follow_visible_x[key] = True
 
     def _prepare_trace_selection_for_acquisition(self) -> None:
         for key in ("top", "bottom"):
             if self._trace_checks_user_modified.get(key, False):
                 continue
-            display_mode = self._display_mode(self._display_combo_for_key(key))
+            display_mode = self._effective_display_mode_for_key(key)
             names = self._configured_trace_names_for_display(display_mode)
             if names:
                 self._preferred_trace_checks[key] = set(names)
@@ -5858,14 +5902,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._plot_measurement_view(
             self.top_plot,
             measurement,
-            self._display_mode(self.top_display_combo),
-            self._value_mode(self.top_value_mode_combo),
+            self._effective_display_mode_for_key("top"),
+            self._analysis_value_mode_for_key("top"),
         )
         self._plot_measurement_view(
             self.bottom_plot,
             measurement,
-            self._display_mode(self.bottom_display_combo),
-            self._value_mode(self.bottom_value_mode_combo),
+            self._effective_display_mode_for_key("bottom"),
+            self._analysis_value_mode_for_key("bottom"),
         )
         self._update_plot_layout(self.layout_mode_combo.currentText())
         self._update_axis_labels()
@@ -5889,7 +5933,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return "channel_full_scale"
         if self._auto_y_follow_visible_x.get(key, False):
             return "visible"
-        if self._display_mode(self._display_combo_for_key(key)) == "time":
+        if self._effective_display_mode_for_key(key) == "time":
             return "channel_full_scale"
         return "legacy"
 
@@ -5927,6 +5971,33 @@ class MainWindow(QtWidgets.QMainWindow):
                 combo.currentText(),
             )
 
+    def _advanced_mode_for_key(self, key: str) -> str:
+        display_mode = self._display_mode(self._display_combo_for_key(key))
+        if display_mode == "advanced":
+            advanced_mode = self._value_mode(self._value_combo_for_key(key))
+            if advanced_mode in self._value_mode_options("advanced"):
+                return advanced_mode
+        return display_mode
+
+    def _analysis_value_mode_for_key(self, key: str) -> str:
+        display_mode = self._display_mode(self._display_combo_for_key(key))
+        value_mode = self._value_mode(self._value_combo_for_key(key))
+        if display_mode == "advanced":
+            advanced_mode = value_mode
+            advanced_options = self._value_mode_options(advanced_mode)
+            return advanced_options[0] if advanced_options else "real"
+        return value_mode
+
+    def _sync_advanced_value_mode_for_key(self, key: str) -> None:
+        display_mode = self._display_mode(self._display_combo_for_key(key))
+        if display_mode in self._value_mode_options("advanced"):
+            value_combo = self._value_combo_for_key(key)
+            current_value = self._value_mode(value_combo)
+            options = self._value_mode_options(display_mode)
+            if current_value not in options and options:
+                self._set_combo_data_silent(value_combo, options[0])
+                self._sync_value_strip_from_combo(value_combo)
+
     @staticmethod
     def _set_combo_items(combo: QtWidgets.QComboBox, items: list[str], current: str | None = None) -> None:
         combo.blockSignals(True)
@@ -5960,6 +6031,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if default_value_mode in self._value_mode_options(display_mode):
             self._set_combo_data_silent(value_combo, default_value_mode)
             self._sync_value_strip_from_combo(value_combo)
+        elif display_mode == "advanced" and value_combo.count():
+            self._sync_value_strip_from_combo(value_combo)
 
     def _display_combo_for_key(self, key: str) -> QtWidgets.QComboBox:
         return self.top_display_combo if key == "top" else self.bottom_display_combo
@@ -5976,14 +6049,51 @@ class MainWindow(QtWidgets.QMainWindow):
     def _yscale_combo_for_key(self, key: str) -> QtWidgets.QComboBox:
         return self.top_yscale_combo if key == "top" else self.bottom_yscale_combo
 
+    def _set_active_plot_key(self, key: str) -> None:
+        if key in {"top", "bottom"}:
+            self._active_plot_key = key
+
+    def _set_active_plot_display_mode(self, mode: str, key: str | None = None) -> None:
+        target_key = key or getattr(self, "_active_plot_key", "top")
+        if target_key not in {"top", "bottom"}:
+            target_key = "top"
+        display_combo = self._display_combo_for_key(target_key)
+        if mode in self._value_mode_options("advanced"):
+            self._set_display_mode_silent(display_combo, mode)
+            value_options = self._value_mode_options(mode)
+            if value_options:
+                value_combo = self._value_combo_for_key(target_key)
+                self._set_combo_data_silent(value_combo, value_options[0])
+                self._sync_value_strip_from_combo(value_combo)
+            self._display_mode_changed(target_key)
+            self.statusBar().showMessage(
+                f"{target_key.title()} display set to {self._display_label_for_mode(mode)}"
+            )
+            return
+        self._set_display_mode_silent(display_combo, mode)
+        self._display_mode_changed(target_key)
+
     @staticmethod
     def _default_xscale_for_display(display_mode: str) -> str:
-        if display_mode in {"autospectrum", "frf", "coherence", "cross_spectrum"}:
+        if display_mode in {
+            "autospectrum",
+            "cumulative_psd",
+            "frf",
+            "coherence",
+            "cross_spectrum",
+            "foundation_vibration",
+            "dynamic_stiffness",
+        }:
             return "log"
         return "linear"
 
     @staticmethod
     def _default_yscale_for_value(display_mode: str, value_mode: str) -> str:
+        if display_mode == "advanced":
+            display_mode = value_mode
+            value_mode = MainWindow._value_mode_options(display_mode)[0]
+        if display_mode in {"cumulative_psd", "foundation_vibration", "dynamic_stiffness"}:
+            return "log"
         if display_mode == "autospectrum" and value_mode.startswith("log_"):
             return "log"
         if display_mode in {"frf", "cross_spectrum"} and value_mode == "log_mag":
@@ -6024,18 +6134,72 @@ class MainWindow(QtWidgets.QMainWindow):
                 combo.blockSignals(False)
                 return
 
+    @classmethod
+    def _advanced_display_modes(cls) -> set[str]:
+        return {value for _label, value in cls.ADVANCED_DISPLAY_MODE_ITEMS}
+
+    def _ensure_display_mode_item(self, combo: QtWidgets.QComboBox, mode: str) -> None:
+        if combo.findData(mode) >= 0:
+            return
+        combo.addItem(self._display_label_for_mode(mode), mode)
+
+    def _remove_temporary_advanced_display_items(self, combo: QtWidgets.QComboBox) -> None:
+        advanced_modes = self._advanced_display_modes()
+        combo.blockSignals(True)
+        try:
+            for index in range(combo.count() - 1, -1, -1):
+                if str(combo.itemData(index)) in advanced_modes:
+                    combo.removeItem(index)
+        finally:
+            combo.blockSignals(False)
+
     def _sync_display_strip_from_combo(self, combo: QtWidgets.QComboBox) -> None:
         if not hasattr(self, "top_display_strip_combo"):
             return
+        mode = self._display_mode(combo)
         if combo is self.top_display_combo:
-            self._set_combo_text_silent(self.top_display_strip_combo, combo.currentText())
+            target = self.top_display_strip_combo
         elif combo is self.bottom_display_combo:
-            self._set_combo_text_silent(self.bottom_display_strip_combo, combo.currentText())
+            target = self.bottom_display_strip_combo
+        else:
+            return
+        if mode in self._advanced_display_modes():
+            target.blockSignals(True)
+            try:
+                self._ensure_display_mode_item(target, mode)
+                index = target.findData(mode)
+                if index >= 0:
+                    target.setCurrentIndex(index)
+            finally:
+                target.blockSignals(False)
+        else:
+            self._remove_temporary_advanced_display_items(target)
+            self._set_combo_text_silent(target, combo.currentText())
 
     def _set_display_mode_silent(self, combo: QtWidgets.QComboBox, mode: str) -> None:
+        if mode in self._value_mode_options("advanced"):
+            if self._display_mode(combo) != mode:
+                combo.blockSignals(True)
+                try:
+                    self._ensure_display_mode_item(combo, mode)
+                    index = combo.findData(mode)
+                    if index >= 0:
+                        combo.setCurrentIndex(index)
+                finally:
+                    combo.blockSignals(False)
+            self._sync_display_strip_from_combo(combo)
+            value_combo = (
+                self.top_value_mode_combo
+                if combo is self.top_display_combo
+                else self.bottom_value_mode_combo
+            )
+            self._sync_value_mode_options(value_combo, mode)
+            self._sync_value_strip_from_combo(value_combo)
+            return
         if self._display_mode(combo) == mode:
             self._sync_display_strip_from_combo(combo)
             return
+        self._remove_temporary_advanced_display_items(combo)
         for index in range(combo.count()):
             if combo.itemData(index) == mode:
                 combo.blockSignals(True)
@@ -6063,31 +6227,49 @@ class MainWindow(QtWidgets.QMainWindow):
     def _apply_default_axis_modes(self, key: str) -> None:
         display_mode = self._display_mode(self._display_combo_for_key(key))
         value_mode = self._value_mode(self._value_combo_for_key(key))
+        effective_display = self._advanced_mode_for_key(key)
+        effective_value = self._analysis_value_mode_for_key(key)
         self._set_combo_text_silent(
-            self._xscale_combo_for_key(key), self._default_xscale_for_display(display_mode)
+            self._xscale_combo_for_key(key), self._default_xscale_for_display(effective_display)
         )
         self._set_combo_text_silent(
-            self._yscale_combo_for_key(key), self._default_yscale_for_value(display_mode, value_mode)
+            self._yscale_combo_for_key(key), self._default_yscale_for_value(effective_display, effective_value)
         )
 
     def _display_mode_changed(self, key: str) -> None:
+        self._set_active_plot_key(key)
+        display_mode = self._display_mode(self._display_combo_for_key(key))
+        if display_mode not in self._advanced_display_modes():
+            self._remove_temporary_advanced_display_items(self._display_combo_for_key(key))
+            self._remove_temporary_advanced_display_items(self._display_strip_combo_for_key(key))
         self._manual_x_ranges[key] = None
         self._manual_y_ranges[key] = None
         self._channel_full_scale_focus[key] = None
         self._auto_y_follow_visible_x[key] = True
         self._preferred_trace_checks[key] = None
         self._trace_checks_user_modified[key] = False
+        self._sync_advanced_value_mode_for_key(key)
         self._apply_default_value_mode(key)
         self._apply_default_axis_modes(key)
         self._refresh_trace_lists_from_available_sources()
         self._refresh_current_measurement_view()
 
     def _value_mode_changed(self, key: str) -> None:
+        self._set_active_plot_key(key)
+        if self._display_mode(self._display_combo_for_key(key)) == "advanced":
+            self._manual_x_ranges[key] = None
+            self._manual_y_ranges[key] = None
+            self._channel_full_scale_focus[key] = None
+            self._auto_y_follow_visible_x[key] = True
+            self._apply_default_axis_modes(key)
+            self._refresh_trace_lists_from_available_sources()
+            self._refresh_current_measurement_view()
+            return
         self._manual_y_ranges[key] = None
         self._channel_full_scale_focus[key] = None
         self._auto_y_follow_visible_x[key] = True
-        display_mode = self._display_mode(self._display_combo_for_key(key))
-        value_mode = self._value_mode(self._value_combo_for_key(key))
+        display_mode = self._effective_display_mode_for_key(key)
+        value_mode = self._analysis_value_mode_for_key(key)
         self._set_combo_text_silent(
             self._yscale_combo_for_key(key), self._default_yscale_for_value(display_mode, value_mode)
         )
@@ -6133,15 +6315,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 display_combo = self._display_combo_for_key(key)
                 value_combo = self._value_combo_for_key(key)
                 self._set_display_mode_silent(display_combo, display_mode)
-                self._sync_value_mode_options(value_combo, display_mode)
+                current_display_mode = self._display_mode(display_combo)
+                self._sync_value_mode_options(value_combo, current_display_mode)
             value_mode = panel_state.get("value_mode")
             if isinstance(value_mode, str) and value_mode in self._value_mode_options(
-                self._display_mode(self._display_combo_for_key(key))
+                self._effective_display_mode_for_key(key)
             ):
                 self._set_combo_data_silent(self._value_combo_for_key(key), value_mode)
                 self._sync_value_strip_from_combo(self._value_combo_for_key(key))
-            current_display_mode = self._display_mode(self._display_combo_for_key(key))
-            current_value_mode = self._value_mode(self._value_combo_for_key(key))
+            current_display_mode = self._effective_display_mode_for_key(key)
+            current_value_mode = self._analysis_value_mode_for_key(key)
             self._set_combo_text_silent(
                 self._yscale_combo_for_key(key),
                 self._default_yscale_for_value(current_display_mode, current_value_mode),
@@ -6188,6 +6371,9 @@ class MainWindow(QtWidgets.QMainWindow):
         for label, value in cls.DISPLAY_MODE_ITEMS:
             if value == mode:
                 return label
+        for label, value in cls.ADVANCED_DISPLAY_MODE_ITEMS:
+            if value == mode:
+                return label
         return mode
 
     def _capture_current_legacy_display_state(self) -> dict[str, object]:
@@ -6195,8 +6381,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "layout": self.layout_mode_combo.currentText() if hasattr(self, "layout_mode_combo") else "dual"
         }
         for key in ("top", "bottom"):
-            display_mode = self._display_mode(self._display_combo_for_key(key))
-            value_mode = self._value_mode(self._value_combo_for_key(key))
+            display_mode = self._effective_display_mode_for_key(key)
+            value_mode = self._analysis_value_mode_for_key(key)
             available_names = self._available_trace_names_for_key(key)
             checked_names = self._checked_trace_names(key)
             trace_names = [name for name in available_names if name in checked_names]
@@ -6482,12 +6668,84 @@ class MainWindow(QtWidgets.QMainWindow):
             return 10.0 * np.log10(np.maximum(np.abs(scaled), 1e-307))
         return self._transform_curve(scaled, value_mode)
 
+    def _cumulative_psd_for_trace(
+        self,
+        measurement,
+        cache_key: str,
+        trace_name: str,
+        values: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        freqs = np.asarray(measurement.spectra.get("f", []), dtype=float)
+        channel_params = self._channel_display_params(measurement, trace_name)
+        int_vec = self._legacy_panel_int_vec(measurement, cache_key)
+        if int_vec.size == 0:
+            int_vec = 1.0
+        psd = self._transform_legacy_autospectrum(
+            values,
+            "log_power_per_hz",
+            self._measurement_rbw(measurement),
+            euscale_fac=float(channel_params.get("euscale_fac", 1.0)),
+            db_ref=float(channel_params.get("db_ref", 1.0)),
+            units_value=self._measurement_display_units_value(measurement),
+            wincor=self._measurement_window_correction(measurement),
+            yapcor_index=self._panel_yapcor_index(measurement, cache_key),
+            int_vec=int_vec,
+        )
+        count = min(freqs.size, np.asarray(psd).size)
+        return compute_cumulative_spectrum(freqs[:count], np.asarray(psd)[:count])
+
+    def _foundation_vibration_for_trace(
+        self,
+        measurement,
+        cache_key: str,
+        trace_name: str,
+        values: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        freqs = np.asarray(measurement.spectra.get("f", []), dtype=float)
+        rbw = self._measurement_rbw(measurement)
+        channel_params = self._channel_display_params(measurement, trace_name)
+        int_vec = self._legacy_panel_int_vec(measurement, cache_key)
+        if int_vec.size == 0:
+            int_vec = 1.0
+        psd = self._transform_legacy_autospectrum(
+            values,
+            "log_power_per_hz",
+            rbw,
+            euscale_fac=float(channel_params.get("euscale_fac", 1.0)),
+            db_ref=float(channel_params.get("db_ref", 1.0)),
+            units_value=self._measurement_display_units_value(measurement),
+            wincor=self._measurement_window_correction(measurement),
+            yapcor_index=self._panel_yapcor_index(measurement, cache_key),
+            int_vec=int_vec,
+        )
+        count = min(freqs.size, np.asarray(psd).size)
+        return compute_third_octave_velocity_rms(freqs[:count], np.asarray(psd)[:count], rbw)
+
+    def _dynamic_stiffness_for_trace(
+        self,
+        measurement,
+        trace_name: str,
+        values: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        freqs = np.asarray(measurement.spectra.get("f", []), dtype=float)
+        reference_name = self._trace_reference_name(trace_name)
+        response_name = self._trace_response_name(trace_name)
+        reference = self._channel_display_params(measurement, reference_name)
+        response = self._channel_display_params(measurement, response_name)
+        count = min(freqs.size, np.asarray(values).size)
+        return compute_dynamic_stiffness(
+            freqs[:count],
+            np.asarray(values)[:count],
+            float(response.get("euscale_fac", 1.0)),
+            float(reference.get("euscale_fac", 1.0)),
+        )
+
     def _plot_measurement_view(self, plot, measurement, mode: str, value_mode: str) -> None:
         plot.clear()
         legend = plot.plotItem.legend
         if legend is not None:
             legend.clear()
-        colors = self.TRACE_COLORS
+        colors = self._trace_colors()
         cache_key = "top" if plot is self.top_plot else "bottom"
         self._set_combo_text_silent(
             self._yscale_combo_for_key(cache_key),
@@ -6618,6 +6876,35 @@ class MainWindow(QtWidgets.QMainWindow):
             self._last_plot_cache[cache_key] = current_curves
             self._update_trace_selector(cache_key, current_curves, available_names)
             return
+        if mode in {"cumulative_psd", "foundation_vibration"}:
+            available_names = list(measurement.spectra["autospectrum"].keys())
+            visible_names = selected_names(available_names)
+            for idx, (name, values) in enumerate(measurement.spectra["autospectrum"].items()):
+                if visible_names and name not in visible_names:
+                    continue
+                if mode == "cumulative_psd":
+                    x_values, y_values = self._cumulative_psd_for_trace(
+                        measurement, cache_key, name, values
+                    )
+                else:
+                    x_values, y_values = self._foundation_vibration_for_trace(
+                        measurement, cache_key, name, values
+                    )
+                x_plot, y_plot = self._prepare_curve_xy(cache_key, x_values, y_values)
+                if x_plot.size == 0:
+                    continue
+                curve_item = plot.plot(
+                    x_plot,
+                    y_plot,
+                    pen=self._curve_pen(colors[idx % len(colors)], name, active_trace_name),
+                    name=legend_name(name),
+                    symbol="o" if mode == "foundation_vibration" else None,
+                    symbolSize=5 if mode == "foundation_vibration" else None,
+                )
+                register_curve(name, curve_item, colors[idx % len(colors)], x_plot, y_plot)
+            self._last_plot_cache[cache_key] = current_curves
+            self._update_trace_selector(cache_key, current_curves, available_names)
+            return
         if mode == "fft":
             available_names = list(measurement.spectra["fft"].keys())
             visible_names = selected_names(available_names)
@@ -6678,6 +6965,26 @@ class MainWindow(QtWidgets.QMainWindow):
                         measurement, cache_key, name, values, value_mode
                     )
                     x_plot, y_plot = self._prepare_curve_xy(cache_key, freqs, y)
+                if x_plot.size == 0:
+                    continue
+                curve_item = plot.plot(
+                    x_plot,
+                    y_plot,
+                    pen=self._curve_pen(colors[idx % len(colors)], name, active_trace_name),
+                    name=legend_name(name),
+                )
+                register_curve(name, curve_item, colors[idx % len(colors)], x_plot, y_plot)
+            self._last_plot_cache[cache_key] = current_curves
+            self._update_trace_selector(cache_key, current_curves, available_names)
+            return
+        if mode == "dynamic_stiffness":
+            available_names = list(measurement.frf.keys())
+            visible_names = selected_names(available_names)
+            for idx, (name, values) in enumerate(measurement.frf.items()):
+                if visible_names and name not in visible_names:
+                    continue
+                x_values, y_values = self._dynamic_stiffness_for_trace(measurement, name, values)
+                x_plot, y_plot = self._prepare_curve_xy(cache_key, x_values, y_values)
                 if x_plot.size == 0:
                     continue
                 curve_item = plot.plot(
@@ -6986,6 +7293,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._plot_measurement(measurement)
 
     def _trace_selection_changed(self, key: str, trace_name: str) -> None:
+        self._set_active_plot_key(key)
         self._active_trace_names[key] = trace_name or None
         self._refresh_curve_pens(key)
         self._refresh_markers(key)
@@ -7050,19 +7358,17 @@ class MainWindow(QtWidgets.QMainWindow):
         return self._xscale_combo_for_key(key).currentText() == "log"
 
     def _is_log_yscale(self, key: str) -> bool:
-        display_mode = self._display_mode(self._display_combo_for_key(key))
-        value_mode = self._value_mode(self._value_combo_for_key(key))
+        display_mode = self._effective_display_mode_for_key(key)
+        value_mode = self._analysis_value_mode_for_key(key)
         return (
             self._yscale_combo_for_key(key).currentText() == "log"
             or self._default_yscale_for_value(display_mode, value_mode) == "log"
         )
 
     def _is_nyquist_display(self, key: str) -> bool:
-        display_combo = self.top_display_combo if key == "top" else self.bottom_display_combo
-        value_combo = self.top_value_mode_combo if key == "top" else self.bottom_value_mode_combo
         return (
-            self._display_mode(display_combo) in {"frf", "cross_spectrum"}
-            and self._value_mode(value_combo) == "nyquist"
+            self._effective_display_mode_for_key(key) in {"frf", "cross_spectrum"}
+            and self._analysis_value_mode_for_key(key) == "nyquist"
         )
 
     def _configure_plot_xscale(self, plot, key: str) -> None:
@@ -7386,6 +7692,29 @@ class MainWindow(QtWidgets.QMainWindow):
         return np.log10(max(min_value, 1e-300)), np.log10(max(max_value, 1e-300))
 
     @staticmethod
+    def _safe_axis_extent(
+        min_value: float,
+        max_value: float,
+        *,
+        log_enabled: bool,
+    ) -> tuple[float, float]:
+        if not np.isfinite(min_value) or not np.isfinite(max_value):
+            return (1e-12, 1.0) if log_enabled else (-1.0, 1.0)
+        minimum = float(min(min_value, max_value))
+        maximum = float(max(min_value, max_value))
+        if log_enabled:
+            minimum = max(minimum, 1e-300)
+            maximum = max(maximum, minimum)
+            if maximum > minimum:
+                return minimum, maximum
+            factor = 10.0 ** 0.05
+            return minimum / factor, minimum * factor
+        if maximum > minimum:
+            return minimum, maximum
+        span = max(abs(minimum), 1.0) * 0.05
+        return minimum - span, maximum + span
+
+    @staticmethod
     def _range_from_plot_axis(min_value: float, max_value: float, log_enabled: bool) -> tuple[float, float]:
         if not log_enabled:
             return min_value, max_value
@@ -7447,10 +7776,11 @@ class MainWindow(QtWidgets.QMainWindow):
                             return
                         xmin = min(item[0] for item in extents)
                         xmax = max(item[1] for item in extents)
-                if xmax <= xmin:
-                    span = max(abs(xmin), 1.0) * 0.05
-                    xmin -= span
-                    xmax += span
+                xmin, xmax = self._safe_axis_extent(
+                    xmin,
+                    xmax,
+                    log_enabled=self._is_log_xscale(key) and not self._is_nyquist_display(key),
+                )
                 x_range = self._range_for_plot_axis(
                     xmin,
                     xmax,
@@ -7466,10 +7796,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 if y_extent is None:
                     return
                 ymin, ymax = y_extent
-            if ymax <= ymin:
-                span = max(abs(ymin), 1.0) * 0.05
-                ymin -= span
-                ymax += span
+            ymin, ymax = self._safe_axis_extent(
+                ymin,
+                ymax,
+                log_enabled=self._is_log_yscale(key) and not self._is_nyquist_display(key),
+            )
             y_range = self._range_for_plot_axis(
                 ymin,
                 ymax,

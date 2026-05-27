@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import zipfile
 
 import numpy as np
 
@@ -59,6 +60,7 @@ class ContinuousRecordingTests(unittest.TestCase):
                 channel_names=["ai0", "ai1"],
                 software_version="test",
                 segment_seconds=600.0,
+                compress_closed_segments=False,
                 time_fn=clock.time_ns,
                 monotonic_fn=clock.monotonic_seconds,
             )
@@ -95,6 +97,41 @@ class ContinuousRecordingTests(unittest.TestCase):
             self.assertEqual(manifest["total_frames"], 1)
             self.assertEqual(manifest["segments"][0]["samples"], 3)
 
+    def test_dat_writer_compresses_closed_segments_and_readers_open_zip(self):
+        clock = _Clock()
+        session = default_session_config()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "recording"
+            writer = ContinuousDatWriter(
+                output_dir,
+                session,
+                device_name="Dev1",
+                channel_names=["ai0", "ai1"],
+                software_version="test",
+                time_fn=clock.time_ns,
+                monotonic_fn=clock.monotonic_seconds,
+            )
+            writer.start()
+            writer.write_frame(self._frame(1, 10.0))
+            writer.close()
+
+            segment_path = output_dir / "segment_0001.dat"
+            archive_path = output_dir / "segment_0001.zip"
+            manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+
+            self.assertFalse(segment_path.exists())
+            self.assertTrue(archive_path.exists())
+            self.assertEqual(manifest["segments"][0]["path"], "segment_0001.zip")
+            self.assertEqual(manifest["segments"][0]["raw_path"], "segment_0001.dat")
+            self.assertTrue(manifest["segments"][0]["compressed"])
+            self.assertEqual(manifest["segment_compression"], "zip")
+            with zipfile.ZipFile(archive_path) as archive:
+                self.assertIn("segment_0001.dat", archive.namelist())
+            header = read_dat_header(archive_path)
+            frames = list(iter_dat_frames(archive_path))
+            self.assertEqual(header["format"], "python_vna_continuous_text_dat")
+            np.testing.assert_allclose(frames[0][1]["data"], self._frame(1, 10.0).data)
+
     def test_dat_writer_uses_frame_start_time_for_sample_rows(self):
         clock = _Clock()
         session = default_session_config()
@@ -107,6 +144,7 @@ class ContinuousRecordingTests(unittest.TestCase):
                 device_name="Dev1",
                 channel_names=["ai0", "ai1"],
                 software_version="test",
+                compress_closed_segments=False,
                 time_fn=clock.time_ns,
                 monotonic_fn=clock.monotonic_seconds,
             )
@@ -141,6 +179,7 @@ class ContinuousRecordingTests(unittest.TestCase):
                 channel_names=["ai0", "ai1"],
                 software_version="test",
                 segment_seconds=10.0,
+                compress_closed_segments=False,
                 time_fn=clock.time_ns,
                 monotonic_fn=clock.monotonic_seconds,
             )
@@ -169,6 +208,7 @@ class ContinuousRecordingTests(unittest.TestCase):
                 channel_names=["ai0", "ai1"],
                 software_version="test",
                 manifest_interval_seconds=60.0,
+                compress_closed_segments=False,
                 time_fn=clock.time_ns,
                 monotonic_fn=clock.monotonic_seconds,
             )

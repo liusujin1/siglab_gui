@@ -1002,6 +1002,7 @@ class SignalPipelineTests(unittest.TestCase):
             ExcitationVoltageOrCurrent = _Enum(USE_CURRENT="use_current")
             AcquisitionType = _Enum(CONTINUOUS="continuous", FINITE="finite")
             Edge = _Enum(RISING="rising", FALLING="falling")
+            WindowTriggerCondition1 = _Enum(LEAVING_WINDOW="leaving_window")
 
         class _AIChannel:
             def __setattr__(self, _name, _value):
@@ -1023,10 +1024,16 @@ class SignalPipelineTests(unittest.TestCase):
                 self.calls = []
 
             def cfg_anlg_edge_ref_trig(self, **kwargs):
-                self.calls.append(("ref", kwargs))
+                self.calls.append(("edge_ref", kwargs))
 
             def cfg_anlg_edge_start_trig(self, **kwargs):
-                self.calls.append(("start", kwargs))
+                self.calls.append(("edge_start", kwargs))
+
+            def cfg_anlg_window_ref_trig(self, **kwargs):
+                self.calls.append(("window_ref", kwargs))
+
+            def cfg_anlg_window_start_trig(self, **kwargs):
+                self.calls.append(("window_start", kwargs))
 
         class _Triggers:
             def __init__(self):
@@ -1082,7 +1089,7 @@ class SignalPipelineTests(unittest.TestCase):
         session.acquisition.trigger.enabled = True
         session.acquisition.trigger.mode = "Every Frame"
         session.acquisition.trigger.source = "ai0"
-        session.acquisition.trigger.level = 0.5
+        session.acquisition.trigger.level = -0.5
         session.acquisition.trigger.pretrigger_samples = -10
 
         backend = NIDaqBackend()
@@ -1098,9 +1105,12 @@ class SignalPipelineTests(unittest.TestCase):
         self.assertEqual(task.triggers.start_trigger.calls, [])
         self.assertEqual(len(task.triggers.reference_trigger.calls), 1)
         call_name, kwargs = task.triggers.reference_trigger.calls[0]
-        self.assertEqual(call_name, "ref")
+        self.assertEqual(call_name, "window_ref")
         self.assertEqual(kwargs["trigger_source"], "ai0")
         self.assertEqual(kwargs["pretrigger_samples"], 410)
+        self.assertEqual(kwargs["window_top"], 0.5)
+        self.assertEqual(kwargs["window_bottom"], -0.5)
+        self.assertEqual(kwargs["trigger_when"], "leaving_window")
 
     def test_ni_finite_triggered_read_rearms_each_frame(self):
         class _Reader:

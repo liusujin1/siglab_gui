@@ -29,6 +29,7 @@ from python_vna.analysis_data import (
     load_continuous_channels,
     load_analysis_path,
 )
+from python_vna.display_transforms import transform_legacy_autospectrum
 from python_vna.optional import require
 from python_vna.ui.main_window import (
     DataTipPoint,
@@ -94,6 +95,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self._custom_series_labels: dict[tuple[int, int], str] = {}
         self._custom_series_scales: dict[tuple[int, int], float] = {}
         self._current_measurement_dataset_id: int | None = None
+        self._single_plot_windows: list[QtWidgets.QDialog] = []
         self._build_ui()
         self.apply_theme(self._theme)
 
@@ -120,8 +122,18 @@ class AnalysisViewer(QtWidgets.QMainWindow):
                 "grid_alpha": 0.22,
             }
         theme = self._theme
-        self.setStyleSheet(
-            f"""
+        stylesheet = self._theme_stylesheet(theme)
+        self.setStyleSheet(stylesheet)
+        for dialog in list(self._single_plot_windows):
+            dialog.setStyleSheet(stylesheet)
+            for plot in dialog.findChildren(pg.PlotWidget):
+                self._apply_plot_theme(plot)
+        for plot in self.findChildren(pg.PlotWidget):
+            self._apply_plot_theme(plot)
+
+    @staticmethod
+    def _theme_stylesheet(theme: dict[str, object]) -> str:
+        return f"""
             QMainWindow, QWidget {{
                 background: {theme.get('window_bg')};
                 color: {theme.get('text')};
@@ -249,9 +261,6 @@ class AnalysisViewer(QtWidgets.QMainWindow):
                 border-color: {theme.get('control_border')};
             }}
             """
-        )
-        for plot in self.findChildren(pg.PlotWidget):
-            self._apply_plot_theme(plot)
 
     def _build_ui(self) -> None:
         central = QtWidgets.QWidget(self)
@@ -274,8 +283,8 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self.tabs = QtWidgets.QTabWidget()
         self.main_tab = QtWidgets.QWidget()
         self.foundation_tab = QtWidgets.QWidget()
-        self.tabs.addTab(self.main_tab, "Main")
-        self.tabs.addTab(self.foundation_tab, "Foundation")
+        self.tabs.addTab(self.main_tab, "主界面")
+        self.tabs.addTab(self.foundation_tab, "地面振动")
         layout.addWidget(self.tabs, 1)
         self._build_main_tab()
         self._build_foundation_tab()
@@ -320,36 +329,32 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         return plot
 
     def _build_load_group(self) -> QtWidgets.QGroupBox:
-        group = QtWidgets.QGroupBox("Data")
+        group = QtWidgets.QGroupBox("[-] 数据")
         layout = QtWidgets.QGridLayout(group)
         layout.setContentsMargins(8, 14, 8, 8)
         layout.setHorizontalSpacing(6)
         layout.setVerticalSpacing(5)
-        self.load_file_button = QtWidgets.QPushButton("Load File")
-        self.load_folder_button = QtWidgets.QPushButton("Load Folder")
-        self.clear_button = QtWidgets.QPushButton("Clear")
+        self.load_file_button = QtWidgets.QPushButton("加载文件")
+        self.load_folder_button = QtWidgets.QPushButton("加载文件夹")
+        self.clear_button = QtWidgets.QPushButton("删除所选")
         self.fs_hint_spin = QtWidgets.QDoubleSpinBox()
         self.fs_hint_spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
         self.fs_hint_spin.setRange(16.0, 1_048_576.0)
         self.fs_hint_spin.setDecimals(0)
         self.fs_hint_spin.setSingleStep(256.0)
         self.fs_hint_spin.setValue(4096.0)
-        self.dataset_list = QtWidgets.QListWidget()
-        self.dataset_list.setMinimumHeight(50)
-        self.dataset_list.setMaximumHeight(74)
         layout.addWidget(self.load_file_button, 0, 0)
         layout.addWidget(self.load_folder_button, 0, 1)
         layout.addWidget(self.clear_button, 0, 2)
-        layout.addWidget(QtWidgets.QLabel("FFT Block"), 1, 0)
+        layout.addWidget(QtWidgets.QLabel("FFT块长"), 1, 0)
         layout.addWidget(self.fs_hint_spin, 1, 1, 1, 2)
-        layout.addWidget(self.dataset_list, 2, 0, 1, 3)
         self.load_file_button.clicked.connect(self._load_file)
         self.load_folder_button.clicked.connect(self._load_folder)
-        self.clear_button.clicked.connect(self._clear_datasets)
+        self.clear_button.clicked.connect(self._delete_selected_datasets)
         return group
 
     def _build_series_group(self) -> QtWidgets.QGroupBox:
-        group = QtWidgets.QGroupBox("Channels")
+        group = QtWidgets.QGroupBox("数据列表")
         layout = QtWidgets.QGridLayout(group)
         layout.setContentsMargins(8, 14, 8, 8)
         layout.setHorizontalSpacing(5)
@@ -363,14 +368,14 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self.rename_edit.setPlaceholderText("selected channel name")
         self.factor_edit.setMaximumWidth(64)
         layout.addWidget(self.series_list, 0, 0, 1, 4)
-        layout.addWidget(QtWidgets.QLabel("Rename"), 1, 0)
+        layout.addWidget(QtWidgets.QLabel("重命名"), 1, 0)
         layout.addWidget(self.rename_edit, 1, 1)
-        layout.addWidget(QtWidgets.QLabel("Factor"), 1, 2)
+        layout.addWidget(QtWidgets.QLabel("系数"), 1, 2)
         layout.addWidget(self.factor_edit, 1, 3)
         buttons = QtWidgets.QHBoxLayout()
-        self.select_all_button = QtWidgets.QPushButton("Select All")
-        self.select_none_button = QtWidgets.QPushButton("None")
-        self.refresh_button = QtWidgets.QPushButton("Refresh")
+        self.select_all_button = QtWidgets.QPushButton("全选")
+        self.select_none_button = QtWidgets.QPushButton("全不选")
+        self.refresh_button = QtWidgets.QPushButton("刷新")
         buttons.addWidget(self.select_all_button)
         buttons.addWidget(self.select_none_button)
         buttons.addWidget(self.refresh_button)
@@ -384,7 +389,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         return group
 
     def _build_controls_group(self) -> QtWidgets.QGroupBox:
-        group = QtWidgets.QGroupBox("Options")
+        group = QtWidgets.QGroupBox("[+] 主处理")
         layout = QtWidgets.QGridLayout(group)
         layout.setContentsMargins(8, 12, 8, 7)
         layout.setHorizontalSpacing(5)
@@ -420,16 +425,19 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self.filter_order_spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
         self.filter_order_spin.setRange(1, 12)
         self.filter_order_spin.setValue(4)
-        self.plot_button = QtWidgets.QPushButton("Plot")
-        self.export_button = QtWidgets.QPushButton("Export")
+        self.plot_button = QtWidgets.QPushButton("绘图")
+        self.hold_button = QtWidgets.QPushButton("保持")
+        self.hold_button.setCheckable(True)
+        self.clear_plots_button = QtWidgets.QPushButton("清空图像")
+        self.export_button = QtWidgets.QPushButton("导出数据")
 
-        layout.addWidget(QtWidgets.QLabel("Start s"), 0, 0)
+        layout.addWidget(QtWidgets.QLabel("起始时间"), 0, 0)
         layout.addWidget(self.time_start_edit, 0, 1)
-        layout.addWidget(QtWidgets.QLabel("End s"), 0, 2)
+        layout.addWidget(QtWidgets.QLabel("结束时间"), 0, 2)
         layout.addWidget(self.time_end_edit, 0, 3)
-        layout.addWidget(QtWidgets.QLabel("PSD"), 1, 0)
+        layout.addWidget(QtWidgets.QLabel("PSD 来源"), 1, 0)
         layout.addWidget(self.psd_source_combo, 1, 1, 1, 3)
-        layout.addWidget(QtWidgets.QLabel("Quantity"), 2, 0)
+        layout.addWidget(QtWidgets.QLabel("物理量"), 2, 0)
         layout.addWidget(self.quantity_combo, 2, 1, 1, 3)
         layout.addWidget(QtWidgets.QLabel("Scale"), 3, 0)
         layout.addWidget(self.scale_spin, 3, 1, 1, 3)
@@ -440,9 +448,12 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         layout.addWidget(self.detrend_check, 6, 0)
         layout.addWidget(QtWidgets.QLabel("Order"), 6, 1)
         layout.addWidget(self.filter_order_spin, 6, 2, 1, 2)
-        layout.addWidget(self.plot_button, 7, 0, 1, 2)
-        layout.addWidget(self.export_button, 7, 2, 1, 2)
+        layout.addWidget(self.plot_button, 7, 0)
+        layout.addWidget(self.hold_button, 7, 1)
+        layout.addWidget(self.clear_plots_button, 7, 2)
+        layout.addWidget(self.export_button, 7, 3)
         self.plot_button.clicked.connect(self.plot_current)
+        self.clear_plots_button.clicked.connect(self._clear_plots)
         self.export_button.clicked.connect(self._export_current_csv)
         self.time_start_edit.editingFinished.connect(self._auto_plot_from_control_change)
         self.time_end_edit.editingFinished.connect(self._auto_plot_from_control_change)
@@ -461,20 +472,30 @@ class AnalysisViewer(QtWidgets.QMainWindow):
     def _build_main_tab(self) -> None:
         layout = QtWidgets.QVBoxLayout(self.main_tab)
         layout.setContentsMargins(6, 6, 6, 6)
-        header = QtWidgets.QHBoxLayout()
         self.main_mode_combos: list[QtWidgets.QComboBox] = []
-        for label, default in (("Plot 1", "Time"), ("Plot 2", "PSD"), ("Plot 3", "Trans")):
-            header.addWidget(QtWidgets.QLabel(label))
+        self.main_open_buttons: list[QtWidgets.QPushButton] = []
+        self.main_export_buttons: list[QtWidgets.QPushButton] = []
+        self.main_plots: list[pg.PlotWidget] = []
+        for index, (label, default) in enumerate((("图窗 1", "Time"), ("图窗 2", "PSD"), ("图窗 3", "Trans"))):
+            row = QtWidgets.QHBoxLayout()
+            row.setSpacing(5)
+            row.addWidget(QtWidgets.QLabel(f"{label}:"))
             combo = QtWidgets.QComboBox()
             combo.addItems(["Time", "PSD", "CumPSD", "Trans", "Coherence"])
             combo.setCurrentText(default)
             combo.currentTextChanged.connect(lambda _text: self._auto_plot_from_control_change())
             self.main_mode_combos.append(combo)
-            header.addWidget(combo)
-        header.addStretch(1)
-        layout.addLayout(header)
-        self.main_plots: list[pg.PlotWidget] = []
-        for _index in range(3):
+            row.addWidget(combo)
+            open_button = QtWidgets.QPushButton("图窗")
+            export_button = QtWidgets.QPushButton("导出数据")
+            open_button.clicked.connect(lambda _checked=False, i=index: self._open_plot_window_for_plot(self.main_plots[i]))
+            export_button.clicked.connect(lambda _checked=False, i=index: self._export_plot_csv(self.main_plots[i]))
+            self.main_open_buttons.append(open_button)
+            self.main_export_buttons.append(export_button)
+            row.addWidget(open_button)
+            row.addWidget(export_button)
+            row.addStretch(1)
+            layout.addLayout(row)
             plot = self._create_plot_widget()
             layout.addWidget(plot, 1)
             self.main_plots.append(plot)
@@ -521,7 +542,21 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         controls.addStretch(1)
         layout.addLayout(controls)
         self.foundation_plots: list[pg.PlotWidget] = []
-        for title in ("Ground Vibration", "Dynamic Stiffness", "Coherence"):
+        self.foundation_open_buttons: list[QtWidgets.QPushButton] = []
+        self.foundation_export_buttons: list[QtWidgets.QPushButton] = []
+        for index, title in enumerate(("Ground Vibration", "Dynamic Stiffness", "Coherence")):
+            row = QtWidgets.QHBoxLayout()
+            row.setSpacing(5)
+            row.addStretch(1)
+            open_button = QtWidgets.QPushButton("图窗")
+            export_button = QtWidgets.QPushButton("导出数据")
+            open_button.clicked.connect(lambda _checked=False, i=index: self._open_plot_window_for_plot(self.foundation_plots[i]))
+            export_button.clicked.connect(lambda _checked=False, i=index: self._export_plot_csv(self.foundation_plots[i]))
+            self.foundation_open_buttons.append(open_button)
+            self.foundation_export_buttons.append(export_button)
+            row.addWidget(open_button)
+            row.addWidget(export_button)
+            layout.addLayout(row)
             plot = self._create_plot_widget(title)
             layout.addWidget(plot, 1)
             self.foundation_plots.append(plot)
@@ -692,18 +727,46 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             plot.clear()
         self.statusBar().showMessage("Analysis data cleared")
 
+    def _delete_selected_datasets(self) -> None:
+        selected_series_ids = {
+            item.data(QtCore.Qt.UserRole)
+            for item in self.series_list.selectedItems()
+        }
+        selected_dataset_ids = {
+            dataset.id
+            for dataset in self._datasets
+            for series in dataset.series
+            if series.id in selected_series_ids
+        }
+        if not selected_dataset_ids:
+            self.statusBar().showMessage("No selected data to delete")
+            return
+        self._datasets = [dataset for dataset in self._datasets if dataset.id not in selected_dataset_ids]
+        self._custom_series_labels = {
+            key: value
+            for key, value in self._custom_series_labels.items()
+            if key[0] not in selected_dataset_ids
+        }
+        self._custom_series_scales = {
+            key: value
+            for key, value in self._custom_series_scales.items()
+            if key[0] not in selected_dataset_ids
+        }
+        if self._current_measurement_dataset_id in selected_dataset_ids:
+            self._current_measurement_dataset_id = None
+        self._refresh_dataset_lists()
+        self._clear_plots()
+        self.statusBar().showMessage(f"Deleted {len(selected_dataset_ids)} selected dataset(s)")
+
     def _refresh_dataset_lists(self) -> None:
         selected_ids = {
             item.data(QtCore.Qt.UserRole)
             for item in self.series_list.selectedItems()
         }
-        self.dataset_list.clear()
         self.series_list.blockSignals(True)
         self.series_list.clear()
         self._series_labels = self._build_series_labels()
         for dataset in self._datasets:
-            marker = "continuous" if dataset.is_continuous else "loaded"
-            self.dataset_list.addItem(f"{dataset.id}: {dataset.name} ({marker}, Fs={dataset.sample_rate:g})")
             for series in dataset.series:
                 label = self._series_label(dataset, series)
                 item = QtWidgets.QListWidgetItem(label)
@@ -791,15 +854,24 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self._time_series_cache.clear()
         self._bulk_time_series_cache.clear()
         self._selected_channel_keys_by_dataset = {}
+        keep_existing = bool(getattr(self, "hold_button", None) and self.hold_button.isChecked())
+        if not keep_existing:
+            for plot in self.main_plots + self.foundation_plots:
+                self._clear_data_tips(plot)
         for dataset, series in selected:
             keys = self._selected_channel_keys_by_dataset.setdefault(dataset.id, set())
             keys.add(series.channel_key)
             if dataset.series:
                 keys.add(dataset.series[0].channel_key)
         for plot, combo in zip(self.main_plots, self.main_mode_combos):
-            self._plot_main_axis(plot, combo.currentText(), selected)
-        self._plot_foundation(selected)
+            self._plot_main_axis(plot, combo.currentText(), selected, keep_existing=keep_existing)
+        self._plot_foundation(selected, keep_existing=keep_existing)
         self.statusBar().showMessage(f"Plotted {len(selected)} selected channel(s)")
+
+    def _clear_plots(self) -> None:
+        for plot in self.main_plots + self.foundation_plots:
+            self._clear_plot_with_title(plot, "")
+        self.statusBar().showMessage("Cleared analysis plots")
 
     def _selected_series(self) -> list[tuple[AnalysisDataset, AnalysisSeries]]:
         selected_ids = {
@@ -818,13 +890,20 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         plot: pg.PlotWidget,
         mode: str,
         selected: list[tuple[AnalysisDataset, AnalysisSeries]],
+        *,
+        keep_existing: bool = False,
     ) -> None:
-        plot.clear()
-        plot.addLegend(offset=(4, 2))
-        self._plot_curves[plot] = {}
-        self._active_trace[plot] = None
-        self._data_tip_items[plot].clear()
-        self._readd_cursor_items(plot)
+        if not keep_existing:
+            plot.clear()
+            if plot.plotItem.legend is not None:
+                plot.plotItem.legend.clear()
+            plot.addLegend(offset=(4, 2))
+            self._plot_curves[plot] = {}
+            self._active_trace[plot] = None
+            self._data_tip_items[plot].clear()
+            self._readd_cursor_items(plot)
+        elif plot.plotItem.legend is None:
+            plot.addLegend(offset=(4, 2))
         self._apply_plot_theme(plot)
         mode = str(mode)
         log_x = mode in {"PSD", "CumPSD", "Trans", "Coherence"}
@@ -832,7 +911,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         plot.setLogMode(x=log_x, y=log_y)
         self._log_modes[plot] = (log_x, log_y)
         plot.showGrid(x=True, y=True, alpha=float(self._theme.get("grid_alpha", 0.25)))
-        color_index = 0
+        color_index = len(self._plot_curves.get(plot, {})) if keep_existing else 0
         x_values_for_range: list[np.ndarray] = []
         y_values_for_range: list[np.ndarray] = []
         status_parts: list[str] = []
@@ -847,10 +926,11 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             y_values_for_range.append(y)
             pen = pg.mkPen(TRACE_COLORS[color_index % len(TRACE_COLORS)], width=1.3)
             color_index += 1
-            plot.plot(x, y, pen=pen, name=label)
-            self._plot_curves[plot][label] = (np.asarray(x, dtype=float), np.asarray(y, dtype=float))
+            plot_label = self._unique_plot_label(plot, label) if keep_existing else label
+            plot.plot(x, y, pen=pen, name=plot_label)
+            self._plot_curves[plot][plot_label] = (np.asarray(x, dtype=float), np.asarray(y, dtype=float))
             if self._active_trace[plot] is None:
-                self._active_trace[plot] = label
+                self._active_trace[plot] = plot_label
         if mode == "Time":
             plot.setLabel("bottom", "Time (s)")
             plot.setLabel("left", quantity_time_label(self.quantity_combo.currentText()))
@@ -869,9 +949,22 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             plot.setYRange(0.0, 1.0, padding=0.0)
         plot.setTitle(mode if color_index else f"{mode} (no valid data)")
         if mode != "Coherence":
+            range_curves = self._plot_curves.get(plot, {}) if keep_existing else {}
+            if range_curves:
+                x_values_for_range = [curve[0] for curve in range_curves.values()]
+                y_values_for_range = [curve[1] for curve in range_curves.values()]
             self._auto_range_plot(plot, x_values_for_range, y_values_for_range, log_x=log_x, log_y=log_y)
         if status_parts:
             self.statusBar().showMessage("; ".join(status_parts))
+
+    def _unique_plot_label(self, plot: pg.PlotWidget, label: str) -> str:
+        curves = self._plot_curves.setdefault(plot, {})
+        if label not in curves:
+            return label
+        index = 2
+        while f"{label}#{index}" in curves:
+            index += 1
+        return f"{label}#{index}"
 
     def _curve_for_mode(
         self,
@@ -948,9 +1041,37 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         f = frequencies[:count]
         power = autospectrum[:count]
         rbw = dataset.rbw_hz if dataset.rbw_hz > 0.0 else _infer_rbw(f)
-        psd = dataset.wincor * power * (scale**2) / max(rbw, 1e-20)
+        psd = transform_legacy_autospectrum(
+            power,
+            "log_power_per_hz",
+            rbw,
+            euscale_fac=scale,
+            wincor=dataset.wincor,
+            yapcor_index=int(dataset.metadata.get("legacy_yapcor_index", 1)),
+        )
         valid = np.isfinite(f) & np.isfinite(psd) & (f > 0.0) & (psd > 0.0)
         return f[valid], psd[valid]
+
+    def _foundation_vibration_curve(
+        self,
+        dataset: AnalysisDataset,
+        series: AnalysisSeries,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if series.channel_key in dataset.autospectrum and dataset.frequency_hz is not None:
+            frequency = np.asarray(dataset.frequency_hz, dtype=float).ravel()
+            autospectrum = np.asarray(dataset.autospectrum.get(series.channel_key, []), dtype=float).ravel()
+            count = min(frequency.size, autospectrum.size)
+            if count >= 3:
+                f = frequency[1:count]
+                rbw = dataset.rbw_hz if dataset.rbw_hz > 0.0 else _infer_rbw(frequency[:count])
+                eu = float(series.scale or 1.0)
+                psd = autospectrum[1:count] * (eu**2) / max(float(rbw), 1e-20)
+                return compute_third_octave_velocity_rms(f, psd, rbw)
+
+        f, psd = self._psd_for_series(dataset, series, scale=float(series.scale or 1.0))
+        if f.size < 2:
+            return np.array([], dtype=float), np.array([], dtype=float)
+        return compute_third_octave_velocity_rms(f, psd, dataset.rbw_hz if dataset.rbw_hz > 0.0 else _infer_rbw(f))
 
     def _transfer_curve(
         self,
@@ -1110,7 +1231,12 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         valid = np.isfinite(f) & np.isfinite(coherence) & (f > 0.0)
         return f[valid], coherence[valid], self._series_label(dataset, series)
 
-    def _plot_foundation(self, selected: list[tuple[AnalysisDataset, AnalysisSeries]]) -> None:
+    def _plot_foundation(
+        self,
+        selected: list[tuple[AnalysisDataset, AnalysisSeries]],
+        *,
+        keep_existing: bool = False,
+    ) -> None:
         vib_dataset = self._foundation_selected_dataset(self.foundation_vib_file_combo)
         stiff_dataset = self._foundation_selected_dataset(self.foundation_stiff_file_combo)
         if vib_dataset is None and selected:
@@ -1118,12 +1244,12 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         if stiff_dataset is None and selected:
             stiff_dataset = selected[0][0]
         if vib_dataset is not None:
-            self._plot_foundation_vibration(self.foundation_plots[0], vib_dataset)
+            self._plot_foundation_vibration(self.foundation_plots[0], vib_dataset, keep_existing=keep_existing)
         else:
             self._clear_plot_with_title(self.foundation_plots[0], "Ground vibration (no source)")
         if stiff_dataset is not None:
-            self._plot_foundation_stiffness(self.foundation_plots[1], stiff_dataset)
-            self._plot_foundation_coherence(self.foundation_plots[2], stiff_dataset)
+            self._plot_foundation_stiffness(self.foundation_plots[1], stiff_dataset, keep_existing=keep_existing)
+            self._plot_foundation_coherence(self.foundation_plots[2], stiff_dataset, keep_existing=keep_existing)
         else:
             self._clear_plot_with_title(self.foundation_plots[1], "Dynamic stiffness (no source)")
             self._clear_plot_with_title(self.foundation_plots[2], "Coherence (no source)")
@@ -1141,6 +1267,8 @@ class AnalysisViewer(QtWidgets.QMainWindow):
 
     def _clear_plot_with_title(self, plot: pg.PlotWidget, title: str) -> None:
         plot.clear()
+        if plot.plotItem.legend is not None:
+            plot.plotItem.legend.clear()
         self._plot_curves[plot] = {}
         self._active_trace[plot] = None
         self._data_tip_items[plot].clear()
@@ -1148,19 +1276,30 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self._apply_plot_theme(plot)
         plot.setTitle(title)
 
-    def _plot_foundation_vibration(self, plot: pg.PlotWidget, dataset: AnalysisDataset) -> None:
-        plot.clear()
-        plot.addLegend(offset=(4, 2))
-        self._plot_curves[plot] = {}
-        self._active_trace[plot] = None
-        self._data_tip_items[plot].clear()
-        self._readd_cursor_items(plot)
+    def _plot_foundation_vibration(
+        self,
+        plot: pg.PlotWidget,
+        dataset: AnalysisDataset,
+        *,
+        keep_existing: bool = False,
+    ) -> None:
+        if not keep_existing:
+            plot.clear()
+            if plot.plotItem.legend is not None:
+                plot.plotItem.legend.clear()
+            plot.addLegend(offset=(4, 2))
+            self._plot_curves[plot] = {}
+            self._active_trace[plot] = None
+            self._data_tip_items[plot].clear()
+            self._readd_cursor_items(plot)
+        elif plot.plotItem.legend is None:
+            plot.addLegend(offset=(4, 2))
         self._apply_plot_theme(plot)
         plot.setLogMode(x=True, y=True)
         self._log_modes[plot] = (True, True)
         f_range: list[np.ndarray] = []
         y_range: list[np.ndarray] = []
-        color_index = 0
+        color_index = len(self._plot_curves.get(plot, {})) if keep_existing else 0
         vib_channels = _parse_channel_list(self.foundation_vib_edit.text())
         for channel_number in vib_channels:
             if channel_number < 1 or channel_number > len(dataset.series):
@@ -1168,24 +1307,22 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             series = dataset.series[channel_number - 1]
             if series.channel_key not in dataset.autospectrum:
                 continue
-            f, psd = self._psd_for_series(dataset, series, scale=float(series.scale or 1.0))
-            if f.size < 2:
-                continue
-            centers, velocity = compute_third_octave_velocity_rms(f, psd, dataset.rbw_hz if dataset.rbw_hz > 0.0 else _infer_rbw(f))
+            centers, velocity = self._foundation_vibration_curve(dataset, series)
             if centers.size < 1:
                 continue
             label = _foundation_channel_name(channel_number, series.display_name)
+            plot_label = self._unique_plot_label(plot, label) if keep_existing else label
             plot.plot(
                 centers,
                 velocity,
                 pen=pg.mkPen(TRACE_COLORS[color_index % len(TRACE_COLORS)], width=1.3),
                 symbol="o",
                 symbolSize=5,
-                name=label,
+                name=plot_label,
             )
-            self._plot_curves[plot][label] = (centers, velocity)
+            self._plot_curves[plot][plot_label] = (centers, velocity)
             if self._active_trace[plot] is None:
-                self._active_trace[plot] = label
+                self._active_trace[plot] = plot_label
             color_index += 1
             f_range.append(centers)
             y_range.append(velocity)
@@ -1199,24 +1336,40 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         for name, (enabled, values, color) in vc_lines.items():
             if not enabled:
                 continue
-            plot.plot(ref_f, values, pen=pg.mkPen(color, width=1.8, style=QtCore.Qt.DashLine), name=name)
-            self._plot_curves[plot][name] = (ref_f, values)
+            plot_label = self._unique_plot_label(plot, name) if keep_existing else name
+            plot.plot(ref_f, values, pen=pg.mkPen(color, width=1.8, style=QtCore.Qt.DashLine), name=plot_label)
+            self._plot_curves[plot][plot_label] = (ref_f, values)
             if self._active_trace[plot] is None:
-                self._active_trace[plot] = name
+                self._active_trace[plot] = plot_label
             f_range.append(ref_f)
             y_range.append(values)
         plot.setTitle("Ground vibration")
         plot.setLabel("bottom", "Third-octave center frequency (Hz)")
         plot.setLabel("left", "RMS velocity (um/s)")
+        range_curves = self._plot_curves.get(plot, {}) if keep_existing else {}
+        if range_curves:
+            f_range = [curve[0] for curve in range_curves.values()]
+            y_range = [curve[1] for curve in range_curves.values()]
         self._auto_range_plot(plot, f_range, y_range, log_x=True, log_y=True)
 
-    def _plot_foundation_stiffness(self, plot: pg.PlotWidget, dataset: AnalysisDataset) -> None:
-        plot.clear()
-        plot.addLegend(offset=(4, 2))
-        self._plot_curves[plot] = {}
-        self._active_trace[plot] = None
-        self._data_tip_items[plot].clear()
-        self._readd_cursor_items(plot)
+    def _plot_foundation_stiffness(
+        self,
+        plot: pg.PlotWidget,
+        dataset: AnalysisDataset,
+        *,
+        keep_existing: bool = False,
+    ) -> None:
+        if not keep_existing:
+            plot.clear()
+            if plot.plotItem.legend is not None:
+                plot.plotItem.legend.clear()
+            plot.addLegend(offset=(4, 2))
+            self._plot_curves[plot] = {}
+            self._active_trace[plot] = None
+            self._data_tip_items[plot].clear()
+            self._readd_cursor_items(plot)
+        elif plot.plotItem.legend is None:
+            plot.addLegend(offset=(4, 2))
         self._apply_plot_theme(plot)
         plot.setLogMode(x=True, y=True)
         self._log_modes[plot] = (True, True)
@@ -1225,7 +1378,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         resp_channels = _parse_channel_list(self.foundation_resp_edit.text())
         x_ranges: list[np.ndarray] = []
         y_ranges: list[np.ndarray] = []
-        color_index = 0
+        color_index = len(self._plot_curves.get(plot, {})) if keep_existing else 0
         for resp_ch in resp_channels:
             key = f"ai{ref_ch - 1}->ai{resp_ch - 1}"
             if key not in dataset.frf:
@@ -1243,15 +1396,16 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             if f.size < 2:
                 continue
             label = _foundation_channel_name(resp_ch, response.display_name)
+            plot_label = self._unique_plot_label(plot, label) if keep_existing else label
             plot.plot(
                 f,
                 stiffness,
                 pen=pg.mkPen(TRACE_COLORS[color_index % len(TRACE_COLORS)], width=1.3),
-                name=label,
+                name=plot_label,
             )
-            self._plot_curves[plot][label] = (f, stiffness)
+            self._plot_curves[plot][plot_label] = (f, stiffness)
             if self._active_trace[plot] is None:
-                self._active_trace[plot] = label
+                self._active_trace[plot] = plot_label
             color_index += 1
             x_ranges.append(f)
             y_ranges.append(stiffness)
@@ -1259,22 +1413,38 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             spec_x = np.array([max(30.0, min(x[0] for x in x_ranges)), min(1000.0, max(x[-1] for x in x_ranges))])
             if spec_x[1] > spec_x[0]:
                 spec_y = np.array([1e8, 1e8])
-                plot.plot(spec_x, spec_y, pen=pg.mkPen("#d7263d", width=1.2, style=QtCore.Qt.DashLine), name="1e8 N/m")
-                self._plot_curves[plot]["1e8 N/m"] = (spec_x, spec_y)
+                spec_label = self._unique_plot_label(plot, "1e8 N/m") if keep_existing else "1e8 N/m"
+                plot.plot(spec_x, spec_y, pen=pg.mkPen("#d7263d", width=1.2, style=QtCore.Qt.DashLine), name=spec_label)
+                self._plot_curves[plot][spec_label] = (spec_x, spec_y)
                 x_ranges.append(spec_x)
                 y_ranges.append(spec_y)
         plot.setTitle("Dynamic stiffness")
         plot.setLabel("bottom", "Frequency (Hz)")
         plot.setLabel("left", "Magnitude (N/m)")
+        range_curves = self._plot_curves.get(plot, {}) if keep_existing else {}
+        if range_curves:
+            x_ranges = [curve[0] for curve in range_curves.values()]
+            y_ranges = [curve[1] for curve in range_curves.values()]
         self._auto_range_plot(plot, x_ranges, y_ranges, log_x=True, log_y=True)
 
-    def _plot_foundation_coherence(self, plot: pg.PlotWidget, dataset: AnalysisDataset) -> None:
-        plot.clear()
-        plot.addLegend(offset=(4, 2))
-        self._plot_curves[plot] = {}
-        self._active_trace[plot] = None
-        self._data_tip_items[plot].clear()
-        self._readd_cursor_items(plot)
+    def _plot_foundation_coherence(
+        self,
+        plot: pg.PlotWidget,
+        dataset: AnalysisDataset,
+        *,
+        keep_existing: bool = False,
+    ) -> None:
+        if not keep_existing:
+            plot.clear()
+            if plot.plotItem.legend is not None:
+                plot.plotItem.legend.clear()
+            plot.addLegend(offset=(4, 2))
+            self._plot_curves[plot] = {}
+            self._active_trace[plot] = None
+            self._data_tip_items[plot].clear()
+            self._readd_cursor_items(plot)
+        elif plot.plotItem.legend is None:
+            plot.addLegend(offset=(4, 2))
         self._apply_plot_theme(plot)
         plot.setLogMode(x=True, y=False)
         self._log_modes[plot] = (True, False)
@@ -1282,7 +1452,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         ref_ch = self._foundation_reference_channel()
         resp_channels = _parse_channel_list(self.foundation_resp_edit.text())
         x_ranges: list[np.ndarray] = []
-        color_index = 0
+        color_index = len(self._plot_curves.get(plot, {})) if keep_existing else 0
         for resp_ch in resp_channels:
             key = f"ai{ref_ch - 1}->ai{resp_ch - 1}"
             if key not in dataset.coherence:
@@ -1298,32 +1468,40 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             if f.size < 2:
                 continue
             label = _foundation_channel_name(resp_ch, response.display_name if response is not None else f"Ch {resp_ch}")
+            plot_label = self._unique_plot_label(plot, label) if keep_existing else label
             plot.plot(
                 f,
                 c,
                 pen=pg.mkPen(TRACE_COLORS[color_index % len(TRACE_COLORS)], width=1.3),
-                name=label,
+                name=plot_label,
             )
-            self._plot_curves[plot][label] = (f, c)
+            self._plot_curves[plot][plot_label] = (f, c)
             if self._active_trace[plot] is None:
-                self._active_trace[plot] = label
+                self._active_trace[plot] = plot_label
             color_index += 1
             x_ranges.append(f)
         plot.setTitle("Coherence")
         plot.setLabel("bottom", "Frequency (Hz)")
         plot.setLabel("left", "Coherence")
+        range_curves = self._plot_curves.get(plot, {}) if keep_existing else {}
+        if range_curves:
+            x_ranges = [curve[0] for curve in range_curves.values()]
         if x_ranges:
             self._auto_range_plot(plot, x_ranges, [np.array([0.0, 1.0])], log_x=True, log_y=False)
         plot.setYRange(0.0, 1.0, padding=0.0)
 
     def _export_current_csv(self) -> None:
         plot = self._active_plot or (self.main_plots[0] if self.main_plots else None)
+        self._export_plot_csv(plot)
+
+    def _export_plot_csv(self, plot: pg.PlotWidget | None) -> None:
         if plot is None:
             self.statusBar().showMessage("No active plot for export")
             return
+        self._active_plot = plot
         curves = self._plot_curves.get(plot, {})
         if not curves:
-            self.statusBar().showMessage("No curves in active plot for export")
+            self.statusBar().showMessage("No curves in selected plot for export")
             return
         title = _safe_filename_part(plot.getPlotItem().titleLabel.text or "plot")
         path, _filter = QtWidgets.QFileDialog.getSaveFileName(
@@ -1361,6 +1539,60 @@ class AnalysisViewer(QtWidgets.QMainWindow):
                         values.extend(["", ""])
                 handle.write(",".join(values) + "\n")
         self.statusBar().showMessage(f"Exported active plot to {destination.name}")
+
+    def _open_plot_window_for_plot(self, plot: pg.PlotWidget | None) -> None:
+        if plot is None:
+            self.statusBar().showMessage("No plot selected")
+            return
+        self._active_plot = plot
+        curves = self._plot_curves.get(plot, {})
+        if not curves:
+            self.statusBar().showMessage("Current plot is empty")
+            return
+        dialog = QtWidgets.QDialog(None)
+        dialog.setStyleSheet(self._theme_stylesheet(self._theme))
+        dialog.setWindowTitle(str(plot.getPlotItem().titleLabel.text or "Analysis Plot"))
+        dialog.resize(900, 560)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        detached_plot = self._create_plot_widget(str(plot.getPlotItem().titleLabel.text or "Analysis Plot"))
+        layout.addWidget(detached_plot, 1)
+        self._apply_plot_theme(detached_plot)
+        log_x, log_y = self._log_modes.get(plot, (False, False))
+        detached_plot.setLogMode(x=log_x, y=log_y)
+        self._log_modes[detached_plot] = (log_x, log_y)
+        detached_plot.setLabel("bottom", plot.getAxis("bottom").labelText or "X")
+        detached_plot.setLabel("left", plot.getAxis("left").labelText or "Y")
+        for index, (label, (x, y)) in enumerate(curves.items()):
+            detached_plot.plot(
+                x,
+                y,
+                pen=pg.mkPen(TRACE_COLORS[index % len(TRACE_COLORS)], width=1.3),
+                name=label,
+            )
+            self._plot_curves[detached_plot][label] = (np.asarray(x, dtype=float), np.asarray(y, dtype=float))
+            if self._active_trace[detached_plot] is None:
+                self._active_trace[detached_plot] = label
+        self._auto_scale_current_plot(detached_plot)
+        self._single_plot_windows.append(dialog)
+        dialog.finished.connect(lambda _result, window=dialog: self._forget_single_plot_window(window))
+        dialog.show()
+        self.statusBar().showMessage("Opened current analysis plot")
+
+    def _forget_single_plot_window(self, dialog: QtWidgets.QDialog) -> None:
+        if dialog in self._single_plot_windows:
+            self._single_plot_windows.remove(dialog)
+        try:
+            plots = dialog.findChildren(pg.PlotWidget)
+        except RuntimeError:
+            return
+        for plot in plots:
+            self._plot_curves.pop(plot, None)
+            self._active_trace.pop(plot, None)
+            self._data_tip_items.pop(plot, None)
+            self._cursor_items.pop(plot, None)
+            self._cursor_positions.pop(plot, None)
+            self._axis_history.pop(plot, None)
+            self._log_modes.pop(plot, None)
 
     def _time_window(self) -> tuple[float | None, float | None]:
         return _parse_optional_float(self.time_start_edit.text()), _parse_optional_float(self.time_end_edit.text())
@@ -1942,23 +2174,24 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         xs = _concat_finite(x_arrays, positive_only=log_x)
         ys = _concat_finite(y_arrays, positive_only=log_y)
         self._axis_scaling_plot = plot
-        if xs.size:
-            xmin = float(np.min(xs))
-            xmax = float(np.max(xs))
-            if xmax > xmin:
+        try:
+            view_box = plot.getPlotItem().vb
+            view_box.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
+            view_box.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
+            if xs.size:
+                xmin, xmax = _safe_extent(xs, log_enabled=log_x)
                 if log_x:
                     plot.setXRange(np.log10(xmin), np.log10(xmax), padding=0.04)
                 else:
                     plot.setXRange(xmin, xmax, padding=0.04)
-        if ys.size:
-            ymin = float(np.min(ys))
-            ymax = float(np.max(ys))
-            if ymax > ymin:
+            if ys.size:
+                ymin, ymax = _safe_extent(ys, log_enabled=log_y)
                 if log_y:
                     plot.setYRange(np.log10(ymin), np.log10(ymax), padding=0.08)
                 else:
                     plot.setYRange(ymin, ymax, padding=0.08)
-        self._axis_scaling_plot = None
+        finally:
+            self._axis_scaling_plot = None
 
 
 def _concat_finite(arrays: list[np.ndarray], *, positive_only: bool = False) -> np.ndarray:
@@ -1973,6 +2206,26 @@ def _concat_finite(arrays: list[np.ndarray], *, positive_only: bool = False) -> 
     if not cleaned:
         return np.array([], dtype=float)
     return np.concatenate(cleaned)
+
+
+def _safe_extent(values: np.ndarray, *, log_enabled: bool = False) -> tuple[float, float]:
+    arr = np.asarray(values, dtype=float).ravel()
+    arr = arr[np.isfinite(arr)]
+    if log_enabled:
+        arr = arr[arr > 0.0]
+    if arr.size == 0:
+        return (1e-12, 1.0) if log_enabled else (-1.0, 1.0)
+    minimum = float(np.min(arr))
+    maximum = float(np.max(arr))
+    if maximum > minimum:
+        return minimum, maximum
+    if log_enabled:
+        factor = 10.0 ** 0.05
+        minimum = max(minimum, 1e-300)
+        return minimum / factor, minimum * factor
+    center = minimum
+    span = max(abs(center), 1.0) * 0.05
+    return center - span, center + span
 
 
 def _finite_aligned_xy(x_data: np.ndarray, y_data: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

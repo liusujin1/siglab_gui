@@ -75,21 +75,31 @@ def apply_filter_to_signal(
         if use_low and use_high:
             cutoff = [high / nyquist, low / nyquist]
             btype = "bandpass"
-            cutoff_ref = high
+            cutoff_ref: float | list[float] = [high, low]
         elif use_high:
             cutoff = high / nyquist
-            btype = "highpass"
+            btype = "high"
             cutoff_ref = high
         else:
             cutoff = low / nyquist
-            btype = "lowpass"
+            btype = "low"
             cutoff_ref = low
-        sos = signal.butter(order, cutoff, btype=btype, output="sos")
-        filtered = signal.sosfiltfilt(sos, y_work)
+        b, a = signal.butter(order, cutoff, btype=btype)
+        filt_len = max(len(a), len(b))
+        pad_len = min((y.size - 1) // 2, max(3 * filt_len, 24))
+        if pad_len >= 2:
+            left = 2.0 * y_work[0] - y_work[pad_len:0:-1]
+            right = 2.0 * y_work[-1] - y_work[-2 : -pad_len - 2 : -1]
+            y_pad = np.concatenate((left, y_work, right))
+        else:
+            y_pad = y_work
+        filtered = signal.filtfilt(b, a, y_pad)
+        if pad_len >= 2:
+            filtered = filtered[pad_len : pad_len + y.size]
     except Exception:
         return y.copy(), 0
 
-    trim = compute_filter_trim_samples(y.size, sample_rate, cutoff_ref, order)
+    trim = compute_filter_trim_samples(y.size, sample_rate, cutoff_ref, order, pad_len)
     if filtered.size != y.size or not np.all(np.isfinite(filtered)):
         return y.copy(), 0
     return np.asarray(filtered, dtype=float), trim
@@ -98,14 +108,23 @@ def apply_filter_to_signal(
 def compute_filter_trim_samples(
     sample_count: int,
     sample_rate: float,
-    cutoff_hz: float,
+    cutoff_hz: float | np.ndarray | list[float],
     order: int,
+    pad_len: int | None = None,
 ) -> int:
-    if sample_count < 3 or sample_rate <= 0.0 or cutoff_hz <= 0.0:
+    if sample_count < 3 or sample_rate <= 0.0:
         return 0
-    edge_seconds = max(float(order) / float(cutoff_hz), 0.02)
+    cutoff_values = np.asarray(cutoff_hz, dtype=float).ravel()
+    cutoff_values = cutoff_values[np.isfinite(cutoff_values) & (cutoff_values > 0.0)]
+    if cutoff_values.size == 0:
+        return 0
+    cutoff_min = float(np.min(cutoff_values))
+    edge_seconds = max(float(order) / cutoff_min, 0.02)
     trim = int(np.ceil(edge_seconds * float(sample_rate)))
-    return max(0, min((sample_count - 2) // 2, trim))
+    limits = [(sample_count - 2) // 2, trim]
+    if pad_len is not None:
+        limits.append(int(np.ceil(max(0, int(pad_len)) / 2.0)))
+    return max(0, min(limits))
 
 
 def crop_signal_edges(
@@ -351,13 +370,13 @@ def third_octave_bands(min_frequency: float, max_frequency: float) -> tuple[np.n
     if min_frequency <= 0.0 or max_frequency <= min_frequency:
         return np.array([]), np.array([]), np.array([])
     n = 3
-    upper_steps = max(1, round(n * np.ceil(np.log(max_frequency / 1000.0) / np.log(2.0)) + 1))
+    upper_steps = max(1, _matlab_round(n * np.ceil(np.log(max_frequency / 1000.0) / np.log(2.0)) + 1))
     upper = [1000.0]
     for _index in range(upper_steps):
         upper.append(upper[-1] * 10.0 ** (3.0 / (10.0 * n)))
     upper = [value for value in upper if value < max_frequency * (2.0 ** (0.5 / n))]
 
-    lower_steps = max(1, round(n * np.ceil(np.log(1000.0 / min_frequency) / np.log(2.0)) + 1))
+    lower_steps = max(1, _matlab_round(n * np.ceil(np.log(1000.0 / min_frequency) / np.log(2.0)) + 1))
     lower = [1000.0]
     for _index in range(lower_steps):
         lower.append(lower[-1] / (10.0 ** (3.0 / (10.0 * n))))
@@ -366,9 +385,10 @@ def third_octave_bands(min_frequency: float, max_frequency: float) -> tuple[np.n
     centers = np.unique(np.asarray(lower + upper, dtype=float))
     centers = centers[centers < max_frequency * (2.0 ** (0.5 / n))]
     centers = centers[centers > min_frequency * (2.0 ** (-0.5 / n))]
-    centers = _ansi_preferred_adjust(centers)
-    lower_edges = _significant_digit_round(centers / (2.0 ** (1.0 / (2.0 * n))), 3, 5)
-    upper_edges = _significant_digit_round(centers * (2.0 ** (1.0 / (2.0 * n))), 3, 5)
+    raw_centers = centers.copy()
+    lower_edges = _significant_digit_round(raw_centers / (2.0 ** (1.0 / (2.0 * n))), 3, 5)
+    upper_edges = _significant_digit_round(raw_centers * (2.0 ** (1.0 / (2.0 * n))), 3, 5)
+    centers = _ansi_preferred_adjust(raw_centers)
     valid = (
         np.isfinite(centers)
         & np.isfinite(lower_edges)
@@ -488,8 +508,8 @@ def _ansi_preferred_adjust(values: np.ndarray) -> np.ndarray:
 
 def _significant_digit_round(values: np.ndarray, digits: int, multiple: int) -> np.ndarray:
     output = np.asarray(values, dtype=float).copy()
-    digits = max(1, int(round(digits)))
-    multiple = max(1, int(round(multiple)))
+    digits = max(1, int(_matlab_round(digits)))
+    multiple = max(1, int(_matlab_round(multiple)))
     for index, value in enumerate(output):
         if not np.isfinite(value) or value == 0.0:
             continue
@@ -498,5 +518,12 @@ def _significant_digit_round(values: np.ndarray, digits: int, multiple: int) -> 
             decade += 1.0
         scale = 10.0 ** (digits - decade)
         buffer = scale / multiple
-        output[index] = round(buffer * value) / buffer
+        output[index] = _matlab_round(buffer * value) / buffer
     return output
+
+
+def _matlab_round(value: float) -> int:
+    number = float(value)
+    if number >= 0.0:
+        return int(np.floor(number + 0.5))
+    return int(np.ceil(number - 0.5))

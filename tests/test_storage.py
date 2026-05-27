@@ -122,14 +122,19 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(np.squeeze(mat["SystemClk"]).item(), 51200)
         self.assertEqual(np.squeeze(mat["SampleRate"]).item(), 1280)
         self.assertEqual(np.squeeze(mat["hdlg1_s1"])[0], 6)
+        self.assertEqual(np.squeeze(mat["hdlg2_s1"]).tolist()[:7], [1, 0, 0, 9, 0, 0, 1])
+        self.assertEqual(str(np.squeeze(mat["hdlg2_vis"])), "on")
+        self.assertEqual(str(np.squeeze(mat["exdlg2_vis"])), "off")
         self.assertEqual(np.squeeze(mat["vdlg2_s1"])[1], 20)
         self.assertEqual(np.squeeze(mat["vdlg2_s1"])[4], 1)
         self.assertEqual(np.squeeze(slm.winsel).item(), 1)
         self.assertEqual(np.squeeze(slm.wincor).item(), 1)
         self.assertEqual(mat["vdlg1_s1"].dtype.kind, "f")
-        self.assertEqual(mat["hdlg1_s1"].dtype.kind, "f")
-        self.assertEqual(mat["hdlg2_s1"].dtype.kind, "f")
-        self.assertEqual(mat["num_io"].dtype.kind, "f")
+        self.assertEqual(mat["hdlg1_s1"].dtype, np.dtype("uint16"))
+        self.assertEqual(mat["hdlg2_s1"].dtype, np.dtype("int16"))
+        self.assertEqual(mat["num_io"].dtype, np.dtype("uint8"))
+        self.assertEqual(mat["SampleRate"].dtype, np.dtype("uint16"))
+        self.assertEqual(mat["SystemClk"].dtype, np.dtype("uint16"))
         self.assertEqual(np.asarray(slm.navg).dtype.kind, "f")
         self.assertEqual(np.asarray(slm.clist).dtype.kind, "f")
         self.assertEqual(np.asarray(slm.xcstate[0, 0].refc).dtype.kind, "f")
@@ -143,6 +148,35 @@ class StorageTests(unittest.TestCase):
         self.assertIn("ai0->ai1", loaded.measurement.frf)
         np.testing.assert_allclose(loaded.measurement.frf["ai0->ai1"], session.measurement.frf["ai0->ai1"])
         np.testing.assert_allclose(loaded.measurement.coherence["ai0->ai1"], session.measurement.coherence["ai0->ai1"])
+
+    def test_save_legacy_vna_preserves_large_sensor_sensitivity(self):
+        session = self._sample_session()
+        session.config.ai_channels[0].label = "Hammer"
+        session.config.ai_channels[0].engineering_unit = "N"
+        session.config.ai_channels[0].sensitivity = 800.0
+        session.config.ai_channels[0].per_eu_mode = "/Volt"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "hammer.vna"
+            save_legacy_vna(session, path)
+            mat = loadmat(path, squeeze_me=False, struct_as_record=False)
+            loaded = load_legacy_vna(path)
+
+        self.assertEqual(float(mat["vdlg1_s1"][0, 6]), 800.0)
+        self.assertEqual(float(mat["ChanStat"][0, 2]), 800.0)
+        self.assertEqual(loaded.config.ai_channels[0].sensitivity, 800.0)
+
+    def test_save_legacy_vna_hides_trigger_when_linked_excitation_is_enabled(self):
+        session = self._sample_session()
+        session.config.acquisition.excitation.enabled = True
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "linked_excitation.vna"
+            save_legacy_vna(session, path)
+            mat = loadmat(path, squeeze_me=False, struct_as_record=False)
+
+        self.assertEqual(str(np.squeeze(mat["hdlg2_vis"])), "off")
+        self.assertEqual(str(np.squeeze(mat["exdlg2_vis"])), "on")
 
     def test_default_channels_use_requested_engineering_units(self):
         config = default_session_config()

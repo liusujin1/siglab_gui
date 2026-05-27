@@ -7,7 +7,11 @@ from typing import Any
 
 import numpy as np
 
-from python_vna.continuous_recording import iter_dat_frames, read_dat_header, read_dat_table_info
+from python_vna.continuous_recording import (
+    iter_dat_frames,
+    read_dat_header,
+    read_dat_table_info,
+)
 from python_vna.measurement_filter import filter_measurement_to_enabled_channels
 from python_vna.models import MeasurementSet, SavedSession
 from python_vna.storage import load_legacy_vna
@@ -123,12 +127,14 @@ def load_analysis_path(path: str | Path, *, fs_hint: float = 1000.0, dataset_id:
         return load_legacy_analysis_dataset(source, dataset_id=dataset_id)
     if suffix == ".xlsx":
         raise ValueError("XLSX is not supported in Analysis Viewer to keep the package small.")
-    if suffix == ".dat":
+    if suffix in {".dat", ".zip"}:
         try:
             header = read_dat_header(source)
             if header.get("format") == "python_vna_continuous_text_dat":
                 return load_continuous_segment(source, header=header, dataset_id=dataset_id)
         except Exception:
+            if suffix == ".zip":
+                raise
             pass
     if suffix in {".txt", ".csv", ".dat"}:
         return load_numeric_text_dataset(source, fs_hint=fs_hint, dataset_id=dataset_id)
@@ -230,7 +236,7 @@ def load_continuous_recording(path: str | Path, *, dataset_id: int = 1) -> Analy
     for raw in manifest.get("segments", []):
         if not isinstance(raw, dict):
             continue
-        segment_path = base / str(raw.get("path", ""))
+        segment_path = _resolve_continuous_segment_path(base, raw)
         if not segment_path.exists():
             continue
         segments.append(
@@ -243,7 +249,7 @@ def load_continuous_recording(path: str | Path, *, dataset_id: int = 1) -> Analy
         )
     active = manifest.get("active_segment")
     if isinstance(active, dict):
-        active_path = base / str(active.get("path", ""))
+        active_path = _resolve_continuous_segment_path(base, active)
         if active_path.exists() and all(segment.path != active_path for segment in segments):
             segments.append(
                 ContinuousSegmentInfo(
@@ -286,6 +292,23 @@ def load_continuous_segment(
         manifest={},
         dataset_id=dataset_id,
     )
+
+
+def _resolve_continuous_segment_path(base: Path, raw: dict[str, Any]) -> Path:
+    path_text = str(raw.get("path", "") or "")
+    path = base / path_text
+    if path.exists():
+        return path
+    raw_path_text = str(raw.get("raw_path", "") or "")
+    raw_path = base / raw_path_text
+    if raw_path.exists():
+        return raw_path
+    for candidate in (path, raw_path):
+        if candidate.suffix.lower() == ".dat":
+            zipped = candidate.with_suffix(".zip")
+            if zipped.exists():
+                return zipped
+    return path
 
 
 def load_numeric_text_dataset(path: str | Path, *, fs_hint: float = 1000.0, dataset_id: int = 1) -> AnalysisDataset:
@@ -489,6 +512,22 @@ def load_continuous_channels(
     data_chunks: dict[str, list[np.ndarray]] = {key: [] for key in keys}
     sample_offset = 0
     for segment in dataset.continuous_segments:
+        if segment.path.suffix.lower() == ".zip":
+            sample_offset = _append_continuous_frames_from_segment(
+                segment,
+                keys,
+                dataset.sample_rate,
+                sample_offset,
+                start_s=start_s,
+                end_s=end_s,
+                start_sample=start_sample,
+                stride=stride,
+                time_chunks=time_chunks,
+                data_chunks=data_chunks,
+            )
+            if end_s is not None and np.isfinite(end_s) and time_chunks and time_chunks[-1].size and time_chunks[-1][-1] >= float(end_s):
+                break
+            continue
         try:
             header, columns, data_start_line = read_dat_table_info(segment.path)
             has_local_time = len(columns) > 1 and columns[1] == "local_time"
@@ -544,6 +583,53 @@ def load_continuous_channels(
         for key, chunks in data_chunks.items()
     }
     return time_s, channels
+
+
+def _append_continuous_frames_from_segment(
+    segment: ContinuousSegmentInfo,
+    keys: list[str],
+    sample_rate: float,
+    sample_offset: int,
+    *,
+    start_s: float | None,
+    end_s: float | None,
+    start_sample: int,
+    stride: int,
+    time_chunks: list[np.ndarray],
+    data_chunks: dict[str, list[np.ndarray]],
+) -> int:
+    selected_indices: list[int] | None = None
+    for _header, frame in iter_dat_frames(segment.path):
+        names = [str(name) for name in frame.get("channel_names", [])]
+        if selected_indices is None:
+            try:
+                selected_indices = [names.index(key) for key in keys]
+            except ValueError:
+                return sample_offset + max(0, int(segment.samples))
+        data = np.asarray(frame.get("data", np.empty((0, 0))), dtype=float)
+        if data.ndim != 2:
+            continue
+        sample_count = int(data.shape[1])
+        global_samples = np.arange(sample_count, dtype=np.int64) + sample_offset
+        frame_time = global_samples.astype(float) / max(sample_rate, 1e-20)
+        sample_offset += sample_count
+        mask = np.ones(sample_count, dtype=bool)
+        if start_s is not None and np.isfinite(start_s):
+            mask &= frame_time >= float(start_s)
+        if end_s is not None and np.isfinite(end_s):
+            mask &= frame_time <= float(end_s)
+        if stride > 1:
+            mask &= ((global_samples - start_sample) % stride) == 0
+        if not np.any(mask):
+            if end_s is not None and np.isfinite(end_s) and frame_time.size and frame_time[0] > float(end_s):
+                break
+            continue
+        time_chunks.append(frame_time[mask])
+        for output_index, key in enumerate(keys):
+            channel_index = selected_indices[output_index]
+            if channel_index < data.shape[0]:
+                data_chunks[key].append(data[channel_index][mask])
+    return sample_offset
 
 
 def _continuous_total_samples(dataset: AnalysisDataset) -> int:

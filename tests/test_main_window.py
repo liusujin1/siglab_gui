@@ -117,13 +117,15 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(self.window.sample_rate_edit.value(), 2560.0)
         self.assertEqual(self.window.average_count_edit.value(), 20)
         self.assertEqual(self.window.refresh_devices_button.text(), "Refresh")
-        self.assertEqual(self.window.save_session_button.text(), "Save VNA")
+        self.assertEqual(self.window.save_session_button.text(), "Save")
         self.assertEqual(self.window.load_session_button.text(), "Load")
         self.assertEqual(self.window.import_legacy_button.text(), "Import")
-        self.assertEqual(self.window.open_vna_button.text(), "Open VNA")
+        self.assertEqual(self.window.open_vna_button.text(), "Open")
         self.assertEqual(self.window.toolbar_data_tip_button.text(), "Data Tip")
         self.assertIsInstance(self.window.toolbar_data_tip_button, QtWidgets.QPushButton)
         self.assertEqual(self.window.start_button.text(), "Inst")
+        self.assertEqual(self.window.bandwidth_combo.itemText(0), "BW=0.39KHz")
+        self.assertIn("BW=0.50KHz", [self.window.bandwidth_combo.itemText(index) for index in range(self.window.bandwidth_combo.count())])
         self.assertIsNotNone(self.window.mc_setup_action)
         available = self.window._screen_available_geometry()
         self.assertLessEqual(self.window.width(), available.width())
@@ -163,7 +165,7 @@ class MainWindowTests(unittest.TestCase):
         ]
         self.assertEqual(
             file_action_texts,
-            ["Open VNA", "Save VNA", "Save to Default", "Export Data", "Exit"],
+            ["Open VNA", "Save VNA", "Save to Default", "Exit"],
         )
         display_menu = menu_actions["Display"].menu()
         self.assertIsNotNone(display_menu)
@@ -178,6 +180,21 @@ class MainWindowTests(unittest.TestCase):
         self.assertIn("Clear Overlays", display_action_texts)
         self.assertIn("Open Current Plots", display_action_texts)
         self.assertIn("Light Theme", display_action_texts)
+        self.assertIn("Advanced Plot", display_action_texts)
+        advanced_action = next(
+            action
+            for action in display_menu.actions()
+            if action.text().replace("&", "") == "Advanced Plot"
+        )
+        self.assertIsNotNone(advanced_action.menu())
+        self.assertEqual(
+            [
+                action.text().replace("&", "")
+                for action in advanced_action.menu().actions()
+                if not action.isSeparator()
+            ],
+            ["cspec", "acor", "ccor", "impulse", "fft"],
+        )
         self.assertNotIn("Bode Plot", display_action_texts)
         self.assertNotIn("Cursor Readout", display_action_texts)
         self.assertNotIn("Data Tip", display_action_texts)
@@ -218,6 +235,13 @@ class MainWindowTests(unittest.TestCase):
         ):
             expected = button.fontMetrics().horizontalAdvance(button.text()) + 26
             self.assertGreaterEqual(button.minimumWidth(), expected)
+        toolbar = self.window.findChild(QtWidgets.QWidget, "topToolbar")
+        toolbar_widgets = [
+            toolbar.layout().itemAt(index).widget()
+            for index in range(toolbar.layout().count())
+            if isinstance(toolbar.layout().itemAt(index).widget(), (QtWidgets.QPushButton, QtWidgets.QToolButton))
+        ]
+        self.assertEqual([widget.text() for widget in toolbar_widgets[:4]], ["Controls", "Open", "Save", "Data Tip"])
         self.assertEqual(self.window.top_trace_list.count(), 4)
         self.assertEqual(self.window.bottom_trace_list.count(), 3)
         self.assertEqual(
@@ -278,6 +302,23 @@ class MainWindowTests(unittest.TestCase):
             self.assertTrue(next_window.light_theme_action.isChecked())
         finally:
             next_window.close()
+
+    def test_light_theme_uses_high_contrast_plot_curve_palette(self):
+        self.window.light_theme_action.trigger()
+        measurement = self._measurement()
+        self.controller.state.measurement = measurement
+
+        self.window.top_display_combo.setCurrentText("y(t)")
+        self.window._plot_measurement(measurement)
+
+        first_curve = self.window._plot_curve_items["top"]["ai0"]
+        second_curve = self.window._plot_curve_items["top"]["ai1"]
+        self.assertEqual(self.window._trace_colors()[:4], self.window.LIGHT_TRACE_COLORS[:4])
+        self.assertEqual(self.window.LIGHT_TRACE_COLORS[3], "#c2185b")
+        self.assertNotEqual(self.window.LIGHT_TRACE_COLORS[1], self.window.LIGHT_TRACE_COLORS[3])
+        self.assertEqual(first_curve.opts["pen"].color().name(), "#1f77b4")
+        self.assertEqual(second_curve.opts["pen"].color().name(), "#d95f02")
+        self.assertNotEqual(first_curve.opts["pen"].color().name(), self.window.TRACE_COLORS[0])
 
     def test_legacy_left_panel_avoids_gray_background_black_text(self):
         stylesheet = self.window.left_panel.styleSheet()
@@ -575,6 +616,27 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(self.window._channel_full_scale_focus["top"], "ai1")
         self.assertAlmostEqual(refreshed_y_range[0], first_y_range[0], places=6)
         self.assertAlmostEqual(refreshed_y_range[1], first_y_range[1], places=6)
+
+    def test_inst_start_keeps_frequency_plots_auto_fit_instead_of_legacy_floor(self):
+        measurement = self._measurement()
+        measurement.spectra["f"] = np.array([1.0, 2.0, 4.0, 8.0], dtype=float)
+        measurement.spectra["autospectrum"] = {
+            "ai0": np.array([1e-9, 2e-4, 3e-4, 2e-4], dtype=float)
+        }
+        self.controller.state.measurement = measurement
+        self.window.bottom_display_combo.setCurrentText("aspec")
+        self.window.bottom_value_mode_combo.setCurrentText("Log rms^2/Hz")
+        self.window.bottom_xscale_combo.setCurrentText("log")
+        self.window._manual_y_ranges["bottom"] = (1e-12, 1.0)
+
+        self.window._clear_runtime_axis_ranges()
+        self.window._plot_measurement(measurement)
+
+        _x_range, y_range = self.window.bottom_plot.viewRange()
+        self.assertTrue(self.window._auto_y_follow_visible_x["bottom"])
+        self.assertIsNone(self.window._manual_y_ranges["bottom"])
+        self.assertGreater(y_range[0], -10.0)
+        self.assertLess(y_range[0], -7.0)
 
     def test_trace_selection_does_not_change_channel_setup_current_channel(self):
         measurement = self._measurement()
@@ -1301,7 +1363,7 @@ class MainWindowTests(unittest.TestCase):
             self.assertFalse(controller.aborted)
             self.assertTrue(controller.stopped)
             self.assertTrue((output_dir / "manifest.json").exists())
-            self.assertTrue((output_dir / "segment_0001.dat").exists())
+            self.assertTrue((output_dir / "segment_0001.zip").exists())
 
     def test_continuous_recording_worker_creates_files_before_first_frame(self):
         class _Backend:
@@ -1336,7 +1398,7 @@ class MainWindowTests(unittest.TestCase):
             worker.run()
 
             self.assertTrue((output_dir / "manifest.json").exists())
-            self.assertTrue((output_dir / "segment_0001.dat").exists())
+            self.assertTrue((output_dir / "segment_0001.zip").exists())
 
     def test_acquisition_tab_contains_legacy_style_trigger_panel(self):
         groups = {
@@ -1369,10 +1431,10 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(self.window.trigger_mode_combo.currentData(), "Off (Free Run)")
         self.assertEqual(self.window.trigger_source_combo.currentText(), "Ch1")
         self.assertEqual(self.window.trigger_level_percent_combo.currentText(), "0%")
-        self.assertEqual(self.window.trigger_level_percent_combo.count(), 17)
+        self.assertEqual(self.window.trigger_level_percent_combo.count(), 9)
         self.assertEqual(self.window.trigger_level_percent_combo.itemText(0), "71%")
-        self.assertEqual(self.window.trigger_level_percent_combo.itemText(16), "-71%")
-        self.assertEqual(self.window.trigger_slope_button.text(), "Pos")
+        self.assertEqual(self.window.trigger_level_percent_combo.itemText(8), "0%")
+        self.assertFalse(hasattr(self.window, "trigger_slope_button"))
         self.assertEqual(self.window.trigger_enable.text(), "Arm")
         self.assertFalse(self.window.trigger_enable.isEnabled())
         session = self.window._read_session_from_widgets()
@@ -1382,8 +1444,6 @@ class MainWindowTests(unittest.TestCase):
         self.window.trigger_mode_combo.setCurrentText("1st Frame")
         self.window.trigger_source_combo.setCurrentText("Ch2")
         self.window.trigger_level_percent_combo.setCurrentText("35%")
-        self.window.trigger_slope_button.click()
-        self.assertEqual(self.window.trigger_slope_combo.currentText(), "Neg")
 
         session = self.window._read_session_from_widgets()
 
@@ -1392,7 +1452,7 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(session.acquisition.trigger.source, "ai1")
         self.assertEqual(session.acquisition.trigger.level_percent, 35.0)
         self.assertAlmostEqual(session.acquisition.trigger.level, 3.5)
-        self.assertEqual(session.acquisition.trigger.slope, "falling")
+        self.assertEqual(session.acquisition.trigger.slope, "either")
         self.window.trigger_mode_combo.setCurrentText("Manual Arm")
         session = self.window._read_session_from_widgets()
         self.assertFalse(session.acquisition.trigger.enabled)
@@ -1414,6 +1474,9 @@ class MainWindowTests(unittest.TestCase):
         self.assertAlmostEqual(session.acquisition.modal.double_hit_delay_fraction, 0.2)
 
     def test_legacy_left_controls_have_real_bindings_or_are_disabled(self):
+        self.window.bandwidth_combo.setCurrentText("BW=0.39KHz")
+        self.assertAlmostEqual(self.window.sample_rate_edit.value(), 1000.0)
+
         self.window.bandwidth_combo.setCurrentText("BW=2.0KHz")
         self.assertEqual(self.window.sample_rate_edit.value(), 5120.0)
 
@@ -1782,8 +1845,9 @@ class MainWindowTests(unittest.TestCase):
         self.assertIsNotNone(viewer)
         self.assertIsNone(viewer.parent())
         self.assertFalse(viewer.isModal())
-        self.assertEqual(viewer.dataset_list.count(), 1)
-        self.assertIn("Current Measurement", viewer.dataset_list.item(0).text())
+        self.assertEqual(len(viewer._datasets), 1)
+        self.assertEqual(viewer._datasets[0].name, "Current Measurement")
+        self.assertGreater(viewer.series_list.count(), 0)
         viewer.close()
 
     def test_current_plot_window_context_menu_supports_data_tips(self):
@@ -2155,6 +2219,35 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(self.window.bottom_value_mode_combo.currentText(), "dB rms")
         self.assertEqual(self.window.bottom_value_strip_combo.currentText(), "dB rms")
 
+    def test_legacy_display_state_can_restore_advanced_modes(self):
+        measurement = self._measurement()
+        measurement.metadata["legacy_display_state"] = {
+            "layout": "dual",
+            "top": {
+                "mode": "fft",
+                "value_mode": "dB",
+                "xscale": "linear",
+                "trace_names": ["ai0"],
+            },
+            "bottom": {
+                "mode": "cross_spectrum",
+                "value_mode": "phase",
+                "xscale": "log",
+                "trace_names": ["ai0->ai1"],
+            },
+        }
+        self.controller.state.measurement = measurement
+
+        self.window._apply_display_defaults_for_measurement(measurement)
+
+        self.assertEqual(self.window._effective_display_mode_for_key("top"), "fft")
+        self.assertEqual(self.window.top_display_combo.currentText(), "fft")
+        self.assertEqual(self.window.top_value_mode_combo.currentText(), "dB")
+        self.assertEqual(self.window.top_display_strip_combo.currentText(), "fft")
+        self.assertEqual(self.window._effective_display_mode_for_key("bottom"), "cross_spectrum")
+        self.assertEqual(self.window.bottom_display_combo.currentText(), "cspec")
+        self.assertEqual(self.window.bottom_value_mode_combo.currentText(), "phase")
+
     def test_legacy_trace_names_match_channel_labels_or_internal_names(self):
         measurement = self._measurement()
         measurement.metadata["legacy_display_state"] = {
@@ -2239,14 +2332,44 @@ class MainWindowTests(unittest.TestCase):
         self.assertGreater(shown_sizes[0], 0)
 
     def test_display_strip_syncs_with_sidebar_controls(self):
-        self.window.top_display_strip_combo.setCurrentText("fft")
-        self.assertEqual(self.window.top_display_combo.currentText(), "fft")
+        self.assertNotIn(
+            "Advanced",
+            [
+                self.window.top_display_combo.itemText(index)
+                for index in range(self.window.top_display_combo.count())
+            ],
+        )
         self.window.bottom_display_combo.setCurrentText("coh")
         self.assertEqual(self.window.bottom_display_strip_combo.currentText(), "coh")
-        self.assertEqual(self.window.top_value_mode_combo.currentText(), "real")
         self.window.top_display_combo.setCurrentText("aspec")
         self.assertIn("pk", [self.window.top_value_mode_combo.itemText(i) for i in range(self.window.top_value_mode_combo.count())])
         self.assertIn("rms/rt(Hz)", [self.window.top_value_mode_combo.itemText(i) for i in range(self.window.top_value_mode_combo.count())])
+
+    def test_top_display_menu_advanced_items_apply_to_active_plot(self):
+        self.window._set_active_plot_key("bottom")
+        self.window._set_active_plot_display_mode("fft")
+
+        self.assertEqual(self.window._effective_display_mode_for_key("bottom"), "fft")
+        self.assertEqual(self.window.bottom_display_combo.currentText(), "fft")
+        self.assertEqual(self.window.bottom_value_mode_combo.currentText(), "real")
+        self.assertNotIn(
+            "fft",
+            [
+                self.window.top_display_combo.itemText(index)
+                for index in range(self.window.top_display_combo.count())
+            ],
+        )
+
+        self.window.bottom_display_combo.setCurrentText("coh")
+
+        self.assertEqual(self.window._effective_display_mode_for_key("bottom"), "coherence")
+        self.assertNotIn(
+            "fft",
+            [
+                self.window.bottom_display_combo.itemText(index)
+                for index in range(self.window.bottom_display_combo.count())
+            ],
+        )
 
     def test_aspec_extended_value_modes_plot(self):
         measurement = self._measurement()
@@ -2336,13 +2459,23 @@ class MainWindowTests(unittest.TestCase):
             ["real", "mag", "imag", "dB", "log mag", "phase", "phase u", "nyquist"],
         )
 
-        self.window.top_display_combo.setCurrentText("cspec")
-        cspec_labels = [
-            self.window.top_value_mode_combo.itemText(index)
-            for index in range(self.window.top_value_mode_combo.count())
+        self.assertNotIn(
+            "cspec",
+            [
+                self.window.top_display_combo.itemText(index)
+                for index in range(self.window.top_display_combo.count())
+            ],
+        )
+        self.window._set_active_plot_display_mode("cross_spectrum", key="top")
+        self.assertEqual(self.window._effective_display_mode_for_key("top"), "cross_spectrum")
+        self.assertEqual(self.window._analysis_value_mode_for_key("top"), "real")
+
+        direct_cspec_labels = [
+            label
+            for label, _value in self.window._value_mode_labels("cross_spectrum")
         ]
         self.assertEqual(
-            cspec_labels,
+            direct_cspec_labels,
             ["real", "mag", "imag", "dB", "log mag", "phase", "phase u", "nyquist"],
         )
         self.window.top_display_combo.setCurrentText("aspec")
@@ -2364,6 +2497,11 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(self.window.top_value_strip_combo.currentText(), "Log rms^2/Hz")
         self.assertEqual(self.window.top_yscale_combo.currentText(), "log")
 
+        self.window.top_display_combo.setCurrentText("CumPSD")
+        self.assertEqual(self.window.top_value_mode_combo.currentText(), "3 sigma")
+        self.assertEqual(self.window.top_xscale_combo.currentText(), "log")
+        self.assertEqual(self.window.top_yscale_combo.currentText(), "log")
+
     def test_axis_scales_follow_matlab_display_defaults(self):
         self.window.top_display_combo.setCurrentText("xfer")
         self.assertEqual(self.window.top_xscale_combo.currentText(), "log")
@@ -2372,7 +2510,7 @@ class MainWindowTests(unittest.TestCase):
         self.window.top_value_mode_combo.setCurrentText("log mag")
         self.assertEqual(self.window.top_yscale_combo.currentText(), "log")
 
-        self.window.top_display_combo.setCurrentText("fft")
+        self.window._set_active_plot_display_mode("fft", key="top")
         self.assertEqual(self.window.top_xscale_combo.currentText(), "linear")
         self.assertEqual(self.window.top_yscale_combo.currentText(), "linear")
 
@@ -2429,6 +2567,35 @@ class MainWindowTests(unittest.TestCase):
             np.maximum(((3.0 / 6.0) ** 2) * measurement.spectra["autospectrum"]["ai0"], 1e-307)
         )
         np.testing.assert_allclose(cached_y, expected)
+
+    def test_main_display_adds_cumpsd_foundation_and_dynamic_stiffness(self):
+        measurement = self._measurement()
+        measurement.spectra["f"] = np.array([1.0, 2.0, 4.0, 8.0, 16.0, 31.5, 63.0], dtype=float)
+        measurement.spectra["autospectrum"] = {
+            "ai0": np.linspace(1.0, 7.0, 7, dtype=float),
+            "ai1": np.linspace(2.0, 8.0, 7, dtype=float),
+        }
+        measurement.frf = {"ai0->ai1": np.full(7, 0.01 + 0.0j, dtype=complex)}
+        self.controller.state.measurement = measurement
+
+        self.window.top_display_combo.setCurrentText("CumPSD")
+        self.window._plot_measurement(measurement)
+        self.assertIn("ai0", self.window._last_plot_cache["top"])
+        cum_x, cum_y = self.window._last_plot_cache["top"]["ai0"]
+        self.assertGreater(cum_x.size, 1)
+        self.assertTrue(np.all(cum_y >= 0.0))
+
+        self.window.top_display_combo.setCurrentText("地基振动")
+        self.window._plot_measurement(measurement)
+        vib_x, vib_y = self.window._last_plot_cache["top"]["ai0"]
+        self.assertGreater(vib_x.size, 0)
+        self.assertTrue(np.all(vib_y > 0.0))
+
+        self.window.bottom_display_combo.setCurrentText("动刚度")
+        self.window._plot_measurement(measurement)
+        stiff_x, stiff_y = self.window._last_plot_cache["bottom"]["ai0->ai1"]
+        self.assertGreater(stiff_x.size, 1)
+        self.assertTrue(np.all(stiff_y > 0.0))
 
     def test_live_time_display_applies_channel_engineering_scale(self):
         measurement = self._measurement()
@@ -2585,6 +2752,25 @@ class MainWindowTests(unittest.TestCase):
         self.assertGreater(x_range[1], 1.5)
         self.assertLess(y_range[0], float(np.min(expected_y)))
         self.assertGreater(y_range[1], float(np.max(expected_y)))
+
+    def test_log_auto_range_handles_flat_small_values_without_huge_floor(self):
+        measurement = self._measurement()
+        measurement.spectra["f"] = np.array([10.0, 20.0, 40.0, 80.0], dtype=float)
+        measurement.spectra["autospectrum"] = {
+            "ai0": np.full(4, 2.0e-8, dtype=float)
+        }
+        self.controller.state.measurement = measurement
+        self.window.top_display_combo.setCurrentText("aspec")
+        self.window.top_value_mode_combo.setCurrentText("Log rms^2/Hz")
+        self.window.top_xscale_combo.setCurrentText("log")
+
+        self.window._plot_measurement(measurement)
+
+        x_range, y_range = self.window.top_plot.viewRange()
+        self.assertGreater(x_range[0], 0.9)
+        self.assertLess(x_range[1], 2.0)
+        self.assertGreater(y_range[0], -9.0)
+        self.assertLess(y_range[1], -7.0)
 
     def test_log_y_legacy_scope_uses_legacy_floor_instead_of_data_minimum(self):
         measurement = self._measurement()
