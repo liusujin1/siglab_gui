@@ -15,7 +15,7 @@ from PySide6 import QtCore, QtWidgets
 
 from python_vna.controller import VnaController
 from python_vna.continuous_recording import RecordingStatus
-from python_vna.daq.base import BackendFrame
+from python_vna.daq.base import BackendCapability, BackendDevice, BackendFrame
 from python_vna.models import MeasurementSet, SavedSession
 from python_vna.storage import default_session_config
 import python_vna.ui.main_window as main_window_module
@@ -23,7 +23,11 @@ from python_vna.ui.main_window import AcquisitionWorker, MCSetupDialog, MainWind
 
 
 class _DummyBackend:
+    def __init__(self):
+        self.list_calls = 0
+
     def list_devices(self):
+        self.list_calls += 1
         return []
 
     def close(self):
@@ -66,7 +70,8 @@ class MainWindowTests(unittest.TestCase):
         )
         self._settings_env_patcher.start()
         session = default_session_config()
-        self.controller = VnaController(_DummyBackend(), session)
+        self.backend = _DummyBackend()
+        self.controller = VnaController(self.backend, session)
         self.window = MainWindow(self.controller, session)
 
     def tearDown(self):
@@ -110,23 +115,24 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(self.window.top_display_strip_combo.currentText(), "y(t)")
         self.assertEqual(self.window.bottom_display_strip_combo.currentText(), "xfer")
         self.assertEqual(self.window.bottom_value_mode_combo.currentText(), "dB")
-        self.assertEqual(self.window.avg_button.text(), "Avg")
+        self.assertEqual(self.window.avg_button.text(), "平均")
         self.assertTrue(self.window.avg_button.isEnabled())
-        self.assertEqual(self.window.record_button.text(), "Record")
+        self.assertEqual(self.window.record_button.text(), "连续记录")
         self.assertTrue(self.window.record_button.isEnabled())
         self.assertEqual(self.window.sample_rate_edit.value(), 2560.0)
         self.assertEqual(self.window.average_count_edit.value(), 20)
-        self.assertEqual(self.window.refresh_devices_button.text(), "Refresh")
-        self.assertEqual(self.window.save_session_button.text(), "Save")
-        self.assertEqual(self.window.load_session_button.text(), "Load")
-        self.assertEqual(self.window.import_legacy_button.text(), "Import")
-        self.assertEqual(self.window.open_vna_button.text(), "Open")
-        self.assertEqual(self.window.toolbar_data_tip_button.text(), "Data Tip")
+        self.assertEqual(self.window.refresh_devices_button.text(), "刷新")
+        self.assertEqual(self.window.save_session_button.text(), "保存")
+        self.assertEqual(self.window.load_session_button.text(), "加载")
+        self.assertEqual(self.window.import_legacy_button.text(), "导入")
+        self.assertEqual(self.window.open_vna_button.text(), "打开")
+        self.assertEqual(self.window.toolbar_data_tip_button.text(), "数据标注")
         self.assertIsInstance(self.window.toolbar_data_tip_button, QtWidgets.QPushButton)
-        self.assertEqual(self.window.start_button.text(), "Inst")
+        self.assertEqual(self.window.start_button.text(), "瞬时")
         self.assertEqual(self.window.bandwidth_combo.itemText(0), "BW=0.39KHz")
         self.assertIn("BW=0.50KHz", [self.window.bandwidth_combo.itemText(index) for index in range(self.window.bandwidth_combo.count())])
         self.assertIsNotNone(self.window.mc_setup_action)
+        self.assertEqual(self.backend.list_calls, 0)
         available = self.window._screen_available_geometry()
         self.assertLessEqual(self.window.width(), available.width())
         self.assertLessEqual(self.window.height(), available.height())
@@ -138,25 +144,25 @@ class MainWindowTests(unittest.TestCase):
         ]
         self.assertEqual(
             legacy_titles,
-            ["CHANNEL SETUP", "FREQUENCY RNG", "PROCESSING", "TRIGGER"],
+            ["通道设置", "频率范围", "处理", "触发"],
         )
         self.assertEqual(
             [self.window.top_control_tabs.tabText(index) for index in range(self.window.top_control_tabs.count())],
-            ["Excitation", "Modal", "Display"],
+            ["激励", "模态", "显示"],
         )
         menu_actions = {
             action.text().replace("&", ""): action for action in self.window.menuBar().actions()
         }
-        self.assertIn("File", menu_actions)
-        self.assertIn("Setup", menu_actions)
-        self.assertIn("Modal", menu_actions)
-        self.assertIn("Analysis", menu_actions)
-        self.assertIsNone(menu_actions["Setup"].menu())
-        self.assertIsNone(menu_actions["Modal"].menu())
-        self.assertIsNone(menu_actions["Analysis"].menu())
+        self.assertIn("文件", menu_actions)
+        self.assertIn("设置", menu_actions)
+        self.assertIn("模态", menu_actions)
+        self.assertIn("分析", menu_actions)
+        self.assertIsNone(menu_actions["设置"].menu())
+        self.assertIsNone(menu_actions["模态"].menu())
+        self.assertIsNone(menu_actions["分析"].menu())
         self.assertIsNot(self.window.excitation_setup_page, self.window.modal_setup_page)
         self.assertNotIn("Units", menu_actions)
-        file_menu = menu_actions["File"].menu()
+        file_menu = menu_actions["文件"].menu()
         self.assertIsNotNone(file_menu)
         file_action_texts = [
             action.text().replace("&", "")
@@ -165,26 +171,26 @@ class MainWindowTests(unittest.TestCase):
         ]
         self.assertEqual(
             file_action_texts,
-            ["Open VNA", "Save VNA", "Save to Default", "Exit"],
+            ["打开 VNA", "保存 VNA", "保存为默认", "退出"],
         )
-        display_menu = menu_actions["Display"].menu()
+        display_menu = menu_actions["显示"].menu()
         self.assertIsNotNone(display_menu)
         display_action_texts = {
             action.text().replace("&", "")
             for action in display_menu.actions()
             if not action.isSeparator()
         }
-        self.assertIn("Mark", display_action_texts)
-        self.assertIn("Overlay Upper", display_action_texts)
-        self.assertIn("Overlay Lower", display_action_texts)
-        self.assertIn("Clear Overlays", display_action_texts)
-        self.assertIn("Open Current Plots", display_action_texts)
-        self.assertIn("Light Theme", display_action_texts)
-        self.assertIn("Advanced Plot", display_action_texts)
+        self.assertIn("标记", display_action_texts)
+        self.assertIn("叠加上图", display_action_texts)
+        self.assertIn("叠加下图", display_action_texts)
+        self.assertIn("清除叠加", display_action_texts)
+        self.assertIn("打开当前图像", display_action_texts)
+        self.assertIn("浅色主题", display_action_texts)
+        self.assertIn("高级图像", display_action_texts)
         advanced_action = next(
             action
             for action in display_menu.actions()
-            if action.text().replace("&", "") == "Advanced Plot"
+            if action.text().replace("&", "") == "高级图像"
         )
         self.assertIsNotNone(advanced_action.menu())
         self.assertEqual(
@@ -217,7 +223,60 @@ class MainWindowTests(unittest.TestCase):
             button.text()
             for button in self.window.findChild(QtWidgets.QWidget, "topToolbar").findChildren(QtWidgets.QPushButton)
         }
-        self.assertNotIn("Refresh", toolbar_button_texts)
+        self.assertNotIn("刷新", toolbar_button_texts)
+
+    def test_async_device_refresh_populates_devices_without_init_blocking(self):
+        devices = [
+            BackendDevice(
+                name="Dev1",
+                product_type="NI USB-4431",
+                ai_channels=["Dev1/ai0"],
+                ao_channels=["Dev1/ao0"],
+                capability=BackendCapability(
+                    supports_iepe=True,
+                    supports_output=True,
+                    supports_analog_trigger=True,
+                    supports_pretrigger=True,
+                ),
+            )
+        ]
+
+        self.window._handle_devices_ready(devices)
+
+        self.assertEqual(self.window.device_combo.count(), 1)
+        self.assertEqual(self.window.device_combo.itemData(0), "Dev1")
+        self.assertIn("找到 1 个设备", self.window.statusBar().currentMessage())
+
+    def test_startup_session_load_failure_keeps_default_window_alive(self):
+        with tempfile.NamedTemporaryFile(suffix=".vna") as tmpfile, mock.patch.object(
+            main_window_module,
+            "load_legacy_vna",
+            side_effect=RuntimeError("bad default"),
+        ):
+            self.window.load_startup_session_async(Path(tmpfile.name))
+            worker = self.window._startup_session_worker
+            self.assertIsNotNone(worker)
+            worker.run()
+            QtWidgets.QApplication.processEvents()
+
+        self.assertIn("默认设置未加载", self.window.statusBar().currentMessage())
+        self.assertEqual(self.window.windowTitle(), "VNA - USB-4431")
+
+    def test_loaded_startup_session_applies_config_and_measurement(self):
+        imported = SavedSession(
+            config=default_session_config(),
+            measurement=self._measurement(),
+            source_path=Path("D:/fake/default.vna"),
+        )
+        imported.config.title = "Loaded"
+
+        self.window._apply_loaded_startup_session(imported)
+
+        self.assertIs(self.window.controller.state.measurement, imported.measurement)
+        self.assertEqual(self.window._current_source_path, imported.source_path)
+        self.assertIn("default.vna", self.window.windowTitle())
+
+    def test_toolbar_buttons_fit_after_fast_startup(self):
         toolbar_label_texts = {
             label.text()
             for label in self.window.findChild(QtWidgets.QWidget, "topToolbar").findChildren(QtWidgets.QLabel)
@@ -241,7 +300,7 @@ class MainWindowTests(unittest.TestCase):
             for index in range(toolbar.layout().count())
             if isinstance(toolbar.layout().itemAt(index).widget(), (QtWidgets.QPushButton, QtWidgets.QToolButton))
         ]
-        self.assertEqual([widget.text() for widget in toolbar_widgets[:4]], ["Controls", "Open", "Save", "Data Tip"])
+        self.assertEqual([widget.text() for widget in toolbar_widgets[:4]], ["控件", "打开", "保存", "数据标注"])
         self.assertEqual(self.window.top_trace_list.count(), 4)
         self.assertEqual(self.window.bottom_trace_list.count(), 3)
         self.assertEqual(
@@ -357,6 +416,9 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(dialog.table.rowCount(), self.window.channel_table.rowCount())
         self.assertLessEqual(dialog.width(), 930)
         self.assertLessEqual(dialog.height(), 210)
+        self.assertEqual(dialog.windowTitle(), "通道设置")
+        self.assertEqual(dialog.apply_button.text(), "应用")
+        self.assertEqual(dialog.close_button.text(), "关闭")
         self.assertEqual(
             dialog.table.horizontalScrollBarPolicy(),
             QtCore.Qt.ScrollBarAlwaysOff,
@@ -930,7 +992,9 @@ class MainWindowTests(unittest.TestCase):
         try:
             main_window_module.AcquisitionWorker = _Worker
             main_window_module.QtCore.QThread = lambda _parent=None: _Thread()
-            self.window.average_mode_combo.setCurrentText("linear")
+            average_index = self.window.average_mode_combo.findData("linear")
+            self.assertGreaterEqual(average_index, 0)
+            self.window.average_mode_combo.setCurrentIndex(average_index)
             self.window.average_count_edit.setValue(20)
 
             self.window._start_average_acquisition()
@@ -1407,13 +1471,13 @@ class MainWindowTests(unittest.TestCase):
         }
 
         self.assertEqual(self.window.left_panel.objectName(), "legacyLeftPanel")
-        self.assertNotIn("TRIGGER", groups)
+        self.assertNotIn("触发", groups)
         legacy_titles = [
             label.text()
             for label in self.window.left_panel.findChildren(QtWidgets.QLabel)
             if label.objectName() == "legacyPanelTitle"
         ]
-        self.assertIn("TRIGGER", legacy_titles)
+        self.assertIn("触发", legacy_titles)
         self.assertEqual(
             [
                 self.window.trigger_mode_combo.itemData(index)
@@ -1427,7 +1491,7 @@ class MainWindowTests(unittest.TestCase):
                 "1st-Manual Arm",
             ],
         )
-        self.assertEqual(self.window.trigger_mode_combo.currentText(), "Free Run")
+        self.assertEqual(self.window.trigger_mode_combo.currentText(), "自由运行")
         self.assertEqual(self.window.trigger_mode_combo.currentData(), "Off (Free Run)")
         self.assertEqual(self.window.trigger_source_combo.currentText(), "Ch1")
         self.assertEqual(self.window.trigger_level_percent_combo.currentText(), "0%")
@@ -1435,13 +1499,15 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(self.window.trigger_level_percent_combo.itemText(0), "71%")
         self.assertEqual(self.window.trigger_level_percent_combo.itemText(8), "0%")
         self.assertFalse(hasattr(self.window, "trigger_slope_button"))
-        self.assertEqual(self.window.trigger_enable.text(), "Arm")
+        self.assertEqual(self.window.trigger_enable.text(), "预备")
         self.assertFalse(self.window.trigger_enable.isEnabled())
         session = self.window._read_session_from_widgets()
         self.assertFalse(session.acquisition.trigger.enabled)
         self.assertEqual(session.acquisition.trigger.source, "immediate")
 
-        self.window.trigger_mode_combo.setCurrentText("1st Frame")
+        self.window.trigger_mode_combo.setCurrentIndex(
+            self.window.trigger_mode_combo.findData("1st Frame")
+        )
         self.window.trigger_source_combo.setCurrentText("Ch2")
         self.window.trigger_level_percent_combo.setCurrentText("35%")
 
@@ -1453,13 +1519,15 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(session.acquisition.trigger.level_percent, 35.0)
         self.assertAlmostEqual(session.acquisition.trigger.level, 3.5)
         self.assertEqual(session.acquisition.trigger.slope, "either")
-        self.window.trigger_mode_combo.setCurrentText("Manual Arm")
+        self.window.trigger_mode_combo.setCurrentIndex(
+            self.window.trigger_mode_combo.findData("Manual Arm")
+        )
         session = self.window._read_session_from_widgets()
         self.assertFalse(session.acquisition.trigger.enabled)
         self.assertEqual(session.acquisition.trigger.source, "immediate")
         self.assertTrue(self.window.trigger_enable.isEnabled())
         self.window.trigger_enable.click()
-        self.assertEqual(self.window.trigger_enable.text(), "Armed")
+        self.assertEqual(self.window.trigger_enable.text(), "已预备")
         session = self.window._read_session_from_widgets()
         self.assertTrue(session.acquisition.trigger.enabled)
         self.assertEqual(session.acquisition.trigger.mode, "Manual Arm")
@@ -1480,18 +1548,24 @@ class MainWindowTests(unittest.TestCase):
         self.window.bandwidth_combo.setCurrentText("BW=2.0KHz")
         self.assertEqual(self.window.sample_rate_edit.value(), 5120.0)
 
-        self.window.reject_combo.setCurrentText("Double Hit Reject")
+        self.window.reject_combo.setCurrentIndex(
+            self.window.reject_combo.findData("Double Hit Reject")
+        )
         session = self.window._read_session_from_widgets()
         self.assertTrue(session.acquisition.modal.reject_double_hit)
         self.assertFalse(session.acquisition.modal.reject_overload)
         self.assertFalse(session.acquisition.modal.enabled)
 
-        self.window.reject_combo.setCurrentText("Overload Reject")
+        self.window.reject_combo.setCurrentIndex(
+            self.window.reject_combo.findData("Overload Reject")
+        )
         session = self.window._read_session_from_widgets()
         self.assertFalse(session.acquisition.modal.reject_double_hit)
         self.assertTrue(session.acquisition.modal.reject_overload)
 
-        self.window.reject_combo.setCurrentText("Both Reject")
+        self.window.reject_combo.setCurrentIndex(
+            self.window.reject_combo.findData("Both Reject")
+        )
         session = self.window._read_session_from_widgets()
         self.assertTrue(session.acquisition.modal.reject_double_hit)
         self.assertTrue(session.acquisition.modal.reject_overload)
@@ -1505,7 +1579,7 @@ class MainWindowTests(unittest.TestCase):
         self.assertFalse(self.window.aa_filters_button.isEnabled())
         self.assertTrue(self.window.overlap_combo.isEnabled())
 
-        self.window.overlap_combo.setCurrentText("Max Overlap")
+        self.window.overlap_combo.setCurrentIndex(self.window.overlap_combo.findData(100))
         session = self.window._read_session_from_widgets()
         self.assertEqual(session.acquisition.overlap_percent, 100)
 
@@ -1515,7 +1589,8 @@ class MainWindowTests(unittest.TestCase):
 
         self.window._load_session_to_widgets()
 
-        self.assertEqual(self.window.reject_combo.currentText(), "Both Reject")
+        self.assertEqual(self.window.reject_combo.currentText(), "全部剔除")
+        self.assertEqual(self.window.reject_combo.currentData(), "Both Reject")
 
     def test_modal_parameters_match_legacy_percent_ranges(self):
         self.assertEqual(self.window.double_hit_threshold_edit.minimum(), 0.01)
@@ -1540,6 +1615,7 @@ class MainWindowTests(unittest.TestCase):
 
         dialog = captured["dialog"]
         stylesheet = dialog.styleSheet()
+        self.assertEqual(dialog.windowTitle(), "模态参数")
         self.assertNotIn("background: #d0d0d0", stylesheet)
         self.assertNotIn("color: #000000", stylesheet.split("QDoubleSpinBox", 1)[0])
         self.assertIn("QDoubleSpinBox::up-button", stylesheet)
@@ -1566,6 +1642,7 @@ class MainWindowTests(unittest.TestCase):
         dialog = captured["dialog"]
         self.assertGreaterEqual(dialog.minimumWidth(), self.window.excitation_setup_page.sizeHint().width() + 32)
         self.assertGreaterEqual(dialog.minimumHeight(), 190)
+        self.assertEqual(dialog.windowTitle(), "设置")
         clipped_children = [
             child
             for child in self.window.excitation_setup_page.findChildren(QtWidgets.QWidget)
@@ -2081,7 +2158,8 @@ class MainWindowTests(unittest.TestCase):
 
         self.assertEqual(self.window.sample_rate_edit.value(), 2560.0)
         self.assertEqual(self.window.frame_size_edit.value(), 4096)
-        self.assertEqual(self.window.average_mode_combo.currentText(), "linear")
+        self.assertEqual(self.window.average_mode_combo.currentText(), "线性平均")
+        self.assertEqual(self.window.average_mode_combo.currentData(), "linear")
         self.assertEqual(self.window.average_count_edit.value(), 20)
         self.assertEqual(self.window.window_combo.currentText(), "Hanning")
         self.assertEqual(self.window.trigger_mode_combo.currentData(), "Off (Free Run)")

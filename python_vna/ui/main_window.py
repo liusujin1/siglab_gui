@@ -16,6 +16,7 @@ from python_vna.continuous_recording import (
     RecordingStatus,
     recording_directory_name,
 )
+from python_vna.daq.base import BackendDevice
 from python_vna.display_transforms import (
     align_vector_to_values,
     legacy_frequency_int_vector,
@@ -674,7 +675,7 @@ class MCSetupDialog(QtWidgets.QDialog):
     def __init__(self, main_window: "MainWindow") -> None:
         super().__init__(main_window)
         self.main_window = main_window
-        self.setWindowTitle("MC Setup")
+        self.setWindowTitle("通道设置")
         self.setFixedWidth(930)
         self.setStyleSheet(main_window._mc_setup_dialog_stylesheet())
         layout = QtWidgets.QVBoxLayout(self)
@@ -716,13 +717,13 @@ class MCSetupDialog(QtWidgets.QDialog):
         layout.addWidget(self.table)
 
         bottom = QtWidgets.QHBoxLayout()
-        self.set_all_checkbox = QtWidgets.QCheckBox("Set Ch 3 thru Ch 4 =")
+        self.set_all_checkbox = QtWidgets.QCheckBox("设置 Ch 3 至 Ch 4 =")
         self.copy_source_combo = QtWidgets.QComboBox()
         self.copy_source_combo.addItems(["Ch 1", "Ch 2", "Ch 3", "Ch 4"])
-        self.apply_button = QtWidgets.QPushButton("Apply")
-        self.undo_button = QtWidgets.QPushButton("Undo")
-        self.save_as_button = QtWidgets.QPushButton("Save As")
-        self.close_button = QtWidgets.QPushButton("Close")
+        self.apply_button = QtWidgets.QPushButton("应用")
+        self.undo_button = QtWidgets.QPushButton("撤销")
+        self.save_as_button = QtWidgets.QPushButton("另存为")
+        self.close_button = QtWidgets.QPushButton("关闭")
         bottom.addWidget(self.set_all_checkbox)
         bottom.addWidget(self.copy_source_combo)
         bottom.addStretch(1)
@@ -1110,6 +1111,48 @@ class ContinuousRecordingWorker(QtCore.QObject):
         )
 
 
+class DeviceRefreshWorker(QtCore.QObject):
+    devices_ready = QtCore.Signal(object)
+    error = QtCore.Signal(str)
+    finished = QtCore.Signal()
+
+    def __init__(self, controller: VnaController) -> None:
+        super().__init__()
+        self._controller = controller
+
+    @QtCore.Slot()
+    def run(self) -> None:
+        try:
+            self.devices_ready.emit(self._controller.list_devices())
+        except Exception as exc:
+            self.error.emit(str(exc))
+        finally:
+            self.finished.emit()
+
+
+class StartupSessionWorker(QtCore.QObject):
+    session_ready = QtCore.Signal(object)
+    skipped = QtCore.Signal(str)
+    error = QtCore.Signal(str)
+    finished = QtCore.Signal()
+
+    def __init__(self, path: Path) -> None:
+        super().__init__()
+        self._path = Path(path)
+
+    @QtCore.Slot()
+    def run(self) -> None:
+        try:
+            if not self._path.exists():
+                self.skipped.emit(f"未找到默认设置：{self._path}")
+                return
+            self.session_ready.emit(load_legacy_vna(self._path))
+        except Exception as exc:
+            self.error.emit(str(exc))
+        finally:
+            self.finished.emit()
+
+
 class MainWindow(QtWidgets.QMainWindow):
     DEFAULT_IEPE_CURRENT_MA = 2.1
     DEFAULT_EU_PER_VOLT = 1.0
@@ -1166,11 +1209,34 @@ class MainWindow(QtWidgets.QMainWindow):
                 return value
         return "boxcar"
     TRIGGER_MODE_LABELS = {
-        "Off (Free Run)": "Free Run",
-        "Every Frame": "Every Frame",
-        "1st Frame": "1st Frame",
-        "Manual Arm": "Manual Arm",
-        "1st-Manual Arm": "1st-Manual",
+        "Off (Free Run)": "自由运行",
+        "Every Frame": "每帧触发",
+        "1st Frame": "首帧触发",
+        "Manual Arm": "手动预备",
+        "1st-Manual Arm": "首帧手动",
+    }
+    REJECT_MODE_ITEMS = [
+        ("不剔除", "No Reject"),
+        ("过载剔除", "Overload Reject"),
+        ("双击剔除", "Double Hit Reject"),
+        ("全部剔除", "Both Reject"),
+    ]
+    OVERLAP_MODE_ITEMS = [
+        ("无重叠", 0),
+        ("50%重叠", 50),
+        ("最大重叠", 100),
+    ]
+    AVERAGE_MODE_ITEMS = [
+        ("线性平均", "linear"),
+        ("指数平均", "exponential"),
+        ("峰值保持", "peak"),
+        ("不平均", "off"),
+    ]
+    TOP_SETUP_TITLES = {
+        "Setup": "设置",
+        "Excitation": "激励设置",
+        "Modal": "模态设置",
+        "Display": "显示设置",
     }
     TRIGGER_LEVEL_PERCENT_VALUES = [
         round(abs(level * 100.0 * np.sqrt(2.0) / (32.0 / 2.0)), 6)
@@ -1419,6 +1485,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recording_worker: ContinuousRecordingWorker | None = None
         self._recording_stop_event: threading.Event | None = None
         self._recording_output_dir: Path | None = None
+        self._device_refresh_thread: QtCore.QThread | None = None
+        self._device_refresh_worker: DeviceRefreshWorker | None = None
+        self._startup_session_thread: QtCore.QThread | None = None
+        self._startup_session_worker: StartupSessionWorker | None = None
         self._analysis_viewer = None
         self._pending_measurement = None
         self._plot_update_scheduled = False
@@ -1429,7 +1499,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_toolbar_size()
         self._load_session_to_widgets()
         self._update_window_title()
-        self._refresh_devices()
 
     def _show_status_message(self, message: str) -> None:
         self.statusBar().showMessage(message)
@@ -1929,7 +1998,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._style_vna_control_combo(value_combo)
         layout.addWidget(value_combo)
         layout.addWidget(self._combo_row("active", trace_combo))
-        chan_label = QtWidgets.QLabel("chan sel")
+        chan_label = QtWidgets.QLabel("通道选择")
         chan_label.setObjectName("vnaControlLabel")
         layout.addWidget(chan_label)
         trace_list = self.top_trace_list if title == "Upper" else self.bottom_trace_list
@@ -1991,28 +2060,28 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_menus(self) -> None:
         menu_bar = self.menuBar()
 
-        file_menu = menu_bar.addMenu("&File")
-        file_menu.addAction("Open VNA", self._import_legacy_vna)
-        file_menu.addAction("Save VNA", self._save_session)
-        file_menu.addAction("Save to Default", self._save_to_default_vna)
+        file_menu = menu_bar.addMenu("文件")
+        file_menu.addAction("打开 VNA", self._import_legacy_vna)
+        file_menu.addAction("保存 VNA", self._save_session)
+        file_menu.addAction("保存为默认", self._save_to_default_vna)
         file_menu.addSeparator()
-        file_menu.addAction("Exit", self.close)
+        file_menu.addAction("退出", self.close)
 
-        self.mc_setup_action = menu_bar.addAction("MC Setup")
+        self.mc_setup_action = menu_bar.addAction("通道设置")
         self.mc_setup_action.triggered.connect(self._open_mc_setup_dialog)
 
-        self.setup_action = menu_bar.addAction("Setup")
+        self.setup_action = menu_bar.addAction("设置")
         self.setup_action.triggered.connect(
-            lambda: self._open_setup_page_dialog("Setup", self.excitation_setup_page)
+            lambda: self._open_setup_page_dialog("设置", self.excitation_setup_page)
         )
-        self.excitation_enabled_action = QtGui.QAction("Enable AO Excitation", self)
+        self.excitation_enabled_action = QtGui.QAction("启用 AO 激励", self)
         self.excitation_enabled_action.setCheckable(True)
         self.excitation_enabled_action.triggered.connect(self.exc_enable.setChecked)
-        self.modal_enabled_action = QtGui.QAction("Enable Modal Processing", self)
+        self.modal_enabled_action = QtGui.QAction("启用模态处理", self)
         self.modal_enabled_action.setCheckable(True)
         self.modal_enabled_action.triggered.connect(self.modal_enable_checkbox.setChecked)
 
-        display_menu = menu_bar.addMenu("&Display")
+        display_menu = menu_bar.addMenu("显示")
         self.single_layout_action = QtGui.QAction("Single", self)
         self.dual_layout_action = QtGui.QAction("Dual", self)
         self.control_panel_action = QtGui.QAction("Control Panel", self)
@@ -2022,15 +2091,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.overlay_action = QtGui.QAction("Overlay", self)
         self.overlay_action.setCheckable(True)
         self.overlay_action.triggered.connect(self.overlay_checkbox.setChecked)
-        self.overlay_upper_action = display_menu.addAction("Overlay Upper", self._capture_top_overlay)
-        self.overlay_lower_action = display_menu.addAction("Overlay Lower", self._capture_bottom_overlay)
-        display_menu.addAction("Clear Overlays", self._clear_overlays)
+        self.overlay_upper_action = display_menu.addAction("叠加上图", self._capture_top_overlay)
+        self.overlay_lower_action = display_menu.addAction("叠加下图", self._capture_bottom_overlay)
+        display_menu.addAction("清除叠加", self._clear_overlays)
         display_menu.addSeparator()
         self.cursor_action = QtGui.QAction("Cursor Readout", self)
         self.cursor_action.setCheckable(True)
         self.cursor_action.setChecked(True)
         self.cursor_action.triggered.connect(self._toggle_cursor_readout)
-        self.markers_action = display_menu.addAction("Mark")
+        self.markers_action = display_menu.addAction("标记")
         self.markers_action.setCheckable(True)
         self.markers_action.setChecked(False)
         self.markers_action.triggered.connect(
@@ -2049,8 +2118,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.axis_labels_action.setChecked(True)
         self.axis_labels_action.triggered.connect(self._update_axis_labels)
         display_menu.addSeparator()
-        display_menu.addAction("Open Current Plots", self._open_current_plot_window)
-        advanced_menu = display_menu.addMenu("Advanced Plot")
+        display_menu.addAction("打开当前图像", self._open_current_plot_window)
+        advanced_menu = display_menu.addMenu("高级图像")
         self.advanced_display_actions: dict[str, QtGui.QAction] = {}
         for label, mode in self.ADVANCED_DISPLAY_MODE_ITEMS:
             action = advanced_menu.addAction(label)
@@ -2061,30 +2130,30 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             self.advanced_display_actions[mode] = action
         display_menu.addSeparator()
-        self.light_theme_action = QtGui.QAction("Light Theme", self)
+        self.light_theme_action = QtGui.QAction("浅色主题", self)
         self.light_theme_action.setCheckable(True)
         self.light_theme_action.setChecked(self._theme_name == "light")
         self.light_theme_action.triggered.connect(self._toggle_light_theme)
         display_menu.addAction(self.light_theme_action)
 
-        self.modal_menu_action = menu_bar.addAction("Modal")
+        self.modal_menu_action = menu_bar.addAction("模态")
         self.modal_menu_action.triggered.connect(self._open_modal_parameters_dialog)
-        self.force_window_action = QtGui.QAction("Force Window", self)
+        self.force_window_action = QtGui.QAction("力窗", self)
         self.force_window_action.setCheckable(True)
         self.force_window_action.triggered.connect(self.force_window_checkbox.setChecked)
-        self.exp_window_action = QtGui.QAction("Exponential Window", self)
+        self.exp_window_action = QtGui.QAction("指数窗", self)
         self.exp_window_action.setCheckable(True)
         self.exp_window_action.triggered.connect(self.exp_window_checkbox.setChecked)
-        self.reject_double_hit_action = QtGui.QAction("Reject Double Hit", self)
+        self.reject_double_hit_action = QtGui.QAction("双击剔除", self)
         self.reject_double_hit_action.setCheckable(True)
         self.reject_double_hit_action.triggered.connect(
             self.reject_double_hit_checkbox.setChecked
         )
-        self.reject_overload_action = QtGui.QAction("Reject Overload", self)
+        self.reject_overload_action = QtGui.QAction("过载剔除", self)
         self.reject_overload_action.setCheckable(True)
         self.reject_overload_action.triggered.connect(self.reject_overload_checkbox.setChecked)
 
-        self.analysis_viewer_action = menu_bar.addAction("Analysis")
+        self.analysis_viewer_action = menu_bar.addAction("分析")
         self.analysis_viewer_action.triggered.connect(self._open_analysis_viewer)
 
     def _open_analysis_viewer(self) -> None:
@@ -2111,7 +2180,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not hasattr(self, "top_control_tabs"):
             return
         dialog = QtWidgets.QDialog(self)
-        dialog.setWindowTitle(f"{tab_name} Setup")
+        dialog.setWindowTitle(self.TOP_SETUP_TITLES.get(tab_name, tab_name))
         dialog.setStyleSheet(self.styleSheet())
         layout = QtWidgets.QVBoxLayout(dialog)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -2119,8 +2188,9 @@ class MainWindow(QtWidgets.QMainWindow):
         tabs.setParent(dialog)
         tabs.setVisible(True)
         layout.addWidget(tabs)
+        display_tab_name = self.TOP_SETUP_TITLES.get(tab_name, tab_name)
         for index in range(tabs.count()):
-            if tabs.tabText(index) == tab_name:
+            if tabs.tabText(index) in {tab_name, display_tab_name}:
                 tabs.setCurrentIndex(index)
                 break
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
@@ -2135,7 +2205,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _open_setup_page_dialog(self, title: str, page: QtWidgets.QWidget) -> None:
         dialog = QtWidgets.QDialog(self)
-        dialog.setWindowTitle(title)
+        dialog.setWindowTitle(self.TOP_SETUP_TITLES.get(title, title))
         dialog.setStyleSheet(self.styleSheet())
         layout = QtWidgets.QVBoxLayout(dialog)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -2158,8 +2228,9 @@ class MainWindow(QtWidgets.QMainWindow):
         dialog.adjustSize()
         page_hint = page.sizeHint()
         dialog_hint = dialog.sizeHint()
-        min_width = 760 if title == "Setup" else 620
-        min_height = 190 if title == "Setup" else 230
+        setup_titles = {"Setup", "设置"}
+        min_width = 760 if title in setup_titles else 620
+        min_height = 190 if title in setup_titles else 230
         width = max(min_width, dialog_hint.width(), page_hint.width() + 32)
         height = max(min_height, dialog_hint.height(), page_hint.height() + 82)
         dialog.setMinimumSize(width, height)
@@ -2167,7 +2238,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _open_modal_parameters_dialog(self) -> None:
         dialog = QtWidgets.QDialog(self)
-        dialog.setWindowTitle("Modal Parameters")
+        dialog.setWindowTitle("模态参数")
         dialog.setModal(True)
         theme = self._theme()
         dialog.setStyleSheet(
@@ -2259,35 +2330,35 @@ class MainWindow(QtWidgets.QMainWindow):
         specs = [
             (
                 "double_hit_threshold",
-                "double hit amplitude %",
+                "双击幅值 %",
                 10.0,
                 100.0,
                 self.double_hit_threshold_edit.value() * 100.0,
-                "Used only when double hit reject is selected in the Setup PROCESSING controls",
+                "仅在处理栏选择双击剔除时生效",
             ),
             (
                 "double_hit_delay",
-                "double hit delay %",
+                "双击延迟 %",
                 20.0,
                 50.0,
                 self.double_hit_delay_edit.value() * 100.0,
-                "Used only when double hit reject is selected in the Setup PROCESSING controls",
+                "仅在处理栏选择双击剔除时生效",
             ),
             (
                 "force_window",
-                "force window size in %",
+                "力窗宽度 %",
                 5.0,
                 100.0,
                 self.force_window_fraction_edit.value() * 100.0,
-                "Used only when the User Defined Window is selected in the Setup PROCESSING controls",
+                "仅在处理栏选择自定义模态窗时生效",
             ),
             (
                 "exp_decay",
-                "exponential window decay %",
+                "指数窗衰减 %",
                 1.0,
                 100.0,
                 self.exp_window_decay_edit.value() * 100.0,
-                "Used only when the User Defined Window is selected in the Setup PROCESSING controls",
+                "仅在处理栏选择自定义模态窗时生效",
             ),
         ]
         for key, label_text, minimum, maximum, value, tooltip in specs:
@@ -2309,8 +2380,8 @@ class MainWindow(QtWidgets.QMainWindow):
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Apply | QtWidgets.QDialogButtonBox.Cancel
         )
-        buttons.button(QtWidgets.QDialogButtonBox.Apply).setText("Apply")
-        buttons.button(QtWidgets.QDialogButtonBox.Cancel).setText("Cancel")
+        buttons.button(QtWidgets.QDialogButtonBox.Apply).setText("应用")
+        buttons.button(QtWidgets.QDialogButtonBox.Cancel).setText("取消")
 
         def apply_values() -> None:
             self.double_hit_threshold_edit.setValue(edits["double_hit_threshold"].value() / 100.0)
@@ -2318,7 +2389,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.force_window_fraction_edit.setValue(edits["force_window"].value() / 100.0)
             self.exp_window_decay_edit.setValue(edits["exp_decay"].value() / 100.0)
             self._read_session_from_widgets()
-            self.statusBar().showMessage("Modal parameters applied")
+            self.statusBar().showMessage("模态参数已应用")
 
         buttons.clicked.connect(
             lambda button: (
@@ -3227,33 +3298,33 @@ class MainWindow(QtWidgets.QMainWindow):
         self.backend_combo.addItems(["simulated", "ni"])
         self.backend_combo.currentTextChanged.connect(self._backend_changed)
         self.device_combo = QtWidgets.QComboBox()
-        self.refresh_devices_button = QtWidgets.QPushButton("Refresh")
-        self.refresh_devices_button.setToolTip("Refresh Devices")
+        self.refresh_devices_button = QtWidgets.QPushButton("刷新")
+        self.refresh_devices_button.setToolTip("刷新设备")
         self.refresh_devices_button.clicked.connect(self._refresh_devices)
-        self.open_vna_button = QtWidgets.QPushButton("Open")
-        self.open_vna_button.setToolTip("Open legacy VNA and apply its setup/data")
-        self.toolbar_data_tip_button = QtWidgets.QPushButton("Data Tip")
-        self.toolbar_data_tip_button.setToolTip("Toggle MATLAB-style data tip labels")
+        self.open_vna_button = QtWidgets.QPushButton("打开")
+        self.open_vna_button.setToolTip("打开旧版 VNA 并应用配置/数据")
+        self.toolbar_data_tip_button = QtWidgets.QPushButton("数据标注")
+        self.toolbar_data_tip_button.setToolTip("切换 MATLAB 风格数据标注")
         self.toolbar_data_tip_button.setCheckable(True)
         self.toolbar_data_tip_button.toggled.connect(self._toggle_data_tips)
-        self.start_button = QtWidgets.QPushButton("Inst")
-        self.start_button.setToolTip("Instant acquisition")
-        self.avg_button = QtWidgets.QPushButton("Avg")
-        self.record_button = QtWidgets.QPushButton("Record")
-        self.record_button.setToolTip("Continuously record time data to DAT files")
-        self.stop_button = QtWidgets.QPushButton("Stop")
+        self.start_button = QtWidgets.QPushButton("瞬时")
+        self.start_button.setToolTip("瞬时采集")
+        self.avg_button = QtWidgets.QPushButton("平均")
+        self.record_button = QtWidgets.QPushButton("连续记录")
+        self.record_button.setToolTip("连续记录时域数据到 DAT 文件")
+        self.stop_button = QtWidgets.QPushButton("停止")
         self.stop_button.setObjectName("dangerButton")
         self.stop_button.setEnabled(False)
-        self.export_button = QtWidgets.QPushButton("Export")
-        self.export_button.setToolTip("Export current measurement")
-        self.save_session_button = QtWidgets.QPushButton("Save")
-        self.save_session_button.setToolTip("Save VNA")
-        self.load_session_button = QtWidgets.QPushButton("Load")
-        self.load_session_button.setToolTip("Load Session")
-        self.import_legacy_button = QtWidgets.QPushButton("Import")
-        self.import_legacy_button.setToolTip("Import VNA")
+        self.export_button = QtWidgets.QPushButton("导出")
+        self.export_button.setToolTip("导出当前测量")
+        self.save_session_button = QtWidgets.QPushButton("保存")
+        self.save_session_button.setToolTip("保存 VNA")
+        self.load_session_button = QtWidgets.QPushButton("加载")
+        self.load_session_button.setToolTip("加载会话")
+        self.import_legacy_button = QtWidgets.QPushButton("导入")
+        self.import_legacy_button.setToolTip("导入 VNA")
         self.controls_button = QtWidgets.QToolButton()
-        self.controls_button.setText("Controls")
+        self.controls_button.setText("控件")
         self.controls_button.setCheckable(True)
         self.controls_button.setChecked(True)
         self.controls_button.toggled.connect(self._toggle_control_panel)
@@ -3342,9 +3413,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.excitation_setup_page = self._build_excitation_tab(compact=True)
         self.modal_setup_page = self._build_modal_tab(compact=True)
         self.display_setup_page = self._build_display_controls(compact=True)
-        self.top_control_tabs.addTab(self.excitation_setup_page, "Excitation")
-        self.top_control_tabs.addTab(self.modal_setup_page, "Modal")
-        self.top_control_tabs.addTab(self.display_setup_page, "Display")
+        self.top_control_tabs.addTab(self.excitation_setup_page, "激励")
+        self.top_control_tabs.addTab(self.modal_setup_page, "模态")
+        self.top_control_tabs.addTab(self.display_setup_page, "显示")
         self.top_control_tabs.hide()
         return self.top_control_tabs
 
@@ -3924,7 +3995,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return label
 
     def _build_legacy_channel_panel(self) -> QtWidgets.QWidget:
-        panel, layout = self._legacy_panel("CHANNEL SETUP")
+        panel, layout = self._legacy_panel("通道设置")
         top_row = QtWidgets.QHBoxLayout()
         top_row.addWidget(self.channel_select_combo, 1)
         top_row.addWidget(self.channel_enabled_checkbox, 1)
@@ -3937,7 +4008,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addLayout(range_row)
         layout.addStretch(1)
 
-        layout.addWidget(self._legacy_label("Channel Label", "legacyGrayCell"))
+        layout.addWidget(self._legacy_label("通道标签", "legacyGrayCell"))
         layout.addWidget(self.channel_label_edit)
 
         eu_row = QtWidgets.QHBoxLayout()
@@ -3963,13 +4034,13 @@ class MainWindow(QtWidgets.QMainWindow):
         return panel
 
     def _build_legacy_frequency_panel(self) -> QtWidgets.QWidget:
-        panel, layout = self._legacy_panel("FREQUENCY RNG")
+        panel, layout = self._legacy_panel("频率范围")
         self.bandwidth_combo = QtWidgets.QComboBox()
         self.bandwidth_combo.addItems(list(self.BANDWIDTH_OPTIONS_HZ))
         self.bandwidth_combo.setCurrentText("BW=1.0KHz")
         self.bandwidth_combo.currentTextChanged.connect(self._bandwidth_changed)
         self._make_compact_combo(self.bandwidth_combo, 9)
-        self.aa_filters_button = QtWidgets.QPushButton("AA Filter")
+        self.aa_filters_button = QtWidgets.QPushButton("抗混叠滤波")
         self.aa_filters_button.setEnabled(False)
         self.aa_filters_button.setToolTip(
             "AA Filters On. NI USB-4431 anti-alias filtering is hardware-managed by DAQmx; "
@@ -3977,7 +4048,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         layout.addWidget(self.bandwidth_combo)
         layout.addWidget(self.aa_filters_button)
-        layout.addWidget(self._legacy_label("Record Length", "legacyGrayCell"))
+        layout.addWidget(self._legacy_label("记录长度", "legacyGrayCell"))
         length_row = QtWidgets.QHBoxLayout()
         length_row.setSpacing(4)
         length_min_label = self._legacy_label("2048", "legacyText")
@@ -4006,9 +4077,9 @@ class MainWindow(QtWidgets.QMainWindow):
         return panel
 
     def _build_legacy_processing_panel(self) -> QtWidgets.QWidget:
-        panel, layout = self._legacy_panel("PROCESSING")
+        panel, layout = self._legacy_panel("处理")
         layout.addWidget(self.average_mode_combo)
-        layout.addWidget(self._legacy_label("Stop at Count", "legacyGrayCell"))
+        layout.addWidget(self._legacy_label("平均次数", "legacyGrayCell"))
         count_row = QtWidgets.QHBoxLayout()
         count_row.addWidget(self._legacy_label("1", "legacyText"))
         count_row.addWidget(self.average_count_edit, 1)
@@ -4021,24 +4092,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.average_count_edit.valueChanged.connect(self.average_count_slider.setValue)
         layout.addWidget(self.average_count_slider)
         self.reject_combo = QtWidgets.QComboBox()
-        self.reject_combo.addItems(
-            ["No Reject", "Overload Reject", "Double Hit Reject", "Both Reject"]
-        )
+        for label, value in self.REJECT_MODE_ITEMS:
+            self.reject_combo.addItem(label, value)
         self.reject_combo.setToolTip(
-            "Reject mode: No Reject / Overload Reject / Double Hit Reject / Both Reject"
+            "剔除模式：不剔除 / 过载剔除 / 双击剔除 / 全部剔除"
         )
         self._make_compact_combo(self.reject_combo, 9)
         self.reject_combo.currentTextChanged.connect(self._reject_mode_changed)
         self.overlap_combo = QtWidgets.QComboBox()
-        self.overlap_combo.addItems(["No Overlap", "50% Overlap", "Max Overlap"])
-        self.overlap_combo.setCurrentText("No Overlap")
+        for label, value in self.OVERLAP_MODE_ITEMS:
+            self.overlap_combo.addItem(label, value)
+        self.overlap_combo.setCurrentIndex(0)
         self._make_compact_combo(self.overlap_combo, 9)
         self.overlap_combo.setToolTip(
-            "Overlap processing: No / 50% / Max. Applies to Inst/Avg processing frames; Record still stores raw time data."
+            "重叠处理：无重叠 / 50%重叠 / 最大重叠；只影响瞬时/平均处理帧，连续记录仍保存原始时域数据。"
         )
         self.window_combo = QtWidgets.QComboBox()
         self.window_combo.addItems(list(self.PROCESSING_WINDOW_LABELS.values()))
-        self.window_combo.setToolTip("Processing window")
+        self.window_combo.setToolTip("处理窗函数")
         self._make_compact_combo(self.window_combo, 9)
         self.window_combo.currentTextChanged.connect(self._processing_window_changed)
         layout.addWidget(self.reject_combo)
@@ -4047,7 +4118,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return panel
 
     def _build_legacy_trigger_panel(self) -> QtWidgets.QWidget:
-        panel, layout = self._legacy_panel("TRIGGER")
+        panel, layout = self._legacy_panel("触发")
         layout.addWidget(self.trigger_mode_combo)
 
         source_row = QtWidgets.QHBoxLayout()
@@ -4055,12 +4126,12 @@ class MainWindow(QtWidgets.QMainWindow):
         source_row.addWidget(self.trigger_level_percent_combo, 1)
         layout.addLayout(source_row)
 
-        abs_label = self._legacy_label("Abs Level", "legacyText")
+        abs_label = self._legacy_label("绝对阈值", "legacyText")
         abs_label.setAlignment(QtCore.Qt.AlignCenter)
-        abs_label.setToolTip("Trigger fires when the absolute input amplitude exceeds the selected level.")
+        abs_label.setToolTip("输入绝对幅值超过所选阈值时触发。")
         layout.addWidget(abs_label)
 
-        layout.addWidget(self._legacy_label("Delay", "legacyGrayCell"))
+        layout.addWidget(self._legacy_label("延迟", "legacyGrayCell"))
         delay_row = QtWidgets.QHBoxLayout()
         delay_row.addWidget(self._legacy_label("-100", "legacyText"))
         delay_row.addWidget(self.pretrigger_samples_edit, 1)
@@ -4132,7 +4203,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.channel_grid_group = matrix_group
 
         editor_panel = QtWidgets.QWidget()
-        self.channel_enabled_checkbox = QtWidgets.QCheckBox("Enabled")
+        self.channel_enabled_checkbox = QtWidgets.QCheckBox("启用")
         self.channel_select_combo = QtWidgets.QComboBox()
         self.channel_select_combo.setEditable(False)
         self.channel_name_edit = QtWidgets.QLineEdit()
@@ -4701,7 +4772,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         manual_mode = "manual" in self._current_combo_value(self.trigger_mode_combo).strip().lower()
         self.trigger_enable.setEnabled(manual_mode)
-        self.trigger_enable.setText("Armed" if self.trigger_enable.isChecked() else "Arm")
+        self.trigger_enable.setText("已预备" if self.trigger_enable.isChecked() else "预备")
         self.trigger_enable.setToolTip(
             "Manual trigger arm state. Manual Arm modes require this to be Armed before acquisition."
             if manual_mode
@@ -4794,15 +4865,15 @@ class MainWindow(QtWidgets.QMainWindow):
         if normalized == "hanning":
             self.force_window_checkbox.setChecked(False)
             self.exp_window_checkbox.setChecked(False)
-        self.statusBar().showMessage(f"Processing window set to {text}")
+        self.statusBar().showMessage(f"处理窗函数已设为 {text}")
 
     def _reject_mode_changed(self, text: str) -> None:
-        normalized = text.strip().lower()
+        normalized = self._current_combo_value(self.reject_combo).strip().lower()
         both = "both" in normalized
         self.reject_overload_checkbox.setChecked(both or "overload" in normalized)
         self.reject_double_hit_checkbox.setChecked(both or "double" in normalized)
         if "overload" in normalized or "double" in normalized:
-            self.statusBar().showMessage(f"Reject mode set to {text}")
+            self.statusBar().showMessage(f"剔除模式已设为 {text}")
 
     def _build_acquisition_tab(self):
         widget = QtWidgets.QWidget()
@@ -4810,7 +4881,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(8)
 
-        acquisition_group = QtWidgets.QGroupBox("Acquisition")
+        acquisition_group = QtWidgets.QGroupBox("采集")
         form = QtWidgets.QFormLayout(acquisition_group)
         form.setContentsMargins(8, 6, 8, 6)
         self.sample_rate_edit = QtWidgets.QDoubleSpinBox()
@@ -4823,28 +4894,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.frame_size_edit.setSingleStep(128)
         self.frame_size_edit.setValue(4096)
         self.average_mode_combo = QtWidgets.QComboBox()
-        self.average_mode_combo.addItems(["linear", "exponential", "peak", "off"])
-        self.average_mode_combo.setCurrentText("linear")
+        for label, value in self.AVERAGE_MODE_ITEMS:
+            self.average_mode_combo.addItem(label, value)
+        self.average_mode_combo.setCurrentIndex(0)
         self._make_compact_combo(self.average_mode_combo, 9)
         self.average_mode_combo.setToolTip(
-            "linear: arithmetic average and stop at Average Count; "
-            "exponential: running weighted average until Stop; "
-            "peak: peak-hold average and stop at Average Count; "
-            "off: no averaging."
+            "线性平均：算术平均，到平均次数后停止；"
+            "指数平均：持续加权平均，直到点击停止；"
+            "峰值保持：保留峰值，到平均次数后停止；"
+            "不平均：不做平均。"
         )
         self.average_count_edit = QtWidgets.QSpinBox()
         self.average_count_edit.setRange(1, 1024)
         self.average_count_edit.setValue(20)
         self.average_count_edit.setToolTip(
-            "Number of frames used by Avg for linear/peak modes. "
-            "Exponential mode runs continuously until Stop."
+            "平均采集使用的帧数；线性平均/峰值保持到该次数后停止，指数平均会持续运行直到点击停止。"
         )
         average_help = QtWidgets.QLabel(
-            "Avg: linear = arithmetic average, exponential = running weighted average, "
-            "peak = peak hold, off = no averaging. Count stops linear/peak Avg runs."
+            "Avg：线性平均为算术平均，指数平均为持续加权平均，峰值保持为峰值保留，不平均则直接显示。"
+            "平均次数只会停止线性平均/峰值保持。"
         )
         average_help.setWordWrap(True)
-        self.trigger_enable = QtWidgets.QPushButton("Arm")
+        self.trigger_enable = QtWidgets.QPushButton("预备")
         self.trigger_enable.setCheckable(True)
         self.trigger_enable.setEnabled(False)
         self.trigger_enable.clicked.connect(self._toggle_trigger_arm)
@@ -4886,17 +4957,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pretrigger_samples_edit.valueChanged.connect(self.trigger_delay_slider.setValue)
         self.trigger_delay_slider.setValue(self.pretrigger_samples_edit.value())
 
-        form.addRow("Sample Rate (Hz)", self.sample_rate_edit)
-        form.addRow("Frame Size", self.frame_size_edit)
-        form.addRow("Average Mode", self.average_mode_combo)
-        form.addRow("Average Count", self.average_count_edit)
+        form.addRow("采样率 (Hz)", self.sample_rate_edit)
+        form.addRow("帧长度", self.frame_size_edit)
+        form.addRow("平均模式", self.average_mode_combo)
+        form.addRow("平均次数", self.average_count_edit)
         form.addRow("", average_help)
         layout.addWidget(acquisition_group)
         layout.addStretch(1)
         return widget
 
     def _build_trigger_panel(self) -> QtWidgets.QGroupBox:
-        panel = QtWidgets.QGroupBox("TRIGGER")
+        panel = QtWidgets.QGroupBox("触发")
         panel.setObjectName("legacyTriggerPanel")
         panel.setStyleSheet(self._legacy_trigger_panel_stylesheet(self._theme()))
         layout = QtWidgets.QVBoxLayout(panel)
@@ -4909,12 +4980,12 @@ class MainWindow(QtWidgets.QMainWindow):
         row.addWidget(self.trigger_level_percent_combo, 1)
         layout.addLayout(row)
 
-        abs_label = QtWidgets.QLabel("Abs Level")
+        abs_label = QtWidgets.QLabel("绝对阈值")
         abs_label.setAlignment(QtCore.Qt.AlignCenter)
         abs_label.setToolTip("Trigger fires when the absolute input amplitude exceeds the selected level.")
         layout.addWidget(abs_label)
 
-        delay_label = QtWidgets.QLabel("Delay")
+        delay_label = QtWidgets.QLabel("延迟")
         delay_label.setAlignment(QtCore.Qt.AlignCenter)
         layout.addWidget(delay_label)
         delay_row = QtWidgets.QHBoxLayout()
@@ -5083,7 +5154,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 key=lambda label: abs(self.BANDWIDTH_OPTIONS_HZ[label] - self.session.acquisition.bandwidth_hz),
             )
             self.bandwidth_combo.setCurrentText(bandwidth_label)
-        self.average_mode_combo.setCurrentText(self.session.acquisition.averaging.mode)
+        average_index = self.average_mode_combo.findData(
+            self.session.acquisition.averaging.mode
+        )
+        if average_index >= 0:
+            self.average_mode_combo.setCurrentIndex(average_index)
         self.average_count_edit.setValue(self.session.acquisition.averaging.count)
         if hasattr(self, "average_count_slider"):
             self.average_count_slider.setValue(min(max(self.session.acquisition.averaging.count, 1), 1000))
@@ -5175,12 +5250,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._processing_window_label(self.session.acquisition.processing_window)
             )
         if hasattr(self, "overlap_combo"):
-            overlap_text = {
-                0: "No Overlap",
-                50: "50% Overlap",
-                100: "Max Overlap",
-            }.get(int(self.session.acquisition.overlap_percent), "No Overlap")
-            index = self.overlap_combo.findText(overlap_text)
+            overlap_value = int(self.session.acquisition.overlap_percent)
+            index = self.overlap_combo.findData(overlap_value)
             if index >= 0:
                 self.overlap_combo.setCurrentIndex(index)
         if hasattr(self, "reject_combo"):
@@ -5189,13 +5260,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.session.acquisition.modal.reject_double_hit
                 and self.session.acquisition.modal.reject_overload
             ):
-                self.reject_combo.setCurrentText("Both Reject")
+                reject_mode = "Both Reject"
             elif self.session.acquisition.modal.reject_double_hit:
-                self.reject_combo.setCurrentText("Double Hit Reject")
+                reject_mode = "Double Hit Reject"
             elif self.session.acquisition.modal.reject_overload:
-                self.reject_combo.setCurrentText("Overload Reject")
+                reject_mode = "Overload Reject"
             else:
-                self.reject_combo.setCurrentText("No Reject")
+                reject_mode = "No Reject"
+            index = self.reject_combo.findData(reject_mode)
+            if index >= 0:
+                self.reject_combo.setCurrentIndex(index)
             self.reject_combo.blockSignals(False)
         self._reload_channel_selectors()
         self._update_axis_labels()
@@ -5294,13 +5368,24 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.window_combo.currentText()
             )
         if hasattr(self, "overlap_combo"):
-            session.acquisition.overlap_percent = {
-                "No Overlap": 0,
-                "50% Overlap": 50,
-                "Max Overlap": 100,
-                "75% Overlap": 75,
-            }.get(self.overlap_combo.currentText(), session.acquisition.overlap_percent)
-        session.acquisition.averaging.mode = self.average_mode_combo.currentText()
+            overlap_value = self.overlap_combo.currentData()
+            if overlap_value is None:
+                overlap_value = {
+                    "No Overlap": 0,
+                    "50% Overlap": 50,
+                    "Max Overlap": 100,
+                    "75% Overlap": 75,
+                }.get(self.overlap_combo.currentText(), session.acquisition.overlap_percent)
+            session.acquisition.overlap_percent = int(overlap_value)
+        average_mode = self.average_mode_combo.currentData()
+        if average_mode is None:
+            average_mode = {
+                "线性平均": "linear",
+                "指数平均": "exponential",
+                "峰值保持": "peak",
+                "不平均": "off",
+            }.get(self.average_mode_combo.currentText(), self.average_mode_combo.currentText())
+        session.acquisition.averaging.mode = str(average_mode)
         session.acquisition.averaging.count = self.average_count_edit.value()
         session.acquisition.overlay_enabled = self.overlay_checkbox.isChecked()
         session.acquisition.reference_channel = (
@@ -5357,13 +5442,8 @@ class MainWindow(QtWidgets.QMainWindow):
         session.acquisition.modal.reject_overload = self.reject_overload_checkbox.isChecked()
         return session
 
-    def _refresh_devices(self) -> None:
+    def _apply_device_list(self, devices: list[BackendDevice]) -> None:
         self.device_combo.clear()
-        try:
-            devices = self.controller.list_devices()
-        except Exception as exc:
-            self.statusBar().showMessage(f"Device refresh failed: {exc}")
-            return
         for device in devices:
             self.device_combo.addItem(f"{device.name} ({device.product_type})", device.name)
         preferred = self.controller.preferred_device(devices)
@@ -5375,9 +5455,52 @@ class MainWindow(QtWidgets.QMainWindow):
             self._map_channels_to_selected_device()
             self.device_info_label.setText(f"Device: {preferred}")
         if not devices:
-            self.statusBar().showMessage("No devices found")
+            self.statusBar().showMessage("未找到设备")
         else:
-            self.statusBar().showMessage(f"Found {len(devices)} device(s)")
+            self.statusBar().showMessage(f"找到 {len(devices)} 个设备")
+
+    def _refresh_devices(self) -> None:
+        try:
+            devices = self.controller.list_devices()
+        except Exception as exc:
+            self.statusBar().showMessage(f"Device refresh failed: {exc}")
+            return
+        self._apply_device_list(devices)
+
+    def refresh_devices_async(self) -> None:
+        if self._device_refresh_thread is not None:
+            return
+        self.device_combo.clear()
+        self.device_combo.addItem("正在加载设备...", None)
+        self.refresh_devices_button.setEnabled(False)
+        self.statusBar().showMessage("正在刷新 NI 设备...")
+        thread = QtCore.QThread(self)
+        worker = DeviceRefreshWorker(self.controller)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.devices_ready.connect(self._handle_devices_ready)
+        worker.error.connect(self._handle_device_refresh_error)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._device_refresh_finished)
+        thread.finished.connect(thread.deleteLater)
+        self._device_refresh_thread = thread
+        self._device_refresh_worker = worker
+        thread.start()
+
+    @QtCore.Slot(object)
+    def _handle_devices_ready(self, devices) -> None:
+        self._apply_device_list(list(devices or []))
+
+    @QtCore.Slot(str)
+    def _handle_device_refresh_error(self, message: str) -> None:
+        self.device_combo.clear()
+        self.statusBar().showMessage(f"Device refresh failed: {message}")
+
+    def _device_refresh_finished(self) -> None:
+        self._device_refresh_thread = None
+        self._device_refresh_worker = None
+        self.refresh_devices_button.setEnabled(True)
 
     def _backend_changed(self, backend_name: str) -> None:
         if self._acquisition_thread is not None:
@@ -8461,11 +8584,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def _export_data(self) -> None:
         snapshot = self.controller.snapshot()
         if snapshot.measurement is None:
-            QtWidgets.QMessageBox.warning(self, "No Data", "Acquire at least one frame first.")
+            QtWidgets.QMessageBox.warning(self, "无数据", "请先至少采集一帧数据。")
             return
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
-            "Export Session",
+            "导出会话",
             str(Path.cwd() / "session"),
             "All Supported (*.json *.npz *.csv *.h5);;JSON Session (*.json);;NPZ Data (*.npz);;CSV Time Data (*.csv);;HDF5 Data (*.h5)",
         )
@@ -8492,13 +8615,13 @@ class MainWindow(QtWidgets.QMainWindow):
             except RuntimeError:
                 pass
             export_path = json_path
-        self.statusBar().showMessage(f"Exported to {export_path}")
+        self.statusBar().showMessage(f"已导出到 {export_path}")
 
     def _save_session(self) -> None:
         self._read_session_from_widgets()
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
-            "Save VNA",
+            "保存 VNA",
             str((self._current_source_path or Path.cwd() / "session.vna").with_suffix(".vna")),
             "VNA Files (*.vna);;JSON Session (*.json)",
         )
@@ -8510,7 +8633,7 @@ class MainWindow(QtWidgets.QMainWindow):
             save_session_json(snapshot, save_path)
         else:
             save_legacy_vna(snapshot, save_path)
-        self.statusBar().showMessage(f"Saved session to {save_path}")
+        self.statusBar().showMessage(f"已保存会话到 {save_path}")
 
     def _default_vna_path(self) -> Path:
         return resource_path("dsa/vna/default.vna")
@@ -8522,13 +8645,13 @@ class MainWindow(QtWidgets.QMainWindow):
         save_legacy_vna(self._snapshot_with_current_display_state(), save_path)
         self._current_source_path = save_path
         self._update_window_title()
-        self.statusBar().showMessage(f"Saved default VNA to {save_path}")
+        self.statusBar().showMessage(f"已保存默认 VNA 到 {save_path}")
         return save_path
 
     def _load_session(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
-            "Load Session",
+            "加载会话",
             str(Path.cwd()),
             "VNA Files (*.vna);;JSON Session (*.json)",
         )
@@ -8550,12 +8673,50 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_display_defaults_for_measurement(loaded.measurement)
         if loaded.measurement is not None:
             self._plot_measurement(loaded.measurement)
-        self.statusBar().showMessage(f"Loaded session from {path}")
+        self.statusBar().showMessage(f"已从 {path} 加载会话")
+
+    def _apply_loaded_startup_session(self, imported: SavedSession) -> None:
+        self.statusBar().showMessage("正在加载默认设置...")
+        self._reset_plot_display_state()
+        self.controller.set_session(imported.config)
+        self.controller.state.measurement = imported.measurement
+        self.session = imported.config
+        self._current_source_path = imported.source_path
+        self._update_window_title()
+        self._load_session_to_widgets()
+        self._apply_display_defaults_for_measurement(imported.measurement)
+        if imported.measurement is not None:
+            self._plot_measurement(imported.measurement)
+        self.statusBar().showMessage(f"已从 {self._current_source_path} 加载默认设置")
+
+    def load_startup_session_async(self, path: str | Path | None = None) -> None:
+        if self._startup_session_thread is not None:
+            return
+        selected_path = Path(path) if path is not None else resource_path("dsa/vna/default.vna")
+        self.statusBar().showMessage("正在加载默认设置...")
+        thread = QtCore.QThread(self)
+        worker = StartupSessionWorker(selected_path)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.session_ready.connect(self._apply_loaded_startup_session)
+        worker.skipped.connect(self.statusBar().showMessage)
+        worker.error.connect(lambda message: self.statusBar().showMessage(f"默认设置未加载：{message}"))
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._startup_session_finished)
+        thread.finished.connect(thread.deleteLater)
+        self._startup_session_thread = thread
+        self._startup_session_worker = worker
+        thread.start()
+
+    def _startup_session_finished(self) -> None:
+        self._startup_session_thread = None
+        self._startup_session_worker = None
 
     def _import_legacy_vna(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
-            "Open Legacy VNA",
+            "打开旧版 VNA",
             str(self._last_vna_directory),
             "VNA Files (*.vna);;MAT Files (*.mat)",
         )
@@ -8574,7 +8735,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_display_defaults_for_measurement(imported.measurement)
         if imported.measurement is not None:
             self._plot_measurement(imported.measurement)
-        self.statusBar().showMessage(f"Opened legacy VNA from {path}")
+        self.statusBar().showMessage(f"已打开旧版 VNA：{path}")
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
         try:
@@ -8596,7 +8757,19 @@ class MainWindow(QtWidgets.QMainWindow):
                     event.ignore()
                     self.statusBar().showMessage("Waiting for acquisition to stop")
                     return
-            else:
+            if self._device_refresh_thread is not None:
+                self._device_refresh_thread.quit()
+                if not self._device_refresh_thread.wait(1500):
+                    event.ignore()
+                    self.statusBar().showMessage("Waiting for device refresh to finish")
+                    return
+            if self._startup_session_thread is not None:
+                self._startup_session_thread.quit()
+                if not self._startup_session_thread.wait(1500):
+                    event.ignore()
+                    self.statusBar().showMessage("Waiting for default setup to finish")
+                    return
+            if self._acquisition_thread is None and self._recording_thread is None:
                 self.controller.stop()
             self.controller.close()
         except Exception:

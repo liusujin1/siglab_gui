@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "python-vna"
-version = "2.1"
+version = "2.2"
 description = "Python front-end and analysis pipeline for NI USB-4431 vibration testing."
 readme = "README.md"
 requires-python = ">=3.11"

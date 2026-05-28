@@ -685,6 +685,12 @@ class AnalysisViewerUiTests(unittest.TestCase):
         try:
             self.assertEqual(viewer.main_mode_combos[2].currentText(), "Trans")
             self.assertEqual(viewer.export_button.text(), "导出数据")
+            foundation_labels = [
+                label.text()
+                for label in viewer.foundation_tab.findChildren(QtWidgets.QLabel)
+            ]
+            self.assertIn("振动文件", foundation_labels)
+            self.assertIn("动刚度文件", foundation_labels)
             self.assertEqual(viewer._foundation_reference_channel(), 1)
             self.assertEqual(viewer.tabs.tabText(0), "主界面")
             self.assertEqual(viewer.tabs.tabText(1), "地面振动")

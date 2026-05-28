@@ -3,7 +3,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from scipy import signal
+
+_SIGNAL_MODULE = None
+
+
+def _signal():
+    global _SIGNAL_MODULE
+    if _SIGNAL_MODULE is None:
+        from scipy import signal as scipy_signal
+
+        _SIGNAL_MODULE = scipy_signal
+    return _SIGNAL_MODULE
 
 
 @dataclass(slots=True)
@@ -67,7 +77,7 @@ def apply_filter_to_signal(
 
     y_work = y - float(np.nanmean(y))
     if config.detrend_enabled:
-        y_work = signal.detrend(y_work)
+        y_work = _signal().detrend(y_work)
     if not use_low and not use_high:
         return np.asarray(y_work, dtype=float), 0
 
@@ -84,7 +94,7 @@ def apply_filter_to_signal(
             cutoff = low / nyquist
             btype = "low"
             cutoff_ref = low
-        b, a = signal.butter(order, cutoff, btype=btype)
+        b, a = _signal().butter(order, cutoff, btype=btype)
         filt_len = max(len(a), len(b))
         pad_len = min((y.size - 1) // 2, max(3 * filt_len, 24))
         if pad_len >= 2:
@@ -93,7 +103,7 @@ def apply_filter_to_signal(
             y_pad = np.concatenate((left, y_work, right))
         else:
             y_pad = y_work
-        filtered = signal.filtfilt(b, a, y_pad)
+        filtered = _signal().filtfilt(b, a, y_pad)
         if pad_len >= 2:
             filtered = filtered[pad_len : pad_len + y.size]
     except Exception:
@@ -155,7 +165,7 @@ def compute_periodogram_psd(
     if y.size < 2 or not np.isfinite(sample_rate) or sample_rate <= 0.0:
         return np.array([], dtype=float), np.array([], dtype=float)
     y = y - float(np.mean(y))
-    freqs, psd = signal.periodogram(y, fs=float(sample_rate), window="boxcar", detrend=False)
+    freqs, psd = _signal().periodogram(y, fs=float(sample_rate), window="boxcar", detrend=False)
     valid = np.isfinite(freqs) & np.isfinite(psd) & (freqs > 0.0) & (psd > 0.0)
     return freqs[valid], psd[valid]
 
@@ -169,7 +179,7 @@ def compute_welch_psd(
     nperseg = _validated_block_size(y.size, sample_rate, block_size)
     if nperseg < 2:
         return np.array([], dtype=float), np.array([], dtype=float)
-    freqs, psd = signal.welch(
+    freqs, psd = _signal().welch(
         y,
         fs=float(sample_rate),
         window="hann",
@@ -192,7 +202,8 @@ def compute_transfer_function_welch(
     nperseg = _validated_block_size(ref.size, sample_rate, block_size)
     if nperseg < 2:
         return np.array([], dtype=float), np.array([], dtype=complex)
-    freqs, g_xx = signal.welch(
+    sig = _signal()
+    freqs, g_xx = sig.welch(
         ref,
         fs=float(sample_rate),
         window="hann",
@@ -201,7 +212,7 @@ def compute_transfer_function_welch(
         detrend="constant",
         scaling="density",
     )
-    _freqs, g_yx = signal.csd(
+    _freqs, g_yx = sig.csd(
         ref,
         resp,
         fs=float(sample_rate),
@@ -226,7 +237,7 @@ def compute_coherence_welch(
     nperseg = _validated_block_size(ref.size, sample_rate, block_size)
     if nperseg < 2:
         return np.array([], dtype=float), np.array([], dtype=float)
-    freqs, coherence = signal.coherence(
+    freqs, coherence = _signal().coherence(
         ref,
         resp,
         fs=float(sample_rate),

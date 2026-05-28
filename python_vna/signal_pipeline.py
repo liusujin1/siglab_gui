@@ -4,7 +4,6 @@ from collections import deque
 from dataclasses import dataclass, field
 
 import numpy as np
-from scipy import signal
 
 from python_vna.daq.base import BackendFrame
 from python_vna.models import (
@@ -13,6 +12,18 @@ from python_vna.models import (
     MeasurementSet,
     ModalProcessingConfig,
 )
+
+_SIGNAL_MODULE = None
+
+
+def _signal():
+    global _SIGNAL_MODULE
+    if _SIGNAL_MODULE is None:
+        from scipy import signal as scipy_signal
+
+        _SIGNAL_MODULE = scipy_signal
+    return _SIGNAL_MODULE
+
 
 LEGACY_MODAL_NOTES = (
     "Legacy VNA modal flow: trigger mode chooses free-run/every/first and auto/manual arm; "
@@ -117,14 +128,15 @@ def compute_coherence_from_spectra(
 def compute_correlations(frame: BackendFrame) -> dict[str, np.ndarray]:
     correlations: dict[str, np.ndarray] = {}
     data = frame.data
+    sig = _signal()
     for i, channel_name in enumerate(frame.channel_names):
-        correlations[f"{channel_name}:auto"] = signal.correlate(
+        correlations[f"{channel_name}:auto"] = sig.correlate(
             data[i], data[i], mode="full"
         )
     if data.shape[0] >= 2:
         reference = data[0]
         for i in range(1, data.shape[0]):
-            correlations[f"{frame.channel_names[i]}:cross"] = signal.correlate(
+            correlations[f"{frame.channel_names[i]}:cross"] = sig.correlate(
                 data[i], reference, mode="full"
             )
     return correlations
@@ -221,7 +233,7 @@ def analyze_double_hit(
     threshold_fraction = float(np.clip(threshold_fraction, 0.0, 1.0))
     threshold_level = peak * threshold_fraction
     peak_distance = max(1, min_spacing // 4)
-    peaks, properties = signal.find_peaks(
+    peaks, properties = _signal().find_peaks(
         force_like,
         height=threshold_level,
         distance=peak_distance,

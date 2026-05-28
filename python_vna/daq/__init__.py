@@ -6,8 +6,6 @@ from .base import (
     DaqBackendError,
     preferred_usb4431_device,
 )
-from .ni import NIDaqBackend
-from .simulated import SimulatedDaqBackend
 
 __all__ = [
     "BackendCapability",
@@ -19,3 +17,15 @@ __all__ = [
     "NIDaqBackend",
     "SimulatedDaqBackend",
 ]
+
+
+def __getattr__(name):
+    if name == "NIDaqBackend":
+        from .ni import NIDaqBackend
+
+        return NIDaqBackend
+    if name == "SimulatedDaqBackend":
+        from .simulated import SimulatedDaqBackend
+
+        return SimulatedDaqBackend
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

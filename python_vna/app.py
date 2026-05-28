@@ -5,7 +5,6 @@ from pathlib import Path
 import sys
 
 from python_vna.controller import VnaController
-from python_vna.daq import NIDaqBackend, SimulatedDaqBackend
 from python_vna.diagnostics import append_log, enable_fault_log
 from python_vna.optional import require
 from python_vna.storage import default_session_config, load_legacy_vna
@@ -18,8 +17,12 @@ def resource_path(relative_path: str) -> Path:
 
 def build_backend(name: str):
     if name == "ni":
+        from python_vna.daq.ni import NIDaqBackend
+
         return NIDaqBackend()
     if name == "simulated":
+        from python_vna.daq.simulated import SimulatedDaqBackend
+
         return SimulatedDaqBackend()
     raise ValueError(f"Unsupported backend '{name}'.")
 
@@ -63,21 +66,18 @@ def main(argv: list[str] | None = None) -> int:
     if icon_path.exists():
         app.setWindowIcon(QtGui.QIcon(str(icon_path)))
     backend = build_backend(args.backend)
-    startup_session = load_startup_session()
-    session_config = startup_session.config if startup_session is not None else default_session_config()
+    session_config = default_session_config()
     controller = VnaController(backend, session_config)
-    if startup_session is not None:
-        controller.state.measurement = startup_session.measurement
     window = MainWindow(controller, session_config)
-    if startup_session is not None:
-        window._current_source_path = startup_session.source_path
-        window._update_window_title()
-        if startup_session.measurement is not None:
-            window._plot_measurement(startup_session.measurement)
     window.backend_combo.setCurrentText(args.backend)
     if args.device:
         window.device_combo.addItem(args.device, args.device)
+        window.device_combo.setCurrentText(args.device)
     window.show()
+    append_log("main window shown")
+    QtCore = require("PySide6.QtCore", "python -m pip install -e .[gui]")
+    QtCore.QTimer.singleShot(0, lambda: window.load_startup_session_async(default_vna_path()))
+    QtCore.QTimer.singleShot(0, window.refresh_devices_async)
     return app.exec()
 
 

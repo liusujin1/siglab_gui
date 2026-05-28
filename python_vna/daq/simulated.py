@@ -4,7 +4,6 @@ import time
 from dataclasses import dataclass
 
 import numpy as np
-from scipy import signal
 
 from python_vna.daq.base import (
     BackendCapability,
@@ -14,6 +13,17 @@ from python_vna.daq.base import (
     DaqBackendError,
 )
 from python_vna.models import SessionConfig
+
+_SIGNAL_MODULE = None
+
+
+def _signal():
+    global _SIGNAL_MODULE
+    if _SIGNAL_MODULE is None:
+        from scipy import signal as scipy_signal
+
+        _SIGNAL_MODULE = scipy_signal
+    return _SIGNAL_MODULE
 
 
 @dataclass(slots=True)
@@ -71,7 +81,7 @@ class SimulatedDaqBackend(BaseDaqBackend):
         time_vector = (
             np.arange(frame_size, dtype=float) / sample_rate + self._state.time_offset
         )
-        reference = signal.chirp(
+        reference = _signal().chirp(
             time_vector,
             f0=session.acquisition.excitation.chirp_start_hz,
             f1=max(
