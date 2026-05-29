@@ -1330,16 +1330,24 @@ class MainWindowTests(unittest.TestCase):
                 return None
 
         with tempfile.TemporaryDirectory() as tmpdir:
+            dialog_dirs: list[str] = []
+
+            def fake_get_directory(_parent, _title, directory):
+                dialog_dirs.append(directory)
+                return tmpdir
+
             try:
                 main_window_module.ContinuousRecordingWorker = _Worker
                 main_window_module.QtCore.QThread = lambda _parent=None: _Thread()
                 with mock.patch.object(
                     QtWidgets.QFileDialog,
                     "getExistingDirectory",
-                    return_value=tmpdir,
+                    fake_get_directory,
                 ):
                     self.window._start_continuous_recording()
 
+                self.assertEqual(dialog_dirs[0], str(Path.cwd()))
+                self.assertEqual(self.window._last_recording_parent_directory, Path(tmpdir))
                 self.assertEqual(captured["output_dir"].parent, Path(tmpdir))
                 self.assertTrue(captured["output_dir"].name.startswith("recording_"))
                 self.assertFalse(self.window.start_button.isEnabled())
@@ -3097,6 +3105,69 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(dialog_dirs[1], str(first_path.parent))
         self.assertEqual(self.window._last_vna_directory, second_path.parent)
         self.assertIn(second_path.name, self.window.windowTitle())
+
+    def test_save_vna_remembers_last_folder(self):
+        first_path = Path(tempfile.gettempdir()) / "vna_save_first" / "first.vna"
+        second_path = Path(tempfile.gettempdir()) / "vna_save_second" / "second.vna"
+        dialog_paths: list[str] = []
+
+        def fake_save_file(_parent, _title, filename, _filter):
+            dialog_paths.append(filename)
+            return (str(first_path if len(dialog_paths) == 1 else second_path), "")
+
+        with mock.patch.object(main_window_module, "save_legacy_vna") as save_legacy:
+            with mock.patch.object(QtWidgets.QFileDialog, "getSaveFileName", fake_save_file):
+                self.window._save_session()
+                self.window._save_session()
+
+        self.assertEqual(dialog_paths[0], str(Path.cwd() / "session.vna"))
+        self.assertEqual(dialog_paths[1], str(first_path))
+        self.assertEqual(self.window._last_vna_directory, second_path.parent)
+        self.assertEqual(self.window._current_source_path, second_path)
+        self.assertEqual(save_legacy.call_count, 2)
+
+    def test_load_session_remembers_last_folder(self):
+        first_path = Path(tempfile.gettempdir()) / "vna_load_first" / "first.vna"
+        second_path = Path(tempfile.gettempdir()) / "vna_load_second" / "second.vna"
+        loaded = SavedSession(
+            config=default_session_config(),
+            measurement=self._measurement(),
+            source_path=first_path,
+        )
+        dialog_dirs: list[str] = []
+
+        def fake_open_file(_parent, _title, directory, _filter):
+            dialog_dirs.append(directory)
+            return (str(first_path if len(dialog_dirs) == 1 else second_path), "")
+
+        with mock.patch.object(main_window_module, "load_legacy_vna", return_value=loaded):
+            with mock.patch.object(QtWidgets.QFileDialog, "getOpenFileName", fake_open_file):
+                self.window._load_session()
+                self.window._load_session()
+
+        self.assertEqual(dialog_dirs[0], str(Path.cwd()))
+        self.assertEqual(dialog_dirs[1], str(first_path.parent))
+        self.assertEqual(self.window._last_vna_directory, second_path.parent)
+
+    def test_export_data_remembers_last_folder(self):
+        first_path = Path(tempfile.gettempdir()) / "vna_export_first" / "first.csv"
+        second_path = Path(tempfile.gettempdir()) / "vna_export_second" / "second.csv"
+        self.controller.state.measurement = self._measurement()
+        dialog_paths: list[str] = []
+
+        def fake_save_file(_parent, _title, filename, _filter):
+            dialog_paths.append(filename)
+            return (str(first_path if len(dialog_paths) == 1 else second_path), "")
+
+        with mock.patch.object(main_window_module, "save_measurement_csv") as save_csv:
+            with mock.patch.object(QtWidgets.QFileDialog, "getSaveFileName", fake_save_file):
+                self.window._export_data()
+                self.window._export_data()
+
+        self.assertEqual(dialog_paths[0], str(Path.cwd() / "session"))
+        self.assertEqual(dialog_paths[1], str(first_path.parent / "session"))
+        self.assertEqual(self.window._last_export_directory, second_path.parent)
+        self.assertEqual(save_csv.call_count, 2)
 
     def test_mark_at_cursor_uses_real_coordinates_on_log_axes(self):
         measurement = self._measurement()

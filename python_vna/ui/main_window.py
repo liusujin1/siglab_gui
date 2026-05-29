@@ -1468,6 +1468,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._controls_visible = True
         self._controls_last_sizes = [320, 880]
         self._last_vna_directory = Path.cwd()
+        self._last_export_directory = Path.cwd()
+        self._last_recording_parent_directory = Path.cwd()
         self._current_source_path: Path | None = None
         self._ui_settings_path = self._default_ui_settings_path()
         self._theme_name = self._load_theme_preference()
@@ -5679,10 +5681,11 @@ class MainWindow(QtWidgets.QMainWindow):
         parent_dir = QtWidgets.QFileDialog.getExistingDirectory(
             self,
             "Select Continuous Recording Folder",
-            str(Path.cwd()),
+            str(self._last_recording_parent_directory),
         )
         if not parent_dir:
             return
+        self._last_recording_parent_directory = Path(parent_dir)
         output_dir = Path(parent_dir) / recording_directory_name()
         self._map_channels_to_selected_device()
         self._reload_channel_selectors(include_new_responses=True)
@@ -8589,13 +8592,14 @@ class MainWindow(QtWidgets.QMainWindow):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "导出会话",
-            str(Path.cwd() / "session"),
+            str(self._last_export_directory / "session"),
             "All Supported (*.json *.npz *.csv *.h5);;JSON Session (*.json);;NPZ Data (*.npz);;CSV Time Data (*.csv);;HDF5 Data (*.h5)",
         )
         if not path:
             return
 
         export_path = Path(path)
+        self._last_export_directory = export_path.parent
         suffix = export_path.suffix.lower()
         if suffix == ".npz":
             save_measurement_npz(snapshot, export_path)
@@ -8619,10 +8623,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _save_session(self) -> None:
         self._read_session_from_widgets()
+        default_save_path = (
+            self._current_source_path.with_suffix(".vna")
+            if self._current_source_path is not None
+            else self._last_vna_directory / "session.vna"
+        )
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "保存 VNA",
-            str((self._current_source_path or Path.cwd() / "session.vna").with_suffix(".vna")),
+            str(default_save_path),
             "VNA Files (*.vna);;JSON Session (*.json)",
         )
         if not path:
@@ -8633,6 +8642,9 @@ class MainWindow(QtWidgets.QMainWindow):
             save_session_json(snapshot, save_path)
         else:
             save_legacy_vna(snapshot, save_path)
+        self._current_source_path = save_path
+        self._last_vna_directory = save_path.parent
+        self._update_window_title()
         self.statusBar().showMessage(f"已保存会话到 {save_path}")
 
     def _default_vna_path(self) -> Path:
@@ -8652,12 +8664,13 @@ class MainWindow(QtWidgets.QMainWindow):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
             "加载会话",
-            str(Path.cwd()),
+            str(self._last_vna_directory),
             "VNA Files (*.vna);;JSON Session (*.json)",
         )
         if not path:
             return
         selected_path = Path(path)
+        self._last_vna_directory = selected_path.parent
         loaded = (
             load_legacy_vna(selected_path)
             if selected_path.suffix.lower() in {".vna", ".mat"}

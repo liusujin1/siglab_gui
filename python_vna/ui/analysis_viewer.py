@@ -163,7 +163,22 @@ class AnalysisViewer(QtWidgets.QMainWindow):
                 padding: 2px 6px;
                 font-weight: bold;
             }}
-            QPushButton:disabled {{
+            QPushButton:hover, QToolButton:hover {{
+                background: {theme.get('accent_alt')};
+                border-color: {theme.get('accent_alt')};
+            }}
+            QPushButton:pressed, QToolButton:pressed {{
+                background: {theme.get('label_text')};
+                border-color: {theme.get('label_text')};
+                padding-top: 3px;
+                padding-left: 7px;
+            }}
+            QPushButton:checked, QToolButton:checked {{
+                background: {theme.get('accent_alt')};
+                border: 2px solid {theme.get('label_text')};
+                color: white;
+            }}
+            QPushButton:disabled, QToolButton:disabled {{
                 background: {theme.get('panel_bg_alt')};
                 color: {theme.get('muted_text')};
                 border-color: {theme.get('border')};
@@ -384,7 +399,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self.rename_edit.editingFinished.connect(self._rename_selected_series_from_editor)
         self.factor_edit.editingFinished.connect(self._set_selected_series_scale_from_editor)
         self.select_all_button.clicked.connect(self._select_all_series)
-        self.select_none_button.clicked.connect(self.series_list.clearSelection)
+        self.select_none_button.clicked.connect(self._select_no_series)
         self.refresh_button.clicked.connect(self.refresh_data_sources)
         return group
 
@@ -426,7 +441,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self.filter_order_spin.setRange(1, 12)
         self.filter_order_spin.setValue(4)
         self.plot_button = QtWidgets.QPushButton("绘图")
-        self.hold_button = QtWidgets.QPushButton("保持")
+        self.hold_button = QtWidgets.QPushButton("保持:关")
         self.hold_button.setCheckable(True)
         self.clear_plots_button = QtWidgets.QPushButton("清空图像")
         self.export_button = QtWidgets.QPushButton("导出数据")
@@ -453,6 +468,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         layout.addWidget(self.clear_plots_button, 7, 2)
         layout.addWidget(self.export_button, 7, 3)
         self.plot_button.clicked.connect(self.plot_current)
+        self.hold_button.toggled.connect(self._hold_toggled)
         self.clear_plots_button.clicked.connect(self._clear_plots)
         self.export_button.clicked.connect(self._export_current_csv)
         self.time_start_edit.editingFinished.connect(self._auto_plot_from_control_change)
@@ -589,6 +605,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         if not path:
             return
         folder = Path(path)
+        self._last_directory = folder
         manifest = folder / "manifest.json"
         if manifest.exists():
             self._load_path(folder)
@@ -834,6 +851,18 @@ class AnalysisViewer(QtWidgets.QMainWindow):
     def _select_all_series(self) -> None:
         for index in range(self.series_list.count()):
             self.series_list.item(index).setSelected(True)
+        self.statusBar().showMessage(f"已选择 {self.series_list.count()} 个通道")
+
+    def _select_no_series(self) -> None:
+        self.series_list.clearSelection()
+        self.statusBar().showMessage("已取消选择所有通道")
+
+    def _hold_toggled(self, enabled: bool) -> None:
+        self.hold_button.setText("保持:开" if enabled else "保持:关")
+        if enabled:
+            self.statusBar().showMessage("保持已开启：下一次绘图会叠加到当前图像")
+        else:
+            self.statusBar().showMessage("保持已关闭：下一次绘图会先清空旧曲线")
 
     def _on_series_selection_changed(self) -> None:
         self._sync_series_editors_from_selection()
@@ -1513,6 +1542,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         if not path:
             return
         destination = Path(path)
+        self._last_directory = destination.parent
         rows: list[tuple[str, np.ndarray, np.ndarray]] = []
         max_count = 0
         for label, (x, y) in curves.items():

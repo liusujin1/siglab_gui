@@ -384,6 +384,23 @@ class AnalysisViewerUiTests(unittest.TestCase):
             finally:
                 viewer.close()
 
+    def test_load_folder_remembers_directory_even_when_no_supported_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            folder = Path(tmpdir)
+            viewer = AnalysisViewer()
+            try:
+                with mock.patch(
+                    "python_vna.ui.analysis_viewer.QtWidgets.QFileDialog.getExistingDirectory",
+                    return_value=str(folder),
+                ), mock.patch(
+                    "python_vna.ui.analysis_viewer.QtWidgets.QMessageBox.warning"
+                ):
+                    viewer._load_folder()
+
+                self.assertEqual(viewer._last_directory, folder)
+            finally:
+                viewer.close()
+
     def test_viewer_uses_vna_axis_items_context_menu_and_data_tips(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "data.csv"
@@ -456,6 +473,8 @@ class AnalysisViewerUiTests(unittest.TestCase):
         try:
             self.assertIn("QMenu::item:selected", viewer.styleSheet())
             self.assertIn("background:", viewer.styleSheet())
+            self.assertIn("QPushButton:pressed", viewer.styleSheet())
+            self.assertIn("QPushButton:checked", viewer.styleSheet())
         finally:
             viewer.close()
 
@@ -511,6 +530,7 @@ class AnalysisViewerUiTests(unittest.TestCase):
                 self.assertIn("active_trace_x,active_trace_y", text)
                 self.assertIn("3,5", text)
                 self.assertNotIn("top_x", text)
+                self.assertEqual(viewer._last_directory, destination.parent)
             finally:
                 viewer.close()
 
@@ -685,6 +705,7 @@ class AnalysisViewerUiTests(unittest.TestCase):
         try:
             self.assertEqual(viewer.main_mode_combos[2].currentText(), "Trans")
             self.assertEqual(viewer.export_button.text(), "导出数据")
+            self.assertEqual(viewer.hold_button.text(), "保持:关")
             foundation_labels = [
                 label.text()
                 for label in viewer.foundation_tab.findChildren(QtWidgets.QLabel)
@@ -696,6 +717,28 @@ class AnalysisViewerUiTests(unittest.TestCase):
             self.assertEqual(viewer.tabs.tabText(1), "地面振动")
             self.assertEqual(len(viewer.main_open_buttons), 3)
             self.assertEqual(len(viewer.foundation_export_buttons), 3)
+        finally:
+            viewer.close()
+
+    def test_hold_and_selection_buttons_show_feedback(self):
+        viewer = AnalysisViewer()
+        try:
+            viewer.hold_button.setChecked(True)
+            self.assertEqual(viewer.hold_button.text(), "保持:开")
+            self.assertIn("保持已开启", viewer.statusBar().currentMessage())
+
+            viewer.hold_button.setChecked(False)
+            self.assertEqual(viewer.hold_button.text(), "保持:关")
+            self.assertIn("保持已关闭", viewer.statusBar().currentMessage())
+
+            viewer.series_list.addItem("one")
+            viewer.series_list.addItem("two")
+            for index in range(viewer.series_list.count()):
+                viewer.series_list.item(index).setData(QtCore.Qt.UserRole, index)
+            viewer._select_all_series()
+            self.assertIn("已选择 2 个通道", viewer.statusBar().currentMessage())
+            viewer._select_no_series()
+            self.assertIn("已取消选择所有通道", viewer.statusBar().currentMessage())
         finally:
             viewer.close()
 
