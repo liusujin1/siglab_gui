@@ -12,6 +12,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6 import QtCore, QtWidgets
 
+from python_vna.analysis_derivation import (
+    DERIVE_BASE_TO_TOP,
+    DERIVE_TOP_TO_BASE,
+    derive_psd_from_transfer,
+    derive_time_from_transfer,
+)
 from python_vna.analysis_algorithms import (
     FilterConfig,
     apply_filter_to_signal,
@@ -69,6 +75,60 @@ class AnalysisAlgorithmTests(unittest.TestCase):
 
         peak_index = int(np.argmin(np.abs(freqs - 40.0)))
         self.assertAlmostEqual(abs(xfer[peak_index]), 2.5, delta=0.1)
+
+    def test_derived_psd_transfer_converts_both_directions(self):
+        freqs = np.array([10.0, 20.0, 30.0], dtype=float)
+        psd = np.array([1.0, 2.0, 3.0], dtype=float)
+        transfer = np.full(freqs.shape, 2.0 + 0.0j, dtype=complex)
+
+        top_f, top_psd = derive_psd_from_transfer(
+            freqs,
+            psd,
+            freqs,
+            transfer,
+            direction=DERIVE_BASE_TO_TOP,
+        )
+        base_f, base_psd = derive_psd_from_transfer(
+            freqs,
+            top_psd,
+            freqs,
+            transfer,
+            direction=DERIVE_TOP_TO_BASE,
+        )
+
+        np.testing.assert_allclose(top_f, freqs)
+        np.testing.assert_allclose(top_psd, psd * 4.0)
+        np.testing.assert_allclose(base_f, freqs)
+        np.testing.assert_allclose(base_psd, psd)
+
+    def test_derived_time_requires_complex_transfer_and_recovers_gain(self):
+        sample_rate = 1000.0
+        time_s = np.arange(1000, dtype=float) / sample_rate
+        signal = np.sin(2.0 * np.pi * 20.0 * time_s)
+        transfer_f = np.array([1.0, 20.0, 500.0], dtype=float)
+        complex_h = np.full(3, 2.0 + 0.0j, dtype=complex)
+
+        derived_t, derived = derive_time_from_transfer(
+            time_s,
+            signal,
+            sample_rate,
+            transfer_f,
+            complex_h,
+            direction=DERIVE_BASE_TO_TOP,
+        )
+        no_phase_t, no_phase = derive_time_from_transfer(
+            time_s,
+            signal,
+            sample_rate,
+            transfer_f,
+            np.full(3, 2.0, dtype=float),
+            direction=DERIVE_BASE_TO_TOP,
+        )
+
+        np.testing.assert_allclose(derived_t, time_s)
+        np.testing.assert_allclose(derived, 2.0 * signal, atol=1e-10)
+        self.assertEqual(no_phase_t.size, 0)
+        self.assertEqual(no_phase.size, 0)
 
     def test_acceleration_conversions_match_expected_units(self):
         freqs = np.array([1.0, 10.0, 100.0], dtype=float)
@@ -715,8 +775,93 @@ class AnalysisViewerUiTests(unittest.TestCase):
             self.assertEqual(viewer._foundation_reference_channel(), 1)
             self.assertEqual(viewer.tabs.tabText(0), "主界面")
             self.assertEqual(viewer.tabs.tabText(1), "地面振动")
+            self.assertEqual(viewer.tabs.tabText(2), "换算")
             self.assertEqual(len(viewer.main_open_buttons), 3)
             self.assertEqual(len(viewer.foundation_export_buttons), 3)
+            self.assertEqual(len(viewer.derived_export_buttons), 2)
+            self.assertEqual(viewer.derived_result_mode_combo.currentText(), "PSD")
+            self.assertEqual(viewer.derived_direction_combo.currentData(), DERIVE_BASE_TO_TOP)
+            self.assertFalse(any(checkbox.isChecked() for checkbox in viewer.derived_vc_checks.values()))
+            self.assertFalse(viewer.derived_show_source_check.isChecked())
+        finally:
+            viewer.close()
+
+    def test_derived_tab_converts_loaded_transfer_and_input_data(self):
+        session = default_session_config()
+        freqs = np.array([0.0, 10.0, 20.0, 30.0], dtype=float)
+        time_s = np.arange(256, dtype=float) / 256.0
+        transfer_measurement = MeasurementSet(
+            sample_rate=256.0,
+            time_data={
+                "t": time_s,
+                "channels": {
+                    "ai0": np.sin(2.0 * np.pi * 10.0 * time_s),
+                    "ai1": 2.0 * np.sin(2.0 * np.pi * 10.0 * time_s),
+                },
+            },
+            spectra={"f": freqs, "autospectrum": {}},
+            frf={"ai0->ai1": np.full(freqs.shape, 2.0 + 0.0j, dtype=complex)},
+            coherence={},
+            cross_spectra={},
+            correlations={},
+            impulse_responses={},
+            metadata={"rbw_hz": 1.0},
+        )
+        input_measurement = MeasurementSet(
+            sample_rate=256.0,
+            time_data={
+                "t": time_s,
+                "channels": {"ai0": np.sin(2.0 * np.pi * 10.0 * time_s)},
+            },
+            spectra={"f": freqs, "autospectrum": {"ai0": np.array([0.0, 1.0, 1.0, 1.0])}},
+            frf={},
+            coherence={},
+            cross_spectra={},
+            correlations={},
+            impulse_responses={},
+            metadata={"rbw_hz": 1.0, "legacy_runtime_wincor": 1.0},
+        )
+        viewer = AnalysisViewer()
+        try:
+            viewer._datasets = [
+                dataset_from_measurement(transfer_measurement, session_config=session, dataset_id=1, name="transfer"),
+                dataset_from_measurement(input_measurement, session_config=session, dataset_id=2, name="input"),
+            ]
+            viewer._next_dataset_id = 3
+            viewer._refresh_dataset_lists()
+            input_index = viewer._combo_index_for_data(viewer.derived_input_series_combo, "2:ai0")
+            viewer.derived_input_series_combo.setCurrentIndex(input_index)
+
+            viewer._plot_derived()
+
+            transfer_curves = viewer._plot_curves[viewer.derived_plots[0]]
+            psd_curves = viewer._plot_curves[viewer.derived_plots[1]]
+            transfer_data = viewer.derived_transfer_combo.currentData()
+            self.assertEqual(transfer_data[0], 1)
+            self.assertEqual(transfer_data[1], "ai0->ai1")
+            self.assertIn("ai0->ai1", viewer.derived_transfer_combo.currentText())
+            self.assertGreater(len(transfer_curves), 0)
+            self.assertGreater(len(psd_curves), 0)
+            _label, (f, psd) = next(iter(psd_curves.items()))
+            np.testing.assert_allclose(f, [10.0, 20.0, 30.0])
+            np.testing.assert_allclose(psd, [4.0, 4.0, 4.0])
+
+            viewer.derived_show_source_check.setChecked(True)
+            viewer._plot_derived()
+            psd_with_source = viewer._plot_curves[viewer.derived_plots[1]]
+            self.assertTrue(any(label.startswith("待换算:") for label in psd_with_source))
+
+            viewer.derived_result_mode_combo.setCurrentText("近似时域")
+            viewer._plot_derived()
+            time_curves = viewer._plot_curves[viewer.derived_plots[1]]
+            self.assertGreater(len(time_curves), 0)
+
+            viewer.derived_result_mode_combo.setCurrentText("地基振动")
+            viewer.derived_vc_checks["VC A"].setChecked(True)
+            viewer._plot_derived()
+            foundation_curves = viewer._plot_curves[viewer.derived_plots[1]]
+            self.assertIn("VC A", foundation_curves)
+            self.assertIn("VC A", viewer._plot_export_excluded[viewer.derived_plots[1]])
         finally:
             viewer.close()
 

@@ -4,6 +4,13 @@ from pathlib import Path
 
 import numpy as np
 
+from python_vna.analysis_derivation import (
+    DERIVE_BASE_TO_TOP,
+    DERIVE_TOP_TO_BASE,
+    derive_psd_from_transfer,
+    derive_time_from_transfer,
+    has_complex_transfer_phase,
+)
 from python_vna.analysis_algorithms import (
     FilterConfig,
     apply_filter_to_signal,
@@ -21,6 +28,7 @@ from python_vna.analysis_algorithms import (
     quantity_cumulative_label,
     quantity_psd_label,
     quantity_time_label,
+    third_octave_bands,
 )
 from python_vna.analysis_data import (
     AnalysisDataset,
@@ -91,10 +99,12 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self._axis_history: dict[pg.PlotWidget, list[tuple[tuple[float, float], tuple[float, float]]]] = {}
         self._axis_scaling_plot: pg.PlotWidget | None = None
         self._log_modes: dict[pg.PlotWidget, tuple[bool, bool]] = {}
+        self._plot_export_excluded: dict[pg.PlotWidget, set[str]] = {}
         self._series_labels: dict[str, str] = {}
         self._custom_series_labels: dict[tuple[int, int], str] = {}
         self._custom_series_scales: dict[tuple[int, int], float] = {}
         self._current_measurement_dataset_id: int | None = None
+        self._derived_result_cache: dict[tuple[object, ...], tuple[object, ...]] = {}
         self._single_plot_windows: list[QtWidgets.QDialog] = []
         self._build_ui()
         self.apply_theme(self._theme)
@@ -298,11 +308,14 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self.tabs = QtWidgets.QTabWidget()
         self.main_tab = QtWidgets.QWidget()
         self.foundation_tab = QtWidgets.QWidget()
+        self.derived_tab = QtWidgets.QWidget()
         self.tabs.addTab(self.main_tab, "主界面")
         self.tabs.addTab(self.foundation_tab, "地面振动")
+        self.tabs.addTab(self.derived_tab, "换算")
         layout.addWidget(self.tabs, 1)
         self._build_main_tab()
         self._build_foundation_tab()
+        self._build_derived_tab()
         self.statusBar().showMessage("Ready")
 
     def _create_plot_widget(self, title: str = "") -> pg.PlotWidget:
@@ -341,6 +354,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self._cursor_positions[plot] = None
         self._axis_history[plot] = []
         self._log_modes[plot] = (False, False)
+        self._plot_export_excluded[plot] = set()
         return plot
 
     def _build_load_group(self) -> QtWidgets.QGroupBox:
@@ -585,6 +599,113 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self.foundation_vib_edit.editingFinished.connect(self._auto_plot_from_control_change)
         self.foundation_resp_edit.editingFinished.connect(self._auto_plot_from_control_change)
 
+    def _build_derived_tab(self) -> None:
+        layout = QtWidgets.QVBoxLayout(self.derived_tab)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        controls = QtWidgets.QGroupBox("传递率换算")
+        control_grid = QtWidgets.QGridLayout(controls)
+        control_grid.setContentsMargins(8, 14, 8, 8)
+        control_grid.setHorizontalSpacing(5)
+        control_grid.setVerticalSpacing(4)
+
+        self.derived_transfer_combo = QtWidgets.QComboBox()
+        self.derived_direction_combo = QtWidgets.QComboBox()
+        self.derived_direction_combo.addItem("地基 -> 顶部", DERIVE_BASE_TO_TOP)
+        self.derived_direction_combo.addItem("顶部 -> 地基", DERIVE_TOP_TO_BASE)
+        self.derived_input_series_combo = QtWidgets.QComboBox()
+        self.derived_freq_min_edit = QtWidgets.QLineEdit()
+        self.derived_freq_max_edit = QtWidgets.QLineEdit()
+        self.derived_freq_min_edit.setPlaceholderText("auto")
+        self.derived_freq_max_edit.setPlaceholderText("auto")
+        self.derived_regularization_spin = QtWidgets.QDoubleSpinBox()
+        self.derived_regularization_spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+        self.derived_regularization_spin.setDecimals(9)
+        self.derived_regularization_spin.setRange(0.0, 1e6)
+        self.derived_regularization_spin.setSingleStep(1e-6)
+        self.derived_regularization_spin.setValue(1e-6)
+        self.derived_plot_button = QtWidgets.QPushButton("换算绘图")
+        self.derived_show_source_check = QtWidgets.QCheckBox("绘制待换算数据")
+        self.derived_show_source_check.setObjectName("vcCheck")
+        self.derived_show_source_check.setChecked(False)
+        self.derived_vc_checks: dict[str, QtWidgets.QCheckBox] = {}
+
+        for combo in (self.derived_transfer_combo, self.derived_input_series_combo):
+            combo.setMinimumContentsLength(28)
+            combo.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+
+        control_grid.addWidget(QtWidgets.QLabel("传递率曲线"), 0, 0)
+        control_grid.addWidget(self.derived_transfer_combo, 0, 1, 1, 4)
+        control_grid.addWidget(QtWidgets.QLabel("换算方向"), 0, 5)
+        control_grid.addWidget(self.derived_direction_combo, 0, 6)
+        control_grid.addWidget(QtWidgets.QLabel("待换算数据"), 1, 0)
+        control_grid.addWidget(self.derived_input_series_combo, 1, 1, 1, 6)
+        control_grid.addWidget(QtWidgets.QLabel("频率下限"), 2, 0)
+        control_grid.addWidget(self.derived_freq_min_edit, 2, 1)
+        control_grid.addWidget(QtWidgets.QLabel("频率上限"), 2, 2)
+        control_grid.addWidget(self.derived_freq_max_edit, 2, 3)
+        control_grid.addWidget(QtWidgets.QLabel("反推下限"), 2, 4)
+        control_grid.addWidget(self.derived_regularization_spin, 2, 5)
+        control_grid.addWidget(self.derived_plot_button, 2, 6)
+        vc_row = QtWidgets.QHBoxLayout()
+        vc_row.setSpacing(6)
+        vc_row.addWidget(QtWidgets.QLabel("VC参考线"))
+        for name in ("VC A", "VC B", "VC C", "VC D", "VC E", "VC F"):
+            checkbox = QtWidgets.QCheckBox(name)
+            checkbox.setObjectName("vcCheck")
+            checkbox.setChecked(False)
+            checkbox.toggled.connect(lambda _checked: self._auto_plot_derived_from_control_change())
+            self.derived_vc_checks[name] = checkbox
+            vc_row.addWidget(checkbox)
+        vc_row.addSpacing(14)
+        vc_row.addWidget(self.derived_show_source_check)
+        vc_row.addStretch(1)
+        control_grid.addLayout(vc_row, 3, 0, 1, 7)
+        layout.addWidget(controls)
+
+        self.derived_plots: list[pg.PlotWidget] = []
+        self.derived_open_buttons: list[QtWidgets.QPushButton] = []
+        self.derived_export_buttons: list[QtWidgets.QPushButton] = []
+        self.derived_result_mode_combo = QtWidgets.QComboBox()
+        self.derived_result_mode_combo.addItems(["PSD", "CumPSD", "地基振动", "近似时域"])
+        self.derived_result_mode_combo.setCurrentText("PSD")
+        self.derived_result_mode_combo.currentTextChanged.connect(lambda _text: self._auto_plot_derived_from_control_change())
+        for index, title in enumerate(("传递率曲线", "换算图窗")):
+            row = QtWidgets.QHBoxLayout()
+            row.setSpacing(5)
+            row.addWidget(QtWidgets.QLabel(title))
+            if index > 0:
+                row.addWidget(self.derived_result_mode_combo)
+            row.addStretch(1)
+            open_button = QtWidgets.QPushButton("图窗")
+            export_button = QtWidgets.QPushButton("导出数据")
+            open_button.clicked.connect(lambda _checked=False, i=index: self._open_plot_window_for_plot(self.derived_plots[i]))
+            export_button.clicked.connect(lambda _checked=False, i=index: self._export_plot_csv(self.derived_plots[i]))
+            self.derived_open_buttons.append(open_button)
+            self.derived_export_buttons.append(export_button)
+            row.addWidget(open_button)
+            row.addWidget(export_button)
+            layout.addLayout(row)
+            plot = self._create_plot_widget(title)
+            layout.addWidget(plot, 1)
+            self.derived_plots.append(plot)
+
+        self.derived_transfer_combo.currentIndexChanged.connect(
+            lambda _index: self._auto_plot_derived_from_control_change()
+        )
+        self.derived_direction_combo.currentIndexChanged.connect(
+            lambda _index: self._auto_plot_derived_from_control_change()
+        )
+        self.derived_input_series_combo.currentIndexChanged.connect(
+            lambda _index: self._auto_plot_derived_from_control_change()
+        )
+        self.derived_show_source_check.toggled.connect(lambda _checked: self._auto_plot_derived_from_control_change())
+        self.derived_freq_min_edit.editingFinished.connect(self._auto_plot_derived_from_control_change)
+        self.derived_freq_max_edit.editingFinished.connect(self._auto_plot_derived_from_control_change)
+        self.derived_regularization_spin.editingFinished.connect(self._auto_plot_derived_from_control_change)
+        self.derived_plot_button.clicked.connect(self._plot_derived)
+
     def _load_file(self) -> None:
         paths, _filter = QtWidgets.QFileDialog.getOpenFileNames(
             self,
@@ -630,6 +751,8 @@ class AnalysisViewer(QtWidgets.QMainWindow):
                 failed.append(path.name if not path.is_dir() else path.name)
         if paths:
             self._last_directory = paths[-1] if paths[-1].is_dir() else paths[-1].parent
+        if loaded:
+            self._derived_result_cache.clear()
         self._refresh_dataset_lists()
         if failed:
             self.statusBar().showMessage(f"Loaded {len(loaded)} file(s), failed {len(failed)}")
@@ -721,6 +844,9 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             refreshed.append(reloaded)
 
         self._datasets = refreshed
+        self._time_series_cache.clear()
+        self._bulk_time_series_cache.clear()
+        self._derived_result_cache.clear()
         if self._datasets:
             self._next_dataset_id = max(self._next_dataset_id, max(dataset.id for dataset in self._datasets) + 1)
         self._refresh_dataset_lists()
@@ -738,9 +864,10 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self._series_labels.clear()
         self._custom_series_labels.clear()
         self._custom_series_scales.clear()
+        self._derived_result_cache.clear()
         self._current_measurement_dataset_id = None
         self._refresh_dataset_lists()
-        for plot in self.main_plots + self.foundation_plots:
+        for plot in self._all_analysis_plots():
             plot.clear()
         self.statusBar().showMessage("Analysis data cleared")
 
@@ -769,6 +896,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             for key, value in self._custom_series_scales.items()
             if key[0] not in selected_dataset_ids
         }
+        self._derived_result_cache.clear()
         if self._current_measurement_dataset_id in selected_dataset_ids:
             self._current_measurement_dataset_id = None
         self._refresh_dataset_lists()
@@ -792,6 +920,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
                 item.setSelected(series.id in selected_ids if selected_ids else False)
         self.series_list.blockSignals(False)
         self._refresh_foundation_file_selectors()
+        self._refresh_derived_selectors()
         self._sync_series_editors_from_selection()
 
     def _refresh_foundation_file_selectors(self) -> None:
@@ -839,6 +968,99 @@ class AnalysisViewer(QtWidgets.QMainWindow):
     def _update_foundation_file_combo_tooltip(combo: QtWidgets.QComboBox) -> None:
         combo.setToolTip(combo.currentText())
 
+    def _refresh_derived_selectors(self) -> None:
+        if not hasattr(self, "derived_transfer_combo"):
+            return
+        previous_transfer = self.derived_transfer_combo.currentData()
+        previous_input_id = self.derived_input_series_combo.currentData()
+        self.derived_transfer_combo.blockSignals(True)
+        self.derived_input_series_combo.blockSignals(True)
+        try:
+            self.derived_transfer_combo.clear()
+            transfer_options = self._derived_transfer_options()
+            if not transfer_options:
+                self.derived_transfer_combo.addItem("(no transfer)", None)
+                self.derived_transfer_combo.setEnabled(False)
+            else:
+                self.derived_transfer_combo.setEnabled(True)
+                for label, data in transfer_options:
+                    self.derived_transfer_combo.addItem(label, data)
+                    self.derived_transfer_combo.setItemData(
+                        self.derived_transfer_combo.count() - 1,
+                        label,
+                        QtCore.Qt.ToolTipRole,
+                    )
+            transfer_index = self._combo_index_for_data(self.derived_transfer_combo, previous_transfer)
+            if transfer_index < 0:
+                transfer_index = 0 if self.derived_transfer_combo.count() else -1
+            if transfer_index >= 0:
+                self.derived_transfer_combo.setCurrentIndex(transfer_index)
+            self._update_foundation_file_combo_tooltip(self.derived_transfer_combo)
+
+            self.derived_input_series_combo.clear()
+            for dataset in self._datasets:
+                for series in dataset.series:
+                    label = self._series_label(dataset, series)
+                    self.derived_input_series_combo.addItem(label, series.id)
+                    self.derived_input_series_combo.setItemData(
+                        self.derived_input_series_combo.count() - 1,
+                        label,
+                        QtCore.Qt.ToolTipRole,
+                    )
+            input_index = self._combo_index_for_data(self.derived_input_series_combo, previous_input_id)
+            if input_index < 0:
+                input_index = 0 if self.derived_input_series_combo.count() else -1
+            if input_index >= 0:
+                self.derived_input_series_combo.setCurrentIndex(input_index)
+            self.derived_input_series_combo.setEnabled(self.derived_input_series_combo.count() > 0)
+            self._update_foundation_file_combo_tooltip(self.derived_input_series_combo)
+        finally:
+            self.derived_transfer_combo.blockSignals(False)
+            self.derived_input_series_combo.blockSignals(False)
+
+    def _derived_transfer_options(self) -> list[tuple[str, tuple[int, str, str, str, str]]]:
+        options: list[tuple[str, tuple[int, str, str, str, str]]] = []
+        for dataset in self._datasets:
+            display_name = _series_display_file_name(dataset.name)
+            if dataset.frf:
+                for key in sorted(dataset.frf):
+                    if "->" not in key:
+                        continue
+                    base_key, top_key = key.split("->", 1)
+                    base_series = self._series_for_transfer_endpoint(dataset, base_key)
+                    top_series = self._series_for_transfer_endpoint(dataset, top_key)
+                    base_label = f"Ch {base_series.channel_index + 1}" if base_series is not None else base_key
+                    top_label = f"Ch {top_series.channel_index + 1}" if top_series is not None else top_key
+                    label = f"{display_name} | {base_label}->{top_label} ({key})"
+                    options.append((label, (dataset.id, key, base_key, top_key, "stored")))
+                continue
+            if len(dataset.series) >= 2:
+                base_series = dataset.series[0]
+                for top_series in dataset.series[1:]:
+                    key = f"{base_series.channel_key}->{top_series.channel_key}"
+                    label = f"{display_name} | Ch {base_series.channel_index + 1}->Ch {top_series.channel_index + 1} (time)"
+                    options.append(
+                        (
+                            label,
+                            (
+                                dataset.id,
+                                key,
+                                base_series.channel_key,
+                                top_series.channel_key,
+                                "time",
+                            ),
+                        )
+                    )
+        return options
+
+    def _dataset_by_id(self, dataset_id: int | None) -> AnalysisDataset | None:
+        if dataset_id is None:
+            return None
+        for dataset in self._datasets:
+            if dataset.id == dataset_id:
+                return dataset
+        return None
+
     @staticmethod
     def _combo_index_for_data(combo: QtWidgets.QComboBox, value: object) -> int:
         if value is None:
@@ -871,9 +1093,22 @@ class AnalysisViewer(QtWidgets.QMainWindow):
     def _auto_plot_from_control_change(self) -> None:
         if self._suspend_auto_plot:
             return
+        if hasattr(self, "derived_plots") and self._has_derived_input_ready():
+            self._plot_derived(quiet=True)
         if not self._datasets or not self.series_list.selectedItems():
             return
         self.plot_current()
+
+    def _auto_plot_derived_from_control_change(self) -> None:
+        if self._suspend_auto_plot:
+            return
+        if not hasattr(self, "derived_plots") or not self._has_derived_input_ready():
+            return
+        self._plot_derived(quiet=True)
+
+    def _has_derived_input_ready(self) -> bool:
+        transfer_data = self.derived_transfer_combo.currentData()
+        return transfer_data is not None and self.derived_input_series_combo.currentData() is not None
 
     def plot_current(self) -> None:
         selected = self._selected_series()
@@ -885,7 +1120,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self._selected_channel_keys_by_dataset = {}
         keep_existing = bool(getattr(self, "hold_button", None) and self.hold_button.isChecked())
         if not keep_existing:
-            for plot in self.main_plots + self.foundation_plots:
+            for plot in self._all_analysis_plots():
                 self._clear_data_tips(plot)
         for dataset, series in selected:
             keys = self._selected_channel_keys_by_dataset.setdefault(dataset.id, set())
@@ -895,10 +1130,11 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         for plot, combo in zip(self.main_plots, self.main_mode_combos):
             self._plot_main_axis(plot, combo.currentText(), selected, keep_existing=keep_existing)
         self._plot_foundation(selected, keep_existing=keep_existing)
+        self._plot_derived(keep_existing=keep_existing, quiet=True)
         self.statusBar().showMessage(f"Plotted {len(selected)} selected channel(s)")
 
     def _clear_plots(self) -> None:
-        for plot in self.main_plots + self.foundation_plots:
+        for plot in self._all_analysis_plots():
             self._clear_plot_with_title(plot, "")
         self.statusBar().showMessage("Cleared analysis plots")
 
@@ -1283,6 +1519,704 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             self._clear_plot_with_title(self.foundation_plots[1], "Dynamic stiffness (no source)")
             self._clear_plot_with_title(self.foundation_plots[2], "Coherence (no source)")
 
+    def _plot_derived(self, *, keep_existing: bool = False, quiet: bool = False) -> None:
+        if not hasattr(self, "derived_plots"):
+            return
+        selected_transfer = self._selected_derived_transfer()
+        input_series = self._derived_input_series()
+        if selected_transfer is None or not input_series:
+            if not quiet:
+                self.statusBar().showMessage("换算页缺少传递率曲线或待换算数据")
+            for plot, title in zip(self.derived_plots, ("传递率曲线 (no source)", "换算图窗 1 (no source)", "换算图窗 2 (no source)")):
+                self._clear_plot_with_title(plot, title)
+            return
+        transfer_dataset, transfer_key, source_kind, base_series, top_series, transfer_label = selected_transfer
+        transfer_keys = self._selected_channel_keys_by_dataset.setdefault(transfer_dataset.id, set())
+        transfer_keys.update({base_series.channel_key, top_series.channel_key})
+        for input_dataset, series in input_series:
+            input_keys = self._selected_channel_keys_by_dataset.setdefault(input_dataset.id, set())
+            input_keys.add(series.channel_key)
+
+        transfer = self._transfer_for_derived(
+            transfer_dataset,
+            transfer_key,
+            source_kind,
+            base_series,
+            top_series,
+        )
+        if transfer is None:
+            if not quiet:
+                self.statusBar().showMessage("无法从所选传递率数据得到 H_top/base")
+            for plot in self.derived_plots:
+                self._clear_plot_with_title(plot, "No transfer function")
+            return
+        transfer_f, transfer_h, phase_available = transfer
+        direction = str(self.derived_direction_combo.currentData() or DERIVE_BASE_TO_TOP)
+        regularization = float(self.derived_regularization_spin.value())
+        freq_min = _parse_optional_float(self.derived_freq_min_edit.text())
+        freq_max = _parse_optional_float(self.derived_freq_max_edit.text())
+
+        results: list[dict[str, object]] = []
+        for input_dataset, series in input_series:
+            result = self._derived_result_for_series(
+                transfer_dataset,
+                input_dataset,
+                base_series,
+                top_series,
+                series,
+                transfer_f,
+                transfer_h,
+                phase_available,
+                direction=direction,
+                regularization=regularization,
+                freq_min=freq_min,
+                freq_max=freq_max,
+            )
+            if result is not None:
+                results.append(result)
+        self._plot_derived_results(
+            transfer_f,
+            transfer_h,
+            transfer_label,
+            results,
+            keep_existing=keep_existing,
+        )
+        if not quiet:
+            if results:
+                self.statusBar().showMessage(f"换算完成：{len(results)} 条曲线")
+            else:
+                self.statusBar().showMessage("换算没有得到有效曲线")
+
+    def _plot_derived_results(
+        self,
+        transfer_f: np.ndarray,
+        transfer_h: np.ndarray,
+        transfer_label: str,
+        results: list[dict[str, object]],
+        *,
+        keep_existing: bool,
+    ) -> None:
+        self._plot_selected_transfer_axis(
+            self.derived_plots[0],
+            transfer_f,
+            transfer_h,
+            transfer_label,
+            keep_existing=keep_existing,
+        )
+        self._plot_derived_result_axis(
+            self.derived_plots[1],
+            self.derived_result_mode_combo.currentText(),
+            results,
+            keep_existing=keep_existing,
+        )
+
+    def _plot_selected_transfer_axis(
+        self,
+        plot: pg.PlotWidget,
+        transfer_f: np.ndarray,
+        transfer_h: np.ndarray,
+        label: str,
+        *,
+        keep_existing: bool,
+    ) -> None:
+        if not keep_existing:
+            plot.clear()
+            if plot.plotItem.legend is not None:
+                plot.plotItem.legend.clear()
+            plot.addLegend(offset=(4, 2))
+            self._plot_curves[plot] = {}
+            self._plot_export_excluded[plot] = set()
+            self._active_trace[plot] = None
+            self._data_tip_items[plot].clear()
+            self._readd_cursor_items(plot)
+        elif plot.plotItem.legend is None:
+            plot.addLegend(offset=(4, 2))
+        self._apply_plot_theme(plot)
+        plot.setLogMode(x=True, y=False)
+        self._log_modes[plot] = (True, False)
+        f = np.asarray(transfer_f, dtype=float).ravel()
+        magnitude_db = 20.0 * np.log10(np.maximum(np.abs(transfer_h), 1e-20))
+        count = min(f.size, magnitude_db.size)
+        f = f[:count]
+        magnitude_db = magnitude_db[:count]
+        valid = np.isfinite(f) & np.isfinite(magnitude_db) & (f > 0.0)
+        f = f[valid]
+        magnitude_db = magnitude_db[valid]
+        if f.size >= 2:
+            plot_label = self._unique_plot_label(plot, label) if keep_existing else label
+            plot.plot(f, magnitude_db, pen=pg.mkPen(TRACE_COLORS[0], width=1.3), name=plot_label)
+            self._plot_curves[plot][plot_label] = (f, magnitude_db)
+            self._active_trace[plot] = plot_label
+        plot.setTitle("传递率曲线" if f.size >= 2 else "传递率曲线 (no valid data)")
+        plot.setLabel("bottom", "Frequency (Hz)")
+        plot.setLabel("left", "Trans (dB)")
+        self._auto_range_plot(plot, [f], [magnitude_db], log_x=True, log_y=False)
+
+    def _plot_derived_result_axis(
+        self,
+        plot: pg.PlotWidget,
+        mode: str,
+        results: list[dict[str, object]],
+        *,
+        keep_existing: bool,
+    ) -> None:
+        specs = {
+            "PSD": ("PSD", "psd", "Frequency (Hz)", quantity_psd_label(self.quantity_combo.currentText()), True, True),
+            "CumPSD": (
+                "CumPSD",
+                "cumulative",
+                "Frequency (Hz)",
+                quantity_cumulative_label(self.quantity_combo.currentText()),
+                True,
+                False,
+            ),
+            "地基振动": (
+                "地基振动",
+                "foundation",
+                "Third-octave center frequency (Hz)",
+                "RMS velocity (um/s)",
+                True,
+                True,
+            ),
+            "近似时域": ("近似时域", "time", "Time (s)", quantity_time_label(self.quantity_combo.currentText()), False, False),
+        }
+        title, curve_key, x_label, y_label, log_x, log_y = specs.get(str(mode), specs["PSD"])
+        if not keep_existing:
+            plot.clear()
+            if plot.plotItem.legend is not None:
+                plot.plotItem.legend.clear()
+            plot.addLegend(offset=(4, 2))
+            self._plot_curves[plot] = {}
+            self._plot_export_excluded[plot] = set()
+            self._active_trace[plot] = None
+            self._data_tip_items[plot].clear()
+            self._readd_cursor_items(plot)
+        elif plot.plotItem.legend is None:
+            plot.addLegend(offset=(4, 2))
+        self._apply_plot_theme(plot)
+        plot.setLogMode(x=log_x, y=log_y)
+        self._log_modes[plot] = (log_x, log_y)
+        plot.setLabel("bottom", x_label)
+        plot.setLabel("left", y_label)
+        x_ranges: list[np.ndarray] = []
+        y_ranges: list[np.ndarray] = []
+        color_index = len(self._plot_curves.get(plot, {})) if keep_existing else 0
+        for result in results:
+            curve = result.get(curve_key)
+            if not curve:
+                continue
+            x, y = curve
+            x = np.asarray(x, dtype=float)
+            y = np.asarray(y, dtype=float)
+            if x.size < 2 or y.size < 2:
+                continue
+            label = str(result.get("label", "derived"))
+            plot_label = self._unique_plot_label(plot, label) if keep_existing else label
+            plot.plot(
+                x,
+                y,
+                pen=pg.mkPen(TRACE_COLORS[color_index % len(TRACE_COLORS)], width=1.3),
+                name=plot_label,
+            )
+            self._plot_curves[plot][plot_label] = (x, y)
+            if self._active_trace[plot] is None:
+                self._active_trace[plot] = plot_label
+            color_index += 1
+            x_ranges.append(x)
+            y_ranges.append(y)
+            if self.derived_show_source_check.isChecked():
+                source_curve = result.get(f"source_{curve_key}")
+                if source_curve:
+                    sx, sy = source_curve
+                    sx = np.asarray(sx, dtype=float)
+                    sy = np.asarray(sy, dtype=float)
+                    if sx.size >= 2 and sy.size >= 2:
+                        source_label = str(result.get("source_label", "待换算数据"))
+                        source_plot_label = self._unique_plot_label(plot, source_label) if keep_existing else source_label
+                        plot.plot(
+                            sx,
+                            sy,
+                            pen=pg.mkPen(
+                                TRACE_COLORS[color_index % len(TRACE_COLORS)],
+                                width=1.15,
+                                style=QtCore.Qt.DashLine,
+                            ),
+                            name=source_plot_label,
+                        )
+                        self._plot_curves[plot][source_plot_label] = (sx, sy)
+                        color_index += 1
+                        x_ranges.append(sx)
+                        y_ranges.append(sy)
+        if curve_key in {"psd", "cumulative", "foundation"}:
+            self._add_derived_vc_reference_lines(
+                plot,
+                curve_key,
+                x_ranges,
+                y_ranges,
+                keep_existing=keep_existing,
+            )
+        plot.setTitle(title if x_ranges else f"{title} (no valid data)")
+        range_curves = self._plot_curves.get(plot, {}) if keep_existing else {}
+        if range_curves:
+            x_ranges = [curve[0] for curve in range_curves.values()]
+            y_ranges = [curve[1] for curve in range_curves.values()]
+        self._auto_range_plot(plot, x_ranges, y_ranges, log_x=log_x, log_y=log_y)
+
+    def _add_derived_vc_reference_lines(
+        self,
+        plot: pg.PlotWidget,
+        curve_key: str,
+        x_ranges: list[np.ndarray],
+        y_ranges: list[np.ndarray],
+        *,
+        keep_existing: bool,
+    ) -> None:
+        vc_lines = {
+            "VC A": (np.array([100.0, 50.0, 50.0]), "#202020"),
+            "VC B": (np.array([50.0, 25.0, 25.0]), "#1f5fbf"),
+            "VC C": (np.array([12.5, 12.5, 12.5]), "#d12f2f"),
+            "VC D": (np.array([6.25, 6.25, 6.25]), "#228b3c"),
+            "VC E": (np.array([3.125, 3.125, 3.125]), "#8a5a00"),
+            "VC F": (np.array([1.5625, 1.5625, 1.5625]), "#6f42c1"),
+        }
+        ref_f = np.array([4.0, 8.0, 80.0])
+        for name, (values, color) in vc_lines.items():
+            checkbox = self.derived_vc_checks.get(name)
+            if checkbox is None or not checkbox.isChecked():
+                continue
+            x_values, y_values = self._vc_reference_curve_for_mode(ref_f, values, curve_key)
+            if x_values.size < 2 or y_values.size < 2:
+                continue
+            plot_label = self._unique_plot_label(plot, name) if keep_existing else name
+            plot.plot(x_values, y_values, pen=pg.mkPen(color, width=1.6, style=QtCore.Qt.DashLine), name=plot_label)
+            self._plot_curves[plot][plot_label] = (x_values, y_values)
+            self._plot_export_excluded.setdefault(plot, set()).add(plot_label)
+            x_ranges.append(x_values)
+            y_ranges.append(y_values)
+
+    def _vc_reference_curve_for_mode(
+        self,
+        frequencies: np.ndarray,
+        velocity_um_s: np.ndarray,
+        curve_key: str,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        f = np.asarray(frequencies, dtype=float).ravel()
+        velocity = np.asarray(velocity_um_s, dtype=float).ravel()
+        count = min(f.size, velocity.size)
+        f = f[:count]
+        velocity = velocity[:count]
+        valid = np.isfinite(f) & np.isfinite(velocity) & (f > 0.0) & (velocity > 0.0)
+        f = f[valid]
+        velocity = velocity[valid]
+        if f.size < 2:
+            return np.array([], dtype=float), np.array([], dtype=float)
+        if curve_key == "foundation":
+            return f, velocity
+        centers, lower_edges, upper_edges = third_octave_bands(float(np.min(f) * 0.8), float(np.max(f) * 1.25))
+        if centers.size == 0:
+            return np.array([], dtype=float), np.array([], dtype=float)
+        bandwidths = np.empty_like(f)
+        for index, center in enumerate(f):
+            nearest = int(np.argmin(np.abs(centers - center)))
+            bandwidths[index] = max(float(upper_edges[nearest] - lower_edges[nearest]), 1e-20)
+        velocity_psd_si = (velocity / 1e6) ** 2 / bandwidths
+        acceleration_psd = velocity_psd_si * (2.0 * np.pi * f) ** 2
+        f_quantity, psd_quantity = convert_acceleration_psd(
+            f,
+            acceleration_psd,
+            self.quantity_combo.currentText(),
+            highpass_enabled=self.highpass_check.isChecked(),
+            highpass_hz=float(self.highpass_spin.value()),
+        )
+        if curve_key == "cumulative":
+            return compute_cumulative_spectrum(f_quantity, psd_quantity)
+        return f_quantity, psd_quantity
+
+    def _derived_result_for_series(
+        self,
+        transfer_dataset: AnalysisDataset,
+        input_dataset: AnalysisDataset,
+        base_series: AnalysisSeries,
+        top_series: AnalysisSeries,
+        input_series: AnalysisSeries,
+        transfer_f: np.ndarray,
+        transfer_h: np.ndarray,
+        phase_available: bool,
+        *,
+        direction: str,
+        regularization: float,
+        freq_min: float | None,
+        freq_max: float | None,
+    ) -> dict[str, object] | None:
+        cache_key = self._derived_cache_key(
+            transfer_dataset,
+            input_dataset,
+            base_series,
+            top_series,
+            input_series,
+            direction,
+            regularization,
+            freq_min,
+            freq_max,
+        )
+        if cache_key in self._derived_result_cache:
+            (
+                f_accel,
+                psd_accel,
+                t_time,
+                y_time,
+                f_source_accel,
+                psd_source_accel,
+                t_source,
+                y_source,
+                label,
+                source_label,
+            ) = self._derived_result_cache[cache_key]
+        else:
+            f_in, psd_in = self._psd_for_series(
+                input_dataset,
+                input_series,
+                scale=float(self.scale_spin.value()) * float(input_series.scale or 1.0),
+            )
+            f_accel, psd_accel = derive_psd_from_transfer(
+                f_in,
+                psd_in,
+                transfer_f,
+                transfer_h,
+                direction=direction,
+                regularization_floor=regularization,
+            )
+            if f_accel.size and freq_min is not None:
+                keep = f_accel >= float(freq_min)
+                f_accel = f_accel[keep]
+                psd_accel = psd_accel[keep]
+            if f_accel.size and freq_max is not None:
+                keep = f_accel <= float(freq_max)
+                f_accel = f_accel[keep]
+                psd_accel = psd_accel[keep]
+            f_source_accel = np.asarray(f_in, dtype=float)
+            psd_source_accel = np.asarray(psd_in, dtype=float)
+            if f_source_accel.size and freq_min is not None:
+                keep = f_source_accel >= float(freq_min)
+                f_source_accel = f_source_accel[keep]
+                psd_source_accel = psd_source_accel[keep]
+            if f_source_accel.size and freq_max is not None:
+                keep = f_source_accel <= float(freq_max)
+                f_source_accel = f_source_accel[keep]
+                psd_source_accel = psd_source_accel[keep]
+            t_time, y_time = self._derived_time_curve(
+                input_dataset,
+                input_series,
+                transfer_f,
+                transfer_h,
+                phase_available,
+                direction=direction,
+                regularization=regularization,
+            )
+            t_source, y_source = self._source_time_curve(input_dataset, input_series)
+            label = self._derived_result_label(input_dataset, input_series, direction)
+            source_label = f"待换算: {self._series_label(input_dataset, input_series)}"
+            self._derived_result_cache[cache_key] = (
+                f_accel,
+                psd_accel,
+                t_time,
+                y_time,
+                f_source_accel,
+                psd_source_accel,
+                t_source,
+                y_source,
+                label,
+                source_label,
+            )
+        if f_accel.size < 2 and t_time.size < 2:
+            return None
+        result: dict[str, object] = {"label": label, "source_label": source_label}
+        if f_accel.size >= 2:
+            f_quantity, psd_quantity = convert_acceleration_psd(
+                f_accel,
+                psd_accel,
+                self.quantity_combo.currentText(),
+                highpass_enabled=self.highpass_check.isChecked(),
+                highpass_hz=float(self.highpass_spin.value()),
+            )
+            if f_quantity.size >= 2:
+                result["psd"] = (f_quantity, psd_quantity)
+                result["cumulative"] = compute_cumulative_spectrum(f_quantity, psd_quantity)
+            rbw = _infer_rbw(f_accel)
+            result["foundation"] = compute_third_octave_velocity_rms(f_accel, psd_accel, rbw)
+        if f_source_accel.size >= 2:
+            f_source_quantity, psd_source_quantity = convert_acceleration_psd(
+                f_source_accel,
+                psd_source_accel,
+                self.quantity_combo.currentText(),
+                highpass_enabled=self.highpass_check.isChecked(),
+                highpass_hz=float(self.highpass_spin.value()),
+            )
+            if f_source_quantity.size >= 2:
+                result["source_psd"] = (f_source_quantity, psd_source_quantity)
+                result["source_cumulative"] = compute_cumulative_spectrum(f_source_quantity, psd_source_quantity)
+            source_rbw = _infer_rbw(f_source_accel)
+            result["source_foundation"] = compute_third_octave_velocity_rms(
+                f_source_accel,
+                psd_source_accel,
+                source_rbw,
+            )
+        if t_time.size >= 2:
+            converted_time = convert_acceleration_time_series(
+                y_time,
+                input_dataset.sample_rate,
+                self.quantity_combo.currentText(),
+                highpass_enabled=self.highpass_check.isChecked(),
+                highpass_hz=float(self.highpass_spin.value()),
+            )
+            count = min(t_time.size, converted_time.size)
+            result["time"] = (t_time[:count], converted_time[:count])
+        if t_source.size >= 2:
+            converted_source_time = convert_acceleration_time_series(
+                y_source,
+                input_dataset.sample_rate,
+                self.quantity_combo.currentText(),
+                highpass_enabled=self.highpass_check.isChecked(),
+                highpass_hz=float(self.highpass_spin.value()),
+            )
+            count = min(t_source.size, converted_source_time.size)
+            result["source_time"] = (t_source[:count], converted_source_time[:count])
+        return result
+
+    def _derived_time_curve(
+        self,
+        input_dataset: AnalysisDataset,
+        input_series: AnalysisSeries,
+        transfer_f: np.ndarray,
+        transfer_h: np.ndarray,
+        phase_available: bool,
+        *,
+        direction: str,
+        regularization: float,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if not phase_available:
+            return np.array([], dtype=float), np.array([], dtype=float)
+        start_s, end_s = self._analysis_window_for_dataset(input_dataset)
+        t, raw = self._load_analysis_time_series(
+            input_dataset,
+            input_series.channel_key,
+            start_s=start_s,
+            end_s=end_s,
+        )
+        if raw.size < 2:
+            return np.array([], dtype=float), np.array([], dtype=float)
+        filtered, trim = apply_filter_to_signal(raw, input_dataset.sample_rate, self._filter_config())
+        if trim > 0 and filtered.size > trim * 2:
+            filtered = filtered[trim:-trim]
+            t = t[trim:-trim]
+        values = filtered * float(self.scale_spin.value()) * float(input_series.scale or 1.0)
+        return derive_time_from_transfer(
+            t,
+            values,
+            input_dataset.sample_rate,
+            transfer_f,
+            transfer_h,
+            direction=direction,
+            regularization_floor=regularization,
+        )
+
+    def _source_time_curve(
+        self,
+        input_dataset: AnalysisDataset,
+        input_series: AnalysisSeries,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        start_s, end_s = self._analysis_window_for_dataset(input_dataset)
+        t, raw = self._load_analysis_time_series(
+            input_dataset,
+            input_series.channel_key,
+            start_s=start_s,
+            end_s=end_s,
+        )
+        if raw.size < 2:
+            return np.array([], dtype=float), np.array([], dtype=float)
+        filtered, trim = apply_filter_to_signal(raw, input_dataset.sample_rate, self._filter_config())
+        if trim > 0 and filtered.size > trim * 2:
+            filtered = filtered[trim:-trim]
+            t = t[trim:-trim]
+        values = filtered * float(self.scale_spin.value()) * float(input_series.scale or 1.0)
+        return t[: values.size], values
+
+    def _derived_cache_key(
+        self,
+        transfer_dataset: AnalysisDataset,
+        input_dataset: AnalysisDataset,
+        base_series: AnalysisSeries,
+        top_series: AnalysisSeries,
+        input_series: AnalysisSeries,
+        direction: str,
+        regularization: float,
+        freq_min: float | None,
+        freq_max: float | None,
+    ) -> tuple[object, ...]:
+        config = self._filter_config()
+        start_s, end_s = self._time_window()
+        return (
+            transfer_dataset.id,
+            input_dataset.id,
+            base_series.channel_key,
+            top_series.channel_key,
+            input_series.channel_key,
+            direction,
+            round(float(regularization), 12),
+            freq_min,
+            freq_max,
+            self.psd_source_combo.currentText(),
+            round(float(self.scale_spin.value()), 12),
+            round(float(input_series.scale or 1.0), 12),
+            round(float(base_series.scale or 1.0), 12),
+            round(float(top_series.scale or 1.0), 12),
+            start_s,
+            end_s,
+            round(float(self.fs_hint_spin.value()), 6),
+            config.lowpass_enabled,
+            round(float(config.lowpass_hz), 6),
+            config.highpass_enabled,
+            round(float(config.highpass_hz), 6),
+            config.detrend_enabled,
+            int(config.order),
+        )
+
+    def _derived_input_series(self) -> list[tuple[AnalysisDataset, AnalysisSeries]]:
+        selected_id = self.derived_input_series_combo.currentData()
+        selected: list[tuple[AnalysisDataset, AnalysisSeries]] = []
+        for dataset in self._datasets:
+            for series in dataset.series:
+                if series.id == selected_id:
+                    selected.append((dataset, series))
+        return selected
+
+    def _selected_derived_transfer(
+        self,
+    ) -> tuple[AnalysisDataset, str, str, AnalysisSeries, AnalysisSeries, str] | None:
+        data = self.derived_transfer_combo.currentData()
+        if not isinstance(data, tuple) or len(data) != 5:
+            return None
+        dataset_id, transfer_key, base_key, top_key, source_kind = data
+        dataset = self._dataset_by_id(int(dataset_id))
+        if dataset is None:
+            return None
+        base_series = self._series_for_transfer_endpoint(dataset, str(base_key))
+        top_series = self._series_for_transfer_endpoint(dataset, str(top_key))
+        if base_series is None or top_series is None:
+            return None
+        return (
+            dataset,
+            str(transfer_key),
+            str(source_kind),
+            base_series,
+            top_series,
+            self.derived_transfer_combo.currentText(),
+        )
+
+    def _transfer_for_derived(
+        self,
+        dataset: AnalysisDataset,
+        transfer_key: str,
+        source_kind: str,
+        base_series: AnalysisSeries,
+        top_series: AnalysisSeries,
+    ) -> tuple[np.ndarray, np.ndarray, bool] | None:
+        if source_kind == "stored" and transfer_key in dataset.frf and dataset.frequency_hz is not None:
+            frf_values = dataset.frf[transfer_key]
+            f = np.asarray(dataset.frequency_hz, dtype=float).ravel()
+            h_raw = np.asarray(frf_values).ravel()
+            count = min(f.size, h_raw.size)
+            if count >= 2:
+                eu_ratio = float(top_series.scale or 1.0) / max(float(base_series.scale or 1.0), 1e-20)
+                return f[:count], h_raw[:count] * eu_ratio, has_complex_transfer_phase(frf_values)
+        return self._transfer_for_derived_from_time_data(dataset, base_series, top_series)
+
+    def _transfer_for_derived_from_time_data(
+        self,
+        dataset: AnalysisDataset,
+        base_series: AnalysisSeries,
+        top_series: AnalysisSeries,
+    ) -> tuple[np.ndarray, np.ndarray, bool] | None:
+        start_s, end_s = self._analysis_window_for_dataset(dataset)
+        _t_base, base_raw = self._load_analysis_time_series(
+            dataset,
+            base_series.channel_key,
+            start_s=start_s,
+            end_s=end_s,
+        )
+        _t_top, top_raw = self._load_analysis_time_series(
+            dataset,
+            top_series.channel_key,
+            start_s=start_s,
+            end_s=end_s,
+        )
+        count = min(base_raw.size, top_raw.size)
+        if count < 2:
+            return None
+        base_filtered, base_trim = apply_filter_to_signal(base_raw[:count], dataset.sample_rate, self._filter_config())
+        top_filtered, top_trim = apply_filter_to_signal(top_raw[:count], dataset.sample_rate, self._filter_config())
+        trim = max(base_trim, top_trim)
+        if trim > 0 and base_filtered.size > trim * 2 and top_filtered.size > trim * 2:
+            base_filtered = base_filtered[trim:-trim]
+            top_filtered = top_filtered[trim:-trim]
+        block_size = self._fft_block_size(min(base_filtered.size, top_filtered.size), dataset)
+        f, h_raw = compute_transfer_function_welch(
+            base_filtered,
+            top_filtered,
+            dataset.sample_rate,
+            block_size,
+        )
+        if f.size < 2:
+            return None
+        eu_ratio = float(top_series.scale or 1.0) / max(float(base_series.scale or 1.0), 1e-20)
+        return f, h_raw * eu_ratio, True
+
+    def _series_for_transfer_endpoint(
+        self,
+        dataset: AnalysisDataset,
+        endpoint: str,
+    ) -> AnalysisSeries | None:
+        series = self._series_for_channel_key(dataset, endpoint)
+        if series is not None:
+            return series
+        text = str(endpoint or "").strip().lower()
+        if text.startswith("ai"):
+            try:
+                index = int(text[2:])
+            except ValueError:
+                return None
+            if 0 <= index < len(dataset.series):
+                return dataset.series[index]
+        return None
+
+    def _series_for_channel_key(
+        self,
+        dataset: AnalysisDataset | None,
+        channel_key: object,
+    ) -> AnalysisSeries | None:
+        if dataset is None:
+            return None
+        for series in dataset.series:
+            if series.channel_key == channel_key:
+                return series
+        return None
+
+    @staticmethod
+    def _series_for_channel_number(dataset: AnalysisDataset, channel_number: int) -> AnalysisSeries | None:
+        index = int(channel_number) - 1
+        if index < 0 or index >= len(dataset.series):
+            return None
+        return dataset.series[index]
+
+    def _derived_result_label(
+        self,
+        dataset: AnalysisDataset,
+        series: AnalysisSeries,
+        direction: str,
+    ) -> str:
+        suffix = "顶部估算" if direction == DERIVE_BASE_TO_TOP else "地基估算"
+        return f"{self._series_label(dataset, series)} -> {suffix}"
+
     def _foundation_selected_dataset(self, combo: QtWidgets.QComboBox) -> AnalysisDataset | None:
         dataset_id = combo.currentData()
         for dataset in self._datasets:
@@ -1294,11 +2228,19 @@ class AnalysisViewer(QtWidgets.QMainWindow):
     def _foundation_reference_channel() -> int:
         return 1
 
+    def _all_analysis_plots(self) -> list[pg.PlotWidget]:
+        plots: list[pg.PlotWidget] = []
+        plots.extend(getattr(self, "main_plots", []))
+        plots.extend(getattr(self, "foundation_plots", []))
+        plots.extend(getattr(self, "derived_plots", []))
+        return plots
+
     def _clear_plot_with_title(self, plot: pg.PlotWidget, title: str) -> None:
         plot.clear()
         if plot.plotItem.legend is not None:
             plot.plotItem.legend.clear()
         self._plot_curves[plot] = {}
+        self._plot_export_excluded[plot] = set()
         self._active_trace[plot] = None
         self._data_tip_items[plot].clear()
         self._readd_cursor_items(plot)
@@ -1532,6 +2474,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         if not curves:
             self.statusBar().showMessage("No curves in selected plot for export")
             return
+        excluded = self._plot_export_excluded.get(plot, set())
         title = _safe_filename_part(plot.getPlotItem().titleLabel.text or "plot")
         path, _filter = QtWidgets.QFileDialog.getSaveFileName(
             self,
@@ -1546,6 +2489,8 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         rows: list[tuple[str, np.ndarray, np.ndarray]] = []
         max_count = 0
         for label, (x, y) in curves.items():
+            if label in excluded:
+                continue
             x_arr, y_arr = _finite_aligned_xy(x, y)
             if x_arr.size == 0:
                 continue
@@ -1623,6 +2568,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             self._cursor_positions.pop(plot, None)
             self._axis_history.pop(plot, None)
             self._log_modes.pop(plot, None)
+            self._plot_export_excluded.pop(plot, None)
 
     def _time_window(self) -> tuple[float | None, float | None]:
         return _parse_optional_float(self.time_start_edit.text()), _parse_optional_float(self.time_end_edit.text())
@@ -1752,6 +2698,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             self._sync_series_editors_from_selection()
             return
         self._custom_series_labels[(dataset.id, series.channel_index + 1)] = label
+        self._derived_result_cache.clear()
         self._refresh_dataset_lists()
         self.statusBar().showMessage(f"Renamed channel to {label}")
         self.plot_current()
@@ -1773,6 +2720,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         dataset, series = selected[0]
         self._custom_series_scales[(dataset.id, series.channel_index + 1)] = scale
         series.scale = scale
+        self._derived_result_cache.clear()
         self.factor_edit.setText(f"{scale:g}")
         self.statusBar().showMessage(f"Updated {self._series_label(dataset, series)} factor to {scale:g}")
         self.plot_current()
