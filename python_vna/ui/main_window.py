@@ -328,9 +328,30 @@ class DetachedPlotWindow(QtWidgets.QDialog):
         data_tip["text"].setText(f"X {tip_x:.6g}\nY {tip_y:.6g}")
         if hasattr(data_tip["text"], "setAnchor"):
             data_tip["text"].setAnchor(
-                self._data_tip_anchor_for_plot_point(key, plot_x, plot_y)
+                data_tip.get("label_anchor")
+                if data_tip.get("label_anchor_manual")
+                else self._data_tip_anchor_for_plot_point(key, plot_x, plot_y)
             )
         data_tip["text"].setPos(plot_x, plot_y)
+
+    def _drag_data_tip_label_to_scene_pos(
+        self, key: str, data_tip: dict[str, object], scene_pos
+    ) -> bool:
+        plot = self._plot_for_key(key)
+        mouse_point = plot.getPlotItem().vb.mapSceneToView(scene_pos)
+        point_x = self._x_to_plot_coord(key, float(data_tip["x"]))
+        point_y = self._y_to_plot_coord(key, float(data_tip["y"]))
+        anchor = _data_tip_anchor_for_label_drag(
+            float(mouse_point.x()),
+            float(mouse_point.y()),
+            point_x,
+            point_y,
+        )
+        data_tip["label_anchor"] = anchor
+        data_tip["label_anchor_manual"] = True
+        data_tip["text"].setAnchor(anchor)
+        self._show_status(f"{key.title()} plot data tip label moved")
+        return True
 
     def _drag_data_tip_to_scene_pos(
         self, key: str, data_tip: dict[str, object], scene_pos
@@ -381,6 +402,9 @@ class DetachedPlotWindow(QtWidgets.QDialog):
             border=pg.mkPen("#111111", width=0.8),
             on_context_menu=lambda screen_pos, plot_key=key, tip=data_tip: self._show_data_tip_menu(
                 plot_key, tip, screen_pos
+            ),
+            on_drag=lambda scene_pos, plot_key=key, tip=data_tip: self._drag_data_tip_label_to_scene_pos(
+                plot_key, tip, scene_pos
             ),
         )
         text.setZValue(DATA_TIP_Z + 2)
@@ -589,9 +613,10 @@ class DataTipPoint(pg.ScatterPlotItem):
 
 
 class DataTipText(pg.TextItem):
-    def __init__(self, *args, on_context_menu=None, **kwargs):
+    def __init__(self, *args, on_context_menu=None, on_drag=None, **kwargs):
         super().__init__(*args, **kwargs)
         self._on_context_menu = on_context_menu
+        self._on_drag = on_drag
 
     def mouseClickEvent(self, ev) -> None:
         if ev.button() == QtCore.Qt.RightButton and self._on_context_menu is not None:
@@ -599,6 +624,24 @@ class DataTipText(pg.TextItem):
             self._on_context_menu(ev.screenPos())
             return
         super().mouseClickEvent(ev)
+
+    def mouseDragEvent(self, ev) -> None:
+        if ev.button() != QtCore.Qt.LeftButton or self._on_drag is None:
+            ev.ignore()
+            return
+        ev.accept()
+        self._on_drag(ev.scenePos())
+
+
+def _data_tip_anchor_for_label_drag(
+    mouse_plot_x: float,
+    mouse_plot_y: float,
+    point_plot_x: float,
+    point_plot_y: float,
+) -> tuple[float, float]:
+    right = float(mouse_plot_x) >= float(point_plot_x)
+    above = float(mouse_plot_y) >= float(point_plot_y)
+    return (-0.05 if right else 1.05, 1.05 if above else -0.05)
 
 
 class CompactLegendSample(pg.graphicsItems.LegendItem.ItemSample):
@@ -2807,8 +2850,33 @@ class MainWindow(QtWidgets.QMainWindow):
         point.setData([plot_x], [plot_y])
         text.setText(f"X {tip_x:.6g}\nY {tip_y:.6g}")
         if hasattr(text, "setAnchor"):
-            text.setAnchor(self._data_tip_anchor_for_plot_point(key, plot_x, plot_y))
+            text.setAnchor(
+                data_tip.get("label_anchor")
+                if data_tip.get("label_anchor_manual")
+                else self._data_tip_anchor_for_plot_point(key, plot_x, plot_y)
+            )
         text.setPos(plot_x, plot_y)
+
+    def _drag_data_tip_label_to_scene_pos(
+        self, key: str, data_tip: dict[str, object], scene_pos
+    ) -> bool:
+        plot = self._plot_widget_for_key(key)
+        mouse_point = plot.getPlotItem().vb.mapSceneToView(scene_pos)
+        point_x = self._x_to_plot_coord(key, float(data_tip["x"]))
+        point_y = self._y_to_plot_coord(key, float(data_tip["y"]))
+        anchor = _data_tip_anchor_for_label_drag(
+            float(mouse_point.x()),
+            float(mouse_point.y()),
+            point_x,
+            point_y,
+        )
+        data_tip["label_anchor"] = anchor
+        data_tip["label_anchor_manual"] = True
+        text = data_tip["text"]
+        if hasattr(text, "setAnchor"):
+            text.setAnchor(anchor)
+        self.statusBar().showMessage(f"{key.title()} data tip label moved")
+        return True
 
     def _data_tip_anchor_for_plot_point(self, key: str, plot_x: float, plot_y: float) -> tuple[float, float]:
         plot = self._plot_widget_for_key(key)
@@ -2881,6 +2949,9 @@ class MainWindow(QtWidgets.QMainWindow):
             border=pg.mkPen("#111111", width=0.8),
             on_context_menu=lambda screen_pos, plot_key=key, tip=data_tip: self._show_data_tip_menu(
                 plot_key, tip, screen_pos
+            ),
+            on_drag=lambda scene_pos, plot_key=key, tip=data_tip: self._drag_data_tip_label_to_scene_pos(
+                plot_key, tip, scene_pos
             ),
         )
         text.setZValue(DATA_TIP_Z + 2)

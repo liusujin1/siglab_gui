@@ -46,6 +46,7 @@ from python_vna.ui.main_window import (
     VnaViewBox,
     _apply_text_item_style,
     _cursor_palette_for_background,
+    _data_tip_anchor_for_label_drag,
 )
 
 QtCore = require("PySide6.QtCore", "python -m pip install -e .[gui]")
@@ -94,7 +95,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
     ):
         super().__init__(parent)
         self.setWindowTitle("Analysis Viewer")
-        self.resize(1180, 760)
+        self.resize(980, 720)
         self._datasets: list[AnalysisDataset] = []
         self._next_dataset_id = 1
         self._current_measurement_provider = current_measurement_provider
@@ -313,8 +314,8 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         layout.setSpacing(6)
 
         self.left_panel = QtWidgets.QWidget()
-        self.left_panel.setMinimumWidth(270)
-        self.left_panel.setMaximumWidth(330)
+        self.left_panel.setMinimumWidth(230)
+        self.left_panel.setMaximumWidth(285)
         left_layout = QtWidgets.QVBoxLayout(self.left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(5)
@@ -552,8 +553,12 @@ class AnalysisViewer(QtWidgets.QMainWindow):
     def _build_foundation_tab(self) -> None:
         layout = QtWidgets.QVBoxLayout(self.foundation_tab)
         layout.setContentsMargins(6, 6, 6, 6)
-        controls = QtWidgets.QHBoxLayout()
+        controls = QtWidgets.QVBoxLayout()
         controls.setSpacing(4)
+        file_row = QtWidgets.QHBoxLayout()
+        file_row.setSpacing(4)
+        vc_row = QtWidgets.QHBoxLayout()
+        vc_row.setSpacing(6)
         self.foundation_vib_file_combo = QtWidgets.QComboBox()
         self.foundation_stiff_file_combo = QtWidgets.QComboBox()
         self.foundation_vib_edit = QtWidgets.QLineEdit("2,3,4")
@@ -568,12 +573,12 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             combo.setMinimumContentsLength(22)
             combo.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
             combo.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        controls.addWidget(QtWidgets.QLabel("振动文件"))
-        controls.addWidget(self.foundation_vib_file_combo)
-        controls.addWidget(QtWidgets.QLabel("动刚度文件"))
-        controls.addWidget(self.foundation_stiff_file_combo)
-        controls.addWidget(QtWidgets.QLabel("Vib Ch"))
-        controls.addWidget(self.foundation_vib_edit)
+        file_row.addWidget(QtWidgets.QLabel("振动文件"))
+        file_row.addWidget(self.foundation_vib_file_combo)
+        file_row.addWidget(QtWidgets.QLabel("动刚度文件"))
+        file_row.addWidget(self.foundation_stiff_file_combo)
+        file_row.addWidget(QtWidgets.QLabel("Vib Ch"))
+        file_row.addWidget(self.foundation_vib_edit)
         self.vc_a_check = QtWidgets.QCheckBox("VC A")
         self.vc_b_check = QtWidgets.QCheckBox("VC B")
         self.vc_c_check = QtWidgets.QCheckBox("VC C")
@@ -586,8 +591,10 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self.vc_d_check.setChecked(False)
         self.vc_e_check.setChecked(False)
         self.vc_f_check.setChecked(False)
-        controls.addWidget(QtWidgets.QLabel("Stiff Ch"))
-        controls.addWidget(self.foundation_resp_edit)
+        file_row.addWidget(QtWidgets.QLabel("Stiff Ch"))
+        file_row.addWidget(self.foundation_resp_edit)
+        file_row.addStretch(1)
+        vc_row.addWidget(QtWidgets.QLabel("VC参考线"))
         for checkbox in (
             self.vc_a_check,
             self.vc_b_check,
@@ -597,9 +604,11 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             self.vc_f_check,
         ):
             checkbox.setObjectName("vcCheck")
-            controls.addWidget(checkbox)
+            vc_row.addWidget(checkbox)
             checkbox.toggled.connect(lambda _checked: self._auto_plot_from_control_change())
-        controls.addStretch(1)
+        vc_row.addStretch(1)
+        controls.addLayout(file_row)
+        controls.addLayout(vc_row)
         layout.addLayout(controls)
         self.foundation_plots: list[pg.PlotWidget] = []
         self.foundation_open_buttons: list[QtWidgets.QPushButton] = []
@@ -635,10 +644,9 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         layout.setSpacing(6)
 
         controls = QtWidgets.QGroupBox("传递率换算")
-        control_grid = QtWidgets.QGridLayout(controls)
-        control_grid.setContentsMargins(8, 14, 8, 8)
-        control_grid.setHorizontalSpacing(5)
-        control_grid.setVerticalSpacing(4)
+        control_layout = QtWidgets.QVBoxLayout(controls)
+        control_layout.setContentsMargins(8, 14, 8, 8)
+        control_layout.setSpacing(4)
 
         self.derived_transfer_combo = QtWidgets.QComboBox()
         self.derived_direction_combo = QtWidgets.QComboBox()
@@ -657,6 +665,9 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             spin.setMaximumWidth(86)
         self.derived_freq_min_edit = QtWidgets.QLineEdit()
         self.derived_freq_max_edit = QtWidgets.QLineEdit()
+        for edit in (self.derived_freq_min_edit, self.derived_freq_max_edit):
+            edit.setMinimumWidth(58)
+            edit.setMaximumWidth(78)
         self.derived_freq_min_edit.setPlaceholderText("auto")
         self.derived_freq_max_edit.setPlaceholderText("auto")
         self.derived_regularization_spin = QtWidgets.QDoubleSpinBox()
@@ -672,26 +683,44 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self.derived_vc_checks: dict[str, QtWidgets.QCheckBox] = {}
 
         for combo in (self.derived_transfer_combo, self.derived_input_series_combo):
-            combo.setMinimumContentsLength(28)
+            combo.setMinimumWidth(210)
+            combo.setMaximumWidth(16777215)
+            combo.setMinimumContentsLength(16)
+            combo.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
             combo.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.derived_direction_combo.setMaximumWidth(126)
+        self.derived_regularization_spin.setMaximumWidth(138)
+        self.derived_plot_button.setMaximumWidth(130)
 
-        control_grid.addWidget(QtWidgets.QLabel("传递率曲线"), 0, 0)
-        control_grid.addWidget(self.derived_transfer_combo, 0, 1, 1, 3)
-        control_grid.addWidget(QtWidgets.QLabel("传递率系数"), 0, 4)
-        control_grid.addWidget(self.derived_transfer_factor_spin, 0, 5)
-        control_grid.addWidget(QtWidgets.QLabel("换算方向"), 0, 6)
-        control_grid.addWidget(self.derived_direction_combo, 0, 7)
-        control_grid.addWidget(QtWidgets.QLabel("待换算数据"), 1, 0)
-        control_grid.addWidget(self.derived_input_series_combo, 1, 1, 1, 3)
-        control_grid.addWidget(QtWidgets.QLabel("数据系数"), 1, 4)
-        control_grid.addWidget(self.derived_input_factor_spin, 1, 5)
-        control_grid.addWidget(QtWidgets.QLabel("频率下限"), 2, 0)
-        control_grid.addWidget(self.derived_freq_min_edit, 2, 1)
-        control_grid.addWidget(QtWidgets.QLabel("频率上限"), 2, 2)
-        control_grid.addWidget(self.derived_freq_max_edit, 2, 3)
-        control_grid.addWidget(QtWidgets.QLabel("反推下限"), 2, 4)
-        control_grid.addWidget(self.derived_regularization_spin, 2, 5)
-        control_grid.addWidget(self.derived_plot_button, 2, 6, 1, 2)
+        transfer_row = QtWidgets.QHBoxLayout()
+        transfer_row.setSpacing(6)
+        transfer_row.addWidget(QtWidgets.QLabel("传递率曲线"))
+        transfer_row.addWidget(self.derived_transfer_combo, 1)
+        transfer_row.addWidget(QtWidgets.QLabel("传递率系数"))
+        transfer_row.addWidget(self.derived_transfer_factor_spin)
+        control_layout.addLayout(transfer_row)
+
+        input_row = QtWidgets.QHBoxLayout()
+        input_row.setSpacing(6)
+        input_row.addWidget(QtWidgets.QLabel("待换算数据"))
+        input_row.addWidget(self.derived_input_series_combo, 1)
+        input_row.addWidget(QtWidgets.QLabel("数据系数"))
+        input_row.addWidget(self.derived_input_factor_spin)
+        control_layout.addLayout(input_row)
+
+        freq_row = QtWidgets.QHBoxLayout()
+        freq_row.setSpacing(6)
+        freq_row.addWidget(QtWidgets.QLabel("换算方向"))
+        freq_row.addWidget(self.derived_direction_combo)
+        freq_row.addWidget(QtWidgets.QLabel("频率下限"))
+        freq_row.addWidget(self.derived_freq_min_edit)
+        freq_row.addWidget(QtWidgets.QLabel("频率上限"))
+        freq_row.addWidget(self.derived_freq_max_edit)
+        freq_row.addWidget(QtWidgets.QLabel("反推下限"))
+        freq_row.addWidget(self.derived_regularization_spin)
+        freq_row.addWidget(self.derived_plot_button)
+        freq_row.addStretch(1)
+        control_layout.addLayout(freq_row)
         vc_row = QtWidgets.QHBoxLayout()
         vc_row.setSpacing(6)
         vc_row.addWidget(QtWidgets.QLabel("VC参考线"))
@@ -705,10 +734,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         vc_row.addSpacing(14)
         vc_row.addWidget(self.derived_show_source_check)
         vc_row.addStretch(1)
-        control_grid.addLayout(vc_row, 3, 0, 1, 8)
-        control_grid.setColumnStretch(1, 3)
-        control_grid.setColumnStretch(2, 2)
-        control_grid.setColumnStretch(3, 2)
+        control_layout.addLayout(vc_row)
         layout.addWidget(controls)
 
         self.derived_plots: list[pg.PlotWidget] = []
@@ -2760,6 +2786,12 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             self.statusBar().showMessage("Current plot is empty")
             return
         dialog = QtWidgets.QDialog(None)
+        dialog.setWindowFlags(
+            dialog.windowFlags()
+            | QtCore.Qt.WindowMinimizeButtonHint
+            | QtCore.Qt.WindowMaximizeButtonHint
+        )
+        dialog.setSizeGripEnabled(True)
         dialog.setStyleSheet(self._theme_stylesheet(self._theme))
         dialog.setWindowTitle(str(plot.getPlotItem().titleLabel.text or "Analysis Plot"))
         dialog.resize(900, 560)
@@ -3288,6 +3320,9 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             on_context_menu=lambda screen_pos, plot_widget=plot, tip=data_tip: self._show_data_tip_menu(
                 plot_widget, tip, screen_pos
             ),
+            on_drag=lambda scene_pos, plot_widget=plot, tip=data_tip: self._drag_data_tip_label_to_scene_pos(
+                plot_widget, tip, scene_pos
+            ),
         )
         text.setZValue(41)
         text.setPos(self._to_plot_x(plot, tip_x), self._to_plot_y(plot, tip_y))
@@ -3317,9 +3352,33 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         point.setData([self._to_plot_x(plot, tip_x)], [self._to_plot_y(plot, tip_y)])
         text.setText(f"X {tip_x:.6g}\nY {tip_y:.6g}")
         if hasattr(text, "setAnchor"):
-            text.setAnchor(self._data_tip_anchor_for_plot_point(plot, tip_x, tip_y))
+            text.setAnchor(
+                data_tip.get("label_anchor")
+                if data_tip.get("label_anchor_manual")
+                else self._data_tip_anchor_for_plot_point(plot, tip_x, tip_y)
+            )
         text.setPos(self._to_plot_x(plot, tip_x), self._to_plot_y(plot, tip_y))
         self.statusBar().showMessage(f"Data tip moved: x={tip_x:.4g}, y={tip_y:.4g}")
+        return True
+
+    def _drag_data_tip_label_to_scene_pos(
+        self, plot: pg.PlotWidget, data_tip: dict[str, object], scene_pos
+    ) -> bool:
+        mouse_point = plot.getPlotItem().vb.mapSceneToView(scene_pos)
+        point_x = self._to_plot_x(plot, float(data_tip["x"]))
+        point_y = self._to_plot_y(plot, float(data_tip["y"]))
+        anchor = _data_tip_anchor_for_label_drag(
+            float(mouse_point.x()),
+            float(mouse_point.y()),
+            point_x,
+            point_y,
+        )
+        data_tip["label_anchor"] = anchor
+        data_tip["label_anchor_manual"] = True
+        text = data_tip["text"]
+        if hasattr(text, "setAnchor"):
+            text.setAnchor(anchor)
+        self.statusBar().showMessage("Data tip label moved")
         return True
 
     def _show_data_tip_menu(self, plot: pg.PlotWidget, data_tip: dict[str, object], screen_pos) -> None:

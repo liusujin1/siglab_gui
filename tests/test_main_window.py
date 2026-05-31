@@ -3654,6 +3654,26 @@ class MainWindowTests(unittest.TestCase):
         self.assertAlmostEqual(data_tip["x"], 0.2, places=6)
         self.assertIn("X 0.2", data_tip["text"].toPlainText())
 
+    def test_data_tip_label_drag_moves_label_without_changing_point(self):
+        measurement = self._measurement()
+        self.controller.state.measurement = measurement
+        self.window.top_display_combo.setCurrentText("time")
+        self.window._plot_measurement(measurement)
+        self.window._place_data_tip("top", 0.1, 1.0)
+        data_tip = self.window._data_tip_items["top"][0]
+
+        moved = self.window._drag_data_tip_label_to_scene_pos(
+            "top",
+            data_tip,
+            self.window.top_plot.getPlotItem().vb.mapViewToScene(QtCore.QPointF(0.0, 2.0)),
+        )
+
+        self.assertTrue(moved)
+        self.assertTrue(data_tip["label_anchor_manual"])
+        self.assertEqual(data_tip["label_anchor"], (1.05, 1.05))
+        self.assertAlmostEqual(data_tip["x"], 0.1, places=6)
+        self.assertAlmostEqual(data_tip["y"], 1.0, places=6)
+
     def test_delete_data_tip_removes_only_selected_label(self):
         measurement = self._measurement()
         self.controller.state.measurement = measurement

@@ -513,6 +513,15 @@ class AnalysisViewerUiTests(unittest.TestCase):
                 )
                 self.assertTrue(moved)
                 self.assertAlmostEqual(data_tip["x"], 0.2, places=6)
+                label_moved = viewer._drag_data_tip_label_to_scene_pos(
+                    plot,
+                    data_tip,
+                    plot.getPlotItem().vb.mapViewToScene(QtCore.QPointF(0.0, 3.0)),
+                )
+                self.assertTrue(label_moved)
+                self.assertTrue(data_tip["label_anchor_manual"])
+                self.assertEqual(data_tip["label_anchor"], (1.05, 1.05))
+                self.assertAlmostEqual(data_tip["x"], 0.2, places=6)
 
                 viewer._toggle_data_tip_mode(False)
                 cursor_moved = viewer._move_cursor_from_scene_pos(
@@ -562,6 +571,7 @@ class AnalysisViewerUiTests(unittest.TestCase):
             self.assertEqual(len(viewer._single_plot_windows), 1)
             dialog = viewer._single_plot_windows[0]
             detached_plot = dialog.findChildren(type(plot))[0]
+            self.assertTrue(dialog.windowFlags() & QtCore.Qt.WindowMaximizeButtonHint)
             self.assertIn("background: #f4f7fb;", dialog.styleSheet())
             self.assertEqual(detached_plot.backgroundBrush().color().name(), "#ffffff")
 
@@ -791,6 +801,10 @@ class AnalysisViewerUiTests(unittest.TestCase):
             self.assertEqual(len(viewer.main_open_buttons), 3)
             self.assertEqual(len(viewer.foundation_export_buttons), 3)
             self.assertEqual(len(viewer.derived_export_buttons), 2)
+            self.assertLessEqual(viewer.width(), 980)
+            self.assertLessEqual(viewer.left_panel.maximumWidth(), 285)
+            foundation_controls = viewer.foundation_tab.layout().itemAt(0).layout()
+            self.assertEqual(foundation_controls.count(), 2)
             self.assertEqual(viewer.derived_result_mode_combo.currentText(), "PSD")
             self.assertEqual(viewer.derived_direction_combo.currentData(), DERIVE_BASE_TO_TOP)
             self.assertAlmostEqual(viewer.derived_transfer_factor_spin.value(), 1.0)
