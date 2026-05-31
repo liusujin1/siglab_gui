@@ -31,12 +31,18 @@ from python_vna.analysis_algorithms import (
     convert_acceleration_psd,
     convert_acceleration_time_series,
 )
-from python_vna.analysis_data import dataset_from_measurement, load_analysis_path, load_continuous_channels
+from python_vna.analysis_data import (
+    AnalysisDataset,
+    AnalysisSeries,
+    dataset_from_measurement,
+    load_analysis_path,
+    load_continuous_channels,
+)
 from python_vna.continuous_recording import ContinuousDatWriter
 from python_vna.daq.base import BackendFrame
 from python_vna.models import MeasurementSet
 from python_vna.storage import default_session_config
-from python_vna.ui.analysis_viewer import AnalysisViewer
+from python_vna.ui.analysis_viewer import AnalysisViewer, _vc_reference_frequency_velocity
 from python_vna.ui.main_window import DataTipText, VnaAxisItem
 
 
@@ -726,6 +732,12 @@ class AnalysisViewerUiTests(unittest.TestCase):
         viewer = AnalysisViewer()
         try:
             self.assertEqual(viewer.vc_a_check.objectName(), "vcCheck")
+            self.assertFalse(viewer.vc_a_check.isChecked())
+            self.assertTrue(viewer.vc_b_check.isChecked())
+            self.assertTrue(viewer.vc_c_check.isChecked())
+            self.assertFalse(viewer.vc_d_check.isChecked())
+            self.assertFalse(viewer.vc_e_check.isChecked())
+            self.assertFalse(viewer.vc_f_check.isChecked())
             self.assertIn("QCheckBox#vcCheck::indicator", viewer.styleSheet())
         finally:
             viewer.close()
@@ -781,6 +793,10 @@ class AnalysisViewerUiTests(unittest.TestCase):
             self.assertEqual(len(viewer.derived_export_buttons), 2)
             self.assertEqual(viewer.derived_result_mode_combo.currentText(), "PSD")
             self.assertEqual(viewer.derived_direction_combo.currentData(), DERIVE_BASE_TO_TOP)
+            self.assertAlmostEqual(viewer.derived_transfer_factor_spin.value(), 1.0)
+            self.assertAlmostEqual(viewer.derived_input_factor_spin.value(), 1.0)
+            self.assertEqual(viewer.derived_transfer_factor_spin.decimals(), 1)
+            self.assertEqual(viewer.derived_input_factor_spin.decimals(), 1)
             self.assertFalse(any(checkbox.isChecked() for checkbox in viewer.derived_vc_checks.values()))
             self.assertFalse(viewer.derived_show_source_check.isChecked())
         finally:
@@ -846,6 +862,15 @@ class AnalysisViewerUiTests(unittest.TestCase):
             np.testing.assert_allclose(f, [10.0, 20.0, 30.0])
             np.testing.assert_allclose(psd, [4.0, 4.0, 4.0])
 
+            viewer.scale_spin.setValue(10.0)
+            viewer.derived_transfer_factor_spin.setValue(0.5)
+            viewer.derived_input_factor_spin.setValue(3.0)
+            viewer._plot_derived()
+            factored_curves = viewer._plot_curves[viewer.derived_plots[1]]
+            _label, (f_factored, psd_factored) = next(iter(factored_curves.items()))
+            np.testing.assert_allclose(f_factored, [10.0, 20.0, 30.0])
+            np.testing.assert_allclose(psd_factored, [9.0, 9.0, 9.0])
+
             viewer.derived_show_source_check.setChecked(True)
             viewer._plot_derived()
             psd_with_source = viewer._plot_curves[viewer.derived_plots[1]]
@@ -862,6 +887,23 @@ class AnalysisViewerUiTests(unittest.TestCase):
             foundation_curves = viewer._plot_curves[viewer.derived_plots[1]]
             self.assertIn("VC A", foundation_curves)
             self.assertIn("VC A", viewer._plot_export_excluded[viewer.derived_plots[1]])
+
+            vc_c_index = viewer._combo_index_for_data(
+                viewer.derived_input_series_combo,
+                ("vc_reference", "VC C"),
+            )
+            self.assertGreaterEqual(vc_c_index, 0)
+            vc_frequencies, vc_velocity = _vc_reference_frequency_velocity("VC C")
+            self.assertAlmostEqual(vc_frequencies[0], 1.0)
+            self.assertAlmostEqual(vc_frequencies[-1], 80.0)
+            self.assertGreater(vc_frequencies.size, 10)
+            np.testing.assert_allclose(vc_velocity, np.full_like(vc_velocity, 12.5))
+
+            viewer.derived_input_series_combo.setCurrentIndex(vc_c_index)
+            viewer.derived_result_mode_combo.setCurrentText("地基振动")
+            viewer._plot_derived()
+            vc_derived_curves = viewer._plot_curves[viewer.derived_plots[1]]
+            self.assertTrue(any(label.startswith("VC C") for label in vc_derived_curves))
         finally:
             viewer.close()
 
@@ -1001,8 +1043,41 @@ class AnalysisViewerUiTests(unittest.TestCase):
                 viewer._set_selected_series_scale_from_editor()
                 self.assertAlmostEqual(viewer._datasets[0].series[0].scale, 2.5)
                 self.assertEqual(viewer.factor_edit.text(), "2.5")
+                self.assertEqual(viewer.rename_edit.text(), "hammer")
+                self.assertIn("(*2.5)", viewer.series_list.item(0).text())
             finally:
                 viewer.close()
+
+    def test_factor_suffix_uses_relative_to_loaded_scale(self):
+        viewer = AnalysisViewer()
+        try:
+            dataset = AnalysisDataset(
+                id=1,
+                path=Path("scaled.csv"),
+                name="scaled.csv",
+                sample_rate=100.0,
+                series=[
+                    AnalysisSeries(
+                        dataset_id=1,
+                        channel_index=0,
+                        channel_key="ch1",
+                        display_name="ch1",
+                        scale=2.0,
+                    )
+                ],
+                time_s=np.array([0.0, 0.1], dtype=float),
+                channels={"ch1": np.array([1.0, 2.0], dtype=float)},
+            )
+            viewer._datasets = [dataset]
+            viewer._refresh_dataset_lists()
+            viewer.series_list.item(0).setSelected(True)
+            viewer.factor_edit.setText("4")
+            viewer._set_selected_series_scale_from_editor()
+
+            self.assertAlmostEqual(viewer._datasets[0].series[0].scale, 4.0)
+            self.assertIn("(*2)", viewer.series_list.item(0).text())
+        finally:
+            viewer.close()
 
 
 if __name__ == "__main__":

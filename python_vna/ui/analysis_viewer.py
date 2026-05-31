@@ -65,6 +65,23 @@ TRACE_COLORS = [
 ]
 
 TEXT_FILE_FS_HINT_HZ = 1000.0
+VC_REFERENCE_NAMES = ("VC A", "VC B", "VC C", "VC D", "VC E", "VC F")
+VC_REFERENCE_LEVELS_UM_S = {
+    "VC A": 50.0,
+    "VC B": 25.0,
+    "VC C": 12.5,
+    "VC D": 6.25,
+    "VC E": 3.125,
+    "VC F": 1.5625,
+}
+VC_REFERENCE_COLORS = {
+    "VC A": "#202020",
+    "VC B": "#1f5fbf",
+    "VC C": "#d12f2f",
+    "VC D": "#228b3c",
+    "VC E": "#8a5a00",
+    "VC F": "#6f42c1",
+}
 
 
 class AnalysisViewer(QtWidgets.QMainWindow):
@@ -103,6 +120,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self._series_labels: dict[str, str] = {}
         self._custom_series_labels: dict[tuple[int, int], str] = {}
         self._custom_series_scales: dict[tuple[int, int], float] = {}
+        self._original_series_scales: dict[tuple[int, int], float] = {}
         self._current_measurement_dataset_id: int | None = None
         self._derived_result_cache: dict[tuple[object, ...], tuple[object, ...]] = {}
         self._single_plot_windows: list[QtWidgets.QDialog] = []
@@ -437,6 +455,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self.scale_spin.setDecimals(6)
         self.scale_spin.setValue(1.0)
         self.scale_spin.setSingleStep(0.1)
+        self.scale_spin.setToolTip("主界面/地面振动页的统一倍率；换算页使用传递率系数和数据系数。")
         self.lowpass_check = QtWidgets.QCheckBox("Low")
         self.lowpass_spin = QtWidgets.QDoubleSpinBox()
         self.lowpass_spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
@@ -468,7 +487,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         layout.addWidget(self.psd_source_combo, 1, 1, 1, 3)
         layout.addWidget(QtWidgets.QLabel("物理量"), 2, 0)
         layout.addWidget(self.quantity_combo, 2, 1, 1, 3)
-        layout.addWidget(QtWidgets.QLabel("Scale"), 3, 0)
+        layout.addWidget(QtWidgets.QLabel("主图倍率"), 3, 0)
         layout.addWidget(self.scale_spin, 3, 1, 1, 3)
         layout.addWidget(self.lowpass_check, 4, 0)
         layout.addWidget(self.lowpass_spin, 4, 1, 1, 3)
@@ -559,13 +578,24 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self.vc_b_check = QtWidgets.QCheckBox("VC B")
         self.vc_c_check = QtWidgets.QCheckBox("VC C")
         self.vc_d_check = QtWidgets.QCheckBox("VC D")
-        self.vc_a_check.setChecked(True)
+        self.vc_e_check = QtWidgets.QCheckBox("VC E")
+        self.vc_f_check = QtWidgets.QCheckBox("VC F")
+        self.vc_a_check.setChecked(False)
         self.vc_b_check.setChecked(True)
         self.vc_c_check.setChecked(True)
-        self.vc_d_check.setChecked(True)
+        self.vc_d_check.setChecked(False)
+        self.vc_e_check.setChecked(False)
+        self.vc_f_check.setChecked(False)
         controls.addWidget(QtWidgets.QLabel("Stiff Ch"))
         controls.addWidget(self.foundation_resp_edit)
-        for checkbox in (self.vc_a_check, self.vc_b_check, self.vc_c_check, self.vc_d_check):
+        for checkbox in (
+            self.vc_a_check,
+            self.vc_b_check,
+            self.vc_c_check,
+            self.vc_d_check,
+            self.vc_e_check,
+            self.vc_f_check,
+        ):
             checkbox.setObjectName("vcCheck")
             controls.addWidget(checkbox)
             checkbox.toggled.connect(lambda _checked: self._auto_plot_from_control_change())
@@ -615,6 +645,16 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self.derived_direction_combo.addItem("地基 -> 顶部", DERIVE_BASE_TO_TOP)
         self.derived_direction_combo.addItem("顶部 -> 地基", DERIVE_TOP_TO_BASE)
         self.derived_input_series_combo = QtWidgets.QComboBox()
+        self.derived_transfer_factor_spin = QtWidgets.QDoubleSpinBox()
+        self.derived_input_factor_spin = QtWidgets.QDoubleSpinBox()
+        for spin in (self.derived_transfer_factor_spin, self.derived_input_factor_spin):
+            spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+            spin.setKeyboardTracking(False)
+            spin.setRange(1e-12, 1e12)
+            spin.setDecimals(1)
+            spin.setValue(1.0)
+            spin.setSingleStep(0.1)
+            spin.setMaximumWidth(86)
         self.derived_freq_min_edit = QtWidgets.QLineEdit()
         self.derived_freq_max_edit = QtWidgets.QLineEdit()
         self.derived_freq_min_edit.setPlaceholderText("auto")
@@ -636,22 +676,26 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             combo.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
 
         control_grid.addWidget(QtWidgets.QLabel("传递率曲线"), 0, 0)
-        control_grid.addWidget(self.derived_transfer_combo, 0, 1, 1, 4)
-        control_grid.addWidget(QtWidgets.QLabel("换算方向"), 0, 5)
-        control_grid.addWidget(self.derived_direction_combo, 0, 6)
+        control_grid.addWidget(self.derived_transfer_combo, 0, 1, 1, 3)
+        control_grid.addWidget(QtWidgets.QLabel("传递率系数"), 0, 4)
+        control_grid.addWidget(self.derived_transfer_factor_spin, 0, 5)
+        control_grid.addWidget(QtWidgets.QLabel("换算方向"), 0, 6)
+        control_grid.addWidget(self.derived_direction_combo, 0, 7)
         control_grid.addWidget(QtWidgets.QLabel("待换算数据"), 1, 0)
-        control_grid.addWidget(self.derived_input_series_combo, 1, 1, 1, 6)
+        control_grid.addWidget(self.derived_input_series_combo, 1, 1, 1, 3)
+        control_grid.addWidget(QtWidgets.QLabel("数据系数"), 1, 4)
+        control_grid.addWidget(self.derived_input_factor_spin, 1, 5)
         control_grid.addWidget(QtWidgets.QLabel("频率下限"), 2, 0)
         control_grid.addWidget(self.derived_freq_min_edit, 2, 1)
         control_grid.addWidget(QtWidgets.QLabel("频率上限"), 2, 2)
         control_grid.addWidget(self.derived_freq_max_edit, 2, 3)
         control_grid.addWidget(QtWidgets.QLabel("反推下限"), 2, 4)
         control_grid.addWidget(self.derived_regularization_spin, 2, 5)
-        control_grid.addWidget(self.derived_plot_button, 2, 6)
+        control_grid.addWidget(self.derived_plot_button, 2, 6, 1, 2)
         vc_row = QtWidgets.QHBoxLayout()
         vc_row.setSpacing(6)
         vc_row.addWidget(QtWidgets.QLabel("VC参考线"))
-        for name in ("VC A", "VC B", "VC C", "VC D", "VC E", "VC F"):
+        for name in VC_REFERENCE_NAMES:
             checkbox = QtWidgets.QCheckBox(name)
             checkbox.setObjectName("vcCheck")
             checkbox.setChecked(False)
@@ -661,7 +705,10 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         vc_row.addSpacing(14)
         vc_row.addWidget(self.derived_show_source_check)
         vc_row.addStretch(1)
-        control_grid.addLayout(vc_row, 3, 0, 1, 7)
+        control_grid.addLayout(vc_row, 3, 0, 1, 8)
+        control_grid.setColumnStretch(1, 3)
+        control_grid.setColumnStretch(2, 2)
+        control_grid.setColumnStretch(3, 2)
         layout.addWidget(controls)
 
         self.derived_plots: list[pg.PlotWidget] = []
@@ -701,6 +748,8 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             lambda _index: self._auto_plot_derived_from_control_change()
         )
         self.derived_show_source_check.toggled.connect(lambda _checked: self._auto_plot_derived_from_control_change())
+        self.derived_transfer_factor_spin.editingFinished.connect(self._auto_plot_derived_from_control_change)
+        self.derived_input_factor_spin.editingFinished.connect(self._auto_plot_derived_from_control_change)
         self.derived_freq_min_edit.editingFinished.connect(self._auto_plot_derived_from_control_change)
         self.derived_freq_max_edit.editingFinished.connect(self._auto_plot_derived_from_control_change)
         self.derived_regularization_spin.editingFinished.connect(self._auto_plot_derived_from_control_change)
@@ -864,6 +913,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self._series_labels.clear()
         self._custom_series_labels.clear()
         self._custom_series_scales.clear()
+        self._original_series_scales.clear()
         self._derived_result_cache.clear()
         self._current_measurement_dataset_id = None
         self._refresh_dataset_lists()
@@ -896,6 +946,11 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             for key, value in self._custom_series_scales.items()
             if key[0] not in selected_dataset_ids
         }
+        self._original_series_scales = {
+            key: value
+            for key, value in self._original_series_scales.items()
+            if key[0] not in selected_dataset_ids
+        }
         self._derived_result_cache.clear()
         if self._current_measurement_dataset_id in selected_dataset_ids:
             self._current_measurement_dataset_id = None
@@ -908,6 +963,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             item.data(QtCore.Qt.UserRole)
             for item in self.series_list.selectedItems()
         }
+        self._sync_original_and_custom_series_scales()
         self.series_list.blockSignals(True)
         self.series_list.clear()
         self._series_labels = self._build_series_labels()
@@ -922,6 +978,22 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self._refresh_foundation_file_selectors()
         self._refresh_derived_selectors()
         self._sync_series_editors_from_selection()
+
+    def _sync_original_and_custom_series_scales(self) -> None:
+        live_keys: set[tuple[int, int]] = set()
+        for dataset in self._datasets:
+            for series in dataset.series:
+                key = (dataset.id, series.channel_index + 1)
+                live_keys.add(key)
+                if key not in self._original_series_scales:
+                    self._original_series_scales[key] = float(series.scale or 1.0)
+                if key in self._custom_series_scales:
+                    series.scale = float(self._custom_series_scales[key])
+        self._original_series_scales = {
+            key: value
+            for key, value in self._original_series_scales.items()
+            if key in live_keys
+        }
 
     def _refresh_foundation_file_selectors(self) -> None:
         if not hasattr(self, "foundation_vib_file_combo"):
@@ -1007,6 +1079,15 @@ class AnalysisViewer(QtWidgets.QMainWindow):
                         label,
                         QtCore.Qt.ToolTipRole,
                     )
+            for name in VC_REFERENCE_NAMES:
+                label = f"VC参考线 | {name}"
+                data = ("vc_reference", name)
+                self.derived_input_series_combo.addItem(label, data)
+                self.derived_input_series_combo.setItemData(
+                    self.derived_input_series_combo.count() - 1,
+                    label,
+                    QtCore.Qt.ToolTipRole,
+                )
             input_index = self._combo_index_for_data(self.derived_input_series_combo, previous_input_id)
             if input_index < 0:
                 input_index = 0 if self.derived_input_series_combo.count() else -1
@@ -1109,6 +1190,16 @@ class AnalysisViewer(QtWidgets.QMainWindow):
     def _has_derived_input_ready(self) -> bool:
         transfer_data = self.derived_transfer_combo.currentData()
         return transfer_data is not None and self.derived_input_series_combo.currentData() is not None
+
+    def _derived_transfer_factor(self) -> float:
+        if not hasattr(self, "derived_transfer_factor_spin"):
+            return 1.0
+        return float(self.derived_transfer_factor_spin.value())
+
+    def _derived_input_factor(self) -> float:
+        if not hasattr(self, "derived_input_factor_spin"):
+            return 1.0
+        return float(self.derived_input_factor_spin.value())
 
     def plot_current(self) -> None:
         selected = self._selected_series()
@@ -1534,15 +1625,20 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         transfer_keys = self._selected_channel_keys_by_dataset.setdefault(transfer_dataset.id, set())
         transfer_keys.update({base_series.channel_key, top_series.channel_key})
         for input_dataset, series in input_series:
+            if input_dataset is None or not isinstance(series, AnalysisSeries):
+                continue
             input_keys = self._selected_channel_keys_by_dataset.setdefault(input_dataset.id, set())
             input_keys.add(series.channel_key)
 
+        transfer_factor = self._derived_transfer_factor()
+        input_factor = self._derived_input_factor()
         transfer = self._transfer_for_derived(
             transfer_dataset,
             transfer_key,
             source_kind,
             base_series,
             top_series,
+            transfer_factor=transfer_factor,
         )
         if transfer is None:
             if not quiet:
@@ -1558,26 +1654,43 @@ class AnalysisViewer(QtWidgets.QMainWindow):
 
         results: list[dict[str, object]] = []
         for input_dataset, series in input_series:
-            result = self._derived_result_for_series(
-                transfer_dataset,
-                input_dataset,
-                base_series,
-                top_series,
-                series,
-                transfer_f,
-                transfer_h,
-                phase_available,
-                direction=direction,
-                regularization=regularization,
-                freq_min=freq_min,
-                freq_max=freq_max,
-            )
+            if input_dataset is None or not isinstance(series, AnalysisSeries):
+                result = self._derived_result_for_vc_reference(
+                    str(series),
+                    transfer_dataset,
+                    base_series,
+                    top_series,
+                    transfer_f,
+                    transfer_h,
+                    direction=direction,
+                    regularization=regularization,
+                    freq_min=freq_min,
+                    freq_max=freq_max,
+                    input_factor=input_factor,
+                )
+            else:
+                result = self._derived_result_for_series(
+                    transfer_dataset,
+                    input_dataset,
+                    base_series,
+                    top_series,
+                    series,
+                    transfer_f,
+                    transfer_h,
+                    phase_available,
+                    direction=direction,
+                    regularization=regularization,
+                    freq_min=freq_min,
+                    freq_max=freq_max,
+                    transfer_factor=transfer_factor,
+                    input_factor=input_factor,
+                )
             if result is not None:
                 results.append(result)
         self._plot_derived_results(
             transfer_f,
             transfer_h,
-            transfer_label,
+            _append_inline_factor_suffix(transfer_label, transfer_factor),
             results,
             keep_existing=keep_existing,
         )
@@ -1771,24 +1884,21 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         *,
         keep_existing: bool,
     ) -> None:
-        vc_lines = {
-            "VC A": (np.array([100.0, 50.0, 50.0]), "#202020"),
-            "VC B": (np.array([50.0, 25.0, 25.0]), "#1f5fbf"),
-            "VC C": (np.array([12.5, 12.5, 12.5]), "#d12f2f"),
-            "VC D": (np.array([6.25, 6.25, 6.25]), "#228b3c"),
-            "VC E": (np.array([3.125, 3.125, 3.125]), "#8a5a00"),
-            "VC F": (np.array([1.5625, 1.5625, 1.5625]), "#6f42c1"),
-        }
-        ref_f = np.array([4.0, 8.0, 80.0])
-        for name, (values, color) in vc_lines.items():
+        for name in VC_REFERENCE_NAMES:
             checkbox = self.derived_vc_checks.get(name)
             if checkbox is None or not checkbox.isChecked():
                 continue
+            ref_f, values = _vc_reference_frequency_velocity(name)
             x_values, y_values = self._vc_reference_curve_for_mode(ref_f, values, curve_key)
             if x_values.size < 2 or y_values.size < 2:
                 continue
             plot_label = self._unique_plot_label(plot, name) if keep_existing else name
-            plot.plot(x_values, y_values, pen=pg.mkPen(color, width=1.6, style=QtCore.Qt.DashLine), name=plot_label)
+            plot.plot(
+                x_values,
+                y_values,
+                pen=pg.mkPen(VC_REFERENCE_COLORS[name], width=1.6, style=QtCore.Qt.DashLine),
+                name=plot_label,
+            )
             self._plot_curves[plot][plot_label] = (x_values, y_values)
             self._plot_export_excluded.setdefault(plot, set()).add(plot_label)
             x_ranges.append(x_values)
@@ -1832,6 +1942,92 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             return compute_cumulative_spectrum(f_quantity, psd_quantity)
         return f_quantity, psd_quantity
 
+    def _derived_result_for_vc_reference(
+        self,
+        name: str,
+        transfer_dataset: AnalysisDataset,
+        base_series: AnalysisSeries,
+        top_series: AnalysisSeries,
+        transfer_f: np.ndarray,
+        transfer_h: np.ndarray,
+        *,
+        direction: str,
+        regularization: float,
+        freq_min: float | None,
+        freq_max: float | None,
+        input_factor: float,
+    ) -> dict[str, object] | None:
+        del transfer_dataset, base_series, top_series
+        f_source_accel, psd_source_accel = _vc_reference_acceleration_psd(name)
+        if f_source_accel.size < 2:
+            return None
+        psd_source_accel = psd_source_accel * float(input_factor) ** 2
+        f_accel, psd_accel = derive_psd_from_transfer(
+            f_source_accel,
+            psd_source_accel,
+            transfer_f,
+            transfer_h,
+            direction=direction,
+            regularization_floor=regularization,
+        )
+        if f_accel.size and freq_min is not None:
+            keep = f_accel >= float(freq_min)
+            f_accel = f_accel[keep]
+            psd_accel = psd_accel[keep]
+        if f_accel.size and freq_max is not None:
+            keep = f_accel <= float(freq_max)
+            f_accel = f_accel[keep]
+            psd_accel = psd_accel[keep]
+        if f_source_accel.size and freq_min is not None:
+            keep = f_source_accel >= float(freq_min)
+            f_source_accel = f_source_accel[keep]
+            psd_source_accel = psd_source_accel[keep]
+        if f_source_accel.size and freq_max is not None:
+            keep = f_source_accel <= float(freq_max)
+            f_source_accel = f_source_accel[keep]
+            psd_source_accel = psd_source_accel[keep]
+        if f_accel.size < 2:
+            return None
+
+        destination = "顶部估算" if direction == DERIVE_BASE_TO_TOP else "地基估算"
+        label = _append_inline_factor_suffix(f"{name} -> {destination}", input_factor)
+        source_label = f"待换算: {_append_inline_factor_suffix(name, input_factor)}"
+        result: dict[str, object] = {"label": label, "source_label": source_label}
+        f_quantity, psd_quantity = convert_acceleration_psd(
+            f_accel,
+            psd_accel,
+            self.quantity_combo.currentText(),
+            highpass_enabled=self.highpass_check.isChecked(),
+            highpass_hz=float(self.highpass_spin.value()),
+        )
+        if f_quantity.size >= 2:
+            result["psd"] = (f_quantity, psd_quantity)
+            result["cumulative"] = compute_cumulative_spectrum(f_quantity, psd_quantity)
+        result["foundation"] = _third_octave_velocity_from_center_psd(f_accel, psd_accel)
+
+        f_source_quantity, psd_source_quantity = convert_acceleration_psd(
+            f_source_accel,
+            psd_source_accel,
+            self.quantity_combo.currentText(),
+            highpass_enabled=self.highpass_check.isChecked(),
+            highpass_hz=float(self.highpass_spin.value()),
+        )
+        if f_source_quantity.size >= 2:
+            result["source_psd"] = (f_source_quantity, psd_source_quantity)
+            result["source_cumulative"] = compute_cumulative_spectrum(f_source_quantity, psd_source_quantity)
+        source_f, source_velocity = _vc_reference_frequency_velocity(name)
+        source_velocity = source_velocity * float(input_factor)
+        if source_f.size and freq_min is not None:
+            keep = source_f >= float(freq_min)
+            source_f = source_f[keep]
+            source_velocity = source_velocity[keep]
+        if source_f.size and freq_max is not None:
+            keep = source_f <= float(freq_max)
+            source_f = source_f[keep]
+            source_velocity = source_velocity[keep]
+        result["source_foundation"] = (source_f, source_velocity)
+        return result
+
     def _derived_result_for_series(
         self,
         transfer_dataset: AnalysisDataset,
@@ -1847,6 +2043,8 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         regularization: float,
         freq_min: float | None,
         freq_max: float | None,
+        transfer_factor: float,
+        input_factor: float,
     ) -> dict[str, object] | None:
         cache_key = self._derived_cache_key(
             transfer_dataset,
@@ -1858,6 +2056,8 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             regularization,
             freq_min,
             freq_max,
+            transfer_factor,
+            input_factor,
         )
         if cache_key in self._derived_result_cache:
             (
@@ -1876,7 +2076,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             f_in, psd_in = self._psd_for_series(
                 input_dataset,
                 input_series,
-                scale=float(self.scale_spin.value()) * float(input_series.scale or 1.0),
+                scale=float(input_factor) * float(input_series.scale or 1.0),
             )
             f_accel, psd_accel = derive_psd_from_transfer(
                 f_in,
@@ -1912,10 +2112,14 @@ class AnalysisViewer(QtWidgets.QMainWindow):
                 phase_available,
                 direction=direction,
                 regularization=regularization,
+                input_factor=input_factor,
             )
-            t_source, y_source = self._source_time_curve(input_dataset, input_series)
-            label = self._derived_result_label(input_dataset, input_series, direction)
-            source_label = f"待换算: {self._series_label(input_dataset, input_series)}"
+            t_source, y_source = self._source_time_curve(input_dataset, input_series, input_factor=input_factor)
+            label = _append_inline_factor_suffix(
+                self._derived_result_label(input_dataset, input_series, direction),
+                input_factor,
+            )
+            source_label = f"待换算: {_append_inline_factor_suffix(self._series_label(input_dataset, input_series), input_factor)}"
             self._derived_result_cache[cache_key] = (
                 f_accel,
                 psd_accel,
@@ -1993,6 +2197,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         *,
         direction: str,
         regularization: float,
+        input_factor: float,
     ) -> tuple[np.ndarray, np.ndarray]:
         if not phase_available:
             return np.array([], dtype=float), np.array([], dtype=float)
@@ -2009,7 +2214,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         if trim > 0 and filtered.size > trim * 2:
             filtered = filtered[trim:-trim]
             t = t[trim:-trim]
-        values = filtered * float(self.scale_spin.value()) * float(input_series.scale or 1.0)
+        values = filtered * float(input_factor) * float(input_series.scale or 1.0)
         return derive_time_from_transfer(
             t,
             values,
@@ -2024,6 +2229,8 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self,
         input_dataset: AnalysisDataset,
         input_series: AnalysisSeries,
+        *,
+        input_factor: float,
     ) -> tuple[np.ndarray, np.ndarray]:
         start_s, end_s = self._analysis_window_for_dataset(input_dataset)
         t, raw = self._load_analysis_time_series(
@@ -2038,7 +2245,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         if trim > 0 and filtered.size > trim * 2:
             filtered = filtered[trim:-trim]
             t = t[trim:-trim]
-        values = filtered * float(self.scale_spin.value()) * float(input_series.scale or 1.0)
+        values = filtered * float(input_factor) * float(input_series.scale or 1.0)
         return t[: values.size], values
 
     def _derived_cache_key(
@@ -2052,6 +2259,8 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         regularization: float,
         freq_min: float | None,
         freq_max: float | None,
+        transfer_factor: float,
+        input_factor: float,
     ) -> tuple[object, ...]:
         config = self._filter_config()
         start_s, end_s = self._time_window()
@@ -2066,7 +2275,8 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             freq_min,
             freq_max,
             self.psd_source_combo.currentText(),
-            round(float(self.scale_spin.value()), 12),
+            round(float(transfer_factor), 12),
+            round(float(input_factor), 12),
             round(float(input_series.scale or 1.0), 12),
             round(float(base_series.scale or 1.0), 12),
             round(float(top_series.scale or 1.0), 12),
@@ -2081,9 +2291,15 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             int(config.order),
         )
 
-    def _derived_input_series(self) -> list[tuple[AnalysisDataset, AnalysisSeries]]:
+    def _derived_input_series(self) -> list[tuple[AnalysisDataset | None, AnalysisSeries | str]]:
         selected_id = self.derived_input_series_combo.currentData()
-        selected: list[tuple[AnalysisDataset, AnalysisSeries]] = []
+        if (
+            isinstance(selected_id, tuple)
+            and len(selected_id) == 2
+            and selected_id[0] == "vc_reference"
+        ):
+            return [(None, str(selected_id[1]))]
+        selected: list[tuple[AnalysisDataset | None, AnalysisSeries | str]] = []
         for dataset in self._datasets:
             for series in dataset.series:
                 if series.id == selected_id:
@@ -2120,6 +2336,8 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         source_kind: str,
         base_series: AnalysisSeries,
         top_series: AnalysisSeries,
+        *,
+        transfer_factor: float,
     ) -> tuple[np.ndarray, np.ndarray, bool] | None:
         if source_kind == "stored" and transfer_key in dataset.frf and dataset.frequency_hz is not None:
             frf_values = dataset.frf[transfer_key]
@@ -2128,14 +2346,21 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             count = min(f.size, h_raw.size)
             if count >= 2:
                 eu_ratio = float(top_series.scale or 1.0) / max(float(base_series.scale or 1.0), 1e-20)
-                return f[:count], h_raw[:count] * eu_ratio, has_complex_transfer_phase(frf_values)
-        return self._transfer_for_derived_from_time_data(dataset, base_series, top_series)
+                return f[:count], h_raw[:count] * eu_ratio * float(transfer_factor), has_complex_transfer_phase(frf_values)
+        return self._transfer_for_derived_from_time_data(
+            dataset,
+            base_series,
+            top_series,
+            transfer_factor=transfer_factor,
+        )
 
     def _transfer_for_derived_from_time_data(
         self,
         dataset: AnalysisDataset,
         base_series: AnalysisSeries,
         top_series: AnalysisSeries,
+        *,
+        transfer_factor: float,
     ) -> tuple[np.ndarray, np.ndarray, bool] | None:
         start_s, end_s = self._analysis_window_for_dataset(dataset)
         _t_base, base_raw = self._load_analysis_time_series(
@@ -2169,7 +2394,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         if f.size < 2:
             return None
         eu_ratio = float(top_series.scale or 1.0) / max(float(base_series.scale or 1.0), 1e-20)
-        return f, h_raw * eu_ratio, True
+        return f, h_raw * eu_ratio * float(transfer_factor), True
 
     def _series_for_transfer_endpoint(
         self,
@@ -2297,18 +2522,28 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             color_index += 1
             f_range.append(centers)
             y_range.append(velocity)
-        vc_lines = {
-            "VC A": (self.vc_a_check.isChecked(), np.array([100.0, 50.0, 50.0]), "#202020"),
-            "VC B": (self.vc_b_check.isChecked(), np.array([50.0, 25.0, 25.0]), "#1f5fbf"),
-            "VC C": (self.vc_c_check.isChecked(), np.array([12.5, 12.5, 12.5]), "#d12f2f"),
-            "VC D": (self.vc_d_check.isChecked(), np.array([6.25, 6.25, 6.25]), "#228b3c"),
+        vc_checks = {
+            "VC A": self.vc_a_check,
+            "VC B": self.vc_b_check,
+            "VC C": self.vc_c_check,
+            "VC D": self.vc_d_check,
+            "VC E": self.vc_e_check,
+            "VC F": self.vc_f_check,
         }
-        ref_f = np.array([4.0, 8.0, 80.0])
-        for name, (enabled, values, color) in vc_lines.items():
-            if not enabled:
+        for name in VC_REFERENCE_NAMES:
+            checkbox = vc_checks.get(name)
+            if checkbox is None or not checkbox.isChecked():
+                continue
+            ref_f, values = _vc_reference_frequency_velocity(name)
+            if ref_f.size < 2 or values.size < 2:
                 continue
             plot_label = self._unique_plot_label(plot, name) if keep_existing else name
-            plot.plot(ref_f, values, pen=pg.mkPen(color, width=1.8, style=QtCore.Qt.DashLine), name=plot_label)
+            plot.plot(
+                ref_f,
+                values,
+                pen=pg.mkPen(VC_REFERENCE_COLORS[name], width=1.8, style=QtCore.Qt.DashLine),
+                name=plot_label,
+            )
             self._plot_curves[plot][plot_label] = (ref_f, values)
             if self._active_trace[plot] is None:
                 self._active_trace[plot] = plot_label
@@ -2649,16 +2884,26 @@ class AnalysisViewer(QtWidgets.QMainWindow):
     def _series_label(self, dataset: AnalysisDataset, series: AnalysisSeries) -> str:
         return self._series_labels.get(series.id, _default_series_label(dataset, series))
 
+    def _series_base_label(self, dataset: AnalysisDataset, series: AnalysisSeries) -> str:
+        label = self._custom_series_labels.get(
+            (dataset.id, series.channel_index + 1),
+            _default_series_label(dataset, series),
+        )
+        return _strip_series_scale_suffix(_strip_vna_suffix_in_series_label(label))
+
     def _build_series_labels(self) -> dict[str, str]:
         labels: dict[str, str] = {}
         used: set[str] = set()
         for dataset in self._datasets:
             for series in dataset.series:
-                base = self._custom_series_labels.get(
-                    (dataset.id, series.channel_index + 1),
-                    _default_series_label(dataset, series),
-                )
-                label = _strip_vna_suffix_in_series_label(base)
+                key = (dataset.id, series.channel_index + 1)
+                label = self._series_base_label(dataset, series)
+                if key in self._custom_series_scales:
+                    original_scale = self._original_series_scales.get(key, float(series.scale or 1.0))
+                    label = _append_series_scale_suffix(
+                        label,
+                        _safe_scale_ratio(self._custom_series_scales[key], original_scale),
+                    )
                 root = label
                 duplicate_index = 2
                 while label in used:
@@ -2675,7 +2920,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         try:
             if len(selected) == 1:
                 dataset, series = selected[0]
-                self.rename_edit.setText(self._series_label(dataset, series))
+                self.rename_edit.setText(self._series_base_label(dataset, series))
                 scale = self._custom_series_scales.get(
                     (dataset.id, series.channel_index + 1),
                     float(series.scale or 1.0),
@@ -2697,7 +2942,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         if not label:
             self._sync_series_editors_from_selection()
             return
-        self._custom_series_labels[(dataset.id, series.channel_index + 1)] = label
+        self._custom_series_labels[(dataset.id, series.channel_index + 1)] = _strip_series_scale_suffix(label)
         self._derived_result_cache.clear()
         self._refresh_dataset_lists()
         self.statusBar().showMessage(f"Renamed channel to {label}")
@@ -2722,6 +2967,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         series.scale = scale
         self._derived_result_cache.clear()
         self.factor_edit.setText(f"{scale:g}")
+        self._refresh_dataset_lists()
         self.statusBar().showMessage(f"Updated {self._series_label(dataset, series)} factor to {scale:g}")
         self.plot_current()
 
@@ -3284,6 +3530,115 @@ def _strip_vna_suffix_in_series_label(label: str) -> str:
     suffix = text[index + len(".vna") :]
     if suffix.lower().startswith("+ch"):
         return text[:index] + suffix
+    return text
+
+
+def _append_series_scale_suffix(label: str, scale_ratio: float) -> str:
+    base = _strip_series_scale_suffix(label)
+    try:
+        factor = float(scale_ratio)
+    except (TypeError, ValueError):
+        return base
+    if not np.isfinite(factor) or np.isclose(factor, 1.0, rtol=1e-12, atol=1e-12):
+        return base
+    return f"{base} (*{factor:g})"
+
+
+def _safe_scale_ratio(scale: float, original_scale: float) -> float:
+    try:
+        numerator = float(scale)
+        denominator = float(original_scale)
+    except (TypeError, ValueError):
+        return 1.0
+    if not np.isfinite(numerator) or not np.isfinite(denominator):
+        return 1.0
+    if np.isclose(denominator, 0.0, rtol=0.0, atol=1e-20):
+        return numerator
+    return numerator / denominator
+
+
+def _vc_reference_frequency_velocity(name: str) -> tuple[np.ndarray, np.ndarray]:
+    label = str(name)
+    if label not in VC_REFERENCE_LEVELS_UM_S:
+        return np.array([], dtype=float), np.array([], dtype=float)
+    start_hz = 4.0 if label in {"VC A", "VC B"} else 1.0
+    centers, _lower_edges, _upper_edges = third_octave_bands(start_hz, 90.0)
+    if centers.size == 0:
+        return np.array([], dtype=float), np.array([], dtype=float)
+    centers = np.asarray(centers, dtype=float)
+    keep = np.isfinite(centers) & (centers >= start_hz * 0.999) & (centers <= 80.0 * 1.001)
+    centers = centers[keep]
+    level = float(VC_REFERENCE_LEVELS_UM_S[label])
+    if label in {"VC A", "VC B"}:
+        velocity = np.where(centers < 8.0, level * 8.0 / np.maximum(centers, 1e-20), level)
+    else:
+        velocity = np.full_like(centers, level, dtype=float)
+    return centers, velocity
+
+
+def _vc_reference_acceleration_psd(name: str) -> tuple[np.ndarray, np.ndarray]:
+    frequencies, velocity_um_s = _vc_reference_frequency_velocity(name)
+    if frequencies.size < 2:
+        return np.array([], dtype=float), np.array([], dtype=float)
+    centers, lower_edges, upper_edges = third_octave_bands(
+        float(np.min(frequencies)),
+        float(np.max(frequencies)),
+    )
+    bandwidths = np.empty_like(frequencies, dtype=float)
+    for index, center in enumerate(frequencies):
+        nearest = int(np.argmin(np.abs(centers - center))) if centers.size else -1
+        if nearest >= 0:
+            bandwidths[index] = max(float(upper_edges[nearest] - lower_edges[nearest]), 1e-20)
+        else:
+            bandwidths[index] = max(float(center) / 4.0, 1e-20)
+    velocity_psd_si = (velocity_um_s / 1e6) ** 2 / bandwidths
+    acceleration_psd = velocity_psd_si * (2.0 * np.pi * frequencies) ** 2
+    valid = np.isfinite(frequencies) & np.isfinite(acceleration_psd) & (frequencies > 0.0) & (acceleration_psd > 0.0)
+    return frequencies[valid], acceleration_psd[valid]
+
+
+def _third_octave_velocity_from_center_psd(
+    frequencies: np.ndarray,
+    acceleration_psd: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    f = np.asarray(frequencies, dtype=float).ravel()
+    psd = np.asarray(acceleration_psd, dtype=float).ravel()
+    count = min(f.size, psd.size)
+    f = f[:count]
+    psd = psd[:count]
+    valid = np.isfinite(f) & np.isfinite(psd) & (f > 0.0) & (psd > 0.0)
+    f = f[valid]
+    psd = psd[valid]
+    if f.size < 2:
+        return np.array([], dtype=float), np.array([], dtype=float)
+    centers, lower_edges, upper_edges = third_octave_bands(float(np.min(f)), float(np.max(f)))
+    values = np.full_like(f, np.nan, dtype=float)
+    for index, frequency in enumerate(f):
+        nearest = int(np.argmin(np.abs(centers - frequency))) if centers.size else -1
+        if nearest < 0:
+            continue
+        bandwidth = max(float(upper_edges[nearest] - lower_edges[nearest]), 1e-20)
+        values[index] = np.sqrt(psd[index] / (2.0 * np.pi * frequency) ** 2 * bandwidth) * 1e6
+    valid = np.isfinite(values) & (values > 0.0)
+    return f[valid], values[valid]
+
+
+def _append_inline_factor_suffix(label: str, factor: float) -> str:
+    try:
+        value = float(factor)
+    except (TypeError, ValueError):
+        return str(label)
+    if not np.isfinite(value) or np.isclose(value, 1.0, rtol=1e-12, atol=1e-12):
+        return str(label)
+    return f"{label} (x{value:g})"
+
+
+def _strip_series_scale_suffix(label: str) -> str:
+    text = str(label or "").strip()
+    for marker in (" (*", " (放大", " (缩小到", " (系数"):
+        index = text.rfind(marker)
+        if index >= 0 and text.endswith(")"):
+            return text[:index].strip()
     return text
 
 
