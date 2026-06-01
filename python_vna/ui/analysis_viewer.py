@@ -680,6 +680,12 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self.derived_show_source_check = QtWidgets.QCheckBox("绘制待换算数据")
         self.derived_show_source_check.setObjectName("vcCheck")
         self.derived_show_source_check.setChecked(False)
+        self.derived_coherence_correction_check = QtWidgets.QCheckBox("相干修正")
+        self.derived_coherence_correction_check.setObjectName("vcCheck")
+        self.derived_coherence_correction_check.setToolTip(
+            "使用传递率对应的相干性修正 PSD：正向除以 coh，反向乘以 coh；低相干频点按下限保护。"
+        )
+        self.derived_coherence_correction_check.setChecked(False)
         self.derived_vc_checks: dict[str, QtWidgets.QCheckBox] = {}
 
         for combo in (self.derived_transfer_combo, self.derived_input_series_combo):
@@ -732,6 +738,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             self.derived_vc_checks[name] = checkbox
             vc_row.addWidget(checkbox)
         vc_row.addSpacing(14)
+        vc_row.addWidget(self.derived_coherence_correction_check)
         vc_row.addWidget(self.derived_show_source_check)
         vc_row.addStretch(1)
         control_layout.addLayout(vc_row)
@@ -774,12 +781,17 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             lambda _index: self._auto_plot_derived_from_control_change()
         )
         self.derived_show_source_check.toggled.connect(lambda _checked: self._auto_plot_derived_from_control_change())
+        self.derived_coherence_correction_check.toggled.connect(
+            lambda _checked: self._auto_plot_derived_from_control_change()
+        )
         self.derived_transfer_factor_spin.editingFinished.connect(self._auto_plot_derived_from_control_change)
         self.derived_input_factor_spin.editingFinished.connect(self._auto_plot_derived_from_control_change)
         self.derived_freq_min_edit.editingFinished.connect(self._auto_plot_derived_from_control_change)
         self.derived_freq_max_edit.editingFinished.connect(self._auto_plot_derived_from_control_change)
         self.derived_regularization_spin.editingFinished.connect(self._auto_plot_derived_from_control_change)
-        self.derived_plot_button.clicked.connect(self._plot_derived)
+        self.derived_plot_button.clicked.connect(
+            lambda _checked=False: self._plot_derived(keep_existing=self._hold_enabled())
+        )
 
     def _load_file(self) -> None:
         paths, _filter = QtWidgets.QFileDialog.getOpenFileNames(
@@ -1201,7 +1213,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         if self._suspend_auto_plot:
             return
         if hasattr(self, "derived_plots") and self._has_derived_input_ready():
-            self._plot_derived(quiet=True)
+            self._plot_derived(keep_existing=self._hold_enabled(), quiet=True)
         if not self._datasets or not self.series_list.selectedItems():
             return
         self.plot_current()
@@ -1211,7 +1223,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             return
         if not hasattr(self, "derived_plots") or not self._has_derived_input_ready():
             return
-        self._plot_derived(quiet=True)
+        self._plot_derived(keep_existing=self._hold_enabled(), quiet=True)
 
     def _has_derived_input_ready(self) -> bool:
         transfer_data = self.derived_transfer_combo.currentData()
@@ -1227,6 +1239,9 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             return 1.0
         return float(self.derived_input_factor_spin.value())
 
+    def _hold_enabled(self) -> bool:
+        return bool(getattr(self, "hold_button", None) and self.hold_button.isChecked())
+
     def plot_current(self) -> None:
         selected = self._selected_series()
         if not selected:
@@ -1235,7 +1250,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self._time_series_cache.clear()
         self._bulk_time_series_cache.clear()
         self._selected_channel_keys_by_dataset = {}
-        keep_existing = bool(getattr(self, "hold_button", None) and self.hold_button.isChecked())
+        keep_existing = self._hold_enabled()
         if not keep_existing:
             for plot in self._all_analysis_plots():
                 self._clear_data_tips(plot)
@@ -1677,6 +1692,16 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         regularization = float(self.derived_regularization_spin.value())
         freq_min = _parse_optional_float(self.derived_freq_min_edit.text())
         freq_max = _parse_optional_float(self.derived_freq_max_edit.text())
+        coherence_correction = bool(self.derived_coherence_correction_check.isChecked())
+        coherence = self._coherence_for_derived(
+            transfer_dataset,
+            transfer_key,
+            source_kind,
+            base_series,
+            top_series,
+        ) if coherence_correction else None
+        coherence_f = coherence[0] if coherence is not None else None
+        coherence_values = coherence[1] if coherence is not None else None
 
         results: list[dict[str, object]] = []
         for input_dataset, series in input_series:
@@ -1693,6 +1718,9 @@ class AnalysisViewer(QtWidgets.QMainWindow):
                     freq_min=freq_min,
                     freq_max=freq_max,
                     input_factor=input_factor,
+                    coherence_f=coherence_f,
+                    coherence_values=coherence_values,
+                    coherence_correction=coherence_correction and coherence is not None,
                 )
             else:
                 result = self._derived_result_for_series(
@@ -1710,6 +1738,9 @@ class AnalysisViewer(QtWidgets.QMainWindow):
                     freq_max=freq_max,
                     transfer_factor=transfer_factor,
                     input_factor=input_factor,
+                    coherence_f=coherence_f,
+                    coherence_values=coherence_values,
+                    coherence_correction=coherence_correction and coherence is not None,
                 )
             if result is not None:
                 results.append(result)
@@ -1982,6 +2013,9 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         freq_min: float | None,
         freq_max: float | None,
         input_factor: float,
+        coherence_f: np.ndarray | None = None,
+        coherence_values: np.ndarray | None = None,
+        coherence_correction: bool = False,
     ) -> dict[str, object] | None:
         del transfer_dataset, base_series, top_series
         f_source_accel, psd_source_accel = _vc_reference_acceleration_psd(name)
@@ -1995,6 +2029,10 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             transfer_h,
             direction=direction,
             regularization_floor=regularization,
+            coherence_frequency=coherence_f,
+            coherence_values=coherence_values,
+            coherence_correction=coherence_correction,
+            coherence_floor=regularization,
         )
         if f_accel.size and freq_min is not None:
             keep = f_accel >= float(freq_min)
@@ -2071,6 +2109,9 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         freq_max: float | None,
         transfer_factor: float,
         input_factor: float,
+        coherence_f: np.ndarray | None = None,
+        coherence_values: np.ndarray | None = None,
+        coherence_correction: bool = False,
     ) -> dict[str, object] | None:
         cache_key = self._derived_cache_key(
             transfer_dataset,
@@ -2084,6 +2125,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             freq_max,
             transfer_factor,
             input_factor,
+            coherence_correction,
         )
         if cache_key in self._derived_result_cache:
             (
@@ -2111,6 +2153,10 @@ class AnalysisViewer(QtWidgets.QMainWindow):
                 transfer_h,
                 direction=direction,
                 regularization_floor=regularization,
+                coherence_frequency=coherence_f,
+                coherence_values=coherence_values,
+                coherence_correction=coherence_correction,
+                coherence_floor=regularization,
             )
             if f_accel.size and freq_min is not None:
                 keep = f_accel >= float(freq_min)
@@ -2287,6 +2333,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         freq_max: float | None,
         transfer_factor: float,
         input_factor: float,
+        coherence_correction: bool = False,
     ) -> tuple[object, ...]:
         config = self._filter_config()
         start_s, end_s = self._time_window()
@@ -2303,6 +2350,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             self.psd_source_combo.currentText(),
             round(float(transfer_factor), 12),
             round(float(input_factor), 12),
+            bool(coherence_correction),
             round(float(input_series.scale or 1.0), 12),
             round(float(base_series.scale or 1.0), 12),
             round(float(top_series.scale or 1.0), 12),
@@ -2379,6 +2427,61 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             top_series,
             transfer_factor=transfer_factor,
         )
+
+    def _coherence_for_derived(
+        self,
+        dataset: AnalysisDataset,
+        transfer_key: str,
+        source_kind: str,
+        base_series: AnalysisSeries,
+        top_series: AnalysisSeries,
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        if source_kind == "stored" and transfer_key in dataset.coherence and dataset.frequency_hz is not None:
+            f = np.asarray(dataset.frequency_hz, dtype=float).ravel()
+            coherence = np.asarray(dataset.coherence[transfer_key], dtype=float).ravel()
+            count = min(f.size, coherence.size)
+            if count >= 2:
+                return f[:count], coherence[:count]
+        return self._coherence_for_derived_from_time_data(dataset, base_series, top_series)
+
+    def _coherence_for_derived_from_time_data(
+        self,
+        dataset: AnalysisDataset,
+        base_series: AnalysisSeries,
+        top_series: AnalysisSeries,
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        start_s, end_s = self._analysis_window_for_dataset(dataset)
+        _t_base, base_raw = self._load_analysis_time_series(
+            dataset,
+            base_series.channel_key,
+            start_s=start_s,
+            end_s=end_s,
+        )
+        _t_top, top_raw = self._load_analysis_time_series(
+            dataset,
+            top_series.channel_key,
+            start_s=start_s,
+            end_s=end_s,
+        )
+        count = min(base_raw.size, top_raw.size)
+        if count < 2:
+            return None
+        base_filtered, base_trim = apply_filter_to_signal(base_raw[:count], dataset.sample_rate, self._filter_config())
+        top_filtered, top_trim = apply_filter_to_signal(top_raw[:count], dataset.sample_rate, self._filter_config())
+        trim = max(base_trim, top_trim)
+        if trim > 0 and base_filtered.size > trim * 2 and top_filtered.size > trim * 2:
+            base_filtered = base_filtered[trim:-trim]
+            top_filtered = top_filtered[trim:-trim]
+        block_size = self._fft_block_size(min(base_filtered.size, top_filtered.size), dataset)
+        f, coherence = compute_coherence_welch(
+            base_filtered,
+            top_filtered,
+            dataset.sample_rate,
+            block_size,
+        )
+        if f.size < 2:
+            return None
+        return f, coherence
 
     def _transfer_for_derived_from_time_data(
         self,

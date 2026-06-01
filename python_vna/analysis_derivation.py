@@ -15,6 +15,10 @@ def derive_psd_from_transfer(
     *,
     direction: str = DERIVE_BASE_TO_TOP,
     regularization_floor: float = 1e-6,
+    coherence_frequency: np.ndarray | None = None,
+    coherence_values: np.ndarray | None = None,
+    coherence_correction: bool = False,
+    coherence_floor: float = 1e-6,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Convert one endpoint PSD through H_top/base."""
     f_psd, psd = _sorted_finite_real_pair(psd_frequency, psd_values, positive_y=True)
@@ -34,6 +38,10 @@ def derive_psd_from_transfer(
 
     h_interp = interpolate_complex_transfer(f_h, h, f_out)
     magnitude_sq = np.abs(h_interp) ** 2
+    coherence = None
+    if coherence_correction and coherence_frequency is not None and coherence_values is not None:
+        coherence = interpolate_coherence(coherence_frequency, coherence_values, f_out)
+        coherence = np.maximum(coherence, max(float(coherence_floor), 1e-20))
     if _normal_direction(direction) == DERIVE_TOP_TO_BASE:
         floor_sq = max(float(regularization_floor), 0.0) ** 2
         psd_out = np.divide(
@@ -42,8 +50,17 @@ def derive_psd_from_transfer(
             out=np.zeros_like(psd_out, dtype=float),
             where=np.isfinite(magnitude_sq),
         )
+        if coherence is not None:
+            psd_out = psd_out * coherence
     else:
         psd_out = psd_out * magnitude_sq
+        if coherence is not None:
+            psd_out = np.divide(
+                psd_out,
+                coherence,
+                out=np.zeros_like(psd_out, dtype=float),
+                where=np.isfinite(coherence) & (coherence > 0.0),
+            )
     valid = np.isfinite(f_out) & np.isfinite(psd_out) & (f_out > 0.0) & (psd_out > 0.0)
     return f_out[valid], psd_out[valid]
 
@@ -103,6 +120,18 @@ def interpolate_complex_transfer(
     real = np.interp(f_target, f_h, np.real(h))
     imag = np.interp(f_target, f_h, np.imag(h))
     return real + 1.0j * imag
+
+
+def interpolate_coherence(
+    source_frequency: np.ndarray,
+    source_coherence: np.ndarray,
+    target_frequency: np.ndarray,
+) -> np.ndarray:
+    f, coh = _sorted_finite_real_pair(source_frequency, source_coherence, positive_y=True)
+    f_target = np.asarray(target_frequency, dtype=float).ravel()
+    if f.size < 2 or f_target.size == 0:
+        return np.ones(f_target.shape, dtype=float)
+    return np.interp(f_target, f, np.clip(coh, 0.0, 1.0))
 
 
 def has_complex_transfer_phase(transfer_values: np.ndarray) -> bool:

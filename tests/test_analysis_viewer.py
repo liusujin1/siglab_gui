@@ -107,6 +107,38 @@ class AnalysisAlgorithmTests(unittest.TestCase):
         np.testing.assert_allclose(base_f, freqs)
         np.testing.assert_allclose(base_psd, psd)
 
+    def test_derived_psd_transfer_can_apply_coherence_correction(self):
+        freqs = np.array([10.0, 20.0, 30.0], dtype=float)
+        psd = np.array([1.0, 2.0, 3.0], dtype=float)
+        transfer = np.full(freqs.shape, 2.0 + 0.0j, dtype=complex)
+        coherence = np.full(freqs.shape, 0.25, dtype=float)
+
+        top_f, top_psd = derive_psd_from_transfer(
+            freqs,
+            psd,
+            freqs,
+            transfer,
+            direction=DERIVE_BASE_TO_TOP,
+            coherence_frequency=freqs,
+            coherence_values=coherence,
+            coherence_correction=True,
+        )
+        base_f, base_psd = derive_psd_from_transfer(
+            freqs,
+            top_psd,
+            freqs,
+            transfer,
+            direction=DERIVE_TOP_TO_BASE,
+            coherence_frequency=freqs,
+            coherence_values=coherence,
+            coherence_correction=True,
+        )
+
+        np.testing.assert_allclose(top_f, freqs)
+        np.testing.assert_allclose(top_psd, psd * 16.0)
+        np.testing.assert_allclose(base_f, freqs)
+        np.testing.assert_allclose(base_psd, psd)
+
     def test_derived_time_requires_complex_transfer_and_recovers_gain(self):
         sample_rate = 1000.0
         time_s = np.arange(1000, dtype=float) / sample_rate
@@ -813,6 +845,7 @@ class AnalysisViewerUiTests(unittest.TestCase):
             self.assertEqual(viewer.derived_input_factor_spin.decimals(), 1)
             self.assertFalse(any(checkbox.isChecked() for checkbox in viewer.derived_vc_checks.values()))
             self.assertFalse(viewer.derived_show_source_check.isChecked())
+            self.assertFalse(viewer.derived_coherence_correction_check.isChecked())
         finally:
             viewer.close()
 
@@ -831,7 +864,7 @@ class AnalysisViewerUiTests(unittest.TestCase):
             },
             spectra={"f": freqs, "autospectrum": {}},
             frf={"ai0->ai1": np.full(freqs.shape, 2.0 + 0.0j, dtype=complex)},
-            coherence={},
+            coherence={"ai0->ai1": np.full(freqs.shape, 0.25, dtype=float)},
             cross_spectra={},
             correlations={},
             impulse_responses={},
@@ -876,6 +909,14 @@ class AnalysisViewerUiTests(unittest.TestCase):
             np.testing.assert_allclose(f, [10.0, 20.0, 30.0])
             np.testing.assert_allclose(psd, [4.0, 4.0, 4.0])
 
+            viewer.derived_coherence_correction_check.setChecked(True)
+            viewer._plot_derived()
+            corrected_curves = viewer._plot_curves[viewer.derived_plots[1]]
+            _label, (f_corrected, psd_corrected) = next(iter(corrected_curves.items()))
+            np.testing.assert_allclose(f_corrected, [10.0, 20.0, 30.0])
+            np.testing.assert_allclose(psd_corrected, [16.0, 16.0, 16.0])
+            viewer.derived_coherence_correction_check.setChecked(False)
+
             viewer.scale_spin.setValue(10.0)
             viewer.derived_transfer_factor_spin.setValue(0.5)
             viewer.derived_input_factor_spin.setValue(3.0)
@@ -884,6 +925,14 @@ class AnalysisViewerUiTests(unittest.TestCase):
             _label, (f_factored, psd_factored) = next(iter(factored_curves.items()))
             np.testing.assert_allclose(f_factored, [10.0, 20.0, 30.0])
             np.testing.assert_allclose(psd_factored, [9.0, 9.0, 9.0])
+
+            factored_curve_count = len(factored_curves)
+            viewer.hold_button.setChecked(True)
+            viewer.derived_input_factor_spin.setValue(4.0)
+            viewer._auto_plot_derived_from_control_change()
+            held_curves = viewer._plot_curves[viewer.derived_plots[1]]
+            self.assertGreater(len(held_curves), factored_curve_count)
+            viewer.hold_button.setChecked(False)
 
             viewer.derived_show_source_check.setChecked(True)
             viewer._plot_derived()
