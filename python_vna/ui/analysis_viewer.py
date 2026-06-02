@@ -175,7 +175,12 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self.setStyleSheet(stylesheet)
         for list_widget in self.findChildren(QtWidgets.QListWidget):
             self._apply_list_widget_palette(list_widget)
-        for dialog_name in ("derived_config_dialog", "derived_curve_dialog"):
+        for dialog_name in (
+            "derived_config_dialog",
+            "derived_curve_dialog",
+            "derived_parameter_dialog",
+            "derived_processing_dialog",
+        ):
             dialog = getattr(self, dialog_name, None)
             if dialog is not None:
                 dialog.setStyleSheet(stylesheet)
@@ -385,6 +390,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self.processing_controls_group = self._build_controls_group()
         if self._derived_only:
             left_layout.addWidget(self._build_slot_selection_group())
+            left_layout.addWidget(self._build_settings_buttons_group())
             left_layout.addStretch(1)
             layout.addWidget(self.left_panel)
         else:
@@ -541,6 +547,23 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             button.clicked.connect(lambda _checked=False, slot_role=role: self._show_slot_selector(slot_role))
             layout.addWidget(value_label, row, 1)
             layout.addWidget(button, row, 2)
+        return group
+
+    def _build_settings_buttons_group(self) -> QtWidgets.QGroupBox:
+        group = QtWidgets.QGroupBox("3. 设置")
+        layout = QtWidgets.QGridLayout(group)
+        layout.setContentsMargins(8, 14, 8, 8)
+        layout.setHorizontalSpacing(6)
+        layout.setVerticalSpacing(6)
+        self.derived_parameter_button = QtWidgets.QPushButton("换算参数")
+        self.derived_curve_panel_button = QtWidgets.QPushButton("曲线/拼合")
+        self.derived_processing_button = QtWidgets.QPushButton("滤波处理")
+        layout.addWidget(self.derived_parameter_button, 0, 0)
+        layout.addWidget(self.derived_curve_panel_button, 0, 1)
+        layout.addWidget(self.derived_processing_button, 1, 0, 1, 2)
+        self.derived_parameter_button.clicked.connect(self._show_derived_parameter_dialog)
+        self.derived_curve_panel_button.clicked.connect(self._show_derived_curve_dialog)
+        self.derived_processing_button.clicked.connect(self._show_derived_processing_dialog)
         return group
 
     def _build_controls_group(self) -> QtWidgets.QGroupBox:
@@ -979,11 +1002,29 @@ class AnalysisViewer(QtWidgets.QMainWindow):
 
         if self._derived_only:
             self.derived_curve_dialog = None
-            self.derived_settings_tabs = QtWidgets.QTabWidget()
-            self.derived_settings_tabs.addTab(controls, "换算参数")
-            self.derived_settings_tabs.addTab(edit_group, "曲线/拼合")
-            self.derived_settings_tabs.addTab(self.processing_controls_group, "滤波处理")
-            layout.addWidget(self.derived_settings_tabs)
+            self.derived_parameter_dialog = QtWidgets.QDialog(self)
+            self.derived_parameter_dialog.setWindowTitle("换算参数")
+            self.derived_parameter_dialog.setModal(False)
+            self.derived_parameter_dialog.setSizeGripEnabled(True)
+            parameter_layout = QtWidgets.QVBoxLayout(self.derived_parameter_dialog)
+            parameter_layout.addWidget(controls)
+            self.derived_parameter_dialog.resize(430, 260)
+
+            self.derived_curve_dialog = QtWidgets.QDialog(self)
+            self.derived_curve_dialog.setWindowTitle("曲线/拼合")
+            self.derived_curve_dialog.setModal(False)
+            self.derived_curve_dialog.setSizeGripEnabled(True)
+            curve_layout = QtWidgets.QVBoxLayout(self.derived_curve_dialog)
+            curve_layout.addWidget(edit_group)
+            self.derived_curve_dialog.resize(430, 520)
+
+            self.derived_processing_dialog = QtWidgets.QDialog(self)
+            self.derived_processing_dialog.setWindowTitle("滤波处理")
+            self.derived_processing_dialog.setModal(False)
+            self.derived_processing_dialog.setSizeGripEnabled(True)
+            processing_layout = QtWidgets.QVBoxLayout(self.derived_processing_dialog)
+            processing_layout.addWidget(self.processing_controls_group)
+            self.derived_processing_dialog.resize(430, 240)
         else:
             self.derived_curve_dialog = QtWidgets.QDialog(self)
             self.derived_curve_dialog.setWindowTitle("曲线编辑与拼合")
@@ -1098,6 +1139,22 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         if self.derived_config_dialog is not None:
             self.derived_config_dialog.hide()
         self.statusBar().showMessage("换算配置已应用")
+
+    def _show_derived_parameter_dialog(self) -> None:
+        dialog = getattr(self, "derived_parameter_dialog", None)
+        if dialog is None:
+            return
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _show_derived_processing_dialog(self) -> None:
+        dialog = getattr(self, "derived_processing_dialog", None)
+        if dialog is None:
+            return
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def _show_data_manager_dialog(self) -> None:
         dialog = QtWidgets.QDialog(self)
