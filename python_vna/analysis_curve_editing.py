@@ -145,6 +145,8 @@ def sample_curve_as_db_points(
     count: int = 8,
     power_values: bool,
     target_frequency_hz: np.ndarray | None = None,
+    max_count: int | None = None,
+    error_threshold_db: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     f, y = sorted_finite_points(frequency_hz, values, positive_values=True)
     if f.size < 2:
@@ -166,7 +168,36 @@ def sample_curve_as_db_points(
     else:
         y_db = 20.0 * np.log10(np.maximum(np.abs(y), 1e-300))
     sampled = np.interp(np.log10(targets), log_f, y_db)
-    return targets, sampled
+    control_f, control_db = sorted_finite_points(targets, sampled)
+
+    if max_count is None or error_threshold_db is None:
+        return control_f, control_db
+    limit = min(max(2, int(max_count)), int(f.size))
+    threshold = float(error_threshold_db)
+    if not np.isfinite(threshold) or threshold <= 0.0 or control_f.size >= limit:
+        return control_f, control_db
+
+    while control_f.size < limit:
+        fitted_f, fitted_db = evaluate_db_control_curve(control_f, control_db, f)
+        if fitted_f.size < 2:
+            break
+        source_db = np.interp(np.log10(fitted_f), log_f, y_db)
+        error = np.abs(fitted_db - source_db)
+        if error.size == 0:
+            break
+        for existing_f in control_f:
+            error[np.isclose(fitted_f, existing_f, rtol=1e-10, atol=0.0)] = -np.inf
+        candidate_index = int(np.argmax(error))
+        if not np.isfinite(error[candidate_index]) or error[candidate_index] <= threshold:
+            break
+        candidate_f = float(fitted_f[candidate_index])
+        candidate_db = float(source_db[candidate_index])
+        control_f = np.append(control_f, candidate_f)
+        control_db = np.append(control_db, candidate_db)
+        order = np.argsort(control_f)
+        control_f = control_f[order]
+        control_db = control_db[order]
+    return control_f, control_db
 
 
 def stitch_frequency_curves(

@@ -3153,6 +3153,25 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(self.window._current_source_path, second_path)
         self.assertEqual(save_legacy.call_count, 2)
 
+    def test_save_vna_suggests_next_numbered_filename(self):
+        current_path = Path(tempfile.gettempdir()) / "vna_save_numbered" / "002.vna"
+        selected_path = current_path.with_name("003.vna")
+        self.window._current_source_path = current_path
+        self.window._last_vna_directory = current_path.parent
+        dialog_paths: list[str] = []
+
+        def fake_save_file(_parent, _title, filename, _filter):
+            dialog_paths.append(filename)
+            return (str(selected_path), "")
+
+        with mock.patch.object(main_window_module, "save_legacy_vna") as save_legacy:
+            with mock.patch.object(QtWidgets.QFileDialog, "getSaveFileName", fake_save_file):
+                self.window._save_session()
+
+        self.assertEqual(dialog_paths, [str(selected_path)])
+        self.assertEqual(self.window._current_source_path, selected_path)
+        self.assertEqual(save_legacy.call_count, 1)
+
     def test_load_session_remembers_last_folder(self):
         first_path = Path(tempfile.gettempdir()) / "vna_load_first" / "first.vna"
         second_path = Path(tempfile.gettempdir()) / "vna_load_second" / "second.vna"
@@ -3486,6 +3505,59 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(legend.columnCount, 8)
         self.assertGreater(legend.zValue(), main_window_module.CURVE_Z)
         self.assertLess(legend.zValue(), main_window_module.MARKER_Z)
+
+    def test_plot_legend_auto_moves_away_from_dense_corner(self):
+        time_axis = np.linspace(0.0, 10.0, 240)
+        dense_top_left = 10.0 - time_axis
+        measurement = MeasurementSet(
+            sample_rate=100.0,
+            time_data={"t": time_axis, "channels": {"ai0": dense_top_left}},
+            spectra={
+                "f": np.array([1.0, 2.0], dtype=float),
+                "fft": {},
+                "autospectrum": {},
+            },
+            frf={},
+            coherence={},
+            cross_spectra={},
+            correlations={},
+            impulse_responses={},
+            metadata={"frame_index": 1},
+        )
+        self.controller.state.measurement = measurement
+        self.window.top_display_combo.setCurrentText("time")
+
+        self.window._plot_measurement(measurement)
+
+        legend = self.window.top_plot.plotItem.legend
+        self.assertIsNotNone(legend)
+        self.assertIsNotNone(getattr(legend, "_vna_auto_corner", None))
+        self.assertNotEqual(legend._vna_auto_corner, "top_left")
+
+    def test_detached_plot_legend_auto_moves_away_from_dense_corner(self):
+        x = np.linspace(0.0, 10.0, 240)
+        y = 10.0 - x
+        detached = self.window._detached_plot_window
+
+        detached.set_plot_data(
+            {
+                "top": {
+                    "title": "Upper",
+                    "x_label": "Time",
+                    "y_label": "Value",
+                    "log_x": False,
+                    "log_y": False,
+                    "curves": {"ai0": (x, y)},
+                    "legend_names": {"ai0": "CH1"},
+                    "colors": {"ai0": "#1f77b4"},
+                }
+            }
+        )
+
+        legend = detached.upper_plot.plotItem.legend
+        self.assertIsNotNone(legend)
+        self.assertIsNotNone(getattr(legend, "_vna_auto_corner", None))
+        self.assertNotEqual(legend._vna_auto_corner, "top_left")
 
     def test_right_drag_zoom_box_uses_visible_selection_style(self):
         view_box = self.window.top_plot.getPlotItem().vb

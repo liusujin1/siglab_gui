@@ -21,6 +21,8 @@ from python_vna.analysis_derivation import (
 from python_vna.analysis_curve_editing import (
     apply_db_magnitude_profile,
     apply_power_db_profile,
+    evaluate_db_control_curve,
+    sample_curve_as_db_points,
     stitch_frequency_curves,
     transfer_from_db_points,
 )
@@ -184,6 +186,42 @@ class AnalysisAlgorithmTests(unittest.TestCase):
         np.testing.assert_allclose(20.0 * np.log10(fitted_h), control_db, atol=1e-12)
         np.testing.assert_allclose(top_f, target_f)
         np.testing.assert_allclose(top_psd, [1.0, 100.0, 10000.0], rtol=1e-12)
+
+    def test_adaptive_db_sampling_preserves_narrow_transfer_features(self):
+        freqs = np.logspace(1.0, 3.0, 600)
+        log_f = np.log10(freqs)
+        source_db = (
+            -8.0
+            + 4.0 * np.sin(6.0 * log_f)
+            + 28.0 * np.exp(-0.5 * ((log_f - np.log10(320.0)) / 0.025) ** 2)
+            - 22.0 * np.exp(-0.5 * ((log_f - np.log10(520.0)) / 0.02) ** 2)
+        )
+        values = 10.0 ** (source_db / 20.0)
+        sparse_targets = np.logspace(1.0, 3.0, 8)
+
+        sparse_f, sparse_db = sample_curve_as_db_points(
+            freqs,
+            values,
+            power_values=False,
+            target_frequency_hz=sparse_targets,
+        )
+        adaptive_f, adaptive_db = sample_curve_as_db_points(
+            freqs,
+            values,
+            power_values=False,
+            target_frequency_hz=sparse_targets,
+            max_count=90,
+            error_threshold_db=2.0,
+        )
+        fitted_f, sparse_fit_db = evaluate_db_control_curve(sparse_f, sparse_db, freqs)
+        _fitted_f, adaptive_fit_db = evaluate_db_control_curve(adaptive_f, adaptive_db, freqs)
+        source_at_fit = np.interp(np.log10(fitted_f), log_f, source_db)
+
+        self.assertGreater(adaptive_f.size, sparse_f.size)
+        self.assertLess(np.max(np.abs(adaptive_fit_db - source_at_fit)), 2.0)
+        self.assertGreater(np.max(np.abs(sparse_fit_db - source_at_fit)), 20.0)
+        self.assertTrue(np.any(np.abs(np.log10(adaptive_f) - np.log10(320.0)) < 0.02))
+        self.assertTrue(np.any(np.abs(np.log10(adaptive_f) - np.log10(520.0)) < 0.02))
 
     def test_transfer_magnitude_edit_preserves_complex_phase(self):
         freqs = np.array([10.0, 20.0, 30.0], dtype=float)
@@ -698,6 +736,27 @@ class AnalysisViewerUiTests(unittest.TestCase):
         finally:
             viewer.close()
 
+    def test_legend_auto_moves_away_from_dense_corner(self):
+        viewer = AnalysisViewer()
+        try:
+            plot = viewer.main_plots[0]
+            plot.clear()
+            if plot.plotItem.legend is None:
+                plot.addLegend()
+            else:
+                plot.plotItem.legend.clear()
+            x = np.linspace(0.0, 10.0, 200)
+            y = 10.0 - x
+            plot.plot(x, y, name="top-left heavy trace")
+            viewer._plot_curves[plot] = {"top-left heavy trace": (x, y)}
+            viewer._log_modes[plot] = (False, False)
+
+            viewer._auto_range_plot(plot, [x], [y], log_x=False, log_y=False)
+
+            self.assertNotEqual(plot.plotItem.legend._vna_auto_corner, "top_left")
+        finally:
+            viewer.close()
+
     def test_cursor_palette_is_readable_on_light_theme(self):
         viewer = AnalysisViewer(theme={"plot_bg": "#ffffff"})
         try:
@@ -969,22 +1028,27 @@ class AnalysisViewerUiTests(unittest.TestCase):
             self.assertIsNone(viewer.tabs)
             self.assertFalse(hasattr(viewer, "main_plots"))
             self.assertFalse(hasattr(viewer, "foundation_plots"))
-            self.assertEqual(viewer.derived_config_button.text(), "数据配置")
-            self.assertEqual(viewer.derived_plot_button.text(), "应用")
+            self.assertFalse(hasattr(viewer, "derived_config_button"))
+            self.assertEqual(viewer.derived_plot_button.text(), "换算绘图")
             self.assertIsNone(viewer.clear_button.parentWidget())
-            self.assertIsNotNone(viewer.derived_config_button.parentWidget())
+            self.assertIsNotNone(viewer.derived_manage_data_button.parentWidget())
             self.assertFalse(hasattr(viewer, "derived_curve_button"))
+            self.assertFalse(hasattr(viewer, "derived_main_plot_button"))
+            self.assertIsNone(viewer.derived_config_dialog)
             self.assertIsNone(viewer.derived_curve_dialog)
-            self.assertIs(viewer.left_layout.itemAt(1).widget(), viewer.derived_curve_group)
-            self.assertIs(viewer.derived_curve_group.parentWidget(), viewer.left_panel)
+            self.assertEqual(viewer.left_layout.itemAt(0).widget().title(), "1. 数据")
+            self.assertEqual(viewer.left_layout.itemAt(1).widget().title(), "2. 当前选择")
+            self.assertEqual(viewer.derived_settings_tabs.count(), 3)
+            self.assertEqual(viewer.derived_settings_tabs.tabText(0), "换算参数")
+            self.assertEqual(viewer.derived_settings_tabs.tabText(1), "曲线/拼合")
+            self.assertEqual(viewer.derived_settings_tabs.tabText(2), "滤波处理")
+            self.assertGreaterEqual(viewer.derived_settings_tabs.indexOf(viewer.derived_curve_group), 0)
+            self.assertFalse(hasattr(viewer, "left_scroll"))
+            self.assertFalse(hasattr(viewer, "derived_config_dataset_list"))
             self.assertFalse(viewer._hidden_series_group.isVisible())
             self.assertIsNone(viewer.fs_hint_spin.parentWidget())
             self.assertEqual(viewer.derived_transfer_point_table.maximumHeight(), 420)
-            self.assertEqual(viewer.derived_config_dataset_list.count(), 1)
-            self.assertFalse(viewer.derived_config_dialog.isVisible())
             viewer._show_derived_config_dialog()
-            self.assertTrue(viewer.derived_config_dialog.isVisible())
-            viewer.derived_config_dialog.hide()
             self.assertGreaterEqual(
                 viewer._combo_index_for_data(viewer.derived_transfer_combo, ("manual_transfer",)),
                 0,
@@ -1028,7 +1092,9 @@ class AnalysisViewerUiTests(unittest.TestCase):
             input_index = viewer._combo_index_for_data(viewer.derived_input_series_combo, "1:ai0")
             stitch_index = viewer._combo_index_for_data(viewer.derived_stitch_series_combo, "1:ai1")
             viewer.derived_transfer_combo.setCurrentIndex(manual_index)
-            viewer.derived_input_series_combo.setCurrentIndex(input_index)
+            viewer._apply_slot_selection("input", "1:ai0")
+            self.assertEqual(viewer.derived_input_series_combo.currentIndex(), input_index)
+            self.assertNotEqual(viewer._slot_value_labels["input"].toolTip(), "(未选择)")
             viewer._set_current_transfer_control_points(
                 np.array([10.0, 40.0], dtype=float),
                 np.array([6.0, 6.0], dtype=float),
@@ -1051,11 +1117,17 @@ class AnalysisViewerUiTests(unittest.TestCase):
             viewer._plot_derived()
             stitched_labels = viewer._plot_curves[viewer.derived_plots[1]]
             self.assertTrue(any("拼合@20Hz" in curve_label for curve_label in stitched_labels))
-            viewer._refresh_config_dataset_list()
-            viewer.derived_config_dataset_list.item(0).setSelected(True)
-            viewer._delete_selected_config_datasets()
+            order_index = viewer._combo_index_for_data(viewer.derived_stitch_order_combo, "secondary_first")
+            viewer._apply_slot_selection("stitch_before", "1:ai1")
+            self.assertEqual(viewer.derived_stitch_order_combo.currentIndex(), order_index)
+            viewer._plot_derived()
+            stitched_labels = viewer._plot_curves[viewer.derived_plots[1]]
+            reverse_label = next(curve_label for curve_label in stitched_labels if "导入前/换算后" in curve_label)
+            stitch_f, stitch_y = stitched_labels[reverse_label]
+            self.assertTrue(np.all(stitch_y[stitch_f <= 20.0] > 8.0))
+            self.assertTrue(np.all(stitch_y[stitch_f > 20.0] < 5.0))
+            viewer._delete_datasets_by_ids({1})
             self.assertEqual(viewer._datasets, [])
-            self.assertEqual(viewer.derived_config_dataset_list.item(0).text(), "(暂无已加载数据)")
             _ = before_f
         finally:
             viewer.close()

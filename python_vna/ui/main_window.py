@@ -4,6 +4,7 @@ from collections import deque
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import threading
 import time
@@ -44,6 +45,7 @@ from python_vna.storage import (
     save_legacy_vna,
     save_session_json,
 )
+from python_vna.ui.legend_placement import place_legend_away_from_curves
 
 QtCore = require("PySide6.QtCore", "python -m pip install -e .[gui]")
 QtGui = require("PySide6.QtGui", "python -m pip install -e .[gui]")
@@ -166,7 +168,7 @@ class DetachedPlotWindow(QtWidgets.QDialog):
                     if isinstance(panel.get("legend_names", {}), dict)
                     else str(trace_name),
                 )
-            plot.enableAutoRange()
+            self._auto_range_plot(key)
 
     def apply_theme(self, theme: dict[str, object]) -> None:
         self._theme = dict(theme)
@@ -225,12 +227,67 @@ class DetachedPlotWindow(QtWidgets.QDialog):
         self._show_status(f"Detached plot Data Tip mode {'on' if enabled else 'off'}")
 
     def _auto_scale_all_plots(self) -> None:
-        self.upper_plot.enableAutoRange()
-        self.lower_plot.enableAutoRange()
+        self._auto_range_plot("top")
+        self._auto_range_plot("bottom")
         self._show_status("Auto-scaled detached plots")
 
     def _plot_for_key(self, key: str):
         return self.upper_plot if key == "top" else self.lower_plot
+
+    def _auto_range_plot(self, key: str) -> None:
+        plot = self._plot_for_key(key)
+        curves = self._curves.get(key, {})
+        if not curves:
+            plot.enableAutoRange()
+            self._auto_place_legend(key)
+            return
+        x_extent = self._detached_curve_extent(key, axis=0)
+        y_extent = self._detached_curve_extent(key, axis=1)
+        if x_extent is None or y_extent is None:
+            plot.enableAutoRange()
+            self._auto_place_legend(key)
+            return
+        if self._log_modes[key]["x"]:
+            plot.setXRange(np.log10(x_extent[0]), np.log10(x_extent[1]), padding=0.03)
+        else:
+            plot.setXRange(x_extent[0], x_extent[1], padding=0.03)
+        if self._log_modes[key]["y"]:
+            plot.setYRange(np.log10(y_extent[0]), np.log10(y_extent[1]), padding=0.06)
+        else:
+            plot.setYRange(y_extent[0], y_extent[1], padding=0.06)
+        self._auto_place_legend(key)
+
+    def _detached_curve_extent(self, key: str, *, axis: int) -> tuple[float, float] | None:
+        values: list[np.ndarray] = []
+        log_enabled = bool(self._log_modes[key]["x" if axis == 0 else "y"])
+        for curve in self._curves.get(key, {}).values():
+            arr = np.asarray(curve[axis], dtype=float).ravel()
+            arr = arr[np.isfinite(arr)]
+            if log_enabled:
+                arr = arr[arr > 0.0]
+            if arr.size:
+                values.append(arr)
+        if not values:
+            return None
+        combined = np.concatenate(values)
+        minimum = float(np.min(combined))
+        maximum = float(np.max(combined))
+        if maximum > minimum:
+            return minimum, maximum
+        if log_enabled:
+            return max(minimum / 10.0, 1e-300), max(maximum * 10.0, 1e-299)
+        delta = max(abs(minimum) * 0.05, 1.0)
+        return minimum - delta, maximum + delta
+
+    def _auto_place_legend(self, key: str) -> None:
+        plot = self._plot_for_key(key)
+        place_legend_away_from_curves(
+            plot,
+            self._curves.get(key, {}),
+            log_x=bool(self._log_modes[key]["x"]),
+            log_y=bool(self._log_modes[key]["y"]),
+            default_offset=(3, 2),
+        )
 
     def _x_to_plot_coord(self, key: str, value: float) -> float:
         if self._log_modes[key]["x"]:
@@ -7570,6 +7627,15 @@ class MainWindow(QtWidgets.QMainWindow):
             and self._analysis_value_mode_for_key(key) == "nyquist"
         )
 
+    def _auto_place_plot_legend(self, key: str) -> None:
+        place_legend_away_from_curves(
+            self._plot_widget_for_key(key),
+            self._last_plot_cache.get(key, {}),
+            log_x=self._is_log_xscale(key) and not self._is_nyquist_display(key),
+            log_y=self._is_log_yscale(key) and not self._is_nyquist_display(key),
+            default_offset=(3, 2),
+        )
+
     def _configure_plot_xscale(self, plot, key: str) -> None:
         plot.setLogMode(
             x=self._is_log_xscale(key) and not self._is_nyquist_display(key),
@@ -8016,6 +8082,7 @@ class MainWindow(QtWidgets.QMainWindow):
             plot.setYRange(y_range[0], y_range[1], padding=0.0 if has_manual_y or has_legacy_y else 0.05)
         finally:
             self._axis_scaling_key = None
+            self._auto_place_plot_legend(key)
 
     def _legacy_x_extent_for_display(
         self, key: str, curves: dict[str, tuple[np.ndarray, np.ndarray]]
@@ -8696,11 +8763,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _save_session(self) -> None:
         self._read_session_from_widgets()
-        default_save_path = (
-            self._current_source_path.with_suffix(".vna")
-            if self._current_source_path is not None
-            else self._last_vna_directory / "session.vna"
-        )
+        default_save_path = self._suggest_vna_save_path()
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "保存 VNA",
@@ -8719,6 +8782,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_vna_directory = save_path.parent
         self._update_window_title()
         self.statusBar().showMessage(f"已保存会话到 {save_path}")
+
+    def _suggest_vna_save_path(self) -> Path:
+        if self._current_source_path is None:
+            return self._last_vna_directory / "session.vna"
+        return self._increment_trailing_number(self._current_source_path.with_suffix(".vna"))
+
+    @staticmethod
+    def _increment_trailing_number(path: Path) -> Path:
+        match = re.search(r"(\d+)$", path.stem)
+        if match is None:
+            return path
+        number_text = match.group(1)
+        prefix = path.stem[: match.start(1)]
+        next_number = int(number_text) + 1
+        next_stem = f"{prefix}{next_number:0{len(number_text)}d}"
+        return path.with_name(f"{next_stem}{path.suffix}")
 
     def _default_vna_path(self) -> Path:
         return resource_path("dsa/vna/default.vna")

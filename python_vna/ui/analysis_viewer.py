@@ -56,6 +56,7 @@ from python_vna.ui.main_window import (
     _cursor_palette_for_background,
     _data_tip_anchor_for_label_drag,
 )
+from python_vna.ui.legend_placement import place_legend_away_from_curves
 
 QtCore = require("PySide6.QtCore", "python -m pip install -e .[gui]")
 QtGui = require("PySide6.QtGui", "python -m pip install -e .[gui]")
@@ -369,8 +370,8 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         layout.setSpacing(6)
 
         self.left_panel = QtWidgets.QWidget()
-        self.left_panel.setMinimumWidth(280 if self._derived_only else 230)
-        self.left_panel.setMaximumWidth(340 if self._derived_only else 285)
+        self.left_panel.setMinimumWidth(360 if self._derived_only else 230)
+        self.left_panel.setMaximumWidth(430 if self._derived_only else 285)
         left_layout = QtWidgets.QVBoxLayout(self.left_panel)
         self.left_layout = left_layout
         left_layout.setContentsMargins(0, 0, 0, 0)
@@ -381,8 +382,14 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             self._hidden_series_group.hide()
         else:
             left_layout.addWidget(self._build_series_group(), 4)
-        left_layout.addWidget(self._build_controls_group())
-        layout.addWidget(self.left_panel)
+        self.processing_controls_group = self._build_controls_group()
+        if self._derived_only:
+            left_layout.addWidget(self._build_slot_selection_group())
+            left_layout.addStretch(1)
+            layout.addWidget(self.left_panel)
+        else:
+            left_layout.addWidget(self.processing_controls_group)
+            layout.addWidget(self.left_panel)
 
         self.derived_tab = QtWidgets.QWidget()
         if self._derived_only:
@@ -444,7 +451,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         return plot
 
     def _build_load_group(self) -> QtWidgets.QGroupBox:
-        group = QtWidgets.QGroupBox("[-] 数据")
+        group = QtWidgets.QGroupBox("1. 数据" if self._derived_only else "[-] 数据")
         layout = QtWidgets.QGridLayout(group)
         layout.setContentsMargins(8, 14, 8, 8)
         layout.setHorizontalSpacing(6)
@@ -453,7 +460,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self.load_folder_button = QtWidgets.QPushButton("加载文件夹")
         self.clear_button = QtWidgets.QPushButton("删除所选")
         if self._derived_only:
-            self.derived_config_button = QtWidgets.QPushButton("数据配置")
+            self.derived_manage_data_button = QtWidgets.QPushButton("管理数据")
         self.fs_hint_spin = QtWidgets.QDoubleSpinBox()
         self.fs_hint_spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
         self.fs_hint_spin.setRange(16.0, 1_048_576.0)
@@ -463,7 +470,8 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         layout.addWidget(self.load_file_button, 0, 0)
         layout.addWidget(self.load_folder_button, 0, 1)
         if self._derived_only:
-            layout.addWidget(self.derived_config_button, 0, 2)
+            layout.addWidget(self.derived_manage_data_button, 1, 0, 1, 2)
+            self.derived_manage_data_button.clicked.connect(self._show_data_manager_dialog)
         else:
             layout.addWidget(self.clear_button, 0, 2)
         if not self._derived_only:
@@ -510,8 +518,33 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self.refresh_button.clicked.connect(self.refresh_data_sources)
         return group
 
+    def _build_slot_selection_group(self) -> QtWidgets.QGroupBox:
+        group = QtWidgets.QGroupBox("2. 当前选择")
+        layout = QtWidgets.QGridLayout(group)
+        layout.setContentsMargins(8, 14, 8, 8)
+        layout.setHorizontalSpacing(6)
+        layout.setVerticalSpacing(6)
+        self._slot_value_labels: dict[str, QtWidgets.QLabel] = {}
+        slots = (
+            ("transfer", "传递率曲线"),
+            ("input", "待换算数据"),
+            ("stitch_before", "拼合前半段"),
+            ("stitch_after", "拼合后半段"),
+        )
+        for row, (role, label_text) in enumerate(slots):
+            layout.addWidget(QtWidgets.QLabel(label_text), row, 0)
+            value_label = QtWidgets.QLabel("(未选择)")
+            value_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+            value_label.setWordWrap(True)
+            self._slot_value_labels[role] = value_label
+            button = QtWidgets.QPushButton("选择")
+            button.clicked.connect(lambda _checked=False, slot_role=role: self._show_slot_selector(slot_role))
+            layout.addWidget(value_label, row, 1)
+            layout.addWidget(button, row, 2)
+        return group
+
     def _build_controls_group(self) -> QtWidgets.QGroupBox:
-        group = QtWidgets.QGroupBox("[+] 换算处理" if self._derived_only else "[+] 主处理")
+        group = QtWidgets.QGroupBox("滤波与处理" if self._derived_only else "[+] 主处理")
         layout = QtWidgets.QGridLayout(group)
         layout.setContentsMargins(8, 12, 8, 7)
         layout.setHorizontalSpacing(5)
@@ -722,7 +755,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
 
-        controls = QtWidgets.QGroupBox("传递率换算")
+        controls = QtWidgets.QGroupBox("换算参数" if self._derived_only else "传递率换算")
         control_layout = QtWidgets.QVBoxLayout(controls)
         control_layout.setContentsMargins(8, 14, 8, 8)
         control_layout.setSpacing(4)
@@ -755,7 +788,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self.derived_regularization_spin.setRange(0.0, 1e6)
         self.derived_regularization_spin.setSingleStep(1e-6)
         self.derived_regularization_spin.setValue(1e-6)
-        self.derived_plot_button = QtWidgets.QPushButton("应用")
+        self.derived_plot_button = QtWidgets.QPushButton("换算绘图" if self._derived_only else "应用")
         self.derived_show_source_check = QtWidgets.QCheckBox("绘制待换算数据")
         self.derived_show_source_check.setObjectName("vcCheck")
         self.derived_show_source_check.setChecked(False)
@@ -777,35 +810,65 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self.derived_regularization_spin.setMaximumWidth(138)
         self.derived_plot_button.setMaximumWidth(130)
 
-        transfer_row = QtWidgets.QHBoxLayout()
-        transfer_row.setSpacing(6)
-        transfer_row.addWidget(QtWidgets.QLabel("传递率曲线"))
-        transfer_row.addWidget(self.derived_transfer_combo, 1)
-        transfer_row.addWidget(QtWidgets.QLabel("传递率系数"))
-        transfer_row.addWidget(self.derived_transfer_factor_spin)
-        control_layout.addLayout(transfer_row)
+        if self._derived_only:
+            transfer_factor_row = QtWidgets.QHBoxLayout()
+            transfer_factor_row.setSpacing(6)
+            transfer_factor_row.addWidget(QtWidgets.QLabel("传递率系数"))
+            transfer_factor_row.addWidget(self.derived_transfer_factor_spin)
+            transfer_factor_row.addWidget(QtWidgets.QLabel("换算方向"))
+            transfer_factor_row.addWidget(self.derived_direction_combo, 1)
+            control_layout.addLayout(transfer_factor_row)
 
-        input_row = QtWidgets.QHBoxLayout()
-        input_row.setSpacing(6)
-        input_row.addWidget(QtWidgets.QLabel("待换算数据"))
-        input_row.addWidget(self.derived_input_series_combo, 1)
-        input_row.addWidget(QtWidgets.QLabel("数据系数"))
-        input_row.addWidget(self.derived_input_factor_spin)
-        control_layout.addLayout(input_row)
+            input_factor_row = QtWidgets.QHBoxLayout()
+            input_factor_row.setSpacing(6)
+            input_factor_row.addWidget(QtWidgets.QLabel("数据系数"))
+            input_factor_row.addWidget(self.derived_input_factor_spin)
+            input_factor_row.addStretch(1)
+            control_layout.addLayout(input_factor_row)
 
-        freq_row = QtWidgets.QHBoxLayout()
-        freq_row.setSpacing(6)
-        freq_row.addWidget(QtWidgets.QLabel("换算方向"))
-        freq_row.addWidget(self.derived_direction_combo)
-        freq_row.addWidget(QtWidgets.QLabel("频率下限"))
-        freq_row.addWidget(self.derived_freq_min_edit)
-        freq_row.addWidget(QtWidgets.QLabel("频率上限"))
-        freq_row.addWidget(self.derived_freq_max_edit)
-        freq_row.addWidget(QtWidgets.QLabel("反推下限"))
-        freq_row.addWidget(self.derived_regularization_spin)
-        freq_row.addWidget(self.derived_plot_button)
-        freq_row.addStretch(1)
-        control_layout.addLayout(freq_row)
+            freq_row = QtWidgets.QHBoxLayout()
+            freq_row.setSpacing(6)
+            freq_row.addWidget(QtWidgets.QLabel("频率下限"))
+            freq_row.addWidget(self.derived_freq_min_edit)
+            freq_row.addWidget(QtWidgets.QLabel("频率上限"))
+            freq_row.addWidget(self.derived_freq_max_edit)
+            control_layout.addLayout(freq_row)
+            regularization_row = QtWidgets.QHBoxLayout()
+            regularization_row.setSpacing(6)
+            regularization_row.addWidget(QtWidgets.QLabel("反推下限"))
+            regularization_row.addWidget(self.derived_regularization_spin)
+            regularization_row.addWidget(self.derived_plot_button)
+            control_layout.addLayout(regularization_row)
+        else:
+            transfer_row = QtWidgets.QHBoxLayout()
+            transfer_row.setSpacing(6)
+            transfer_row.addWidget(QtWidgets.QLabel("传递率曲线"))
+            transfer_row.addWidget(self.derived_transfer_combo, 1)
+            transfer_row.addWidget(QtWidgets.QLabel("传递率系数"))
+            transfer_row.addWidget(self.derived_transfer_factor_spin)
+            control_layout.addLayout(transfer_row)
+
+            input_row = QtWidgets.QHBoxLayout()
+            input_row.setSpacing(6)
+            input_row.addWidget(QtWidgets.QLabel("待换算数据"))
+            input_row.addWidget(self.derived_input_series_combo, 1)
+            input_row.addWidget(QtWidgets.QLabel("数据系数"))
+            input_row.addWidget(self.derived_input_factor_spin)
+            control_layout.addLayout(input_row)
+
+            freq_row = QtWidgets.QHBoxLayout()
+            freq_row.setSpacing(6)
+            freq_row.addWidget(QtWidgets.QLabel("换算方向"))
+            freq_row.addWidget(self.derived_direction_combo)
+            freq_row.addWidget(QtWidgets.QLabel("频率下限"))
+            freq_row.addWidget(self.derived_freq_min_edit)
+            freq_row.addWidget(QtWidgets.QLabel("频率上限"))
+            freq_row.addWidget(self.derived_freq_max_edit)
+            freq_row.addWidget(QtWidgets.QLabel("反推下限"))
+            freq_row.addWidget(self.derived_regularization_spin)
+            freq_row.addWidget(self.derived_plot_button)
+            freq_row.addStretch(1)
+            control_layout.addLayout(freq_row)
         vc_row = QtWidgets.QHBoxLayout()
         vc_row.setSpacing(6)
         vc_row.addWidget(QtWidgets.QLabel("VC参考线"))
@@ -854,6 +917,9 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self.derived_psd_edit_button = QtWidgets.QPushButton("编辑当前PSD")
         self.derived_psd_reset_button = QtWidgets.QPushButton("清除PSD编辑")
         self.derived_stitch_enabled_check = QtWidgets.QCheckBox("拼合")
+        self.derived_stitch_order_combo = QtWidgets.QComboBox()
+        self.derived_stitch_order_combo.addItem("换算结果在前", "primary_first")
+        self.derived_stitch_order_combo.addItem("导入数据在前", "secondary_first")
         self.derived_stitch_series_combo = QtWidgets.QComboBox()
         self.derived_stitch_series_combo.setMinimumWidth(210)
         self.derived_stitch_series_combo.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
@@ -883,7 +949,6 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             stitch_row.addWidget(self.derived_stitch_enabled_check, 0, 0)
             stitch_row.addWidget(QtWidgets.QLabel("分界Hz"), 0, 1)
             stitch_row.addWidget(self.derived_stitch_split_edit, 0, 2)
-            stitch_row.addWidget(self.derived_stitch_series_combo, 1, 0, 1, 3)
             stitch_row.setColumnStretch(0, 1)
             edit_layout.addLayout(stitch_row)
         else:
@@ -896,39 +961,29 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             edit_layout.addWidget(self.derived_psd_edit_button, 2, 3)
             edit_layout.addWidget(self.derived_psd_reset_button, 2, 4)
             edit_layout.addWidget(self.derived_stitch_enabled_check, 3, 0)
-            edit_layout.addWidget(self.derived_stitch_series_combo, 3, 1, 1, 3)
+            edit_layout.addWidget(self.derived_stitch_order_combo, 3, 1)
+            edit_layout.addWidget(self.derived_stitch_series_combo, 3, 2, 1, 2)
             edit_layout.addWidget(QtWidgets.QLabel("分界Hz"), 3, 4)
             edit_layout.addWidget(self.derived_stitch_split_edit, 3, 5)
 
-        self.derived_config_dialog = QtWidgets.QDialog(self)
-        self.derived_config_dialog.setWindowTitle("数据配置")
-        self.derived_config_dialog.setModal(False)
-        self.derived_config_dialog.setSizeGripEnabled(True)
-        config_dialog_layout = QtWidgets.QVBoxLayout(self.derived_config_dialog)
-        config_dialog_layout.addWidget(controls)
         if self._derived_only:
-            data_group = QtWidgets.QGroupBox("已加载数据")
-            data_layout = QtWidgets.QVBoxLayout(data_group)
-            data_layout.setContentsMargins(8, 14, 8, 8)
-            data_layout.setSpacing(6)
-            self.derived_config_dataset_list = QtWidgets.QListWidget()
-            self.derived_config_dataset_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
-            self.derived_config_dataset_list.setAlternatingRowColors(True)
-            self.derived_config_dataset_list.setMinimumHeight(150)
-            self.derived_config_delete_button = QtWidgets.QPushButton("删除选中数据")
-            delete_row = QtWidgets.QHBoxLayout()
-            delete_row.addStretch(1)
-            delete_row.addWidget(self.derived_config_delete_button)
-            data_layout.addWidget(self.derived_config_dataset_list)
-            data_layout.addLayout(delete_row)
-            config_dialog_layout.addWidget(data_group)
-            self.derived_config_dialog.resize(760, 390)
+            self.derived_config_dialog = None
         else:
+            self.derived_config_dialog = QtWidgets.QDialog(self)
+            self.derived_config_dialog.setWindowTitle("数据配置")
+            self.derived_config_dialog.setModal(False)
+            self.derived_config_dialog.setSizeGripEnabled(True)
+            config_dialog_layout = QtWidgets.QVBoxLayout(self.derived_config_dialog)
+            config_dialog_layout.addWidget(controls)
             self.derived_config_dialog.resize(760, 180)
 
         if self._derived_only:
             self.derived_curve_dialog = None
-            self.left_layout.insertWidget(1, edit_group, 4)
+            self.derived_settings_tabs = QtWidgets.QTabWidget()
+            self.derived_settings_tabs.addTab(controls, "换算参数")
+            self.derived_settings_tabs.addTab(edit_group, "曲线/拼合")
+            self.derived_settings_tabs.addTab(self.processing_controls_group, "滤波处理")
+            layout.addWidget(self.derived_settings_tabs)
         else:
             self.derived_curve_dialog = QtWidgets.QDialog(self)
             self.derived_curve_dialog.setWindowTitle("曲线编辑与拼合")
@@ -938,17 +993,17 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             curve_dialog_layout.addWidget(edit_group)
             self.derived_curve_dialog.resize(780, 220)
 
-        action_row = QtWidgets.QHBoxLayout()
-        action_row.setSpacing(6)
-        self.derived_main_plot_button = QtWidgets.QPushButton("换算绘图")
         if not self._derived_only:
+            action_row = QtWidgets.QHBoxLayout()
+            action_row.setSpacing(6)
+            self.derived_main_plot_button = QtWidgets.QPushButton("换算绘图")
             self.derived_config_button = QtWidgets.QPushButton("数据配置")
             action_row.addWidget(self.derived_config_button)
             self.derived_curve_button = QtWidgets.QPushButton("曲线编辑与拼合")
             action_row.addWidget(self.derived_curve_button)
-        action_row.addWidget(self.derived_main_plot_button)
-        action_row.addStretch(1)
-        layout.addLayout(action_row)
+            action_row.addWidget(self.derived_main_plot_button)
+            action_row.addStretch(1)
+            layout.addLayout(action_row)
         layout.addLayout(vc_row)
 
         self.derived_plots: list[pg.PlotWidget] = []
@@ -981,12 +1036,14 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self.derived_transfer_combo.currentIndexChanged.connect(
             lambda _index: self._auto_plot_derived_from_control_change()
         )
+        self.derived_transfer_combo.currentIndexChanged.connect(lambda _index: self._sync_slot_labels())
         self.derived_direction_combo.currentIndexChanged.connect(
             lambda _index: self._auto_plot_derived_from_control_change()
         )
         self.derived_input_series_combo.currentIndexChanged.connect(
             lambda _index: self._auto_plot_derived_from_control_change()
         )
+        self.derived_input_series_combo.currentIndexChanged.connect(lambda _index: self._sync_slot_labels())
         self.derived_show_source_check.toggled.connect(lambda _checked: self._auto_plot_derived_from_control_change())
         self.derived_coherence_correction_check.toggled.connect(
             lambda _checked: self._auto_plot_derived_from_control_change()
@@ -996,15 +1053,18 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self.derived_freq_min_edit.editingFinished.connect(self._auto_plot_derived_from_control_change)
         self.derived_freq_max_edit.editingFinished.connect(self._auto_plot_derived_from_control_change)
         self.derived_regularization_spin.editingFinished.connect(self._auto_plot_derived_from_control_change)
-        self.derived_plot_button.clicked.connect(self._apply_derived_config)
-        self.derived_config_button.clicked.connect(self._show_derived_config_dialog)
+        if self._derived_only:
+            self.derived_plot_button.clicked.connect(
+                lambda _checked=False: self._plot_derived(keep_existing=self._hold_enabled())
+            )
+        else:
+            self.derived_plot_button.clicked.connect(self._apply_derived_config)
+            self.derived_config_button.clicked.connect(self._show_derived_config_dialog)
         if not self._derived_only:
             self.derived_curve_button.clicked.connect(self._show_derived_curve_dialog)
-        if self._derived_only:
-            self.derived_config_delete_button.clicked.connect(self._delete_selected_config_datasets)
-        self.derived_main_plot_button.clicked.connect(
-            lambda _checked=False: self._plot_derived(keep_existing=self._hold_enabled())
-        )
+            self.derived_main_plot_button.clicked.connect(
+                lambda _checked=False: self._plot_derived(keep_existing=self._hold_enabled())
+            )
         self.derived_transfer_combo.currentIndexChanged.connect(lambda _index: self._sync_transfer_point_table())
         self.derived_transfer_edit_button.clicked.connect(self._initialize_transfer_edit_points_from_current)
         self.derived_transfer_add_point_button.clicked.connect(self._add_transfer_control_point)
@@ -1017,19 +1077,233 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self.derived_stitch_series_combo.currentIndexChanged.connect(
             lambda _index: self._auto_plot_derived_from_control_change()
         )
+        self.derived_stitch_order_combo.currentIndexChanged.connect(
+            lambda _index: self._auto_plot_derived_from_control_change()
+        )
+        self.derived_stitch_order_combo.currentIndexChanged.connect(lambda _index: self._sync_slot_labels())
         self.derived_stitch_split_edit.editingFinished.connect(self._auto_plot_derived_from_control_change)
         self._sync_transfer_point_table()
+        self._sync_slot_labels()
 
     def _show_derived_config_dialog(self) -> None:
         self._refresh_config_dataset_list()
+        if self.derived_config_dialog is None:
+            return
         self.derived_config_dialog.show()
         self.derived_config_dialog.raise_()
         self.derived_config_dialog.activateWindow()
 
     def _apply_derived_config(self) -> None:
         self._auto_plot_derived_from_control_change()
-        self.derived_config_dialog.hide()
+        if self.derived_config_dialog is not None:
+            self.derived_config_dialog.hide()
         self.statusBar().showMessage("换算配置已应用")
+
+    def _show_data_manager_dialog(self) -> None:
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("管理数据")
+        dialog.setModal(True)
+        dialog.resize(720, 360)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        table = QtWidgets.QTableWidget(0, 4)
+        table.setHorizontalHeaderLabels(["文件", "ID", "通道数", "路径"])
+        table.verticalHeader().setVisible(False)
+        table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(table)
+        button_row = QtWidgets.QHBoxLayout()
+        delete_button = QtWidgets.QPushButton("删除选中数据")
+        close_button = QtWidgets.QPushButton("关闭")
+        button_row.addStretch(1)
+        button_row.addWidget(delete_button)
+        button_row.addWidget(close_button)
+        layout.addLayout(button_row)
+
+        def refresh_table() -> None:
+            table.setRowCount(0)
+            for row, dataset in enumerate(self._datasets):
+                table.insertRow(row)
+                values = (
+                    _series_display_file_name(dataset.name),
+                    str(dataset.id),
+                    str(len(dataset.series)),
+                    str(dataset.path),
+                )
+                for col, value in enumerate(values):
+                    item = QtWidgets.QTableWidgetItem(value)
+                    item.setData(QtCore.Qt.UserRole, dataset.id)
+                    table.setItem(row, col, item)
+
+        def delete_selected() -> None:
+            dataset_ids = {
+                table.item(index.row(), 0).data(QtCore.Qt.UserRole)
+                for index in table.selectedIndexes()
+                if table.item(index.row(), 0) is not None
+            }
+            self._delete_datasets_by_ids({int(dataset_id) for dataset_id in dataset_ids})
+            refresh_table()
+
+        delete_button.clicked.connect(delete_selected)
+        close_button.clicked.connect(dialog.accept)
+        refresh_table()
+        dialog.exec()
+
+    def _slot_options_for_role(self, role: str) -> list[tuple[str, str, object]]:
+        options: list[tuple[str, str, object]] = []
+        if role == "transfer":
+            for index in range(self.derived_transfer_combo.count()):
+                data = self.derived_transfer_combo.itemData(index)
+                if data is not None:
+                    options.append(("传递率", self.derived_transfer_combo.itemText(index), data))
+            return options
+        if role == "input":
+            for index in range(self.derived_input_series_combo.count()):
+                data = self.derived_input_series_combo.itemData(index)
+                if data is not None:
+                    options.append(("待换算", self.derived_input_series_combo.itemText(index), data))
+            return options
+        if role in {"stitch_before", "stitch_after"}:
+            options.append(("换算结果", "换算结果", ("converted_result",)))
+            for index in range(self.derived_stitch_series_combo.count()):
+                data = self.derived_stitch_series_combo.itemData(index)
+                if data is not None:
+                    options.append(("导入数据", self.derived_stitch_series_combo.itemText(index), data))
+        return options
+
+    def _show_slot_selector(self, role: str) -> None:
+        options = self._slot_options_for_role(role)
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("选择数据")
+        dialog.setModal(True)
+        dialog.resize(760, 420)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        search_edit = QtWidgets.QLineEdit()
+        search_edit.setPlaceholderText("搜索文件、通道或类型")
+        table = QtWidgets.QTableWidget(0, 2)
+        table.setHorizontalHeaderLabels(["类型", "数据"])
+        table.verticalHeader().setVisible(False)
+        table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(search_edit)
+        layout.addWidget(table)
+        button_row = QtWidgets.QHBoxLayout()
+        select_button = QtWidgets.QPushButton("选择")
+        cancel_button = QtWidgets.QPushButton("取消")
+        button_row.addStretch(1)
+        button_row.addWidget(select_button)
+        button_row.addWidget(cancel_button)
+        layout.addLayout(button_row)
+
+        def refresh_table() -> None:
+            pattern = search_edit.text().strip().lower()
+            table.setRowCount(0)
+            for kind, label, data in options:
+                searchable = f"{kind} {label}".lower()
+                if pattern and pattern not in searchable:
+                    continue
+                row = table.rowCount()
+                table.insertRow(row)
+                kind_item = QtWidgets.QTableWidgetItem(kind)
+                label_item = QtWidgets.QTableWidgetItem(label)
+                kind_item.setData(QtCore.Qt.UserRole, data)
+                label_item.setData(QtCore.Qt.UserRole, data)
+                table.setItem(row, 0, kind_item)
+                table.setItem(row, 1, label_item)
+            if table.rowCount() > 0:
+                table.selectRow(0)
+
+        def choose_current() -> None:
+            selected = table.selectedIndexes()
+            if not selected:
+                return
+            item = table.item(selected[0].row(), 0)
+            if item is None:
+                return
+            self._apply_slot_selection(role, item.data(QtCore.Qt.UserRole))
+            dialog.accept()
+
+        search_edit.textChanged.connect(refresh_table)
+        table.itemDoubleClicked.connect(lambda _item: choose_current())
+        select_button.clicked.connect(choose_current)
+        cancel_button.clicked.connect(dialog.reject)
+        refresh_table()
+        dialog.exec()
+
+    def _apply_slot_selection(self, role: str, data: object) -> None:
+        if role == "transfer":
+            index = self._combo_index_for_data(self.derived_transfer_combo, data)
+            if index >= 0:
+                self.derived_transfer_combo.setCurrentIndex(index)
+        elif role == "input":
+            index = self._combo_index_for_data(self.derived_input_series_combo, data)
+            if index >= 0:
+                self.derived_input_series_combo.setCurrentIndex(index)
+        elif role in {"stitch_before", "stitch_after"}:
+            self.derived_stitch_enabled_check.setChecked(True)
+            if data == ("converted_result",):
+                order_index = self._combo_index_for_data(
+                    self.derived_stitch_order_combo,
+                    "primary_first" if role == "stitch_before" else "secondary_first",
+                )
+                if order_index >= 0:
+                    self.derived_stitch_order_combo.setCurrentIndex(order_index)
+            else:
+                index = self._combo_index_for_data(self.derived_stitch_series_combo, data)
+                if index >= 0:
+                    self.derived_stitch_series_combo.setCurrentIndex(index)
+                order_index = self._combo_index_for_data(
+                    self.derived_stitch_order_combo,
+                    "secondary_first" if role == "stitch_before" else "primary_first",
+                )
+                if order_index >= 0:
+                    self.derived_stitch_order_combo.setCurrentIndex(order_index)
+        self._sync_slot_labels()
+        self._auto_plot_derived_from_control_change()
+
+    def _sync_slot_labels(self) -> None:
+        if not hasattr(self, "_slot_value_labels"):
+            return
+
+        def set_label(role: str, text: str, data: object | None = None) -> None:
+            label = self._slot_value_labels.get(role)
+            if label is None:
+                return
+            full_text = text or "(未选择)"
+            shown = full_text if len(full_text) <= 46 else f"{full_text[:43]}..."
+            label.setText(shown)
+            tooltip = full_text
+            if data is not None:
+                tooltip = f"{full_text}\n{data}"
+            label.setToolTip(tooltip)
+
+        transfer_text = (
+            self.derived_transfer_combo.currentText()
+            if self.derived_transfer_combo.currentData() is not None
+            else "(未选择)"
+        )
+        input_text = (
+            self.derived_input_series_combo.currentText()
+            if self.derived_input_series_combo.currentData() is not None
+            else "(未选择)"
+        )
+        stitch_source = (
+            self.derived_stitch_series_combo.currentText()
+            if self.derived_stitch_series_combo.currentData() is not None
+            else "(未选择导入数据)"
+        )
+        order = self.derived_stitch_order_combo.currentData()
+        if order == "secondary_first":
+            stitch_before = stitch_source
+            stitch_after = "换算结果"
+        else:
+            stitch_before = "换算结果"
+            stitch_after = stitch_source
+        set_label("transfer", transfer_text, self.derived_transfer_combo.currentData())
+        set_label("input", input_text, self.derived_input_series_combo.currentData())
+        set_label("stitch_before", stitch_before, self.derived_stitch_series_combo.currentData())
+        set_label("stitch_after", stitch_after, self.derived_stitch_series_combo.currentData())
 
     def _show_derived_curve_dialog(self) -> None:
         if self.derived_curve_dialog is None:
@@ -1450,6 +1724,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             if hasattr(self, "derived_stitch_series_combo"):
                 self.derived_stitch_series_combo.blockSignals(False)
         self._sync_transfer_point_table()
+        self._sync_slot_labels()
 
     def _derived_transfer_options(self) -> list[tuple[str, tuple[object, ...]]]:
         options: list[tuple[str, tuple[object, ...]]] = []
@@ -1529,11 +1804,23 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         f = f[np.isfinite(f) & (f > 0.0)]
         if f.size < 2:
             return np.array([], dtype=float)
-        centers, _lower_edges, _upper_edges = third_octave_bands(float(np.min(f)), float(np.max(f)))
-        centers = centers[np.isfinite(centers) & (centers >= np.min(f)) & (centers <= np.max(f))]
-        if centers.size:
-            return np.unique(np.concatenate(([float(np.min(f))], centers, [float(np.max(f))])))
+        min_f = float(np.min(f))
+        max_f = float(np.max(f))
+        centers, lower_edges, upper_edges = third_octave_bands(min_f, max_f)
+        band_points = np.concatenate((lower_edges, centers, upper_edges))
+        band_points = band_points[np.isfinite(band_points) & (band_points >= min_f) & (band_points <= max_f)]
+        if band_points.size:
+            return np.unique(np.concatenate(([min_f], band_points, [max_f])))
         return log_frequency_grid(float(np.min(f)), float(np.max(f)), points=min(max(2, f.size), 8))
+
+    @staticmethod
+    def _edit_control_point_limit(frequency_hz: np.ndarray, target_frequency_hz: np.ndarray) -> int:
+        f = np.asarray(frequency_hz, dtype=float).ravel()
+        f = f[np.isfinite(f) & (f > 0.0)]
+        if f.size < 2:
+            return 2
+        target_count = int(np.asarray(target_frequency_hz, dtype=float).size)
+        return min(int(f.size), max(48, min(180, target_count * 3)))
 
     def _set_current_transfer_control_points(
         self,
@@ -1682,12 +1969,15 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             self.statusBar().showMessage("无法从当前传递率生成控制点")
             return
         f, h, _phase_available = transfer
+        target_f = self._edit_control_frequencies(f)
         control_f, control_db = sample_curve_as_db_points(
             f,
             np.abs(h),
             count=8,
             power_values=False,
-            target_frequency_hz=self._edit_control_frequencies(f),
+            target_frequency_hz=target_f,
+            max_count=self._edit_control_point_limit(f, target_f),
+            error_threshold_db=2.0,
         )
         key = self._current_transfer_edit_key()
         if key is None or control_f.size < 2:
@@ -1725,12 +2015,15 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         if label not in curves:
             label = next(iter(curves))
         x, y = curves[label]
+        target_f = self._edit_control_frequencies(x)
         control_f, control_db = sample_curve_as_db_points(
             x,
             y,
             count=8,
             power_values=True,
-            target_frequency_hz=self._edit_control_frequencies(x),
+            target_frequency_hz=target_f,
+            max_count=self._edit_control_point_limit(x, target_f),
+            error_threshold_db=2.0,
         )
         if control_f.size < 2:
             self.statusBar().showMessage("无法从当前PSD生成控制点")
@@ -1826,16 +2119,32 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         if stitch_source is None:
             return None
         secondary_x, secondary_y, secondary_label = stitch_source
-        stitched_x, stitched_y = stitch_frequency_curves(
-            primary_x,
-            primary_y,
-            secondary_x,
-            secondary_y,
-            float(split),
+        order = (
+            self.derived_stitch_order_combo.currentData()
+            if hasattr(self, "derived_stitch_order_combo")
+            else "primary_first"
         )
+        if order == "secondary_first":
+            stitched_x, stitched_y = stitch_frequency_curves(
+                secondary_x,
+                secondary_y,
+                primary_x,
+                primary_y,
+                float(split),
+            )
+            order_label = f"导入前/换算后 {secondary_label}"
+        else:
+            stitched_x, stitched_y = stitch_frequency_curves(
+                primary_x,
+                primary_y,
+                secondary_x,
+                secondary_y,
+                float(split),
+            )
+            order_label = f"换算前/导入后 {secondary_label}"
         if stitched_x.size < 2:
             return None
-        return stitched_x, stitched_y, f"拼合@{float(split):.6g}Hz {secondary_label}"
+        return stitched_x, stitched_y, f"拼合@{float(split):.6g}Hz {order_label}"
 
     def _select_all_series(self) -> None:
         for index in range(self.series_list.count()):
@@ -4130,6 +4439,16 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         )
         self.statusBar().showMessage("Auto-scaled plot")
 
+    def _auto_place_legend(self, plot: pg.PlotWidget) -> None:
+        log_x, log_y = self._log_modes.get(plot, (False, False))
+        place_legend_away_from_curves(
+            plot,
+            self._plot_curves.get(plot, {}),
+            log_x=log_x,
+            log_y=log_y,
+            default_offset=(4, 2),
+        )
+
     def _nearest_trace_name(self, plot: pg.PlotWidget, click_x: float, click_y: float) -> str | None:
         curves = self._plot_curves.get(plot, {})
         if not curves:
@@ -4364,6 +4683,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
                     plot.setYRange(ymin, ymax, padding=0.08)
         finally:
             self._axis_scaling_plot = None
+        self._auto_place_legend(plot)
 
 
 def _concat_finite(arrays: list[np.ndarray], *, positive_only: bool = False) -> np.ndarray:
