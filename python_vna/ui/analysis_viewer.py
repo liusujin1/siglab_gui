@@ -561,9 +561,13 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         layout.addWidget(self.derived_parameter_button, 0, 0)
         layout.addWidget(self.derived_curve_panel_button, 0, 1)
         layout.addWidget(self.derived_processing_button, 1, 0, 1, 2)
-        self.derived_parameter_button.clicked.connect(self._show_derived_parameter_dialog)
-        self.derived_curve_panel_button.clicked.connect(self._show_derived_curve_dialog)
-        self.derived_processing_button.clicked.connect(self._show_derived_processing_dialog)
+        self.derived_settings_stack = QtWidgets.QStackedWidget()
+        self.derived_settings_stack.setVisible(False)
+        self.derived_settings_stack.setMaximumHeight(430)
+        layout.addWidget(self.derived_settings_stack, 2, 0, 1, 2)
+        self.derived_parameter_button.clicked.connect(lambda _checked=False: self._show_settings_panel(0))
+        self.derived_curve_panel_button.clicked.connect(lambda _checked=False: self._show_settings_panel(1))
+        self.derived_processing_button.clicked.connect(lambda _checked=False: self._show_settings_panel(2))
         return group
 
     def _build_controls_group(self) -> QtWidgets.QGroupBox:
@@ -923,8 +927,8 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self.derived_transfer_point_table.verticalHeader().setVisible(False)
         self.derived_transfer_point_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         if self._derived_only:
-            self.derived_transfer_point_table.setMinimumHeight(220)
-            self.derived_transfer_point_table.setMaximumHeight(420)
+            self.derived_transfer_point_table.setMinimumHeight(150)
+            self.derived_transfer_point_table.setMaximumHeight(260)
             self.derived_transfer_point_table.setSizePolicy(
                 QtWidgets.QSizePolicy.Expanding,
                 QtWidgets.QSizePolicy.Expanding,
@@ -1002,29 +1006,11 @@ class AnalysisViewer(QtWidgets.QMainWindow):
 
         if self._derived_only:
             self.derived_curve_dialog = None
-            self.derived_parameter_dialog = QtWidgets.QDialog(self)
-            self.derived_parameter_dialog.setWindowTitle("换算参数")
-            self.derived_parameter_dialog.setModal(False)
-            self.derived_parameter_dialog.setSizeGripEnabled(True)
-            parameter_layout = QtWidgets.QVBoxLayout(self.derived_parameter_dialog)
-            parameter_layout.addWidget(controls)
-            self.derived_parameter_dialog.resize(430, 260)
-
-            self.derived_curve_dialog = QtWidgets.QDialog(self)
-            self.derived_curve_dialog.setWindowTitle("曲线/拼合")
-            self.derived_curve_dialog.setModal(False)
-            self.derived_curve_dialog.setSizeGripEnabled(True)
-            curve_layout = QtWidgets.QVBoxLayout(self.derived_curve_dialog)
-            curve_layout.addWidget(edit_group)
-            self.derived_curve_dialog.resize(430, 520)
-
-            self.derived_processing_dialog = QtWidgets.QDialog(self)
-            self.derived_processing_dialog.setWindowTitle("滤波处理")
-            self.derived_processing_dialog.setModal(False)
-            self.derived_processing_dialog.setSizeGripEnabled(True)
-            processing_layout = QtWidgets.QVBoxLayout(self.derived_processing_dialog)
-            processing_layout.addWidget(self.processing_controls_group)
-            self.derived_processing_dialog.resize(430, 240)
+            self.derived_parameter_dialog = None
+            self.derived_processing_dialog = None
+            self.derived_settings_stack.addWidget(controls)
+            self.derived_settings_stack.addWidget(edit_group)
+            self.derived_settings_stack.addWidget(self.processing_controls_group)
         else:
             self.derived_curve_dialog = QtWidgets.QDialog(self)
             self.derived_curve_dialog.setWindowTitle("曲线编辑与拼合")
@@ -1155,6 +1141,18 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    def _show_settings_panel(self, index: int) -> None:
+        if not hasattr(self, "derived_settings_stack"):
+            return
+        index = int(index)
+        if index < 0 or index >= self.derived_settings_stack.count():
+            return
+        if not self.derived_settings_stack.isHidden() and self.derived_settings_stack.currentIndex() == index:
+            self.derived_settings_stack.setVisible(False)
+            return
+        self.derived_settings_stack.setCurrentIndex(index)
+        self.derived_settings_stack.setVisible(True)
 
     def _show_data_manager_dialog(self) -> None:
         dialog = QtWidgets.QDialog(self)
