@@ -10,13 +10,19 @@ import numpy as np
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from python_vna.analysis_derivation import (
     DERIVE_BASE_TO_TOP,
     DERIVE_TOP_TO_BASE,
     derive_psd_from_transfer,
     derive_time_from_transfer,
+)
+from python_vna.analysis_curve_editing import (
+    apply_db_magnitude_profile,
+    apply_power_db_profile,
+    stitch_frequency_curves,
+    transfer_from_db_points,
 )
 from python_vna.analysis_algorithms import (
     FilterConfig,
@@ -53,6 +59,27 @@ def _matlab_sd_round(value: float, digits: int, multiple: int) -> float:
     scale = 10.0 ** (digits - decade)
     buffer = scale / multiple
     return float(np.floor(buffer * value + 0.5) / buffer)
+
+
+def _dark_analysis_theme() -> dict[str, object]:
+    return {
+        "window_bg": "#111827",
+        "panel_bg": "#172033",
+        "panel_bg_alt": "#22304a",
+        "cell_bg": "#263653",
+        "plot_bg": "#05070d",
+        "text": "#f5f7fb",
+        "muted_text": "#a9b7c9",
+        "label_text": "#f7d774",
+        "axis": "#f5f7fb",
+        "accent": "#2563eb",
+        "accent_alt": "#0f9f8f",
+        "border": "#31415f",
+        "control_border": "#4b5d7a",
+        "table_bg": "#0f172a",
+        "menu_bg": "#101827",
+        "grid_alpha": 0.25,
+    }
 
 
 class AnalysisAlgorithmTests(unittest.TestCase):
@@ -138,6 +165,63 @@ class AnalysisAlgorithmTests(unittest.TestCase):
         np.testing.assert_allclose(top_psd, psd * 16.0)
         np.testing.assert_allclose(base_f, freqs)
         np.testing.assert_allclose(base_psd, psd)
+
+    def test_manual_transfer_points_fit_in_log_frequency(self):
+        control_f = np.array([10.0, 100.0, 1000.0], dtype=float)
+        control_db = np.array([0.0, 20.0, 40.0], dtype=float)
+        target_f = np.array([10.0, 100.0, 1000.0], dtype=float)
+
+        fitted_f, fitted_h = transfer_from_db_points(control_f, control_db, target_f)
+        top_f, top_psd = derive_psd_from_transfer(
+            target_f,
+            np.ones_like(target_f),
+            fitted_f,
+            fitted_h,
+            direction=DERIVE_BASE_TO_TOP,
+        )
+
+        np.testing.assert_allclose(fitted_f, target_f)
+        np.testing.assert_allclose(20.0 * np.log10(fitted_h), control_db, atol=1e-12)
+        np.testing.assert_allclose(top_f, target_f)
+        np.testing.assert_allclose(top_psd, [1.0, 100.0, 10000.0], rtol=1e-12)
+
+    def test_transfer_magnitude_edit_preserves_complex_phase(self):
+        freqs = np.array([10.0, 20.0, 30.0], dtype=float)
+        phase = np.exp(1.0j * np.array([0.1, 0.2, 0.3], dtype=float))
+        source = np.array([1.0, 2.0, 3.0], dtype=float) * phase
+
+        edited_f, edited = apply_db_magnitude_profile(
+            freqs,
+            source,
+            np.array([10.0, 20.0, 30.0], dtype=float),
+            np.array([6.0, 6.0, 6.0], dtype=float),
+        )
+
+        np.testing.assert_allclose(edited_f, freqs)
+        np.testing.assert_allclose(np.angle(edited), np.angle(source), atol=1e-12)
+        np.testing.assert_allclose(np.abs(edited), 10.0 ** (6.0 / 20.0), rtol=1e-12)
+
+    def test_psd_edit_and_stitch_helpers(self):
+        freqs = np.array([10.0, 20.0, 30.0, 40.0], dtype=float)
+        psd = np.ones_like(freqs)
+
+        edited_f, edited_psd = apply_power_db_profile(
+            freqs,
+            psd,
+            np.array([10.0, 20.0, 40.0], dtype=float),
+            np.array([0.0, 10.0, 0.0], dtype=float),
+        )
+        stitched_f, stitched = stitch_frequency_curves(
+            edited_f,
+            edited_psd,
+            np.array([25.0, 35.0, 45.0], dtype=float),
+            np.array([100.0, 200.0, 300.0], dtype=float),
+            30.0,
+        )
+
+        self.assertGreater(edited_psd[1], edited_psd[0])
+        np.testing.assert_allclose(stitched_f, [10.0, 20.0, 30.0, 35.0, 45.0])
+        np.testing.assert_allclose(stitched[-2:], [200.0, 300.0])
 
     def test_derived_time_requires_complex_transfer_and_recovers_gain(self):
         sample_rate = 1000.0
@@ -585,6 +669,35 @@ class AnalysisViewerUiTests(unittest.TestCase):
         finally:
             viewer.close()
 
+    def test_analysis_series_list_keeps_dark_theme_row_colors(self):
+        viewer = AnalysisViewer(theme=_dark_analysis_theme())
+        try:
+            stylesheet = viewer.styleSheet()
+            self.assertIn("alternate-background-color: #22304a", stylesheet)
+            self.assertIn("QListWidget::item:alternate", stylesheet)
+            palette = viewer.series_list.palette()
+            self.assertEqual(palette.color(QtGui.QPalette.Base).name(), "#0f172a")
+            self.assertEqual(palette.color(QtGui.QPalette.AlternateBase).name(), "#22304a")
+            self.assertEqual(palette.color(QtGui.QPalette.Text).name(), "#f5f7fb")
+            self.assertEqual(palette.color(QtGui.QPalette.Highlight).name(), "#2563eb")
+        finally:
+            viewer.close()
+
+    def test_analysis_legend_text_updates_for_dark_theme(self):
+        viewer = AnalysisViewer(theme=_dark_analysis_theme())
+        try:
+            plot = viewer.main_plots[0]
+            plot.addLegend()
+            plot.plot([1.0, 2.0], [2.0, 3.0], name="trace")
+
+            viewer._apply_plot_theme(plot)
+
+            label = plot.plotItem.legend.items[0][1]
+            self.assertEqual(plot.plotItem.legend.opts["labelTextColor"], "#f5f7fb")
+            self.assertIn("color:#f5f7fb", label.item.toHtml())
+        finally:
+            viewer.close()
+
     def test_cursor_palette_is_readable_on_light_theme(self):
         viewer = AnalysisViewer(theme={"plot_bg": "#ffffff"})
         try:
@@ -846,6 +959,104 @@ class AnalysisViewerUiTests(unittest.TestCase):
             self.assertFalse(any(checkbox.isChecked() for checkbox in viewer.derived_vc_checks.values()))
             self.assertFalse(viewer.derived_show_source_check.isChecked())
             self.assertFalse(viewer.derived_coherence_correction_check.isChecked())
+        finally:
+            viewer.close()
+
+    def test_standalone_conversion_viewer_uses_conversion_only_layout(self):
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            self.assertEqual(viewer.windowTitle(), "VNA 换算工具")
+            self.assertIsNone(viewer.tabs)
+            self.assertFalse(hasattr(viewer, "main_plots"))
+            self.assertFalse(hasattr(viewer, "foundation_plots"))
+            self.assertEqual(viewer.derived_config_button.text(), "数据配置")
+            self.assertEqual(viewer.derived_plot_button.text(), "应用")
+            self.assertIsNone(viewer.clear_button.parentWidget())
+            self.assertIsNotNone(viewer.derived_config_button.parentWidget())
+            self.assertFalse(hasattr(viewer, "derived_curve_button"))
+            self.assertIsNone(viewer.derived_curve_dialog)
+            self.assertIs(viewer.left_layout.itemAt(1).widget(), viewer.derived_curve_group)
+            self.assertIs(viewer.derived_curve_group.parentWidget(), viewer.left_panel)
+            self.assertFalse(viewer._hidden_series_group.isVisible())
+            self.assertIsNone(viewer.fs_hint_spin.parentWidget())
+            self.assertEqual(viewer.derived_transfer_point_table.maximumHeight(), 420)
+            self.assertEqual(viewer.derived_config_dataset_list.count(), 1)
+            self.assertFalse(viewer.derived_config_dialog.isVisible())
+            viewer._show_derived_config_dialog()
+            self.assertTrue(viewer.derived_config_dialog.isVisible())
+            viewer.derived_config_dialog.hide()
+            self.assertGreaterEqual(
+                viewer._combo_index_for_data(viewer.derived_transfer_combo, ("manual_transfer",)),
+                0,
+            )
+            self.assertGreaterEqual(
+                viewer._combo_index_for_data(viewer.derived_input_series_combo, ("vc_reference", "VC C")),
+                0,
+            )
+        finally:
+            viewer.close()
+
+    def test_manual_transfer_psd_edit_and_stitch_ui_paths(self):
+        session = default_session_config()
+        freqs = np.array([0.0, 10.0, 20.0, 40.0], dtype=float)
+        time_s = np.arange(256, dtype=float) / 256.0
+        input_measurement = MeasurementSet(
+            sample_rate=256.0,
+            time_data={
+                "t": time_s,
+                "channels": {
+                    "ai0": np.sin(2.0 * np.pi * 10.0 * time_s),
+                    "ai1": np.sin(2.0 * np.pi * 10.0 * time_s),
+                },
+            },
+            spectra={"f": freqs, "autospectrum": {"ai0": np.array([0.0, 1.0, 1.0, 1.0]), "ai1": np.array([0.0, 9.0, 9.0, 9.0])}},
+            frf={},
+            coherence={},
+            cross_spectra={},
+            correlations={},
+            impulse_responses={},
+            metadata={"rbw_hz": 1.0, "legacy_runtime_wincor": 1.0},
+        )
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            viewer._datasets = [
+                dataset_from_measurement(input_measurement, session_config=session, dataset_id=1, name="input"),
+            ]
+            viewer._next_dataset_id = 2
+            viewer._refresh_dataset_lists()
+            manual_index = viewer._combo_index_for_data(viewer.derived_transfer_combo, ("manual_transfer",))
+            input_index = viewer._combo_index_for_data(viewer.derived_input_series_combo, "1:ai0")
+            stitch_index = viewer._combo_index_for_data(viewer.derived_stitch_series_combo, "1:ai1")
+            viewer.derived_transfer_combo.setCurrentIndex(manual_index)
+            viewer.derived_input_series_combo.setCurrentIndex(input_index)
+            viewer._set_current_transfer_control_points(
+                np.array([10.0, 40.0], dtype=float),
+                np.array([6.0, 6.0], dtype=float),
+                replot=False,
+            )
+
+            viewer._plot_derived()
+            psd_curves = viewer._plot_curves[viewer.derived_plots[1]]
+            self.assertGreater(len(psd_curves), 0)
+            label, (before_f, before_psd) = next(iter(psd_curves.items()))
+            self.assertAlmostEqual(float(np.median(before_psd)), 10.0 ** (6.0 / 10.0), delta=0.05)
+
+            viewer._active_trace[viewer.derived_plots[1]] = label
+            viewer._initialize_psd_edit_points_from_active_curve()
+            self.assertIn(label, viewer._psd_edit_points)
+
+            viewer.derived_stitch_enabled_check.setChecked(True)
+            viewer.derived_stitch_series_combo.setCurrentIndex(stitch_index)
+            viewer.derived_stitch_split_edit.setText("20")
+            viewer._plot_derived()
+            stitched_labels = viewer._plot_curves[viewer.derived_plots[1]]
+            self.assertTrue(any("拼合@20Hz" in curve_label for curve_label in stitched_labels))
+            viewer._refresh_config_dataset_list()
+            viewer.derived_config_dataset_list.item(0).setSelected(True)
+            viewer._delete_selected_config_datasets()
+            self.assertEqual(viewer._datasets, [])
+            self.assertEqual(viewer.derived_config_dataset_list.item(0).text(), "(暂无已加载数据)")
+            _ = before_f
         finally:
             viewer.close()
 

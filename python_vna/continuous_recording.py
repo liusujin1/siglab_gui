@@ -16,6 +16,7 @@ from python_vna.models import SessionConfig
 
 
 DEFAULT_SEGMENT_SECONDS = 600.0
+DEFAULT_MAX_SEGMENT_BYTES = 1_500_000_000
 TEXT_DAT_FORMAT = "python_vna_continuous_text_dat"
 TEXT_DAT_VERSION = 3
 SEGMENT_COMPRESSION_FORMAT = "zip"
@@ -107,6 +108,7 @@ class ContinuousDatWriter:
         channel_names: list[str],
         software_version: str,
         segment_seconds: float = DEFAULT_SEGMENT_SECONDS,
+        max_segment_bytes: int | None = DEFAULT_MAX_SEGMENT_BYTES,
         manifest_interval_seconds: float = 5.0,
         compress_closed_segments: bool = True,
         time_fn=time.time_ns,
@@ -118,6 +120,7 @@ class ContinuousDatWriter:
         self.channel_names = list(channel_names)
         self.software_version = software_version
         self.segment_seconds = float(segment_seconds)
+        self.max_segment_bytes = None if max_segment_bytes is None else int(max_segment_bytes)
         self.manifest_interval_seconds = float(manifest_interval_seconds)
         self.compress_closed_segments = bool(compress_closed_segments)
         self._time_fn = time_fn
@@ -158,7 +161,10 @@ class ContinuousDatWriter:
             self.start()
         assert self._segment is not None
         elapsed_segment = float(self._monotonic_fn()) - self._segment.start_monotonic
-        if self._segment.frames > 0 and elapsed_segment >= self.segment_seconds:
+        if self._segment.frames > 0 and (
+            elapsed_segment >= self.segment_seconds
+            or self._segment_reached_size_limit()
+        ):
             self._close_segment()
             self._open_segment(self._segments[-1]["index"] + 1)
         assert self._segment is not None
@@ -316,6 +322,20 @@ class ContinuousDatWriter:
         )
         self._segment = None
 
+    def _segment_reached_size_limit(self) -> bool:
+        if self.max_segment_bytes is None or self.max_segment_bytes <= 0:
+            return False
+        if self._segment is None or self._segment.file is None:
+            return False
+        try:
+            position = self._segment.file.tell()
+        except (OSError, ValueError):
+            try:
+                position = self._segment.path.stat().st_size
+            except OSError:
+                return False
+        return int(position) >= int(self.max_segment_bytes)
+
     def _compress_segment(self, segment_path: Path) -> Path:
         archive_path = segment_path.with_suffix(".zip")
         with NamedTemporaryFile(
@@ -381,6 +401,7 @@ class ContinuousDatWriter:
             "total_frames": self._total_frames,
             "total_samples": self._total_samples,
             "segment_seconds": self.segment_seconds,
+            "max_segment_bytes": self.max_segment_bytes,
             "segment_compression": SEGMENT_COMPRESSION_FORMAT if self.compress_closed_segments else None,
             "segments": self._segments,
             "active_segment": active_segment,

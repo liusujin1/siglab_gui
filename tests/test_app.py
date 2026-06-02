@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest import mock
 
 from python_vna.app import default_vna_path, load_startup_session, parse_args
+from python_vna.conversion_app import parse_args as parse_conversion_args
 from python_vna.models import SavedSession
 from python_vna.storage import default_session_config
 
@@ -38,6 +39,11 @@ class AppArgumentTests(unittest.TestCase):
     def test_startup_falls_back_when_default_vna_missing(self):
         with mock.patch.object(Path, "exists", return_value=False):
             self.assertIsNone(load_startup_session(Path("D:/fake/default.vna")))
+
+    def test_conversion_app_accepts_startup_paths(self):
+        args = parse_conversion_args(["one.vna", "two.vna"])
+
+        self.assertEqual(args.paths, ["one.vna", "two.vna"])
 
 
 if __name__ == "__main__":

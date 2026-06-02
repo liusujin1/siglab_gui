@@ -1451,6 +1451,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.setWindowIcon(QtGui.QIcon(str(icon_path)))
         self.controller = controller
         self.session = session or default_session_config()
+        self._close_confirmed = False
+        self._tray_icon: QtWidgets.QSystemTrayIcon | None = None
         self._last_plot_cache: dict[str, dict[str, tuple[np.ndarray, np.ndarray]]] = {}
         self._stored_overlays: dict[str, deque[dict[str, tuple[np.ndarray, np.ndarray]]]] = {
             "top": deque(maxlen=6),
@@ -8821,7 +8823,90 @@ class MainWindow(QtWidgets.QMainWindow):
             self._plot_measurement(imported.measurement)
         self.statusBar().showMessage(f"已打开旧版 VNA：{path}")
 
+    def _confirm_close_action(self) -> str:
+        box = QtWidgets.QMessageBox(self)
+        box.setIcon(QtWidgets.QMessageBox.Question)
+        box.setWindowTitle("关闭 Python VNA")
+        box.setText("要关闭主界面吗？")
+        box.setInformativeText("可以退出程序，或最小化到系统托盘保留当前状态。")
+        tray_button = box.addButton("最小化到托盘", QtWidgets.QMessageBox.ActionRole)
+        exit_button = box.addButton("退出程序", QtWidgets.QMessageBox.AcceptRole)
+        cancel_button = box.addButton("取消", QtWidgets.QMessageBox.RejectRole)
+        box.setDefaultButton(cancel_button)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is tray_button:
+            return "tray"
+        if clicked is exit_button:
+            return "exit"
+        return "cancel"
+
+    def _ensure_tray_icon(self) -> QtWidgets.QSystemTrayIcon | None:
+        if not QtWidgets.QSystemTrayIcon.isSystemTrayAvailable():
+            return None
+        if self._tray_icon is not None:
+            return self._tray_icon
+        icon = self.windowIcon()
+        if icon.isNull():
+            icon_path = resource_path("assets/python_vna_icon.ico")
+            if icon_path.exists():
+                icon = QtGui.QIcon(str(icon_path))
+        tray = QtWidgets.QSystemTrayIcon(icon, self)
+        tray.setToolTip(self.windowTitle() or "Python VNA")
+        menu = QtWidgets.QMenu(self)
+        show_action = menu.addAction("显示主界面")
+        exit_action = menu.addAction("退出程序")
+        show_action.triggered.connect(self._restore_from_tray)
+        exit_action.triggered.connect(self._exit_from_tray)
+        tray.setContextMenu(menu)
+        tray.activated.connect(self._handle_tray_activated)
+        self._tray_icon = tray
+        return tray
+
+    def _minimize_to_tray(self) -> None:
+        tray = self._ensure_tray_icon()
+        if tray is None:
+            self.showMinimized()
+            self.statusBar().showMessage("系统托盘不可用，已最小化窗口")
+            return
+        tray.show()
+        self.hide()
+        tray.showMessage(
+            "Python VNA",
+            "程序仍在运行，双击托盘图标可恢复主界面。",
+            QtWidgets.QSystemTrayIcon.Information,
+            2500,
+        )
+
+    def _restore_from_tray(self) -> None:
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _exit_from_tray(self) -> None:
+        self._close_confirmed = True
+        if self._tray_icon is not None:
+            self._tray_icon.hide()
+        self.close()
+
+    def _handle_tray_activated(self, reason) -> None:
+        if reason in {
+            QtWidgets.QSystemTrayIcon.Trigger,
+            QtWidgets.QSystemTrayIcon.DoubleClick,
+        }:
+            self._restore_from_tray()
+
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if not self._close_confirmed and self.isVisible():
+            action = self._confirm_close_action()
+            if action == "cancel":
+                event.ignore()
+                return
+            if action == "tray":
+                event.ignore()
+                self._minimize_to_tray()
+                return
+            self._close_confirmed = True
         try:
             if self._recording_worker is not None:
                 if self._recording_stop_event is not None:
@@ -8860,6 +8945,8 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
         if hasattr(self, "_detached_plot_window"):
             self._detached_plot_window.close()
+        if self._tray_icon is not None:
+            self._tray_icon.hide()
         super().closeEvent(event)
 
 

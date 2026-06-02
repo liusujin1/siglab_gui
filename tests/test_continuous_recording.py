@@ -196,6 +196,34 @@ class ContinuousRecordingTests(unittest.TestCase):
             self.assertEqual(manifest["error"], "manual stop")
             self.assertEqual(len(manifest["segments"]), 2)
 
+    def test_dat_writer_rotates_segments_by_size_limit(self):
+        clock = _Clock()
+        session = default_session_config()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "recording"
+            writer = ContinuousDatWriter(
+                output_dir,
+                session,
+                device_name="Dev1",
+                channel_names=["ai0", "ai1"],
+                software_version="test",
+                segment_seconds=600.0,
+                max_segment_bytes=1,
+                compress_closed_segments=False,
+                time_fn=clock.time_ns,
+                monotonic_fn=clock.monotonic_seconds,
+            )
+            writer.start()
+            writer.write_frame(self._frame(1, 1.0))
+            writer.write_frame(self._frame(2, 2.0))
+            writer.close()
+
+            manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+            self.assertTrue((output_dir / "segment_0001.dat").exists())
+            self.assertTrue((output_dir / "segment_0002.dat").exists())
+            self.assertEqual(len(manifest["segments"]), 2)
+            self.assertEqual(manifest["max_segment_bytes"], 1)
+
     def test_dat_writer_final_manifest_includes_latest_frame_even_with_interval(self):
         clock = _Clock()
         session = default_session_config()

@@ -11,7 +11,7 @@ import numpy as np
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from python_vna.controller import VnaController
 from python_vna.continuous_recording import RecordingStatus
@@ -750,6 +750,33 @@ class MainWindowTests(unittest.TestCase):
 
         self.assertIn("ai1", self.window.channel_select_combo.itemText(1))
         self.assertIn("Resp", self.window.channel_select_combo.itemText(1))
+
+    def test_close_event_can_cancel_from_confirmation_dialog(self):
+        self.window.show()
+        QtWidgets.QApplication.processEvents()
+        event = QtGui.QCloseEvent()
+
+        with mock.patch.object(self.window, "_confirm_close_action", return_value="cancel"):
+            self.window.closeEvent(event)
+
+        self.assertFalse(event.isAccepted())
+        self.assertFalse(self.window._close_confirmed)
+        self.window.hide()
+
+    def test_close_event_can_minimize_to_tray_from_confirmation_dialog(self):
+        self.window.show()
+        QtWidgets.QApplication.processEvents()
+        event = QtGui.QCloseEvent()
+
+        with mock.patch.object(self.window, "_confirm_close_action", return_value="tray"), mock.patch.object(
+            self.window, "_minimize_to_tray"
+        ) as minimize_to_tray:
+            self.window.closeEvent(event)
+
+        self.assertFalse(event.isAccepted())
+        minimize_to_tray.assert_called_once_with()
+        self.assertFalse(self.window._close_confirmed)
+        self.window.hide()
 
     def test_mc_setup_full_scale_change_resets_manual_time_y_range(self):
         measurement = self._measurement()
