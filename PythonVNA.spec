@@ -3,6 +3,34 @@ from PyInstaller.utils.hooks import collect_data_files
 from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import copy_metadata
 
+
+def _normalized_dest(entry):
+    return str(entry[0]).replace("\\", "/").lower()
+
+
+def _filter_bundle_entries(entries):
+    blocked_prefixes = (
+        "assets/python_vna_icon.png",
+        "nidaqmx/_stubs/",
+        "pyside6/translations/",
+    )
+    blocked_exact = {
+        "pyside6/qt6pdf.dll",
+        "pyside6/qt6quick.dll",
+        "pyside6/qt6qml.dll",
+        "pyside6/qt6qmlmodels.dll",
+        "pyside6/qt6qmlmeta.dll",
+        "pyside6/qt6qmlworkerscript.dll",
+        "pyside6/qt6virtualkeyboard.dll",
+    }
+    filtered = []
+    for entry in entries:
+        dest = _normalized_dest(entry)
+        if dest in blocked_exact or any(dest.startswith(prefix) for prefix in blocked_prefixes):
+            continue
+        filtered.append(entry)
+    return filtered
+
 datas = [
     ('dsa\\vna\\default.vna', 'dsa\\vna'),
     ('assets\\python_vna_icon.ico', 'assets'),
@@ -30,6 +58,8 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+a.datas = _filter_bundle_entries(a.datas)
+a.binaries = _filter_bundle_entries(a.binaries)
 pyz = PYZ(a.pure)
 
 exe = EXE(
