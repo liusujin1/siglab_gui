@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from python_vna.app import default_vna_path, load_startup_session, parse_args
+from python_vna.app import default_vna_path, load_startup_session, parse_args, resource_path
 from python_vna.conversion_app import parse_args as parse_conversion_args
 from python_vna.models import SavedSession
 from python_vna.storage import default_session_config
@@ -22,7 +22,7 @@ class AppArgumentTests(unittest.TestCase):
         self.assertEqual(args.backend, "simulated")
 
     def test_default_vna_path_points_to_legacy_default_file(self):
-        self.assertEqual(default_vna_path(), Path("D:/SynologyDrive/codex/vna/dsa/vna/default.vna"))
+        self.assertEqual(default_vna_path(), resource_path("dsa/vna/default.vna"))
 
     def test_startup_loads_default_vna_when_present(self):
         fake_path = Path("D:/fake/default.vna")

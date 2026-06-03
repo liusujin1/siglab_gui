@@ -1772,7 +1772,7 @@ class MainWindowTests(unittest.TestCase):
     def test_save_to_default_uses_legacy_default_vna_path(self):
         self.assertEqual(
             self.window._default_vna_path(),
-            Path("D:/SynologyDrive/codex/vna/dsa/vna/default.vna"),
+            main_window_module.resource_path("dsa/vna/default.vna"),
         )
 
     def test_log_scale_filters_zero_frequency(self):

@@ -8,9 +8,11 @@ __pycache__/
 .venv/
 *.spec
 !PythonVNAConverter.spec
+!PythonVNA_diag.spec
 *.egg-info/
 build/
 dist/
+.worktrees/
 
 # MATLAB transient artifacts
 *.asv
