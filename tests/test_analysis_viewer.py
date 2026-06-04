@@ -1038,10 +1038,14 @@ class AnalysisViewerUiTests(unittest.TestCase):
             self.assertIsNone(viewer.derived_curve_dialog)
             self.assertEqual(viewer.left_layout.itemAt(0).widget().title(), "1. 数据")
             self.assertEqual(viewer.left_layout.itemAt(1).widget().title(), "2. 当前选择")
-            self.assertEqual(viewer.left_layout.itemAt(2).widget().title(), "3. 设置")
+            self.assertEqual(viewer.left_layout.itemAt(2).widget().title(), "3. 工作区曲线")
+            self.assertEqual(viewer.left_layout.itemAt(3).widget().title(), "4. 设置")
             self.assertEqual(viewer.derived_parameter_button.text(), "换算参数")
-            self.assertEqual(viewer.derived_curve_panel_button.text(), "曲线/拼合")
+            self.assertEqual(viewer.derived_curve_panel_button.text(), "曲线编辑")
+            self.assertEqual(viewer.derived_workspace_button.text(), "工作区运算")
             self.assertEqual(viewer.derived_processing_button.text(), "滤波处理")
+            self.assertEqual(viewer.derived_curve_group.title(), "曲线编辑")
+            self.assertIsNone(viewer.derived_stitch_enabled_check.parentWidget())
             self.assertFalse(hasattr(viewer, "left_scroll"))
             self.assertFalse(hasattr(viewer, "derived_config_dataset_list"))
             self.assertFalse(viewer._hidden_series_group.isVisible())
@@ -1049,14 +1053,17 @@ class AnalysisViewerUiTests(unittest.TestCase):
             self.assertEqual(viewer.derived_transfer_point_table.maximumHeight(), 260)
             viewer._show_derived_config_dialog()
             self.assertTrue(viewer.derived_settings_stack.isHidden())
-            self.assertEqual(viewer.derived_settings_stack.count(), 3)
+            self.assertEqual(viewer.derived_settings_stack.count(), 4)
             viewer._show_settings_panel(0)
             self.assertFalse(viewer.derived_settings_stack.isHidden())
             self.assertEqual(viewer.derived_settings_stack.currentIndex(), 0)
             viewer._show_settings_panel(1)
             self.assertFalse(viewer.derived_settings_stack.isHidden())
             self.assertEqual(viewer.derived_settings_stack.currentIndex(), 1)
-            viewer._show_settings_panel(1)
+            viewer._show_settings_panel(2)
+            self.assertFalse(viewer.derived_settings_stack.isHidden())
+            self.assertEqual(viewer.derived_settings_stack.currentIndex(), 2)
+            viewer._show_settings_panel(2)
             self.assertTrue(viewer.derived_settings_stack.isHidden())
             self.assertGreaterEqual(
                 viewer._combo_index_for_data(viewer.derived_transfer_combo, ("manual_transfer",)),
@@ -1069,7 +1076,7 @@ class AnalysisViewerUiTests(unittest.TestCase):
         finally:
             viewer.close()
 
-    def test_manual_transfer_psd_edit_and_stitch_ui_paths(self):
+    def test_manual_transfer_psd_edit_workspace_and_stitch_ui_paths(self):
         session = default_session_config()
         freqs = np.array([0.0, 10.0, 20.0, 40.0], dtype=float)
         time_s = np.arange(256, dtype=float) / 256.0
@@ -1099,7 +1106,6 @@ class AnalysisViewerUiTests(unittest.TestCase):
             viewer._refresh_dataset_lists()
             manual_index = viewer._combo_index_for_data(viewer.derived_transfer_combo, ("manual_transfer",))
             input_index = viewer._combo_index_for_data(viewer.derived_input_series_combo, "1:ai0")
-            stitch_index = viewer._combo_index_for_data(viewer.derived_stitch_series_combo, "1:ai1")
             viewer.derived_transfer_combo.setCurrentIndex(manual_index)
             viewer._apply_slot_selection("input", "1:ai0")
             self.assertEqual(viewer.derived_input_series_combo.currentIndex(), input_index)
@@ -1115,26 +1121,39 @@ class AnalysisViewerUiTests(unittest.TestCase):
             self.assertGreater(len(psd_curves), 0)
             label, (before_f, before_psd) = next(iter(psd_curves.items()))
             self.assertAlmostEqual(float(np.median(before_psd)), 10.0 ** (6.0 / 10.0), delta=0.05)
+            viewer.workspace_add_current_button.click()
+            self.assertEqual(len(viewer._workspace_curves), 1)
+            self.assertEqual(viewer.workspace_curve_table.rowCount(), 1)
 
             viewer._active_trace[viewer.derived_plots[1]] = label
             viewer._initialize_psd_edit_points_from_active_curve()
             self.assertIn(label, viewer._psd_edit_points)
 
-            viewer.derived_stitch_enabled_check.setChecked(True)
-            viewer.derived_stitch_series_combo.setCurrentIndex(stitch_index)
-            viewer.derived_stitch_split_edit.setText("20")
-            viewer._plot_derived()
-            stitched_labels = viewer._plot_curves[viewer.derived_plots[1]]
-            self.assertTrue(any("拼合@20Hz" in curve_label for curve_label in stitched_labels))
-            order_index = viewer._combo_index_for_data(viewer.derived_stitch_order_combo, "secondary_first")
-            viewer._apply_slot_selection("stitch_before", "1:ai1")
-            self.assertEqual(viewer.derived_stitch_order_combo.currentIndex(), order_index)
-            viewer._plot_derived()
-            stitched_labels = viewer._plot_curves[viewer.derived_plots[1]]
-            reverse_label = next(curve_label for curve_label in stitched_labels if "导入前/换算后" in curve_label)
-            stitch_f, stitch_y = stitched_labels[reverse_label]
-            self.assertTrue(np.all(stitch_y[stitch_f <= 20.0] > 8.0))
-            self.assertTrue(np.all(stitch_y[stitch_f > 20.0] < 5.0))
+            viewer._workspace_operation_sources["a"] = ("current_result_curve", label)
+            viewer._workspace_operation_sources["b"] = ("dataset_psd_curve", "1:ai1")
+            viewer.workspace_op_type_combo.setCurrentIndex(
+                viewer._combo_index_for_data(viewer.workspace_op_type_combo, "subtract")
+            )
+            viewer._execute_workspace_operation()
+            self.assertEqual(len(viewer._workspace_curves), 2)
+            subtract_curve = viewer._workspace_curves[-1]
+            self.assertEqual(subtract_curve.curve_type, "相减结果PSD")
+
+            viewer._workspace_operation_sources["a"] = ("workspace_curve", subtract_curve.curve_id)
+            viewer._workspace_operation_sources["b"] = ("dataset_psd_curve", "1:ai1")
+            viewer.workspace_op_type_combo.setCurrentIndex(
+                viewer._combo_index_for_data(viewer.workspace_op_type_combo, "stitch")
+            )
+            viewer.workspace_op_order_combo.setCurrentIndex(
+                viewer._combo_index_for_data(viewer.workspace_op_order_combo, "a_first")
+            )
+            viewer.workspace_op_split_edit.setText("20")
+            viewer._execute_workspace_operation()
+            self.assertEqual(len(viewer._workspace_curves), 3)
+            stitched_curve = viewer._workspace_curves[-1]
+            self.assertEqual(stitched_curve.curve_type, "拼合结果PSD")
+            self.assertTrue(np.all(stitched_curve.values > 0.0))
+
             viewer._delete_datasets_by_ids({1})
             self.assertEqual(viewer._datasets, [])
             _ = before_f

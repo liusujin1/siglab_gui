@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -95,7 +96,17 @@ VC_REFERENCE_COLORS = {
 }
 
 
-class AnalysisViewer(QtWidgets.QMainWindow):
+@dataclass
+class WorkspaceCurve:
+    curve_id: int
+    name: str
+    curve_type: str
+    frequency_hz: np.ndarray
+    values: np.ndarray
+    source: str
+
+
+class AnalysisWorkbench(QtWidgets.QWidget):
     def __init__(
         self,
         parent=None,
@@ -108,6 +119,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self._derived_only = bool(derived_only)
         self.setWindowTitle("VNA 换算工具" if self._derived_only else "Analysis Viewer")
         self.resize(980, 720)
+        self._status_bar = QtWidgets.QStatusBar(self)
         self._datasets: list[AnalysisDataset] = []
         self._next_dataset_id = 1
         self._current_measurement_provider = current_measurement_provider
@@ -145,8 +157,14 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self._psd_edit_points: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self._curve_edit_items: dict[pg.PlotWidget, list[object]] = {}
         self._updating_transfer_point_table = False
+        self._workspace_curves: list[WorkspaceCurve] = []
+        self._next_workspace_curve_id = 1
+        self._workspace_operation_sources: dict[str, object | None] = {"a": None, "b": None}
         self._build_ui()
         self.apply_theme(self._theme)
+
+    def statusBar(self):
+        return self._status_bar
 
     def apply_theme(self, theme: dict[str, object] | None) -> None:
         if theme:
@@ -369,7 +387,11 @@ class AnalysisViewer(QtWidgets.QMainWindow):
 
     def _build_ui(self) -> None:
         central = QtWidgets.QWidget(self)
-        self.setCentralWidget(central)
+        outer_layout = QtWidgets.QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+        outer_layout.addWidget(central, 1)
+        outer_layout.addWidget(self._status_bar, 0)
         layout = QtWidgets.QHBoxLayout(central)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
@@ -390,6 +412,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self.processing_controls_group = self._build_controls_group()
         if self._derived_only:
             left_layout.addWidget(self._build_slot_selection_group())
+            left_layout.addWidget(self._build_workspace_group(), 1)
             left_layout.addWidget(self._build_settings_buttons_group())
             left_layout.addStretch(1)
             layout.addWidget(self.left_panel)
@@ -534,8 +557,6 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         slots = (
             ("transfer", "传递率曲线"),
             ("input", "待换算数据"),
-            ("stitch_before", "拼合前半段"),
-            ("stitch_after", "拼合后半段"),
         )
         for row, (role, label_text) in enumerate(slots):
             layout.addWidget(QtWidgets.QLabel(label_text), row, 0)
@@ -549,26 +570,117 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             layout.addWidget(button, row, 2)
         return group
 
+    def _build_workspace_group(self) -> QtWidgets.QGroupBox:
+        group = QtWidgets.QGroupBox("3. 工作区曲线")
+        layout = QtWidgets.QVBoxLayout(group)
+        layout.setContentsMargins(8, 14, 8, 8)
+        layout.setSpacing(6)
+        self.workspace_curve_table = QtWidgets.QTableWidget(0, 3)
+        self.workspace_curve_table.setHorizontalHeaderLabels(["名称", "类型", "来源"])
+        self.workspace_curve_table.verticalHeader().setVisible(False)
+        self.workspace_curve_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.workspace_curve_table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.workspace_curve_table.setAlternatingRowColors(True)
+        self.workspace_curve_table.setMinimumHeight(132)
+        self.workspace_curve_table.setMaximumHeight(210)
+        self.workspace_curve_table.horizontalHeader().setStretchLastSection(True)
+        self.workspace_curve_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
+        self.workspace_curve_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
+        self.workspace_curve_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.Stretch)
+        layout.addWidget(self.workspace_curve_table)
+        button_row = QtWidgets.QGridLayout()
+        button_row.setHorizontalSpacing(5)
+        button_row.setVerticalSpacing(5)
+        self.workspace_add_current_button = QtWidgets.QPushButton("加入当前PSD")
+        self.workspace_plot_selected_button = QtWidgets.QPushButton("绘制选中")
+        self.workspace_delete_button = QtWidgets.QPushButton("删除选中")
+        button_row.addWidget(self.workspace_add_current_button, 0, 0)
+        button_row.addWidget(self.workspace_plot_selected_button, 0, 1)
+        button_row.addWidget(self.workspace_delete_button, 1, 0, 1, 2)
+        layout.addLayout(button_row)
+        self.workspace_add_current_button.clicked.connect(self._save_current_psd_curve_to_workspace)
+        self.workspace_plot_selected_button.clicked.connect(self._plot_selected_workspace_curves)
+        self.workspace_delete_button.clicked.connect(self._delete_selected_workspace_curves)
+        return group
+
     def _build_settings_buttons_group(self) -> QtWidgets.QGroupBox:
-        group = QtWidgets.QGroupBox("3. 设置")
+        group = QtWidgets.QGroupBox("4. 设置")
         layout = QtWidgets.QGridLayout(group)
         layout.setContentsMargins(8, 14, 8, 8)
         layout.setHorizontalSpacing(6)
         layout.setVerticalSpacing(6)
         self.derived_parameter_button = QtWidgets.QPushButton("换算参数")
-        self.derived_curve_panel_button = QtWidgets.QPushButton("曲线/拼合")
+        self.derived_curve_panel_button = QtWidgets.QPushButton("曲线编辑")
+        self.derived_workspace_button = QtWidgets.QPushButton("工作区运算")
         self.derived_processing_button = QtWidgets.QPushButton("滤波处理")
         layout.addWidget(self.derived_parameter_button, 0, 0)
         layout.addWidget(self.derived_curve_panel_button, 0, 1)
-        layout.addWidget(self.derived_processing_button, 1, 0, 1, 2)
+        layout.addWidget(self.derived_workspace_button, 1, 0)
+        layout.addWidget(self.derived_processing_button, 1, 1)
         self.derived_settings_stack = QtWidgets.QStackedWidget()
         self.derived_settings_stack.setVisible(False)
-        self.derived_settings_stack.setMaximumHeight(430)
+        self.derived_settings_stack.setMaximumHeight(460)
         layout.addWidget(self.derived_settings_stack, 2, 0, 1, 2)
         self.derived_parameter_button.clicked.connect(lambda _checked=False: self._show_settings_panel(0))
         self.derived_curve_panel_button.clicked.connect(lambda _checked=False: self._show_settings_panel(1))
-        self.derived_processing_button.clicked.connect(lambda _checked=False: self._show_settings_panel(2))
+        self.derived_workspace_button.clicked.connect(lambda _checked=False: self._show_settings_panel(2))
+        self.derived_processing_button.clicked.connect(lambda _checked=False: self._show_settings_panel(3))
         return group
+
+    def _build_workspace_operation_group(self) -> QtWidgets.QGroupBox:
+        group = QtWidgets.QGroupBox("工作区运算")
+        layout = QtWidgets.QGridLayout(group)
+        layout.setContentsMargins(8, 14, 8, 8)
+        layout.setHorizontalSpacing(6)
+        layout.setVerticalSpacing(6)
+        self.workspace_op_labels: dict[str, QtWidgets.QLabel] = {}
+        for row, key in enumerate(("a", "b")):
+            layout.addWidget(QtWidgets.QLabel(f"输入{key.upper()}"), row, 0)
+            value_label = QtWidgets.QLabel("(未选择)")
+            value_label.setWordWrap(True)
+            value_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+            self.workspace_op_labels[key] = value_label
+            button = QtWidgets.QPushButton("选择")
+            button.clicked.connect(lambda _checked=False, target=key: self._show_workspace_source_selector(target))
+            layout.addWidget(value_label, row, 1)
+            layout.addWidget(button, row, 2)
+        self.workspace_op_type_combo = QtWidgets.QComboBox()
+        self.workspace_op_type_combo.addItem("拼合", "stitch")
+        self.workspace_op_type_combo.addItem("相加", "add")
+        self.workspace_op_type_combo.addItem("相减", "subtract")
+        self.workspace_op_type_combo.currentIndexChanged.connect(lambda _index: self._sync_workspace_operation_ui())
+        self.workspace_op_output_edit = QtWidgets.QLineEdit()
+        self.workspace_op_output_edit.setPlaceholderText("自动命名")
+        self.workspace_op_order_combo = QtWidgets.QComboBox()
+        self.workspace_op_order_combo.addItem("A在前，B在后", "a_first")
+        self.workspace_op_order_combo.addItem("B在前，A在后", "b_first")
+        self.workspace_op_split_edit = QtWidgets.QLineEdit("30")
+        self.workspace_op_split_edit.setMaximumWidth(86)
+        self.workspace_op_execute_button = QtWidgets.QPushButton("执行并保存到工作区")
+        self.workspace_op_execute_button.clicked.connect(self._execute_workspace_operation)
+        layout.addWidget(QtWidgets.QLabel("操作"), 2, 0)
+        layout.addWidget(self.workspace_op_type_combo, 2, 1, 1, 2)
+        layout.addWidget(QtWidgets.QLabel("输出名"), 3, 0)
+        layout.addWidget(self.workspace_op_output_edit, 3, 1, 1, 2)
+        self.workspace_stitch_controls = QtWidgets.QWidget()
+        stitch_layout = QtWidgets.QGridLayout(self.workspace_stitch_controls)
+        stitch_layout.setContentsMargins(0, 0, 0, 0)
+        stitch_layout.setHorizontalSpacing(6)
+        stitch_layout.setVerticalSpacing(6)
+        stitch_layout.addWidget(QtWidgets.QLabel("顺序"), 0, 0)
+        stitch_layout.addWidget(self.workspace_op_order_combo, 0, 1)
+        stitch_layout.addWidget(QtWidgets.QLabel("分界Hz"), 1, 0)
+        stitch_layout.addWidget(self.workspace_op_split_edit, 1, 1)
+        layout.addWidget(self.workspace_stitch_controls, 4, 0, 1, 3)
+        layout.addWidget(self.workspace_op_execute_button, 5, 0, 1, 3)
+        self._sync_workspace_operation_ui()
+        return group
+
+    def _sync_workspace_operation_ui(self) -> None:
+        if not hasattr(self, "workspace_stitch_controls"):
+            return
+        is_stitch = self.workspace_op_type_combo.currentData() == "stitch"
+        self.workspace_stitch_controls.setVisible(is_stitch)
 
     def _build_controls_group(self) -> QtWidgets.QGroupBox:
         group = QtWidgets.QGroupBox("滤波与处理" if self._derived_only else "[+] 主处理")
@@ -911,7 +1023,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         vc_row.addWidget(self.derived_show_source_check)
         vc_row.addStretch(1)
 
-        edit_group = QtWidgets.QGroupBox("曲线编辑与拼合")
+        edit_group = QtWidgets.QGroupBox("曲线编辑" if self._derived_only else "曲线编辑与拼合")
         self.derived_curve_group = edit_group
         if self._derived_only:
             edit_layout = QtWidgets.QVBoxLayout(edit_group)
@@ -970,14 +1082,10 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             psd_actions.addWidget(self.derived_psd_edit_button)
             psd_actions.addWidget(self.derived_psd_reset_button)
             edit_layout.addLayout(psd_actions)
-            stitch_row = QtWidgets.QGridLayout()
-            stitch_row.setHorizontalSpacing(5)
-            stitch_row.setVerticalSpacing(4)
-            stitch_row.addWidget(self.derived_stitch_enabled_check, 0, 0)
-            stitch_row.addWidget(QtWidgets.QLabel("分界Hz"), 0, 1)
-            stitch_row.addWidget(self.derived_stitch_split_edit, 0, 2)
-            stitch_row.setColumnStretch(0, 1)
-            edit_layout.addLayout(stitch_row)
+            self.derived_stitch_enabled_check.setVisible(False)
+            self.derived_stitch_order_combo.setVisible(False)
+            self.derived_stitch_series_combo.setVisible(False)
+            self.derived_stitch_split_edit.setVisible(False)
         else:
             edit_layout.addWidget(QtWidgets.QLabel("传递率点"), 0, 0)
             edit_layout.addWidget(self.derived_transfer_point_table, 0, 1, 2, 4)
@@ -1010,6 +1118,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             self.derived_processing_dialog = None
             self.derived_settings_stack.addWidget(controls)
             self.derived_settings_stack.addWidget(edit_group)
+            self.derived_settings_stack.addWidget(self._build_workspace_operation_group())
             self.derived_settings_stack.addWidget(self.processing_controls_group)
         else:
             self.derived_curve_dialog = QtWidgets.QDialog(self)
@@ -1218,12 +1327,6 @@ class AnalysisViewer(QtWidgets.QMainWindow):
                 if data is not None:
                     options.append(("待换算", self.derived_input_series_combo.itemText(index), data))
             return options
-        if role in {"stitch_before", "stitch_after"}:
-            options.append(("换算结果", "换算结果", ("converted_result",)))
-            for index in range(self.derived_stitch_series_combo.count()):
-                data = self.derived_stitch_series_combo.itemData(index)
-                if data is not None:
-                    options.append(("导入数据", self.derived_stitch_series_combo.itemText(index), data))
         return options
 
     def _show_slot_selector(self, role: str) -> None:
@@ -1295,25 +1398,6 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             index = self._combo_index_for_data(self.derived_input_series_combo, data)
             if index >= 0:
                 self.derived_input_series_combo.setCurrentIndex(index)
-        elif role in {"stitch_before", "stitch_after"}:
-            self.derived_stitch_enabled_check.setChecked(True)
-            if data == ("converted_result",):
-                order_index = self._combo_index_for_data(
-                    self.derived_stitch_order_combo,
-                    "primary_first" if role == "stitch_before" else "secondary_first",
-                )
-                if order_index >= 0:
-                    self.derived_stitch_order_combo.setCurrentIndex(order_index)
-            else:
-                index = self._combo_index_for_data(self.derived_stitch_series_combo, data)
-                if index >= 0:
-                    self.derived_stitch_series_combo.setCurrentIndex(index)
-                order_index = self._combo_index_for_data(
-                    self.derived_stitch_order_combo,
-                    "secondary_first" if role == "stitch_before" else "primary_first",
-                )
-                if order_index >= 0:
-                    self.derived_stitch_order_combo.setCurrentIndex(order_index)
         self._sync_slot_labels()
         self._auto_plot_derived_from_control_change()
 
@@ -1343,22 +1427,368 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             if self.derived_input_series_combo.currentData() is not None
             else "(未选择)"
         )
-        stitch_source = (
-            self.derived_stitch_series_combo.currentText()
-            if self.derived_stitch_series_combo.currentData() is not None
-            else "(未选择导入数据)"
-        )
-        order = self.derived_stitch_order_combo.currentData()
-        if order == "secondary_first":
-            stitch_before = stitch_source
-            stitch_after = "换算结果"
-        else:
-            stitch_before = "换算结果"
-            stitch_after = stitch_source
         set_label("transfer", transfer_text, self.derived_transfer_combo.currentData())
         set_label("input", input_text, self.derived_input_series_combo.currentData())
-        set_label("stitch_before", stitch_before, self.derived_stitch_series_combo.currentData())
-        set_label("stitch_after", stitch_after, self.derived_stitch_series_combo.currentData())
+
+    def _workspace_source_options(self) -> list[tuple[str, str, object]]:
+        options: list[tuple[str, str, object]] = []
+        if hasattr(self, "derived_plots") and len(self.derived_plots) > 1 and self.derived_result_mode_combo.currentText() == "PSD":
+            excluded = self._plot_export_excluded.get(self.derived_plots[1], set())
+            for label in self._plot_curves.get(self.derived_plots[1], {}):
+                if label in excluded:
+                    continue
+                options.append(("当前结果", label, ("current_result_curve", label)))
+        for dataset in self._datasets:
+            for series in dataset.series:
+                options.append(("导入PSD", self._series_label(dataset, series), ("dataset_psd_curve", series.id)))
+        for curve in self._workspace_curves:
+            options.append(("工作区", curve.name, ("workspace_curve", curve.curve_id)))
+        return options
+
+    def _show_workspace_source_selector(self, target: str) -> None:
+        options = self._workspace_source_options()
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("选择工作区输入")
+        dialog.setModal(True)
+        dialog.resize(760, 420)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        search_edit = QtWidgets.QLineEdit()
+        search_edit.setPlaceholderText("搜索名称、类型或来源")
+        table = QtWidgets.QTableWidget(0, 2)
+        table.setHorizontalHeaderLabels(["类型", "数据"])
+        table.verticalHeader().setVisible(False)
+        table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(search_edit)
+        layout.addWidget(table)
+        button_row = QtWidgets.QHBoxLayout()
+        select_button = QtWidgets.QPushButton("选择")
+        cancel_button = QtWidgets.QPushButton("取消")
+        button_row.addStretch(1)
+        button_row.addWidget(select_button)
+        button_row.addWidget(cancel_button)
+        layout.addLayout(button_row)
+
+        def refresh_table() -> None:
+            pattern = search_edit.text().strip().lower()
+            table.setRowCount(0)
+            for kind, label, data in options:
+                searchable = f"{kind} {label}".lower()
+                if pattern and pattern not in searchable:
+                    continue
+                row = table.rowCount()
+                table.insertRow(row)
+                kind_item = QtWidgets.QTableWidgetItem(kind)
+                label_item = QtWidgets.QTableWidgetItem(label)
+                kind_item.setData(QtCore.Qt.UserRole, data)
+                label_item.setData(QtCore.Qt.UserRole, data)
+                table.setItem(row, 0, kind_item)
+                table.setItem(row, 1, label_item)
+            if table.rowCount() > 0:
+                table.selectRow(0)
+
+        def choose_current() -> None:
+            selected = table.selectedIndexes()
+            if not selected:
+                return
+            item = table.item(selected[0].row(), 0)
+            if item is None:
+                return
+            self._workspace_operation_sources[target] = item.data(QtCore.Qt.UserRole)
+            self._sync_workspace_operation_labels()
+            dialog.accept()
+
+        search_edit.textChanged.connect(refresh_table)
+        table.itemDoubleClicked.connect(lambda _item: choose_current())
+        select_button.clicked.connect(choose_current)
+        cancel_button.clicked.connect(dialog.reject)
+        refresh_table()
+        dialog.exec()
+
+    def _workspace_curve_by_id(self, curve_id: int) -> WorkspaceCurve | None:
+        for curve in self._workspace_curves:
+            if curve.curve_id == curve_id:
+                return curve
+        return None
+
+    def _workspace_source_label(self, data: object | None) -> str:
+        if data is None:
+            return "(未选择)"
+        if isinstance(data, tuple) and len(data) == 2 and data[0] == "workspace_curve":
+            curve = self._workspace_curve_by_id(int(data[1]))
+            return curve.name if curve is not None else "(工作区曲线已失效)"
+        if isinstance(data, tuple) and len(data) == 2 and data[0] == "current_result_curve":
+            return str(data[1])
+        if isinstance(data, tuple) and len(data) == 2 and data[0] == "dataset_psd_curve":
+            for dataset in self._datasets:
+                for series in dataset.series:
+                    if series.id == data[1]:
+                        return self._series_label(dataset, series)
+            return "(导入曲线已失效)"
+        return str(data)
+
+    def _sync_workspace_operation_labels(self) -> None:
+        if not hasattr(self, "workspace_op_labels"):
+            return
+        for key, label in self.workspace_op_labels.items():
+            full_text = self._workspace_source_label(self._workspace_operation_sources.get(key))
+            shown = full_text if len(full_text) <= 42 else f"{full_text[:39]}..."
+            label.setText(shown)
+            label.setToolTip(full_text)
+
+    def _refresh_workspace_curve_table(self) -> None:
+        if not hasattr(self, "workspace_curve_table"):
+            return
+        selected_ids = {
+            self.workspace_curve_table.item(index.row(), 0).data(QtCore.Qt.UserRole)
+            for index in self.workspace_curve_table.selectedIndexes()
+            if self.workspace_curve_table.item(index.row(), 0) is not None
+        }
+        self.workspace_curve_table.setRowCount(0)
+        for row, curve in enumerate(self._workspace_curves):
+            self.workspace_curve_table.insertRow(row)
+            name_item = QtWidgets.QTableWidgetItem(curve.name)
+            name_item.setData(QtCore.Qt.UserRole, curve.curve_id)
+            type_item = QtWidgets.QTableWidgetItem(curve.curve_type)
+            source_item = QtWidgets.QTableWidgetItem(curve.source)
+            source_item.setToolTip(curve.source)
+            self.workspace_curve_table.setItem(row, 0, name_item)
+            self.workspace_curve_table.setItem(row, 1, type_item)
+            self.workspace_curve_table.setItem(row, 2, source_item)
+            if curve.curve_id in selected_ids:
+                self.workspace_curve_table.selectRow(row)
+
+    def _selected_workspace_curve_ids(self) -> list[int]:
+        ids: list[int] = []
+        if not hasattr(self, "workspace_curve_table"):
+            return ids
+        for index in self.workspace_curve_table.selectionModel().selectedRows():
+            item = self.workspace_curve_table.item(index.row(), 0)
+            if item is not None:
+                curve_id = item.data(QtCore.Qt.UserRole)
+                if isinstance(curve_id, int):
+                    ids.append(curve_id)
+        return ids
+
+    def _unique_workspace_curve_name(self, name: str) -> str:
+        base = str(name or "工作区曲线").strip() or "工作区曲线"
+        existing = {curve.name for curve in self._workspace_curves}
+        if base not in existing:
+            return base
+        index = 2
+        while f"{base}#{index}" in existing:
+            index += 1
+        return f"{base}#{index}"
+
+    def _save_workspace_curve(
+        self,
+        name: str,
+        curve_type: str,
+        frequency_hz: np.ndarray,
+        values: np.ndarray,
+        source: str,
+    ) -> WorkspaceCurve | None:
+        f, y = _finite_aligned_xy(frequency_hz, values)
+        positive = np.isfinite(f) & np.isfinite(y) & (f > 0.0) & (y > 0.0)
+        f = f[positive]
+        y = y[positive]
+        if f.size < 2:
+            return None
+        order = np.argsort(f)
+        curve = WorkspaceCurve(
+            curve_id=self._next_workspace_curve_id,
+            name=self._unique_workspace_curve_name(name),
+            curve_type=curve_type,
+            frequency_hz=np.asarray(f[order], dtype=float),
+            values=np.asarray(y[order], dtype=float),
+            source=str(source),
+        )
+        self._next_workspace_curve_id += 1
+        self._workspace_curves.append(curve)
+        self._refresh_workspace_curve_table()
+        self._sync_workspace_operation_labels()
+        return curve
+
+    def _save_current_psd_curve_to_workspace(self) -> None:
+        if self.derived_result_mode_combo.currentText() != "PSD":
+            self.statusBar().showMessage("请先切换到 PSD 结果图窗后再加入工作区")
+            return
+        if not hasattr(self, "derived_plots") or len(self.derived_plots) < 2:
+            return
+        plot = self.derived_plots[1]
+        curves = self._plot_curves.get(plot, {})
+        excluded = self._plot_export_excluded.get(plot, set())
+        if not curves:
+            self.statusBar().showMessage("当前没有可保存的 PSD 曲线")
+            return
+        label = self._active_trace.get(plot)
+        if label not in curves or label in excluded:
+            label = next((name for name in curves if name not in excluded), None)
+        if label is None:
+            self.statusBar().showMessage("当前没有可保存的 PSD 曲线")
+            return
+        x, y = curves[label]
+        saved = self._save_workspace_curve(label, "换算结果PSD", x, y, f"当前结果 | {label}")
+        if saved is None:
+            self.statusBar().showMessage("保存当前 PSD 失败：曲线无有效数据")
+            return
+        self.statusBar().showMessage(f"已加入工作区：{saved.name}")
+
+    def _delete_selected_workspace_curves(self) -> None:
+        selected_ids = set(self._selected_workspace_curve_ids())
+        if not selected_ids:
+            self.statusBar().showMessage("未选择工作区曲线")
+            return
+        self._workspace_curves = [curve for curve in self._workspace_curves if curve.curve_id not in selected_ids]
+        for key, data in list(self._workspace_operation_sources.items()):
+            if isinstance(data, tuple) and len(data) == 2 and data[0] == "workspace_curve" and data[1] in selected_ids:
+                self._workspace_operation_sources[key] = None
+        self._refresh_workspace_curve_table()
+        self._sync_workspace_operation_labels()
+        self.statusBar().showMessage(f"已删除 {len(selected_ids)} 条工作区曲线")
+
+    def _plot_selected_workspace_curves(self) -> None:
+        selected_ids = self._selected_workspace_curve_ids()
+        curves = [self._workspace_curve_by_id(curve_id) for curve_id in selected_ids]
+        curves = [curve for curve in curves if curve is not None]
+        if not curves:
+            self.statusBar().showMessage("未选择工作区曲线")
+            return
+        self.derived_result_mode_combo.setCurrentText("PSD")
+        results = [{"label": curve.name, "psd": (curve.frequency_hz, curve.values)} for curve in curves]
+        self._plot_derived_result_axis(
+            self.derived_plots[1],
+            "PSD",
+            results,
+            keep_existing=self._hold_enabled(),
+        )
+        self.statusBar().showMessage(f"绘制了 {len(curves)} 条工作区曲线")
+
+    def _curve_from_workspace_source(self, data: object | None) -> tuple[np.ndarray, np.ndarray, str] | None:
+        if data is None:
+            return None
+        if isinstance(data, tuple) and len(data) == 2 and data[0] == "workspace_curve":
+            curve = self._workspace_curve_by_id(int(data[1]))
+            if curve is None:
+                return None
+            return curve.frequency_hz.copy(), curve.values.copy(), curve.name
+        if isinstance(data, tuple) and len(data) == 2 and data[0] == "current_result_curve":
+            if not hasattr(self, "derived_plots") or len(self.derived_plots) < 2:
+                return None
+            label = str(data[1])
+            curve = self._plot_curves.get(self.derived_plots[1], {}).get(label)
+            if curve is None:
+                return None
+            return np.asarray(curve[0], dtype=float), np.asarray(curve[1], dtype=float), label
+        if isinstance(data, tuple) and len(data) == 2 and data[0] == "dataset_psd_curve":
+            for dataset in self._datasets:
+                for series in dataset.series:
+                    if series.id == data[1]:
+                        curve = self._curve_for_mode(dataset, series, "PSD")
+                        if curve is None:
+                            return None
+                        return curve
+        return None
+
+    def _aligned_psd_operation(
+        self,
+        left_x: np.ndarray,
+        left_y: np.ndarray,
+        right_x: np.ndarray,
+        right_y: np.ndarray,
+        *,
+        subtract: bool,
+    ) -> tuple[np.ndarray, np.ndarray, bool]:
+        lx, ly = _finite_aligned_xy(left_x, left_y)
+        rx, ry = _finite_aligned_xy(right_x, right_y)
+        valid_left = (lx > 0.0) & (ly > 0.0)
+        valid_right = (rx > 0.0) & (ry > 0.0)
+        lx = lx[valid_left]
+        ly = ly[valid_left]
+        rx = rx[valid_right]
+        ry = ry[valid_right]
+        if lx.size < 2 or rx.size < 2:
+            return np.array([], dtype=float), np.array([], dtype=float), False
+        low = max(float(np.min(lx)), float(np.min(rx)))
+        high = min(float(np.max(lx)), float(np.max(rx)))
+        if not np.isfinite(low) or not np.isfinite(high) or high <= low:
+            return np.array([], dtype=float), np.array([], dtype=float), False
+        grid = np.unique(
+            np.concatenate(
+                (
+                    lx[(lx >= low) & (lx <= high)],
+                    rx[(rx >= low) & (rx <= high)],
+                    np.array([low, high], dtype=float),
+                )
+            )
+        )
+        if grid.size < 2:
+            return np.array([], dtype=float), np.array([], dtype=float), False
+        left_interp = np.interp(np.log10(grid), np.log10(lx), ly)
+        right_interp = np.interp(np.log10(grid), np.log10(rx), ry)
+        values = left_interp - right_interp if subtract else left_interp + right_interp
+        clipped = bool(np.any(values <= 0.0))
+        values = np.maximum(values, 1e-300)
+        return grid, values, clipped
+
+    def _execute_workspace_operation(self) -> None:
+        left_source = self._curve_from_workspace_source(self._workspace_operation_sources.get("a"))
+        right_source = self._curve_from_workspace_source(self._workspace_operation_sources.get("b"))
+        if left_source is None or right_source is None:
+            self.statusBar().showMessage("请先为输入A和输入B选择有效曲线")
+            return
+        left_x, left_y, left_label = left_source
+        right_x, right_y, right_label = right_source
+        operation = self.workspace_op_type_combo.currentData()
+        output_name = self.workspace_op_output_edit.text().strip()
+        curve_type = "工作区PSD"
+        source_text = ""
+        clipped = False
+        if operation == "stitch":
+            split = _parse_optional_float(self.workspace_op_split_edit.text())
+            if split is None:
+                self.statusBar().showMessage("请输入有效的拼合分界频率")
+                return
+            if self.workspace_op_order_combo.currentData() == "b_first":
+                out_x, out_y = stitch_frequency_curves(right_x, right_y, left_x, left_y, float(split))
+                if not output_name:
+                    output_name = f"{right_label}|{left_label}@{float(split):.6g}Hz"
+                source_text = f"拼合: {right_label} -> {left_label} @ {float(split):.6g}Hz"
+            else:
+                out_x, out_y = stitch_frequency_curves(left_x, left_y, right_x, right_y, float(split))
+                if not output_name:
+                    output_name = f"{left_label}|{right_label}@{float(split):.6g}Hz"
+                source_text = f"拼合: {left_label} -> {right_label} @ {float(split):.6g}Hz"
+            curve_type = "拼合结果PSD"
+        elif operation == "subtract":
+            out_x, out_y, clipped = self._aligned_psd_operation(left_x, left_y, right_x, right_y, subtract=True)
+            if not output_name:
+                output_name = f"{left_label} - {right_label}"
+            source_text = f"相减: {left_label} - {right_label}"
+            curve_type = "相减结果PSD"
+        else:
+            out_x, out_y, _clipped_unused = self._aligned_psd_operation(left_x, left_y, right_x, right_y, subtract=False)
+            if not output_name:
+                output_name = f"{left_label} + {right_label}"
+            source_text = f"相加: {left_label} + {right_label}"
+            curve_type = "相加结果PSD"
+        saved = self._save_workspace_curve(output_name, curve_type, out_x, out_y, source_text)
+        if saved is None:
+            self.statusBar().showMessage("运算失败：输出曲线没有有效频点")
+            return
+        self.workspace_op_output_edit.clear()
+        self.derived_result_mode_combo.setCurrentText("PSD")
+        self._plot_derived_result_axis(
+            self.derived_plots[1],
+            "PSD",
+            [{"label": saved.name, "psd": (saved.frequency_hz, saved.values)}],
+            keep_existing=self._hold_enabled(),
+        )
+        if clipped:
+            self.statusBar().showMessage(f"已保存到工作区：{saved.name}（相减结果含非正值，已截断到最小正值）")
+        else:
+            self.statusBar().showMessage(f"已保存到工作区：{saved.name}")
 
     def _show_derived_curve_dialog(self) -> None:
         if self.derived_curve_dialog is None:
@@ -1529,6 +1959,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self._derived_result_cache.clear()
         self._current_measurement_dataset_id = None
         self._refresh_dataset_lists()
+        self._sync_workspace_operation_labels()
         for plot in self._all_analysis_plots():
             plot.clear()
         self.statusBar().showMessage("Analysis data cleared")
@@ -1580,6 +2011,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         if self._current_measurement_dataset_id in selected_dataset_ids:
             self._current_measurement_dataset_id = None
         self._refresh_dataset_lists()
+        self._sync_workspace_operation_labels()
         self._clear_plots()
         self.statusBar().showMessage(f"Deleted {len(selected_dataset_ids)} selected dataset(s)")
 
@@ -4739,6 +5171,10 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         finally:
             self._axis_scaling_plot = None
         self._auto_place_legend(plot)
+
+
+class AnalysisViewer(AnalysisWorkbench):
+    """Top-level-compatible analysis window kept for existing entry points."""
 
 
 def _concat_finite(arrays: list[np.ndarray], *, positive_only: bool = False) -> np.ndarray:

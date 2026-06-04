@@ -22,6 +22,7 @@ dependencies = [
 gui = [
   "PySide6>=6.7",
   "pyqtgraph>=0.13",
+  "PyOpenGL>=3.1",
 ]
 ni = [
   "nidaqmx>=1.0",
@@ -33,6 +34,7 @@ dev = [
 [project.scripts]
 python-vna = "python_vna.app:main"
 python-vna-converter = "python_vna.conversion_app:main"
+python-vna-diagnostic = "python_vna.diagnostic.app:main"
 
 [tool.setuptools.packages.find]
 include = ["python_vna*"]
