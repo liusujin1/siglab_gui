@@ -34,7 +34,6 @@ dev = [
 [project.scripts]
 python-vna = "python_vna.app:main"
 python-vna-converter = "python_vna.conversion_app:main"
-python-vna-diagnostic = "python_vna.diagnostic.app:main"
 
 [tool.setuptools.packages.find]
 include = ["python_vna*"]
