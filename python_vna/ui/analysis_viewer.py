@@ -67,6 +67,8 @@ TRACE_COLORS = [
 
 TEXT_FILE_FS_HINT_HZ = 1000.0
 VC_REFERENCE_NAMES = ("VC A", "VC B", "VC C", "VC D", "VC E", "VC F")
+VC_REFERENCE_DEFAULT_MAX_HZ = 80.0
+VC_REFERENCE_DERIVED_MAX_HZ = 1000.0
 VC_REFERENCE_LEVELS_UM_S = {
     "VC A": 50.0,
     "VC B": 25.0,
@@ -526,6 +528,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         layout.setContentsMargins(6, 6, 6, 6)
         self.main_mode_combos: list[QtWidgets.QComboBox] = []
         self.main_open_buttons: list[QtWidgets.QPushButton] = []
+        self.main_interp_buttons: list[QtWidgets.QPushButton] = []
         self.main_export_buttons: list[QtWidgets.QPushButton] = []
         self.main_plots: list[pg.PlotWidget] = []
         for index, (label, default) in enumerate((("图窗 1", "Time"), ("图窗 2", "PSD"), ("图窗 3", "Trans"))):
@@ -541,10 +544,19 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             open_button = QtWidgets.QPushButton("图窗")
             export_button = QtWidgets.QPushButton("导出数据")
             open_button.clicked.connect(lambda _checked=False, i=index: self._open_plot_window_for_plot(self.main_plots[i]))
+            interp_button = QtWidgets.QPushButton("插值")
+            interp_button.clicked.connect(
+                lambda _checked=False, i=index: self._prompt_and_interpolate_frequency_plot(
+                    self.main_plots[i],
+                    status_prefix=f"图窗 {i + 1}",
+                )
+            )
             export_button.clicked.connect(lambda _checked=False, i=index: self._export_plot_csv(self.main_plots[i]))
             self.main_open_buttons.append(open_button)
+            self.main_interp_buttons.append(interp_button)
             self.main_export_buttons.append(export_button)
             row.addWidget(open_button)
+            row.addWidget(interp_button)
             row.addWidget(export_button)
             row.addStretch(1)
             layout.addLayout(row)
@@ -614,6 +626,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         layout.addLayout(controls)
         self.foundation_plots: list[pg.PlotWidget] = []
         self.foundation_open_buttons: list[QtWidgets.QPushButton] = []
+        self.foundation_interp_buttons: list[QtWidgets.QPushButton] = []
         self.foundation_export_buttons: list[QtWidgets.QPushButton] = []
         for index, title in enumerate(("Ground Vibration", "Dynamic Stiffness", "Coherence")):
             row = QtWidgets.QHBoxLayout()
@@ -622,10 +635,19 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             open_button = QtWidgets.QPushButton("图窗")
             export_button = QtWidgets.QPushButton("导出数据")
             open_button.clicked.connect(lambda _checked=False, i=index: self._open_plot_window_for_plot(self.foundation_plots[i]))
+            interp_button = QtWidgets.QPushButton("插值")
+            interp_button.clicked.connect(
+                lambda _checked=False, i=index: self._prompt_and_interpolate_frequency_plot(
+                    self.foundation_plots[i],
+                    status_prefix=f"地基振动图窗 {i + 1}",
+                )
+            )
             export_button.clicked.connect(lambda _checked=False, i=index: self._export_plot_csv(self.foundation_plots[i]))
             self.foundation_open_buttons.append(open_button)
+            self.foundation_interp_buttons.append(interp_button)
             self.foundation_export_buttons.append(export_button)
             row.addWidget(open_button)
+            row.addWidget(interp_button)
             row.addWidget(export_button)
             layout.addLayout(row)
             plot = self._create_plot_widget(title)
@@ -687,7 +709,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self.derived_coherence_correction_check.setToolTip(
             "使用传递率对应的相干性修正 PSD：正向除以 coh，反向乘以 coh；低相干频点按下限保护。"
         )
-        self.derived_coherence_correction_check.setChecked(False)
+        self.derived_coherence_correction_check.setChecked(True)
         self.derived_vc_checks: dict[str, QtWidgets.QCheckBox] = {}
 
         for combo in (self.derived_transfer_combo, self.derived_input_series_combo):
@@ -749,6 +771,28 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self.derived_plots: list[pg.PlotWidget] = []
         self.derived_open_buttons: list[QtWidgets.QPushButton] = []
         self.derived_export_buttons: list[QtWidgets.QPushButton] = []
+        self.derived_transfer_interp_spin = QtWidgets.QDoubleSpinBox()
+        self.derived_transfer_interp_spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+        self.derived_transfer_interp_spin.setKeyboardTracking(False)
+        self.derived_transfer_interp_spin.setRange(1e-6, 1e6)
+        self.derived_transfer_interp_spin.setDecimals(3)
+        self.derived_transfer_interp_spin.setSingleStep(0.1)
+        self.derived_transfer_interp_spin.setValue(1.0)
+        self.derived_transfer_interp_spin.setSuffix(" Hz")
+        self.derived_transfer_interp_spin.setMaximumWidth(96)
+        self.derived_transfer_interp_button = QtWidgets.QPushButton("插值")
+        self.derived_transfer_interp_button.setMaximumWidth(58)
+        self.derived_result_interp_spin = QtWidgets.QDoubleSpinBox()
+        self.derived_result_interp_spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+        self.derived_result_interp_spin.setKeyboardTracking(False)
+        self.derived_result_interp_spin.setRange(1e-6, 1e6)
+        self.derived_result_interp_spin.setDecimals(3)
+        self.derived_result_interp_spin.setSingleStep(0.1)
+        self.derived_result_interp_spin.setValue(1.0)
+        self.derived_result_interp_spin.setSuffix(" Hz")
+        self.derived_result_interp_spin.setMaximumWidth(96)
+        self.derived_result_interp_button = QtWidgets.QPushButton("插值")
+        self.derived_result_interp_button.setMaximumWidth(58)
         self.derived_result_mode_combo = QtWidgets.QComboBox()
         self.derived_result_mode_combo.addItems(["PSD", "CumPSD", "地基振动", "近似时域"])
         self.derived_result_mode_combo.setCurrentText("PSD")
@@ -767,6 +811,10 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             self.derived_open_buttons.append(open_button)
             self.derived_export_buttons.append(export_button)
             row.addWidget(open_button)
+            if index == 0:
+                row.addWidget(self.derived_transfer_interp_button)
+            else:
+                row.addWidget(self.derived_result_interp_button)
             row.addWidget(export_button)
             layout.addLayout(row)
             plot = self._create_plot_widget(title)
@@ -794,6 +842,8 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         self.derived_plot_button.clicked.connect(
             lambda _checked=False: self._plot_derived(keep_existing=self._hold_enabled())
         )
+        self.derived_transfer_interp_button.clicked.connect(self._prompt_and_interpolate_derived_transfer_plot)
+        self.derived_result_interp_button.clicked.connect(self._prompt_and_interpolate_derived_result_plot)
 
     def _load_file(self) -> None:
         paths, _filter = QtWidgets.QFileDialog.getOpenFileNames(
@@ -1822,7 +1872,185 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         plot.setTitle("传递率曲线" if f.size >= 2 else "传递率曲线 (no valid data)")
         plot.setLabel("bottom", "Frequency (Hz)")
         plot.setLabel("left", "Trans (dB)")
+        self._set_interpolation_resolution_from_curve(self.derived_transfer_interp_spin, f)
         self._auto_range_plot(plot, [f], [magnitude_db], log_x=True, log_y=False)
+
+    def _interpolate_derived_transfer_plot(self) -> None:
+        if not hasattr(self, "derived_plots") or not self.derived_plots:
+            return
+        self._interpolate_frequency_plot(
+            self.derived_plots[0],
+            self.derived_transfer_interp_spin,
+            status_prefix="传递率曲线",
+        )
+
+    def _interpolate_derived_result_plot(self) -> None:
+        if not hasattr(self, "derived_plots") or len(self.derived_plots) < 2:
+            return
+        self._interpolate_frequency_plot(
+            self.derived_plots[1],
+            self.derived_result_interp_spin,
+            status_prefix="换算图窗",
+        )
+
+    def _prompt_and_interpolate_derived_transfer_plot(self) -> None:
+        if not hasattr(self, "derived_plots") or not self.derived_plots:
+            return
+        self._prompt_and_interpolate_frequency_plot(
+            self.derived_plots[0],
+            status_prefix="传递率曲线",
+            resolution_spin=self.derived_transfer_interp_spin,
+        )
+
+    def _prompt_and_interpolate_derived_result_plot(self) -> None:
+        if not hasattr(self, "derived_plots") or len(self.derived_plots) < 2:
+            return
+        self._prompt_and_interpolate_frequency_plot(
+            self.derived_plots[1],
+            status_prefix="换算图窗",
+            resolution_spin=self.derived_result_interp_spin,
+        )
+
+    def _prompt_and_interpolate_frequency_plot(
+        self,
+        plot: pg.PlotWidget,
+        *,
+        status_prefix: str,
+        resolution_spin: QtWidgets.QDoubleSpinBox | None = None,
+    ) -> None:
+        default_resolution = self._default_interpolation_resolution(plot)
+        if default_resolution is None and resolution_spin is not None:
+            default_resolution = float(resolution_spin.value())
+        if default_resolution is None:
+            default_resolution = 1.0
+        resolution = self._request_interpolation_resolution(default_resolution)
+        if resolution is None:
+            return
+        if resolution_spin is not None:
+            resolution_spin.setValue(resolution)
+        self._interpolate_frequency_plot(
+            plot,
+            resolution_spin,
+            status_prefix=status_prefix,
+            resolution=resolution,
+        )
+
+    def _request_interpolation_resolution(self, default_resolution: float) -> float | None:
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("插值分辨率")
+        layout = QtWidgets.QVBoxLayout(dialog)
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel("分辨率"))
+        spin = QtWidgets.QDoubleSpinBox(dialog)
+        spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+        spin.setKeyboardTracking(False)
+        spin.setRange(1e-6, 1e6)
+        spin.setDecimals(3)
+        spin.setSingleStep(0.1)
+        spin.setSuffix(" Hz")
+        spin.setValue(float(default_resolution))
+        row.addWidget(spin)
+        layout.addLayout(row)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel,
+            parent=dialog,
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return None
+        return float(spin.value())
+
+    def _interpolate_frequency_plot(
+        self,
+        plot: pg.PlotWidget,
+        resolution_spin: QtWidgets.QDoubleSpinBox | None,
+        *,
+        status_prefix: str,
+        resolution: float | None = None,
+    ) -> None:
+        curves = self._plot_curves.get(plot, {})
+        if not curves:
+            self.statusBar().showMessage(f"{status_prefix}为空，无法插值")
+            return
+        label = self._active_trace.get(plot)
+        if label not in curves:
+            label = next(iter(curves))
+        x, y = curves[label]
+        x_arr, y_arr = _finite_aligned_xy(x, y)
+        valid = np.isfinite(x_arr) & np.isfinite(y_arr) & (x_arr > 0.0)
+        x_arr = x_arr[valid]
+        y_arr = y_arr[valid]
+        if x_arr.size < 2:
+            self.statusBar().showMessage(f"{status_prefix}有效点不足，无法插值")
+            return
+        order = np.argsort(x_arr)
+        x_arr = x_arr[order]
+        y_arr = y_arr[order]
+        unique_x, unique_indices = np.unique(x_arr, return_index=True)
+        x_arr = unique_x
+        y_arr = y_arr[unique_indices]
+        if x_arr.size < 2:
+            self.statusBar().showMessage(f"{status_prefix}有效频点不足，无法插值")
+            return
+        if resolution is None:
+            if resolution_spin is None:
+                resolution = self._default_interpolation_resolution(plot) or 1.0
+            else:
+                resolution = float(resolution_spin.value())
+        if not np.isfinite(resolution) or resolution <= 0.0:
+            self.statusBar().showMessage("插值分辨率必须大于 0")
+            return
+        start = float(x_arr[0])
+        stop = float(x_arr[-1])
+        if stop <= start:
+            self.statusBar().showMessage(f"{status_prefix}频率范围无效，无法插值")
+            return
+        grid = _aligned_frequency_grid(start, stop, resolution)
+        if grid.size < 2:
+            self.statusBar().showMessage(f"{status_prefix}频率范围小于插值分辨率")
+            return
+        y_interp = np.interp(grid, x_arr, y_arr)
+
+        plot.clear()
+        if plot.plotItem.legend is not None:
+            plot.plotItem.legend.clear()
+        plot.addLegend(offset=(4, 2))
+        self._plot_curves[plot] = {}
+        self._plot_export_excluded[plot] = set()
+        self._active_trace[plot] = None
+        self._data_tip_items[plot].clear()
+        self._readd_cursor_items(plot)
+        self._apply_plot_theme(plot)
+        log_x, log_y = self._log_modes.get(plot, (True, False))
+        plot.setLogMode(x=log_x, y=log_y)
+        base_label = str(label).split(" 插值 ")[0]
+        plot_label = f"{base_label} 插值 {resolution:g} Hz"
+        plot.plot(grid, y_interp, pen=pg.mkPen(TRACE_COLORS[0], width=1.3), name=plot_label)
+        self._plot_curves[plot][plot_label] = (grid, y_interp)
+        self._active_trace[plot] = plot_label
+        self._auto_range_plot(plot, [grid], [y_interp], log_x=log_x, log_y=log_y)
+        self.statusBar().showMessage(f"{status_prefix}已按 {resolution:g} Hz 插值")
+
+    @staticmethod
+    def _set_interpolation_resolution_from_curve(
+        spin: QtWidgets.QDoubleSpinBox,
+        frequencies: np.ndarray,
+    ) -> None:
+        resolution = _infer_frequency_resolution(frequencies)
+        if resolution is not None:
+            spin.setValue(resolution)
+
+    def _default_interpolation_resolution(self, plot: pg.PlotWidget) -> float | None:
+        curves = self._plot_curves.get(plot, {})
+        if not curves:
+            return None
+        label = self._active_trace.get(plot)
+        if label not in curves:
+            label = next(iter(curves))
+        x, _y = curves[label]
+        return _infer_frequency_resolution(x)
 
     def _plot_derived_result_axis(
         self,
@@ -1932,6 +2160,10 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         if range_curves:
             x_ranges = [curve[0] for curve in range_curves.values()]
             y_ranges = [curve[1] for curve in range_curves.values()]
+        resolution_curves = self._plot_curves.get(plot, {})
+        if resolution_curves:
+            first_curve = next(iter(resolution_curves.values()))
+            self._set_interpolation_resolution_from_curve(self.derived_result_interp_spin, first_curve[0])
         self._auto_range_plot(plot, x_ranges, y_ranges, log_x=log_x, log_y=log_y)
 
     def _add_derived_vc_reference_lines(
@@ -1947,7 +2179,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             checkbox = self.derived_vc_checks.get(name)
             if checkbox is None or not checkbox.isChecked():
                 continue
-            ref_f, values = _vc_reference_frequency_velocity(name)
+            ref_f, values = _vc_reference_frequency_velocity(name, max_hz=VC_REFERENCE_DERIVED_MAX_HZ)
             x_values, y_values = self._vc_reference_curve_for_mode(ref_f, values, curve_key)
             if x_values.size < 2 or y_values.size < 2:
                 continue
@@ -2020,7 +2252,10 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         coherence_correction: bool = False,
     ) -> dict[str, object] | None:
         del transfer_dataset, base_series, top_series
-        f_source_accel, psd_source_accel = _vc_reference_acceleration_psd(name)
+        f_source_accel, psd_source_accel = _vc_reference_acceleration_psd(
+            name,
+            max_hz=VC_REFERENCE_DERIVED_MAX_HZ,
+        )
         if f_source_accel.size < 2:
             return None
         psd_source_accel = psd_source_accel * float(input_factor) ** 2
@@ -2081,7 +2316,10 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         if f_source_quantity.size >= 2:
             result["source_psd"] = (f_source_quantity, psd_source_quantity)
             result["source_cumulative"] = compute_cumulative_spectrum(f_source_quantity, psd_source_quantity)
-        source_f, source_velocity = _vc_reference_frequency_velocity(name)
+        source_f, source_velocity = _vc_reference_frequency_velocity(
+            name,
+            max_hz=VC_REFERENCE_DERIVED_MAX_HZ,
+        )
         source_velocity = source_velocity * float(input_factor)
         if source_f.size and freq_min is not None:
             keep = source_f >= float(freq_min)
@@ -2842,7 +3080,7 @@ class AnalysisViewer(QtWidgets.QMainWindow):
             return
         excluded = self._plot_export_excluded.get(plot, set())
         title = _safe_filename_part(plot.getPlotItem().titleLabel.text or "plot")
-        path, _filter = QtWidgets.QFileDialog.getSaveFileName(
+        path, selected_filter = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "Export active plot data",
             str(self._last_directory / f"analysis_{title}.csv"),
@@ -2865,7 +3103,8 @@ class AnalysisViewer(QtWidgets.QMainWindow):
         if not rows:
             self.statusBar().showMessage("No exportable active plot data")
             return
-        with destination.open("w", encoding="utf-8", newline="\n") as handle:
+        encoding = "utf-8-sig" if destination.suffix.lower() == ".csv" or "CSV" in selected_filter else "utf-8"
+        with destination.open("w", encoding=encoding, newline="\n") as handle:
             header = []
             for label, _x, _y in rows:
                 safe_label = _safe_header_part(label)
@@ -3721,16 +3960,26 @@ def _safe_scale_ratio(scale: float, original_scale: float) -> float:
     return numerator / denominator
 
 
-def _vc_reference_frequency_velocity(name: str) -> tuple[np.ndarray, np.ndarray]:
+def _vc_reference_frequency_velocity(
+    name: str,
+    *,
+    max_hz: float = VC_REFERENCE_DEFAULT_MAX_HZ,
+) -> tuple[np.ndarray, np.ndarray]:
     label = str(name)
     if label not in VC_REFERENCE_LEVELS_UM_S:
         return np.array([], dtype=float), np.array([], dtype=float)
+    max_frequency = float(max_hz)
+    if not np.isfinite(max_frequency) or max_frequency <= 0.0:
+        return np.array([], dtype=float), np.array([], dtype=float)
     start_hz = 4.0 if label in {"VC A", "VC B"} else 1.0
-    centers, _lower_edges, _upper_edges = third_octave_bands(start_hz, 90.0)
+    centers, _lower_edges, _upper_edges = third_octave_bands(
+        start_hz,
+        max_frequency * (2.0 ** (1.0 / 6.0)),
+    )
     if centers.size == 0:
         return np.array([], dtype=float), np.array([], dtype=float)
     centers = np.asarray(centers, dtype=float)
-    keep = np.isfinite(centers) & (centers >= start_hz * 0.999) & (centers <= 80.0 * 1.001)
+    keep = np.isfinite(centers) & (centers >= start_hz * 0.999) & (centers <= max_frequency * 1.001)
     centers = centers[keep]
     level = float(VC_REFERENCE_LEVELS_UM_S[label])
     if label in {"VC A", "VC B"}:
@@ -3740,8 +3989,12 @@ def _vc_reference_frequency_velocity(name: str) -> tuple[np.ndarray, np.ndarray]
     return centers, velocity
 
 
-def _vc_reference_acceleration_psd(name: str) -> tuple[np.ndarray, np.ndarray]:
-    frequencies, velocity_um_s = _vc_reference_frequency_velocity(name)
+def _vc_reference_acceleration_psd(
+    name: str,
+    *,
+    max_hz: float = VC_REFERENCE_DEFAULT_MAX_HZ,
+) -> tuple[np.ndarray, np.ndarray]:
+    frequencies, velocity_um_s = _vc_reference_frequency_velocity(name, max_hz=max_hz)
     if frequencies.size < 2:
         return np.array([], dtype=float), np.array([], dtype=float)
     centers, lower_edges, upper_edges = third_octave_bands(
@@ -3814,6 +4067,46 @@ def _safe_header_part(text: str) -> str:
 def _safe_filename_part(text: str) -> str:
     safe = _safe_header_part(text).lower()
     return safe[:48] or "plot"
+
+
+def _infer_frequency_resolution(frequencies: np.ndarray) -> float | None:
+    values = np.asarray(frequencies, dtype=float).ravel()
+    values = values[np.isfinite(values) & (values > 0.0)]
+    if values.size < 2:
+        return None
+    values = np.unique(np.sort(values))
+    diffs = np.diff(values)
+    diffs = diffs[np.isfinite(diffs) & (diffs > 0.0)]
+    if diffs.size == 0:
+        return None
+    return float(np.median(diffs))
+
+
+def _aligned_frequency_grid(start_hz: float, stop_hz: float, resolution_hz: float) -> np.ndarray:
+    start = float(start_hz)
+    stop = float(stop_hz)
+    resolution = float(resolution_hz)
+    if not all(np.isfinite(value) for value in (start, stop, resolution)):
+        return np.array([], dtype=float)
+    if start <= 0.0 or stop <= start or resolution <= 0.0:
+        return np.array([], dtype=float)
+    first_index = int(np.ceil((start - resolution * 1e-9) / resolution))
+    last_index = int(np.floor((stop + resolution * 1e-9) / resolution))
+    if last_index < first_index:
+        return np.array([], dtype=float)
+    indices = np.arange(first_index, last_index + 1, dtype=float)
+    decimals = _frequency_grid_decimals(resolution)
+    return np.round(indices * resolution, decimals=decimals)
+
+
+def _frequency_grid_decimals(resolution_hz: float) -> int:
+    resolution = abs(float(resolution_hz))
+    if not np.isfinite(resolution) or resolution <= 0.0:
+        return 12
+    text = f"{resolution:.12f}".rstrip("0").rstrip(".")
+    if "." not in text:
+        return 0
+    return min(12, max(0, len(text.split(".", 1)[1])))
 
 
 def _supported_files_in_folder(folder: Path) -> list[Path]:

@@ -42,7 +42,7 @@ from python_vna.continuous_recording import ContinuousDatWriter
 from python_vna.daq.base import BackendFrame
 from python_vna.models import MeasurementSet
 from python_vna.storage import default_session_config
-from python_vna.ui.analysis_viewer import AnalysisViewer, _vc_reference_frequency_velocity
+from python_vna.ui.analysis_viewer import AnalysisViewer, _aligned_frequency_grid, _vc_reference_frequency_velocity
 from python_vna.ui.main_window import DataTipText, VnaAxisItem
 
 
@@ -138,6 +138,13 @@ class AnalysisAlgorithmTests(unittest.TestCase):
         np.testing.assert_allclose(top_psd, psd * 16.0)
         np.testing.assert_allclose(base_f, freqs)
         np.testing.assert_allclose(base_psd, psd)
+
+    def test_aligned_frequency_grid_uses_resolution_multiples(self):
+        grid = _aligned_frequency_grid(0.08, 0.42, 0.1)
+
+        np.testing.assert_allclose(grid, [0.1, 0.2, 0.3, 0.4])
+        np.testing.assert_allclose(grid / 0.1, np.rint(grid / 0.1))
+        self.assertEqual([str(value) for value in grid], ["0.1", "0.2", "0.3", "0.4"])
 
     def test_derived_time_requires_complex_transfer_and_recovers_gain(self):
         sample_rate = 1000.0
@@ -631,9 +638,10 @@ class AnalysisViewerUiTests(unittest.TestCase):
                 }
                 with mock.patch(
                     "python_vna.ui.analysis_viewer.QtWidgets.QFileDialog.getSaveFileName",
-                    return_value=(str(destination), ""),
+                    return_value=(str(destination), "CSV Files (*.csv)"),
                 ):
                     viewer._export_current_csv()
+                self.assertTrue(destination.read_bytes().startswith(b"\xef\xbb\xbf"))
                 text = destination.read_text(encoding="utf-8")
                 self.assertIn("active_trace_x,active_trace_y", text)
                 self.assertIn("3,5", text)
@@ -831,6 +839,10 @@ class AnalysisViewerUiTests(unittest.TestCase):
             self.assertEqual(viewer.tabs.tabText(1), "地面振动")
             self.assertEqual(viewer.tabs.tabText(2), "换算")
             self.assertEqual(len(viewer.main_open_buttons), 3)
+            self.assertEqual(len(viewer.main_interp_buttons), 3)
+            self.assertTrue(all(button.text() == "插值" for button in viewer.main_interp_buttons))
+            self.assertEqual(len(viewer.foundation_interp_buttons), 3)
+            self.assertTrue(all(button.text() == "插值" for button in viewer.foundation_interp_buttons))
             self.assertEqual(len(viewer.foundation_export_buttons), 3)
             self.assertEqual(len(viewer.derived_export_buttons), 2)
             self.assertLessEqual(viewer.width(), 980)
@@ -845,7 +857,30 @@ class AnalysisViewerUiTests(unittest.TestCase):
             self.assertEqual(viewer.derived_input_factor_spin.decimals(), 1)
             self.assertFalse(any(checkbox.isChecked() for checkbox in viewer.derived_vc_checks.values()))
             self.assertFalse(viewer.derived_show_source_check.isChecked())
-            self.assertFalse(viewer.derived_coherence_correction_check.isChecked())
+            self.assertTrue(viewer.derived_coherence_correction_check.isChecked())
+            self.assertEqual(viewer.derived_transfer_interp_button.text(), "插值")
+            self.assertAlmostEqual(viewer.derived_transfer_interp_spin.value(), 1.0)
+            derived_labels = [label.text() for label in viewer.derived_tab.findChildren(QtWidgets.QLabel)]
+            self.assertNotIn("分辨率", derived_labels)
+        finally:
+            viewer.close()
+
+    def test_interpolation_prompt_is_shared_by_main_and_foundation_plots(self):
+        viewer = AnalysisViewer()
+        try:
+            for plot in (viewer.main_plots[0], viewer.foundation_plots[0]):
+                viewer._plot_curves[plot] = {
+                    "trace": (np.array([10.0, 20.0, 30.0]), np.array([1.0, 4.0, 9.0]))
+                }
+                viewer._active_trace[plot] = "trace"
+                with mock.patch.object(viewer, "_request_interpolation_resolution", return_value=5.0) as prompt:
+                    viewer._prompt_and_interpolate_frequency_plot(plot, status_prefix="测试")
+
+                prompt.assert_called_once_with(10.0)
+                interpolated_curves = viewer._plot_curves[plot]
+                _label, (interp_f, interp_y) = next(iter(interpolated_curves.items()))
+                np.testing.assert_allclose(interp_f, [10.0, 15.0, 20.0, 25.0, 30.0])
+                np.testing.assert_allclose(interp_y, [1.0, 2.5, 4.0, 6.5, 9.0])
         finally:
             viewer.close()
 
@@ -894,6 +929,7 @@ class AnalysisViewerUiTests(unittest.TestCase):
             viewer._refresh_dataset_lists()
             input_index = viewer._combo_index_for_data(viewer.derived_input_series_combo, "2:ai0")
             viewer.derived_input_series_combo.setCurrentIndex(input_index)
+            viewer.derived_coherence_correction_check.setChecked(False)
 
             viewer._plot_derived()
 
@@ -905,6 +941,18 @@ class AnalysisViewerUiTests(unittest.TestCase):
             self.assertIn("ai0->ai1", viewer.derived_transfer_combo.currentText())
             self.assertGreater(len(transfer_curves), 0)
             self.assertGreater(len(psd_curves), 0)
+            self.assertAlmostEqual(viewer.derived_transfer_interp_spin.value(), 10.0)
+            self.assertAlmostEqual(viewer.derived_result_interp_spin.value(), 10.0)
+            viewer.derived_transfer_interp_spin.setValue(5.0)
+            viewer._interpolate_derived_transfer_plot()
+            interpolated_curves = viewer._plot_curves[viewer.derived_plots[0]]
+            _interp_label, (interp_f, _interp_y) = next(iter(interpolated_curves.items()))
+            np.testing.assert_allclose(interp_f, [10.0, 15.0, 20.0, 25.0, 30.0])
+            viewer.derived_result_interp_spin.setValue(5.0)
+            viewer._interpolate_derived_result_plot()
+            interpolated_result_curves = viewer._plot_curves[viewer.derived_plots[1]]
+            _interp_result_label, (interp_result_f, _interp_result_y) = next(iter(interpolated_result_curves.items()))
+            np.testing.assert_allclose(interp_result_f, [10.0, 15.0, 20.0, 25.0, 30.0])
             _label, (f, psd) = next(iter(psd_curves.items()))
             np.testing.assert_allclose(f, [10.0, 20.0, 30.0])
             np.testing.assert_allclose(psd, [4.0, 4.0, 4.0])
@@ -961,6 +1009,11 @@ class AnalysisViewerUiTests(unittest.TestCase):
             self.assertAlmostEqual(vc_frequencies[-1], 80.0)
             self.assertGreater(vc_frequencies.size, 10)
             np.testing.assert_allclose(vc_velocity, np.full_like(vc_velocity, 12.5))
+            derived_vc_frequencies, derived_vc_velocity = _vc_reference_frequency_velocity("VC C", max_hz=1000.0)
+            self.assertAlmostEqual(derived_vc_frequencies[0], 1.0)
+            self.assertAlmostEqual(derived_vc_frequencies[-1], 1000.0)
+            self.assertGreater(derived_vc_frequencies.size, vc_frequencies.size)
+            np.testing.assert_allclose(derived_vc_velocity, np.full_like(derived_vc_velocity, 12.5))
 
             viewer.derived_input_series_combo.setCurrentIndex(vc_c_index)
             viewer.derived_result_mode_combo.setCurrentText("地基振动")
