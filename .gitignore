@@ -9,6 +9,7 @@ __pycache__/
 *.spec
 !PythonVNAConverter.spec
 !PythonVNA_diag.spec
+!PythonVNA_Suite.spec
 *.egg-info/
 build/
 dist/

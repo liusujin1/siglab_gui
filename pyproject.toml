@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "python-vna"
-version = "2.9"
+version = "3.0"
 description = "Python front-end and analysis pipeline for NI USB-4431 vibration testing."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -21,8 +21,9 @@ dependencies = [
 [project.optional-dependencies]
 gui = [
   "PySide6>=6.7",
-  "pyqtgraph>=0.13",
   "PyOpenGL>=3.1",
+  "pyqtgraph>=0.13",
+  "openpyxl>=3.1",
 ]
 ni = [
   "nidaqmx>=1.0",
@@ -34,6 +35,9 @@ dev = [
 [project.scripts]
 python-vna = "python_vna.app:main"
 python-vna-converter = "python_vna.conversion_app:main"
+python-vna-diagnostic = "python_vna.conversion_app:main"
+python-vna-test = "python_vna.app:main"
+vianalysis = "python_vna.diagnostic.app:main"
 
 [tool.setuptools.packages.find]
 include = ["python_vna*"]

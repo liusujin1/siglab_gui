@@ -170,6 +170,35 @@ def compute_periodogram_psd(
     return freqs[valid], psd[valid]
 
 
+def compute_hann_periodogram_psd(
+    values: np.ndarray,
+    sample_rate: float,
+    *,
+    skip_initial: int = 0,
+) -> tuple[np.ndarray, np.ndarray]:
+    y = np.asarray(values, dtype=float).ravel()
+    y = y[np.isfinite(y)]
+    if y.size < 4 or not np.isfinite(sample_rate) or sample_rate <= 0.0:
+        return np.array([], dtype=float), np.array([], dtype=float)
+    freqs, psd = _signal().periodogram(
+        y,
+        fs=float(sample_rate),
+        window=np.hanning(y.size),
+        nfft=y.size,
+        detrend=False,
+        scaling="density",
+        return_onesided=True,
+    )
+    valid = np.isfinite(freqs) & np.isfinite(psd) & (freqs > 0.0) & (psd > 0.0)
+    freqs = freqs[valid]
+    psd = psd[valid]
+    skip = max(0, int(skip_initial))
+    if skip and freqs.size > skip:
+        freqs = freqs[skip:]
+        psd = psd[skip:]
+    return freqs, psd
+
+
 def compute_welch_psd(
     values: np.ndarray,
     sample_rate: float,
@@ -221,6 +250,49 @@ def compute_transfer_function_welch(
         noverlap=nperseg // 2,
         detrend="constant",
         scaling="density",
+    )
+    frf = np.divide(g_yx, g_xx, out=np.zeros_like(g_yx), where=np.abs(g_xx) > 0.0)
+    valid = np.isfinite(freqs) & np.isfinite(frf) & (freqs > 0.0)
+    return freqs[valid], frf[valid]
+
+
+def compute_matlab_tfestimate(
+    reference: np.ndarray,
+    response: np.ndarray,
+    sample_rate: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    ref, resp = _finite_pair(reference, response)
+    n = ref.size
+    if n < 8 or not np.isfinite(sample_rate) or sample_rate <= 0.0:
+        return np.array([], dtype=float), np.array([], dtype=complex)
+    nfft = n // 3
+    if nfft < 8:
+        nfft = n
+    nfft = min(nfft, n)
+    window = np.hanning(nfft)
+    sig = _signal()
+    freqs, g_xx = sig.welch(
+        ref,
+        fs=float(sample_rate),
+        window=window,
+        nperseg=nfft,
+        noverlap=0,
+        nfft=nfft,
+        detrend=False,
+        scaling="density",
+        return_onesided=True,
+    )
+    _freqs, g_yx = sig.csd(
+        ref,
+        resp,
+        fs=float(sample_rate),
+        window=window,
+        nperseg=nfft,
+        noverlap=0,
+        nfft=nfft,
+        detrend=False,
+        scaling="density",
+        return_onesided=True,
     )
     frf = np.divide(g_yx, g_xx, out=np.zeros_like(g_yx), where=np.abs(g_xx) > 0.0)
     valid = np.isfinite(freqs) & np.isfinite(frf) & (freqs > 0.0)

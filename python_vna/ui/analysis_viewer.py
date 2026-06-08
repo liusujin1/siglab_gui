@@ -160,6 +160,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         self._workspace_curves: list[WorkspaceCurve] = []
         self._next_workspace_curve_id = 1
         self._workspace_operation_sources: dict[str, object | None] = {"a": None, "b": None}
+        self._interpolation_resolution_hz = 1.0
         self._build_ui()
         self.apply_theme(self._theme)
 
@@ -936,7 +937,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         self.derived_coherence_correction_check.setToolTip(
             "使用传递率对应的相干性修正 PSD：正向除以 coh，反向乘以 coh；低相干频点按下限保护。"
         )
-        self.derived_coherence_correction_check.setChecked(False)
+        self.derived_coherence_correction_check.setChecked(True)
         self.derived_vc_checks: dict[str, QtWidgets.QCheckBox] = {}
 
         for combo in (self.derived_transfer_combo, self.derived_input_series_combo):
@@ -1144,6 +1145,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
 
         self.derived_plots: list[pg.PlotWidget] = []
         self.derived_open_buttons: list[QtWidgets.QPushButton] = []
+        self.derived_interpolate_buttons: list[QtWidgets.QPushButton] = []
         self.derived_export_buttons: list[QtWidgets.QPushButton] = []
         self.derived_result_mode_combo = QtWidgets.QComboBox()
         self.derived_result_mode_combo.addItems(["PSD", "CumPSD", "地基振动", "近似时域"])
@@ -1157,12 +1159,16 @@ class AnalysisWorkbench(QtWidgets.QWidget):
                 row.addWidget(self.derived_result_mode_combo)
             row.addStretch(1)
             open_button = QtWidgets.QPushButton("图窗")
+            interpolate_button = QtWidgets.QPushButton("插值")
             export_button = QtWidgets.QPushButton("导出数据")
             open_button.clicked.connect(lambda _checked=False, i=index: self._open_plot_window_for_plot(self.derived_plots[i]))
+            interpolate_button.clicked.connect(lambda _checked=False, i=index: self._show_interpolation_dialog_for_plot(self.derived_plots[i]))
             export_button.clicked.connect(lambda _checked=False, i=index: self._export_plot_csv(self.derived_plots[i]))
             self.derived_open_buttons.append(open_button)
+            self.derived_interpolate_buttons.append(interpolate_button)
             self.derived_export_buttons.append(export_button)
             row.addWidget(open_button)
+            row.addWidget(interpolate_button)
             row.addWidget(export_button)
             layout.addLayout(row)
             plot = self._create_plot_widget(title)
@@ -4408,6 +4414,102 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         plot = self._active_plot or (main_plots[0] if main_plots else None)
         self._export_plot_csv(plot)
 
+    def _suggest_interpolation_resolution_hz(self, plot: pg.PlotWidget | None) -> float:
+        if plot is None:
+            return float(self._interpolation_resolution_hz)
+        excluded = self._plot_export_excluded.get(plot, set())
+        diffs: list[np.ndarray] = []
+        for label, (x_values, y_values) in self._plot_curves.get(plot, {}).items():
+            if label in excluded:
+                continue
+            x_arr, _y_arr = _finite_aligned_xy(x_values, y_values)
+            x_arr = np.unique(np.sort(x_arr[np.isfinite(x_arr) & (x_arr > 0.0)]))
+            if x_arr.size < 2:
+                continue
+            delta = np.diff(x_arr)
+            delta = delta[np.isfinite(delta) & (delta > 0.0)]
+            if delta.size:
+                diffs.append(delta)
+        if not diffs:
+            return float(self._interpolation_resolution_hz)
+        resolution = float(np.median(np.concatenate(diffs)))
+        if not np.isfinite(resolution) or resolution <= 0.0:
+            return float(self._interpolation_resolution_hz)
+        return resolution
+
+    def _show_interpolation_dialog_for_plot(self, plot: pg.PlotWidget | None) -> None:
+        if plot is None:
+            self.statusBar().showMessage("No plot selected for interpolation")
+            return
+        default_resolution = self._suggest_interpolation_resolution_hz(plot)
+        value, accepted = QtWidgets.QInputDialog.getDouble(
+            self,
+            "曲线插值",
+            "频率分辨率 (Hz)",
+            default_resolution,
+            1e-12,
+            1e12,
+            9,
+        )
+        if not accepted:
+            return
+        self._interpolation_resolution_hz = float(value)
+        self._interpolate_plot_frequency_curves(plot, float(value))
+
+    def _interpolate_plot_frequency_curves(self, plot: pg.PlotWidget | None, resolution_hz: float) -> None:
+        if plot is None:
+            self.statusBar().showMessage("No plot selected for interpolation")
+            return
+        if not np.isfinite(resolution_hz) or resolution_hz <= 0.0:
+            self.statusBar().showMessage("请输入有效的频率分辨率")
+            return
+        curves = self._plot_curves.get(plot, {})
+        if not curves:
+            self.statusBar().showMessage("当前图窗没有可插值曲线")
+            return
+        log_x, log_y = self._log_modes.get(plot, (False, False))
+        if not log_x:
+            self.statusBar().showMessage("当前图窗不是频域曲线，无法按 Hz 插值")
+            return
+        excluded = self._plot_export_excluded.get(plot, set())
+        updates: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        for label, (x_values, y_values) in curves.items():
+            if label in excluded:
+                continue
+            new_x, new_y = _interpolate_frequency_curve(
+                x_values,
+                y_values,
+                resolution_hz,
+                log_y=log_y,
+            )
+            if new_x.size >= 2 and new_y.size >= 2:
+                updates[label] = (new_x, new_y)
+        if not updates:
+            self.statusBar().showMessage("当前图窗没有可插值的有效频域曲线")
+            return
+        data_items_by_name: dict[str, pg.PlotDataItem] = {}
+        for item in plot.listDataItems():
+            try:
+                item_name = item.name()
+            except Exception:
+                item_name = item.opts.get("name") if hasattr(item, "opts") else None
+            if item_name:
+                data_items_by_name[str(item_name)] = item
+        for label, (new_x, new_y) in updates.items():
+            curves[label] = (new_x, new_y)
+            item = data_items_by_name.get(label)
+            if item is not None:
+                item.setData(new_x, new_y)
+        self._clear_data_tips(plot)
+        self._auto_range_plot(
+            plot,
+            [curve[0] for curve in curves.values()],
+            [curve[1] for curve in curves.values()],
+            log_x=log_x,
+            log_y=log_y,
+        )
+        self.statusBar().showMessage(f"已按 {resolution_hz:g} Hz 插值 {len(updates)} 条曲线")
+
     def _export_plot_csv(self, plot: pg.PlotWidget | None) -> None:
         if plot is None:
             self.statusBar().showMessage("No active plot for export")
@@ -4442,7 +4544,8 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         if not rows:
             self.statusBar().showMessage("No exportable active plot data")
             return
-        with destination.open("w", encoding="utf-8", newline="\n") as handle:
+        encoding = "utf-8-sig" if destination.suffix.lower() == ".csv" else "utf-8"
+        with destination.open("w", encoding=encoding, newline="\n") as handle:
             header = []
             for label, _x, _y in rows:
                 safe_label = _safe_header_part(label)
@@ -5223,6 +5326,49 @@ def _finite_aligned_xy(x_data: np.ndarray, y_data: np.ndarray) -> tuple[np.ndarr
     return x_arr[finite], y_arr[finite]
 
 
+def _interpolate_frequency_curve(
+    x_data: np.ndarray,
+    y_data: np.ndarray,
+    resolution_hz: float,
+    *,
+    log_y: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    x_arr, y_arr = _finite_aligned_xy(x_data, y_data)
+    valid = x_arr > 0.0
+    x_arr = x_arr[valid]
+    y_arr = y_arr[valid]
+    if x_arr.size < 2 or not np.isfinite(resolution_hz) or resolution_hz <= 0.0:
+        return np.array([], dtype=float), np.array([], dtype=float)
+    order = np.argsort(x_arr)
+    x_arr = x_arr[order]
+    y_arr = y_arr[order]
+    x_arr, unique_indices = np.unique(x_arr, return_index=True)
+    y_arr = y_arr[unique_indices]
+    if x_arr.size < 2:
+        return np.array([], dtype=float), np.array([], dtype=float)
+    start = float(x_arr[0])
+    stop = float(x_arr[-1])
+    if stop <= start:
+        return np.array([], dtype=float), np.array([], dtype=float)
+    step = float(resolution_hz)
+    tolerance = max(step, 1.0) * 1e-10
+    start_index = max(1, int(np.ceil((start - tolerance) / step)))
+    stop_index = int(np.floor((stop + tolerance) / step))
+    if stop_index < start_index:
+        return np.array([], dtype=float), np.array([], dtype=float)
+    new_x = np.arange(start_index, stop_index + 1, dtype=float) * step
+    new_x = np.round(new_x, 12)
+    new_x = np.unique(new_x[(new_x >= start - tolerance) & (new_x <= stop + tolerance)])
+    source_x = np.log10(x_arr)
+    target_x = np.log10(new_x)
+    if log_y and np.all(y_arr > 0.0):
+        new_y = 10.0 ** np.interp(target_x, source_x, np.log10(y_arr))
+    else:
+        new_y = np.interp(target_x, source_x, y_arr)
+    valid = np.isfinite(new_x) & np.isfinite(new_y)
+    return new_x[valid], new_y[valid]
+
+
 def _ranges_close(
     left: tuple[tuple[float, float], tuple[float, float]],
     right: tuple[tuple[float, float], tuple[float, float]],
@@ -5321,11 +5467,12 @@ def _vc_reference_frequency_velocity(name: str) -> tuple[np.ndarray, np.ndarray]
     if label not in VC_REFERENCE_LEVELS_UM_S:
         return np.array([], dtype=float), np.array([], dtype=float)
     start_hz = 4.0 if label in {"VC A", "VC B"} else 1.0
-    centers, _lower_edges, _upper_edges = third_octave_bands(start_hz, 90.0)
+    max_hz = 1000.0
+    centers, _lower_edges, _upper_edges = third_octave_bands(start_hz, 1125.0)
     if centers.size == 0:
         return np.array([], dtype=float), np.array([], dtype=float)
     centers = np.asarray(centers, dtype=float)
-    keep = np.isfinite(centers) & (centers >= start_hz * 0.999) & (centers <= 80.0 * 1.001)
+    keep = np.isfinite(centers) & (centers >= start_hz * 0.999) & (centers <= max_hz * 1.001)
     centers = centers[keep]
     level = float(VC_REFERENCE_LEVELS_UM_S[label])
     if label in {"VC A", "VC B"}:

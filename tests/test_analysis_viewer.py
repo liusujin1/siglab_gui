@@ -806,13 +806,57 @@ class AnalysisViewerUiTests(unittest.TestCase):
                     return_value=(str(destination), ""),
                 ):
                     viewer._export_current_csv()
-                text = destination.read_text(encoding="utf-8")
+                raw = destination.read_bytes()
+                self.assertTrue(raw.startswith(b"\xef\xbb\xbf"))
+                text = raw.decode("utf-8-sig")
                 self.assertIn("active_trace_x,active_trace_y", text)
                 self.assertIn("3,5", text)
                 self.assertNotIn("top_x", text)
                 self.assertEqual(viewer._last_directory, destination.parent)
             finally:
                 viewer.close()
+
+    def test_interpolation_button_resamples_frequency_plot_curves(self):
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            plot = viewer.derived_plots[1]
+            plot.addLegend(offset=(4, 2))
+            plot.setLogMode(x=True, y=True)
+            viewer._log_modes[plot] = (True, True)
+            plot.plot(
+                np.array([0.15, 0.25, 0.35, 0.45], dtype=float),
+                np.array([1.0, 2.0, 4.0, 8.0], dtype=float),
+                name="PSD曲线",
+            )
+            plot.plot(
+                np.array([0.15, 0.45], dtype=float),
+                np.array([2.0, 2.0], dtype=float),
+                name="VC A",
+            )
+            viewer._plot_curves[plot] = {
+                "PSD曲线": (
+                    np.array([0.15, 0.25, 0.35, 0.45], dtype=float),
+                    np.array([1.0, 2.0, 4.0, 8.0], dtype=float),
+                ),
+                "VC A": (np.array([0.15, 0.45], dtype=float), np.array([2.0, 2.0], dtype=float)),
+            }
+            viewer._plot_export_excluded[plot] = {"VC A"}
+
+            with mock.patch(
+                "python_vna.ui.analysis_viewer.QtWidgets.QInputDialog.getDouble",
+                return_value=(0.1, True),
+            ) as get_double:
+                viewer.derived_interpolate_buttons[1].click()
+
+            self.assertAlmostEqual(float(get_double.call_args.args[3]), 0.1)
+            x_values, y_values = viewer._plot_curves[plot]["PSD曲线"]
+            np.testing.assert_allclose(x_values, np.array([0.2, 0.3, 0.4]))
+            self.assertGreater(float(y_values[1]), 1.0)
+            self.assertLess(float(y_values[1]), 8.0)
+            np.testing.assert_allclose(viewer._plot_curves[plot]["VC A"][0], np.array([0.15, 0.45]))
+            self.assertIn("已按 0.1 Hz 插值 1 条曲线", viewer.statusBar().currentMessage())
+        finally:
+            viewer.close()
 
     def test_sync_current_measurement_adds_channels(self):
         measurement = MeasurementSet(
@@ -1003,6 +1047,8 @@ class AnalysisViewerUiTests(unittest.TestCase):
             self.assertEqual(viewer.tabs.tabText(1), "地面振动")
             self.assertEqual(viewer.tabs.tabText(2), "换算")
             self.assertEqual(len(viewer.main_open_buttons), 3)
+            self.assertEqual(len(viewer.derived_interpolate_buttons), 2)
+            self.assertEqual(viewer.derived_interpolate_buttons[0].text(), "插值")
             self.assertEqual(len(viewer.foundation_export_buttons), 3)
             self.assertEqual(len(viewer.derived_export_buttons), 2)
             self.assertLessEqual(viewer.width(), 980)
@@ -1017,7 +1063,7 @@ class AnalysisViewerUiTests(unittest.TestCase):
             self.assertEqual(viewer.derived_input_factor_spin.decimals(), 1)
             self.assertFalse(any(checkbox.isChecked() for checkbox in viewer.derived_vc_checks.values()))
             self.assertFalse(viewer.derived_show_source_check.isChecked())
-            self.assertFalse(viewer.derived_coherence_correction_check.isChecked())
+            self.assertTrue(viewer.derived_coherence_correction_check.isChecked())
         finally:
             viewer.close()
 
@@ -1218,15 +1264,14 @@ class AnalysisViewerUiTests(unittest.TestCase):
             self.assertGreater(len(psd_curves), 0)
             _label, (f, psd) = next(iter(psd_curves.items()))
             np.testing.assert_allclose(f, [10.0, 20.0, 30.0])
-            np.testing.assert_allclose(psd, [4.0, 4.0, 4.0])
+            np.testing.assert_allclose(psd, [16.0, 16.0, 16.0])
 
-            viewer.derived_coherence_correction_check.setChecked(True)
-            viewer._plot_derived()
-            corrected_curves = viewer._plot_curves[viewer.derived_plots[1]]
-            _label, (f_corrected, psd_corrected) = next(iter(corrected_curves.items()))
-            np.testing.assert_allclose(f_corrected, [10.0, 20.0, 30.0])
-            np.testing.assert_allclose(psd_corrected, [16.0, 16.0, 16.0])
             viewer.derived_coherence_correction_check.setChecked(False)
+            viewer._plot_derived()
+            uncorrected_curves = viewer._plot_curves[viewer.derived_plots[1]]
+            _label, (f_uncorrected, psd_uncorrected) = next(iter(uncorrected_curves.items()))
+            np.testing.assert_allclose(f_uncorrected, [10.0, 20.0, 30.0])
+            np.testing.assert_allclose(psd_uncorrected, [4.0, 4.0, 4.0])
 
             viewer.scale_spin.setValue(10.0)
             viewer.derived_transfer_factor_spin.setValue(0.5)
@@ -1269,7 +1314,7 @@ class AnalysisViewerUiTests(unittest.TestCase):
             self.assertGreaterEqual(vc_c_index, 0)
             vc_frequencies, vc_velocity = _vc_reference_frequency_velocity("VC C")
             self.assertAlmostEqual(vc_frequencies[0], 1.0)
-            self.assertAlmostEqual(vc_frequencies[-1], 80.0)
+            self.assertAlmostEqual(vc_frequencies[-1], 1000.0)
             self.assertGreater(vc_frequencies.size, 10)
             np.testing.assert_allclose(vc_velocity, np.full_like(vc_velocity, 12.5))
 

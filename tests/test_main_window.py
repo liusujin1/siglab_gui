@@ -19,7 +19,15 @@ from python_vna.daq.base import BackendCapability, BackendDevice, BackendFrame
 from python_vna.models import MeasurementSet, SavedSession
 from python_vna.storage import default_session_config
 import python_vna.ui.main_window as main_window_module
-from python_vna.ui.main_window import AcquisitionWorker, MCSetupDialog, MainWindow, VnaAxisItem
+from python_vna.ui.main_window import (
+    AcquisitionWorker,
+    MCSetupDialog,
+    MainWindow,
+    VnaAxisItem,
+    archive_member_container,
+    safe_file_dialog_directory,
+    save_path_with_selected_suffix,
+)
 
 
 class _DummyBackend:
@@ -127,6 +135,7 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(self.window.import_legacy_button.text(), "导入")
         self.assertEqual(self.window.open_vna_button.text(), "打开")
         self.assertEqual(self.window.toolbar_data_tip_button.text(), "数据标注")
+        self.assertEqual(self.window.condition_button.text(), "工况")
         self.assertIsInstance(self.window.toolbar_data_tip_button, QtWidgets.QPushButton)
         self.assertEqual(self.window.start_button.text(), "瞬时")
         self.assertEqual(self.window.bandwidth_combo.itemText(0), "BW=0.39KHz")
@@ -146,6 +155,12 @@ class MainWindowTests(unittest.TestCase):
             legacy_titles,
             ["通道设置", "频率范围", "处理", "触发"],
         )
+        condition_titles = [
+            label.text()
+            for label in self.window.condition_panel.findChildren(QtWidgets.QLabel)
+            if label.objectName() == "legacyGroupTitle"
+        ]
+        self.assertIn("工况记录", condition_titles)
         self.assertEqual(
             [self.window.top_control_tabs.tabText(index) for index in range(self.window.top_control_tabs.count())],
             ["激励", "模态", "显示"],
@@ -247,6 +262,40 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(self.window.device_combo.itemData(0), "Dev1")
         self.assertIn("找到 1 个设备", self.window.statusBar().currentMessage())
 
+    def test_device_refresh_worker_uses_subprocess_probe_for_ni_backend(self):
+        class NIDaqBackend:
+            def list_devices(self):
+                raise AssertionError("NI device refresh should use subprocess probe")
+
+        devices = [
+            BackendDevice(
+                name="Dev1",
+                product_type="NI USB-4431",
+                ai_channels=["Dev1/ai0"],
+                ao_channels=["Dev1/ao0"],
+            )
+        ]
+        self.controller.backend = NIDaqBackend()
+        worker = main_window_module.DeviceRefreshWorker(self.controller)
+        captured = []
+        worker.devices_ready.connect(captured.append)
+
+        with mock.patch.object(main_window_module, "probe_ni_devices_subprocess", return_value=devices):
+            worker.run()
+
+        self.assertEqual(captured, [devices])
+
+    def test_backend_change_schedules_async_refresh_without_sync_device_scan(self):
+        self.backend.list_calls = 0
+
+        with mock.patch("python_vna.app.build_backend", return_value=self.backend), mock.patch.object(
+            self.window, "refresh_devices_async"
+        ) as refresh_async:
+            self.window._backend_changed("ni")
+
+        self.assertEqual(self.backend.list_calls, 0)
+        refresh_async.assert_called_once_with()
+
     def test_startup_session_load_failure_keeps_default_window_alive(self):
         with tempfile.NamedTemporaryFile(suffix=".vna") as tmpfile, mock.patch.object(
             main_window_module,
@@ -276,6 +325,19 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(self.window._current_source_path, imported.source_path)
         self.assertIn("default.vna", self.window.windowTitle())
 
+    def test_loaded_startup_session_does_not_plot_saved_data_immediately(self):
+        imported = SavedSession(
+            config=default_session_config(),
+            measurement=self._measurement(),
+            source_path=Path("D:/fake/default.vna"),
+        )
+
+        with mock.patch.object(self.window, "_plot_measurement") as plot_measurement:
+            self.window._apply_loaded_startup_session(imported)
+
+        plot_measurement.assert_not_called()
+        self.assertIs(self.window.controller.state.measurement, imported.measurement)
+
     def test_toolbar_buttons_fit_after_fast_startup(self):
         toolbar_label_texts = {
             label.text()
@@ -300,7 +362,7 @@ class MainWindowTests(unittest.TestCase):
             for index in range(toolbar.layout().count())
             if isinstance(toolbar.layout().itemAt(index).widget(), (QtWidgets.QPushButton, QtWidgets.QToolButton))
         ]
-        self.assertEqual([widget.text() for widget in toolbar_widgets[:4]], ["控件", "打开", "保存", "数据标注"])
+        self.assertEqual([widget.text() for widget in toolbar_widgets[:5]], ["控件", "工况", "打开", "保存", "数据标注"])
         self.assertEqual(self.window.top_trace_list.count(), 4)
         self.assertEqual(self.window.bottom_trace_list.count(), 3)
         self.assertEqual(
@@ -1772,7 +1834,7 @@ class MainWindowTests(unittest.TestCase):
     def test_save_to_default_uses_legacy_default_vna_path(self):
         self.assertEqual(
             self.window._default_vna_path(),
-            Path("D:/SynologyDrive/codex/vna/dsa/vna/default.vna"),
+            main_window_module.resource_path("dsa/vna/default.vna"),
         )
 
     def test_log_scale_filters_zero_frequency(self):
@@ -2443,6 +2505,24 @@ class MainWindowTests(unittest.TestCase):
         self.assertTrue(self.window._controls_visible)
         shown_sizes = self.window.main_splitter.sizes()
         self.assertGreater(shown_sizes[0], 0)
+
+    def test_condition_panel_toggles_with_control_panel(self):
+        self.window.condition_button.setChecked(True)
+
+        self.assertEqual(self.window.left_panel.currentWidget(), self.window.condition_panel)
+        self.assertTrue(self.window.condition_button.isChecked())
+        self.assertFalse(self.window.controls_button.isChecked())
+        self.assertGreater(self.window.main_splitter.sizes()[0], 0)
+
+        self.window.controls_button.setChecked(True)
+
+        self.assertEqual(self.window.left_panel.currentWidget(), self.window.controls_panel)
+        self.assertTrue(self.window.controls_button.isChecked())
+        self.assertFalse(self.window.condition_button.isChecked())
+
+        self.window.controls_button.setChecked(False)
+
+        self.assertEqual(self.window.main_splitter.sizes()[0], 0)
 
     def test_display_strip_syncs_with_sidebar_controls(self):
         self.assertNotIn(
@@ -3133,6 +3213,24 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(self.window._last_vna_directory, second_path.parent)
         self.assertIn(second_path.name, self.window.windowTitle())
 
+    def test_archive_member_paths_are_rejected_before_loading(self):
+        archive_member = Path("D:/data/20260608.7z/20260608/001.vna")
+
+        self.assertEqual(archive_member_container(archive_member), Path("D:/data/20260608.7z"))
+        self.assertEqual(safe_file_dialog_directory(archive_member), "D:\\data")
+
+        def fake_open_file(_parent, _title, _directory, _filter):
+            return (str(archive_member), "")
+
+        with mock.patch.object(QtWidgets.QFileDialog, "getOpenFileName", fake_open_file):
+            with mock.patch.object(main_window_module, "load_legacy_vna") as load_legacy:
+                with mock.patch.object(QtWidgets.QMessageBox, "warning") as warning:
+                    self.window._import_legacy_vna()
+
+        self.assertEqual(load_legacy.call_count, 0)
+        self.assertEqual(warning.call_count, 1)
+        self.assertEqual(self.window._last_vna_directory, Path("D:/data"))
+
     def test_save_vna_remembers_last_folder(self):
         first_path = Path(tempfile.gettempdir()) / "vna_save_first" / "first.vna"
         second_path = Path(tempfile.gettempdir()) / "vna_save_second" / "second.vna"
@@ -3171,6 +3269,143 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(dialog_paths, [str(selected_path)])
         self.assertEqual(self.window._current_source_path, selected_path)
         self.assertEqual(save_legacy.call_count, 1)
+
+    def test_save_vna_appends_suffix_from_selected_filter(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bare_path = Path(tmpdir) / "19"
+            saved_paths: list[Path] = []
+
+            def fake_save_file(_parent, _title, _filename, _filter):
+                return (str(bare_path), "VNA Files (*.vna)")
+
+            def fake_save_legacy(_snapshot, path):
+                saved_paths.append(path)
+
+            with mock.patch.object(main_window_module, "save_legacy_vna", fake_save_legacy):
+                with mock.patch.object(QtWidgets.QFileDialog, "getSaveFileName", fake_save_file):
+                    self.window._save_session()
+
+            self.assertEqual(saved_paths, [bare_path.with_suffix(".vna")])
+            self.assertEqual(self.window._current_source_path, bare_path.with_suffix(".vna"))
+
+    def test_save_vna_appends_json_suffix_from_selected_filter(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bare_path = Path(tmpdir) / "19"
+            saved_paths: list[Path] = []
+
+            def fake_save_file(_parent, _title, _filename, _filter):
+                return (str(bare_path), "JSON Session (*.json)")
+
+            def fake_save_json(_snapshot, path):
+                saved_paths.append(path)
+
+            with mock.patch.object(main_window_module, "save_session_json", fake_save_json):
+                with mock.patch.object(QtWidgets.QFileDialog, "getSaveFileName", fake_save_file):
+                    self.window._save_session()
+
+            self.assertEqual(saved_paths, [bare_path.with_suffix(".json")])
+            self.assertEqual(self.window._current_source_path, bare_path.with_suffix(".json"))
+
+    def test_save_path_with_selected_suffix_keeps_explicit_suffix(self):
+        self.assertEqual(
+            save_path_with_selected_suffix("D:/data/19.custom", "VNA Files (*.vna)"),
+            Path("D:/data/19.custom"),
+        )
+
+    def test_condition_panel_reads_and_writes_numbered_readme(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            folder = Path(tmpdir)
+            path = folder / "003.vna"
+            (folder / "readme.txt").write_text("001:旧工况\n003：读取工况\n", encoding="utf-8")
+            imported = SavedSession(
+                config=default_session_config(),
+                measurement=self._measurement(),
+                source_path=path,
+            )
+            imported.config.notes = "VNA 内说明"
+
+            self.window._apply_loaded_startup_session(imported)
+
+            self.assertEqual(self.window.session.notes, "读取工况")
+            self.assertEqual(self.window.condition_number_label.text(), "003")
+            self.assertEqual(self.window.condition_edit.toPlainText(), "读取工况")
+
+            self.window.condition_button.setChecked(True)
+            self.window.condition_edit.setPlainText("更新工况")
+            self.window._apply_condition_notes()
+
+            readme_text = (folder / "readme.txt").read_text(encoding="utf-8-sig")
+            self.assertIn("003：更新工况", readme_text)
+            self.assertEqual(self.window.session_notes_edit.toPlainText(), "更新工况")
+
+    def test_condition_panel_apply_saves_edited_readme_preview(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            folder = Path(tmpdir)
+            path = folder / "003.vna"
+            (folder / "readme.txt").write_text("001:旧工况\n003：读取工况\n", encoding="utf-8")
+            imported = SavedSession(
+                config=default_session_config(),
+                measurement=self._measurement(),
+                source_path=path,
+            )
+            self.window._apply_loaded_startup_session(imported)
+            self.window.condition_button.setChecked(True)
+
+            self.window.condition_readme_preview.setPlainText("001：第一条修改\n003：预览框修改\n004：新增工况\n")
+            self.window._apply_condition_notes()
+
+            readme_text = (folder / "readme.txt").read_text(encoding="utf-8-sig")
+            self.assertEqual(readme_text, "001：第一条修改\n003：预览框修改\n004：新增工况\n")
+            self.assertEqual(self.window.condition_edit.toPlainText(), "预览框修改")
+            self.assertEqual(self.window.session_notes_edit.toPlainText(), "预览框修改")
+            self.assertEqual(self.window.session.notes, "预览框修改")
+
+    def test_condition_panel_apply_updates_grouped_number_line(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            folder = Path(tmpdir)
+            path = folder / "007.vna"
+            (folder / "readme.txt").write_text(
+                "原减振垫圈\n004:Z\n005:X\n006,007:Y\n",
+                encoding="utf-8",
+            )
+            imported = SavedSession(
+                config=default_session_config(),
+                measurement=self._measurement(),
+                source_path=path,
+            )
+            self.window._apply_loaded_startup_session(imported)
+            self.window.condition_button.setChecked(True)
+
+            self.assertEqual(self.window.condition_edit.toPlainText(), "Y")
+            self.window.condition_edit.setPlainText("新Y")
+            self.window._apply_condition_notes()
+
+            readme_text = (folder / "readme.txt").read_text(encoding="utf-8-sig")
+            self.assertIn("原减振垫圈", readme_text)
+            self.assertIn("006,007：新Y", readme_text)
+            self.assertEqual(self.window.condition_edit.toPlainText(), "新Y")
+
+    def test_save_vna_updates_readme_and_notes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_path = Path(tmpdir) / "002.vna"
+
+            def fake_save_file(_parent, _title, filename, _filter):
+                return (str(save_path), "")
+
+            captured: list[SavedSession] = []
+
+            def fake_save_legacy(snapshot, _path):
+                captured.append(snapshot)
+
+            self.window.condition_button.setChecked(True)
+            self.window.condition_edit.setPlainText("保存工况")
+            with mock.patch.object(main_window_module, "save_legacy_vna", fake_save_legacy):
+                with mock.patch.object(QtWidgets.QFileDialog, "getSaveFileName", fake_save_file):
+                    self.window._save_session()
+
+            self.assertEqual(captured[0].config.notes, "保存工况")
+            readme_text = (save_path.parent / "readme.txt").read_text(encoding="utf-8-sig")
+            self.assertIn("002：保存工况", readme_text)
 
     def test_load_session_remembers_last_folder(self):
         first_path = Path(tempfile.gettempdir()) / "vna_load_first" / "first.vna"

@@ -31,10 +31,20 @@ from python_vna.analysis_algorithms import (
     compute_dynamic_stiffness,
     compute_third_octave_velocity_rms,
 )
+from python_vna.condition_notes import (
+    condition_for_number,
+    condition_number_from_path,
+    read_condition_readme,
+    update_condition_readme_text,
+    write_condition_readme,
+    write_condition_readme_text,
+)
+from python_vna.diagnostics import append_log
 from python_vna.measurement_filter import filter_measurement_to_enabled_channels
 from python_vna.models import ChannelConfig, MeasurementSet, SavedSession, SessionConfig
 from python_vna.optional import require
 from python_vna import __version__ as PYTHON_VNA_VERSION
+from python_vna.daq.device_probe import probe_ni_devices_subprocess
 from python_vna.storage import (
     default_session_config,
     load_legacy_vna,
@@ -57,11 +67,120 @@ LEGEND_Z = 10
 MARKER_Z = 20
 CURSOR_Z = 30
 DATA_TIP_Z = 40
+ARCHIVE_CONTAINER_SUFFIXES = {
+    ".7z",
+    ".zip",
+    ".rar",
+    ".tar",
+    ".gz",
+    ".bz2",
+    ".xz",
+}
 
 
 def resource_path(relative_path: str) -> Path:
     base_path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
     return base_path / relative_path
+
+
+def archive_member_container(path: str | Path | None) -> Path | None:
+    """Return the archive path when a selected path points inside an archive."""
+    if path is None:
+        return None
+    parts = Path(path).parts
+    for index, part in enumerate(parts):
+        suffix = Path(part).suffix.lower()
+        if suffix in ARCHIVE_CONTAINER_SUFFIXES and index < len(parts) - 1:
+            return Path(*parts[: index + 1])
+    return None
+
+
+def is_archive_member_path(path: str | Path | None) -> bool:
+    return archive_member_container(path) is not None
+
+
+def safe_file_dialog_directory(path: str | Path | None) -> str:
+    if path is None:
+        return str(Path.cwd())
+    candidate = Path(path)
+    archive_path = archive_member_container(candidate)
+    if archive_path is not None:
+        return str(archive_path.parent if archive_path.parent != archive_path else Path.cwd())
+    return str(candidate)
+
+
+def _non_native_dialog_options():
+    try:
+        return QtWidgets.QFileDialog.Option.DontUseNativeDialog
+    except AttributeError:
+        return QtWidgets.QFileDialog.DontUseNativeDialog
+
+
+def get_open_file_name(parent, caption: str, directory: str | Path, file_filter: str):
+    safe_directory = safe_file_dialog_directory(directory)
+    try:
+        return QtWidgets.QFileDialog.getOpenFileName(
+            parent,
+            caption,
+            safe_directory,
+            file_filter,
+            options=_non_native_dialog_options(),
+        )
+    except TypeError:
+        return QtWidgets.QFileDialog.getOpenFileName(parent, caption, safe_directory, file_filter)
+
+
+def get_open_file_names(parent, caption: str, directory: str | Path, file_filter: str):
+    safe_directory = safe_file_dialog_directory(directory)
+    try:
+        return QtWidgets.QFileDialog.getOpenFileNames(
+            parent,
+            caption,
+            safe_directory,
+            file_filter,
+            options=_non_native_dialog_options(),
+        )
+    except TypeError:
+        return QtWidgets.QFileDialog.getOpenFileNames(parent, caption, safe_directory, file_filter)
+
+
+def get_save_file_name(parent, caption: str, directory: str | Path, file_filter: str):
+    safe_directory = safe_file_dialog_directory(directory)
+    try:
+        return QtWidgets.QFileDialog.getSaveFileName(
+            parent,
+            caption,
+            safe_directory,
+            file_filter,
+            options=_non_native_dialog_options(),
+        )
+    except TypeError:
+        return QtWidgets.QFileDialog.getSaveFileName(parent, caption, safe_directory, file_filter)
+
+
+def save_path_with_selected_suffix(path: str | Path, selected_filter: str) -> Path:
+    save_path = Path(path)
+    if save_path.suffix:
+        return save_path
+    normalized_filter = selected_filter.lower()
+    if "*.json" in normalized_filter or "json" in normalized_filter:
+        return save_path.with_suffix(".json")
+    if "*.vna" in normalized_filter or "vna" in normalized_filter:
+        return save_path.with_suffix(".vna")
+    return save_path
+
+
+def get_existing_directory(parent, caption: str, directory: str | Path):
+    safe_directory = safe_file_dialog_directory(directory)
+    try:
+        return QtWidgets.QFileDialog.getExistingDirectory(
+            parent,
+            caption,
+            safe_directory,
+            options=_non_native_dialog_options(),
+        )
+    except TypeError:
+        return QtWidgets.QFileDialog.getExistingDirectory(parent, caption, safe_directory)
 
 
 class DetachedPlotWindow(QtWidgets.QDialog):
@@ -598,7 +717,7 @@ class ComboBoxDelegate(QtWidgets.QStyledItemDelegate):
 class VnaAxisItem(pg.AxisItem):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        if self.orientation in {"left", "right"} and hasattr(self, "enableAutoSIPrefix"):
+        if hasattr(self, "enableAutoSIPrefix"):
             self.enableAutoSIPrefix(False)
 
     @staticmethod
@@ -1223,10 +1342,15 @@ class DeviceRefreshWorker(QtCore.QObject):
     @QtCore.Slot()
     def run(self) -> None:
         try:
-            self.devices_ready.emit(self._controller.list_devices())
+            append_log("device refresh worker: begin")
+            if self._controller.backend.__class__.__name__ == "NIDaqBackend":
+                self.devices_ready.emit(probe_ni_devices_subprocess())
+            else:
+                self.devices_ready.emit(self._controller.list_devices())
         except Exception as exc:
             self.error.emit(str(exc))
         finally:
+            append_log("device refresh worker: end")
             self.finished.emit()
 
 
@@ -1243,6 +1367,7 @@ class StartupSessionWorker(QtCore.QObject):
     @QtCore.Slot()
     def run(self) -> None:
         try:
+            append_log(f"startup session worker: begin {self._path}")
             if not self._path.exists():
                 self.skipped.emit(f"未找到默认设置：{self._path}")
                 return
@@ -1250,6 +1375,7 @@ class StartupSessionWorker(QtCore.QObject):
         except Exception as exc:
             self.error.emit(str(exc))
         finally:
+            append_log("startup session worker: end")
             self.finished.emit()
 
 
@@ -1569,6 +1695,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._channel_editor_loading = False
         self._controls_visible = True
         self._controls_last_sizes = [320, 880]
+        self._left_panel_mode = "controls"
+        self._condition_loading = False
+        self._condition_edit_dirty = False
+        self._condition_preview_dirty = False
         self._last_vna_directory = Path.cwd()
         self._last_export_directory = Path.cwd()
         self._last_recording_parent_directory = Path.cwd()
@@ -1602,10 +1732,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_legacy_theme()
         self._refresh_toolbar_size()
         self._load_session_to_widgets()
+        self._refresh_condition_panel()
         self._update_window_title()
 
     def _show_status_message(self, message: str) -> None:
         self.statusBar().showMessage(message)
+
+    def _ensure_real_filesystem_path(self, path: str | Path, *, operation: str) -> bool:
+        archive_path = archive_member_container(path)
+        if archive_path is None:
+            return True
+        message = (
+            f"不能直接{operation}压缩包内部的文件：\n{path}\n\n"
+            f"请先把 {archive_path.name} 解压到普通文件夹，再从解压后的文件夹{operation}。"
+        )
+        QtWidgets.QMessageBox.warning(self, "压缩包路径不可用", message)
+        self.statusBar().showMessage(f"请先解压 {archive_path.name} 后再{operation}")
+        if archive_path.parent != archive_path:
+            self._last_vna_directory = archive_path.parent
+        return False
 
     @classmethod
     def _default_ui_settings_path(cls) -> Path:
@@ -1825,6 +1970,10 @@ class MainWindow(QtWidgets.QMainWindow):
         theme = self._theme()
         if hasattr(self, "left_panel"):
             self.left_panel.setStyleSheet(self._legacy_left_panel_stylesheet(theme))
+        for panel_name in ("controls_panel", "condition_panel"):
+            panel = getattr(self, panel_name, None)
+            if panel is not None:
+                panel.setStyleSheet(self._legacy_left_panel_stylesheet(theme))
         if hasattr(self, "right_panel"):
             self.right_panel.setStyleSheet(self._plot_workspace_stylesheet(theme))
         if hasattr(self, "toolbar_container"):
@@ -1949,7 +2098,13 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.main_splitter)
 
         self._build_session_tab()
-        self.left_panel = self._build_legacy_left_panel()
+        self.controls_panel = self._build_legacy_left_panel()
+        self.condition_panel = self._build_condition_panel()
+        self.left_panel = QtWidgets.QStackedWidget()
+        self.left_panel.setObjectName("legacyLeftPanel")
+        self.left_panel.addWidget(self.controls_panel)
+        self.left_panel.addWidget(self.condition_panel)
+        self.left_panel.setCurrentWidget(self.controls_panel)
         self.left_panel.setMinimumWidth(360)
         self.left_panel.setMaximumWidth(430)
         self.main_splitter.addWidget(self.left_panel)
@@ -3432,7 +3587,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.device_combo = QtWidgets.QComboBox()
         self.refresh_devices_button = QtWidgets.QPushButton("刷新")
         self.refresh_devices_button.setToolTip("刷新设备")
-        self.refresh_devices_button.clicked.connect(self._refresh_devices)
+        self.refresh_devices_button.clicked.connect(self.refresh_devices_async)
         self.open_vna_button = QtWidgets.QPushButton("打开")
         self.open_vna_button.setToolTip("打开旧版 VNA 并应用配置/数据")
         self.toolbar_data_tip_button = QtWidgets.QPushButton("数据标注")
@@ -3460,6 +3615,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.controls_button.setCheckable(True)
         self.controls_button.setChecked(True)
         self.controls_button.toggled.connect(self._toggle_control_panel)
+        self.condition_button = QtWidgets.QToolButton()
+        self.condition_button.setText("工况")
+        self.condition_button.setCheckable(True)
+        self.condition_button.setToolTip("编辑当前测试编号对应的工况说明")
+        self.condition_button.toggled.connect(self._toggle_condition_panel)
         self.start_button.clicked.connect(self._start_acquisition)
         self.avg_button.clicked.connect(self._start_average_acquisition)
         self.record_button.clicked.connect(self._start_continuous_recording)
@@ -3472,6 +3632,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         for widget in (
             self.controls_button,
+            self.condition_button,
             self.open_vna_button,
             self.save_session_button,
             self.toolbar_data_tip_button,
@@ -3783,29 +3944,165 @@ class MainWindow(QtWidgets.QMainWindow):
         return container
 
     def _toggle_control_panel(self, visible: bool) -> None:
-        self._controls_visible = visible
-        if hasattr(self, "control_panel_action") and self.control_panel_action.isChecked() != visible:
-            self.control_panel_action.blockSignals(True)
-            self.control_panel_action.setChecked(visible)
-            self.control_panel_action.blockSignals(False)
-        if hasattr(self, "controls_button") and self.controls_button.isChecked() != visible:
+        if visible:
+            self._set_left_panel_mode("controls")
+        elif self._left_panel_mode != "conditions":
+            self._set_left_panel_mode("hidden")
+
+    def _toggle_condition_panel(self, visible: bool) -> None:
+        if visible:
+            self._set_left_panel_mode("conditions")
+        else:
+            self._set_left_panel_mode("hidden")
+
+    def _set_left_panel_mode(self, mode: str) -> None:
+        if mode not in {"controls", "conditions", "hidden"}:
+            mode = "controls"
+        self._left_panel_mode = mode
+        self._controls_visible = mode == "controls"
+        if hasattr(self, "controls_button"):
             self.controls_button.blockSignals(True)
-            self.controls_button.setChecked(visible)
+            self.controls_button.setChecked(mode == "controls")
             self.controls_button.blockSignals(False)
+        if hasattr(self, "condition_button"):
+            self.condition_button.blockSignals(True)
+            self.condition_button.setChecked(mode == "conditions")
+            self.condition_button.blockSignals(False)
+        if hasattr(self, "control_panel_action"):
+            self.control_panel_action.blockSignals(True)
+            self.control_panel_action.setChecked(mode == "controls")
+            self.control_panel_action.blockSignals(False)
         if not hasattr(self, "main_splitter"):
             return
-        if visible:
-            sizes = self._controls_last_sizes
-            if len(sizes) != 2 or sizes[0] <= 0:
-                sizes = [430, 970]
-            self.main_splitter.setSizes(sizes)
-            self.statusBar().showMessage("Control panel shown")
+        if mode == "hidden":
+            current_sizes = self.main_splitter.sizes()
+            if len(current_sizes) == 2 and current_sizes[0] > 0:
+                self._controls_last_sizes = current_sizes
+            self.main_splitter.setSizes([0, 1])
+            self.statusBar().showMessage("左侧栏已隐藏")
             return
-        current_sizes = self.main_splitter.sizes()
-        if len(current_sizes) == 2 and current_sizes[0] > 0:
-            self._controls_last_sizes = current_sizes
-        self.main_splitter.setSizes([0, 1])
-        self.statusBar().showMessage("Control panel hidden")
+        if hasattr(self, "left_panel"):
+            target = self.condition_panel if mode == "conditions" else self.controls_panel
+            self.left_panel.setCurrentWidget(target)
+        if mode == "conditions":
+            self._refresh_condition_panel()
+        sizes = self._controls_last_sizes
+        if len(sizes) != 2 or sizes[0] <= 0:
+            sizes = [430, 970]
+        self.main_splitter.setSizes(sizes)
+        self.statusBar().showMessage("工况面板已显示" if mode == "conditions" else "Control panel shown")
+
+    def _condition_context_path(self) -> Path | None:
+        return self._current_source_path
+
+    def _condition_folder(self) -> Path | None:
+        path = self._condition_context_path()
+        return path.parent if path is not None else None
+
+    def _read_condition_readme_text(self) -> str:
+        folder = self._condition_folder()
+        if folder is None:
+            return ""
+        try:
+            return read_condition_readme(folder)
+        except OSError:
+            return ""
+
+    def _refresh_condition_panel(self) -> None:
+        if not hasattr(self, "condition_edit"):
+            return
+        path = self._condition_context_path()
+        number = condition_number_from_path(path)
+        readme_text = self._read_condition_readme_text()
+        condition = condition_for_number(readme_text, number) if number else None
+        if condition is None:
+            condition = self.session_notes_edit.toPlainText() if hasattr(self, "session_notes_edit") else self.session.notes
+        self._condition_loading = True
+        try:
+            self.condition_file_label.setText(path.name if path is not None else "未保存")
+            self.condition_file_label.setToolTip(str(path) if path is not None else "")
+            self.condition_number_label.setText(number or "--")
+            self.condition_edit.setPlainText(condition or "")
+            self.condition_readme_preview.setPlainText(readme_text)
+            self._condition_edit_dirty = False
+            self._condition_preview_dirty = False
+        finally:
+            self._condition_loading = False
+
+    def _condition_text_changed(self) -> None:
+        if self._condition_loading:
+            return
+        self._condition_edit_dirty = True
+        if hasattr(self, "session_notes_edit"):
+            self.session_notes_edit.setPlainText(self.condition_edit.toPlainText())
+
+    def _condition_preview_changed(self) -> None:
+        if self._condition_loading:
+            return
+        self._condition_preview_dirty = True
+
+    def _apply_condition_notes(self) -> None:
+        condition = self.condition_edit.toPlainText() if hasattr(self, "condition_edit") else ""
+        if hasattr(self, "session_notes_edit"):
+            self.session_notes_edit.setPlainText(condition)
+        self.session.notes = condition
+        path = self._condition_context_path()
+        number = condition_number_from_path(path)
+        if path is None or path.suffix.lower() != ".vna" or not number:
+            self.statusBar().showMessage("工况已应用到当前 VNA notes")
+            return
+        self._write_condition_readme_from_panel(path, number, condition)
+        self._refresh_condition_panel()
+        self.statusBar().showMessage(f"工况已写入 {path.parent / 'readme.txt'}")
+
+    def _write_condition_readme_from_panel(self, path: Path, number: str, condition: str) -> None:
+        if hasattr(self, "condition_readme_preview"):
+            preview_text = self.condition_readme_preview.toPlainText()
+            preview_condition = condition_for_number(preview_text, number)
+            prefer_preview = self._condition_preview_dirty and not self._condition_edit_dirty
+            if preview_condition is not None and (preview_condition == condition or prefer_preview):
+                write_condition_readme_text(path.parent, preview_text)
+                self.session.notes = preview_condition
+                if hasattr(self, "session_notes_edit"):
+                    self.session_notes_edit.setPlainText(preview_condition)
+                if hasattr(self, "condition_edit"):
+                    self._condition_loading = True
+                    try:
+                        self.condition_edit.setPlainText(preview_condition)
+                    finally:
+                        self._condition_loading = False
+                self._condition_edit_dirty = False
+                self._condition_preview_dirty = False
+                return
+            updated_preview = update_condition_readme_text(preview_text, number, condition)
+            write_condition_readme_text(path.parent, updated_preview)
+            self._condition_edit_dirty = False
+            self._condition_preview_dirty = False
+            return
+        self._write_condition_readme_for_path(path, condition)
+
+    def _write_condition_readme_for_path(self, path: Path, condition: str) -> None:
+        number = condition_number_from_path(path)
+        if path.suffix.lower() != ".vna" or not number:
+            return
+        write_condition_readme(path.parent, number, condition)
+
+    def _apply_condition_from_readme_for_path(self, path: Path) -> None:
+        number = condition_number_from_path(path)
+        if not number:
+            self._refresh_condition_panel()
+            return
+        try:
+            readme_text = read_condition_readme(path.parent)
+        except OSError:
+            self._refresh_condition_panel()
+            return
+        condition = condition_for_number(readme_text, number)
+        if condition is not None:
+            self.session.notes = condition
+            if hasattr(self, "session_notes_edit"):
+                self.session_notes_edit.setPlainText(condition)
+        self._refresh_condition_panel()
 
     def _build_general_panel(self) -> QtWidgets.QGroupBox:
         panel = QtWidgets.QGroupBox("General")
@@ -3829,6 +4126,58 @@ class MainWindow(QtWidgets.QMainWindow):
         form.setContentsMargins(8, 4, 8, 4)
         form.addRow("Device", self.device_info_label)
         form.addRow("Run", self.run_info_label)
+        return panel
+
+    def _build_condition_panel(self) -> QtWidgets.QWidget:
+        panel = QtWidgets.QWidget()
+        panel.setObjectName("legacyLeftPanel")
+        layout = QtWidgets.QVBoxLayout(panel)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        header = QtWidgets.QLabel("工况记录")
+        header.setObjectName("legacyGroupTitle")
+        layout.addWidget(header)
+
+        form = QtWidgets.QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(4)
+        self.condition_file_label = QtWidgets.QLabel("未保存")
+        self.condition_file_label.setObjectName("legacyText")
+        self.condition_number_label = QtWidgets.QLabel("--")
+        self.condition_number_label.setObjectName("legacyText")
+        form.addRow("当前文件", self.condition_file_label)
+        form.addRow("当前编号", self.condition_number_label)
+        layout.addLayout(form)
+
+        edit_label = QtWidgets.QLabel("当前工况")
+        edit_label.setObjectName("legacyMiniLabel")
+        layout.addWidget(edit_label)
+        self.condition_edit = QtWidgets.QPlainTextEdit()
+        self.condition_edit.setPlaceholderText("例如：2号减振器主基板，开#3环境门")
+        self.condition_edit.setMinimumHeight(96)
+        self.condition_edit.textChanged.connect(self._condition_text_changed)
+        layout.addWidget(self.condition_edit)
+
+        preview_label = QtWidgets.QLabel("readme.txt 编辑")
+        preview_label.setObjectName("legacyMiniLabel")
+        layout.addWidget(preview_label)
+        self.condition_readme_preview = QtWidgets.QPlainTextEdit()
+        self.condition_readme_preview.setPlaceholderText("可直接编辑所有编号工况，点“应用”保存整份 readme.txt")
+        self.condition_readme_preview.setMinimumHeight(180)
+        self.condition_readme_preview.textChanged.connect(self._condition_preview_changed)
+        layout.addWidget(self.condition_readme_preview, 1)
+
+        buttons = QtWidgets.QHBoxLayout()
+        buttons.setSpacing(6)
+        self.condition_apply_button = QtWidgets.QPushButton("应用")
+        self.condition_apply_button.setToolTip("保存当前工况和下方 readme.txt 编辑内容")
+        self.condition_refresh_button = QtWidgets.QPushButton("刷新 readme")
+        self.condition_apply_button.clicked.connect(self._apply_condition_notes)
+        self.condition_refresh_button.clicked.connect(self._refresh_condition_panel)
+        buttons.addWidget(self.condition_apply_button)
+        buttons.addWidget(self.condition_refresh_button)
+        layout.addLayout(buttons)
         return panel
 
     def _build_display_panel(
@@ -5602,6 +5951,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def refresh_devices_async(self) -> None:
         if self._device_refresh_thread is not None:
             return
+        append_log("device refresh async: schedule")
         self.device_combo.clear()
         self.device_combo.addItem("正在加载设备...", None)
         self.refresh_devices_button.setEnabled(False)
@@ -5635,6 +5985,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_devices_button.setEnabled(True)
 
     def _backend_changed(self, backend_name: str) -> None:
+        append_log(f"backend changed: begin {backend_name}")
         if self._acquisition_thread is not None:
             self._stop_acquisition()
             return
@@ -5647,7 +5998,8 @@ class MainWindow(QtWidgets.QMainWindow):
             from python_vna.app import build_backend
 
             self.controller.backend = build_backend("simulated")
-        self._refresh_devices()
+        append_log(f"backend changed: end {backend_name}")
+        self.refresh_devices_async()
 
     def _map_channels_to_selected_device(self) -> None:
         device_name = self.device_combo.currentData()
@@ -5808,7 +6160,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _start_continuous_recording(self) -> None:
         if self._acquisition_thread is not None or self._recording_thread is not None:
             return
-        parent_dir = QtWidgets.QFileDialog.getExistingDirectory(
+        parent_dir = get_existing_directory(
             self,
             "Select Continuous Recording Folder",
             str(self._last_recording_parent_directory),
@@ -8729,13 +9081,15 @@ class MainWindow(QtWidgets.QMainWindow):
         if snapshot.measurement is None:
             QtWidgets.QMessageBox.warning(self, "无数据", "请先至少采集一帧数据。")
             return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+        path, _ = get_save_file_name(
             self,
             "导出会话",
             str(self._last_export_directory / "session"),
             "All Supported (*.json *.npz *.csv *.h5);;JSON Session (*.json);;NPZ Data (*.npz);;CSV Time Data (*.csv);;HDF5 Data (*.h5)",
         )
         if not path:
+            return
+        if not self._ensure_real_filesystem_path(path, operation="保存"):
             return
 
         export_path = Path(path)
@@ -8762,9 +9116,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"已导出到 {export_path}")
 
     def _save_session(self) -> None:
+        if hasattr(self, "condition_edit") and self._left_panel_mode == "conditions":
+            self._condition_text_changed()
         self._read_session_from_widgets()
         default_save_path = self._suggest_vna_save_path()
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+        path, selected_filter = get_save_file_name(
             self,
             "保存 VNA",
             str(default_save_path),
@@ -8772,15 +9128,19 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if not path:
             return
-        save_path = Path(path)
+        if not self._ensure_real_filesystem_path(path, operation="保存"):
+            return
+        save_path = save_path_with_selected_suffix(path, selected_filter)
         snapshot = self._snapshot_with_current_display_state()
         if save_path.suffix.lower() == ".json":
             save_session_json(snapshot, save_path)
         else:
             save_legacy_vna(snapshot, save_path)
+            self._write_condition_readme_for_path(save_path, snapshot.config.notes)
         self._current_source_path = save_path
         self._last_vna_directory = save_path.parent
         self._update_window_title()
+        self._refresh_condition_panel()
         self.statusBar().showMessage(f"已保存会话到 {save_path}")
 
     def _suggest_vna_save_path(self) -> Path:
@@ -8813,13 +9173,15 @@ class MainWindow(QtWidgets.QMainWindow):
         return save_path
 
     def _load_session(self) -> None:
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+        path, _ = get_open_file_name(
             self,
             "加载会话",
             str(self._last_vna_directory),
             "VNA Files (*.vna);;JSON Session (*.json)",
         )
         if not path:
+            return
+        if not self._ensure_real_filesystem_path(path, operation="打开"):
             return
         selected_path = Path(path)
         self._last_vna_directory = selected_path.parent
@@ -8835,24 +9197,45 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_source_path = selected_path
         self._update_window_title()
         self._load_session_to_widgets()
+        if selected_path.suffix.lower() in {".vna", ".mat"}:
+            self._apply_condition_from_readme_for_path(selected_path)
+        else:
+            self._refresh_condition_panel()
         self._apply_display_defaults_for_measurement(loaded.measurement)
         if loaded.measurement is not None:
             self._plot_measurement(loaded.measurement)
         self.statusBar().showMessage(f"已从 {path} 加载会话")
 
     def _apply_loaded_startup_session(self, imported: SavedSession) -> None:
+        append_log("startup session apply: begin")
         self.statusBar().showMessage("正在加载默认设置...")
+        append_log("startup session apply: reset display begin")
         self._reset_plot_display_state()
+        append_log("startup session apply: reset display end")
+        append_log("startup session apply: controller session begin")
         self.controller.set_session(imported.config)
         self.controller.state.measurement = imported.measurement
         self.session = imported.config
         self._current_source_path = imported.source_path
         self._update_window_title()
+        append_log("startup session apply: controller session end")
+        append_log("startup session apply: widgets begin")
         self._load_session_to_widgets()
+        append_log("startup session apply: widgets end")
+        append_log("startup session apply: condition begin")
+        if self._current_source_path is not None:
+            self._apply_condition_from_readme_for_path(self._current_source_path)
+        else:
+            self._refresh_condition_panel()
+        append_log("startup session apply: condition end")
+        append_log("startup session apply: display defaults begin")
         self._apply_display_defaults_for_measurement(imported.measurement)
-        if imported.measurement is not None:
-            self._plot_measurement(imported.measurement)
+        append_log("startup session apply: display defaults end")
+        # Default sessions are loaded during startup; avoid plotting saved data here
+        # because large legacy measurement arrays can block the first UI event loop.
+        append_log("startup session apply: skip initial plot")
         self.statusBar().showMessage(f"已从 {self._current_source_path} 加载默认设置")
+        append_log("startup session apply: end")
 
     def load_startup_session_async(self, path: str | Path | None = None) -> None:
         if self._startup_session_thread is not None:
@@ -8879,13 +9262,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._startup_session_worker = None
 
     def _import_legacy_vna(self) -> None:
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+        path, _ = get_open_file_name(
             self,
             "打开旧版 VNA",
             str(self._last_vna_directory),
             "VNA Files (*.vna);;MAT Files (*.mat)",
         )
         if not path:
+            return
+        if not self._ensure_real_filesystem_path(path, operation="打开"):
             return
         selected_path = Path(path)
         self._last_vna_directory = selected_path.parent
@@ -8897,6 +9282,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_source_path = selected_path
         self._update_window_title()
         self._load_session_to_widgets()
+        self._apply_condition_from_readme_for_path(selected_path)
         self._apply_display_defaults_for_measurement(imported.measurement)
         if imported.measurement is not None:
             self._plot_measurement(imported.measurement)
