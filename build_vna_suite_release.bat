@@ -19,6 +19,7 @@ if "%VERSION%"=="" (
 
 echo.
 echo Syncing worktrees and building PythonVNA suite...
+echo This release build creates VIanalysis.exe, PythonVNATest.exe, and PythonVNAUpdater.exe.
 echo.
 
 if "%VERSION%"=="" (
@@ -41,6 +42,11 @@ if not "%EXITCODE%"=="0" (
     echo Build finished successfully.
     echo Output: !OUTPUT_PATH!
     echo Version file: !OUTPUT_PATH!\VERSION.txt
+    echo.
+    echo Executables:
+    if exist "!OUTPUT_PATH!\*.exe" (
+        dir /b "!OUTPUT_PATH!\*.exe"
+    )
 )
 pause
 exit /b %EXITCODE%

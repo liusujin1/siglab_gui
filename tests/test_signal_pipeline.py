@@ -921,6 +921,97 @@ class SignalPipelineTests(unittest.TestCase):
         _args, kwargs = _Task.created_tasks[-1].ai_channels.voltage_calls[0]
         self.assertEqual(kwargs["terminal_config"], "rse")
 
+    def test_ni_continuous_sampling_uses_large_input_buffer(self):
+        class _Enum:
+            def __init__(self, **values):
+                for key, value in values.items():
+                    setattr(self, key, value)
+
+        class _Constants:
+            TerminalConfiguration = _Enum(DEFAULT="default")
+            Coupling = _Enum(AC="ac", DC="dc")
+            AcquisitionType = _Enum(CONTINUOUS="continuous", FINITE="finite")
+
+        class _AIChannel:
+            def __setattr__(self, _name, _value):
+                return None
+
+        class _AIChannels:
+            def add_ai_voltage_chan(self, *_args, **_kwargs):
+                return _AIChannel()
+
+        class _Timing:
+            def __init__(self):
+                self.kwargs = None
+
+            def cfg_samp_clk_timing(self, **kwargs):
+                self.kwargs = kwargs
+
+        class _InStream:
+            def __init__(self):
+                self.input_buf_size = None
+
+        class _Triggers:
+            start_trigger = object()
+            reference_trigger = object()
+
+        class _Task:
+            created_tasks = []
+
+            def __init__(self, *_args, **_kwargs):
+                self.ai_channels = _AIChannels()
+                self.timing = _Timing()
+                self.triggers = _Triggers()
+                self.in_stream = _InStream()
+                _Task.created_tasks.append(self)
+
+            def close(self):
+                return None
+
+        class _AIPhysicalChannel:
+            name = "Dev1/ai0"
+
+        class _Device:
+            name = "Dev1"
+            product_type = "NI USB-4431"
+            ai_physical_chans = [_AIPhysicalChannel()]
+            ao_physical_chans = []
+
+        class _System:
+            devices = [_Device()]
+
+            @staticmethod
+            def local():
+                return _System()
+
+        class _Nidaqmx:
+            Task = _Task
+            system = type("system", (), {"System": _System})
+
+        class _Readers:
+            class AnalogMultiChannelReader:
+                def __init__(self, _stream):
+                    return None
+
+        session = SessionConfig(
+            ai_channels=[ChannelConfig(name="ai0", physical_name="ai0", enabled=True)]
+        )
+        session.acquisition.sample_rate = 25_600.0
+        session.acquisition.frame_size = 4096
+        session.acquisition.buffer_frames = 8
+
+        backend = NIDaqBackend()
+        backend._nidaqmx = _Nidaqmx()
+        backend._constants = _Constants()
+        backend._stream_readers = _Readers()
+
+        backend.configure(session, device_name="Dev1")
+
+        task = _Task.created_tasks[-1]
+        self.assertEqual(task.timing.kwargs["sample_mode"], "continuous")
+        self.assertEqual(task.timing.kwargs["samps_per_chan"], 256000)
+        self.assertEqual(task.in_stream.input_buf_size, 256000)
+
     def test_ni_backend_rejects_iepe_channels_on_non_iepe_device(self):
         class _Enum:
             def __init__(self, **values):

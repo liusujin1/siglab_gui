@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-import base64
 import csv
 import math
+import os
 import re
 import zipfile
 import xml.etree.ElementTree as ET
@@ -21,6 +21,7 @@ from python_vna.diagnostic.data import (
     load_trace_analysis_file,
     load_vibration_analysis_file,
 )
+from python_vna.diagnostics import append_log
 from python_vna.optional import require
 from python_vna.ui.main_window import (
     DataTipPoint,
@@ -32,6 +33,14 @@ from python_vna.ui.main_window import (
     _data_tip_anchor_for_label_drag,
 )
 from python_vna.ui.legend_placement import place_legend_away_from_curves
+from python_vna.ui.diagnostic_theme import (
+    LIGHT_TRACE_COLORS,
+    apply_plot_legend_theme,
+    color_for_trace_name,
+    color_map_for_trace_names,
+    set_button_role as shared_set_button_role,
+    trace_colors_for_theme,
+)
 
 QtCore = require("PySide6.QtCore", "python -m pip install -e .[gui]")
 QtGui = require("PySide6.QtGui", "python -m pip install -e .[gui]")
@@ -340,24 +349,37 @@ class Modal3DView(gl.GLViewWidget):
         self.cameraChanged.emit(float(self.opts.get("azimuth", 35.0)), float(self.opts.get("elevation", 24.0)))
 
 
-TRACE_COLORS = [
-    "#1f77b4",
-    "#e4572e",
-    "#2e8b57",
-    "#f2a900",
-    "#7b61ff",
-    "#00a6a6",
-    "#d7263d",
-    "#5c677d",
-]
+TRACE_COLORS = list(LIGHT_TRACE_COLORS)
 
 
 def configure_control_panel(widget: QtWidgets.QWidget) -> None:
     widget.setObjectName("diagnosticControlPanel")
 
 
+def create_control_scroll_area(
+    panel: QtWidgets.QWidget,
+    *,
+    minimum_width: int,
+    maximum_width: int,
+) -> QtWidgets.QScrollArea:
+    panel.setMinimumWidth(0)
+    panel.setMaximumWidth(16_777_215)
+    panel.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+    scroll = QtWidgets.QScrollArea()
+    scroll.setObjectName("diagnosticControlScroll")
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+    scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+    scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+    scroll.setMinimumWidth(minimum_width)
+    scroll.setMaximumWidth(maximum_width)
+    scroll.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
+    scroll.setWidget(panel)
+    return scroll
+
+
 def set_button_role(button: QtWidgets.QPushButton, role: str) -> None:
-    button.setProperty("role", role)
+    shared_set_button_role(button, role)
 
 
 def create_toggle_button(label: str) -> QtWidgets.QPushButton:
@@ -376,12 +398,12 @@ def update_toggle_button_text(button: QtWidgets.QPushButton, label: str) -> None
 def create_group_box(title: str, *, layout_type: type[QtWidgets.QLayout] = QtWidgets.QGridLayout) -> tuple[QtWidgets.QGroupBox, QtWidgets.QLayout]:
     group = QtWidgets.QGroupBox(title)
     layout = layout_type(group)
-    layout.setContentsMargins(8, 14, 8, 8)
+    layout.setContentsMargins(10, 16, 10, 10)
     if isinstance(layout, QtWidgets.QGridLayout):
-        layout.setHorizontalSpacing(6)
-        layout.setVerticalSpacing(5)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(6)
     else:
-        layout.setSpacing(6)
+        layout.setSpacing(7)
     return group, layout
 
 
@@ -420,9 +442,17 @@ class DiagnosticPage(QtWidgets.QWidget):
     def apply_theme(self, theme: dict[str, object]) -> None:
         if theme:
             self._theme = dict(theme)
+        global TRACE_COLORS
+        TRACE_COLORS = trace_colors_for_theme(self._theme or theme)
         for plot in self.findChildren(pg.PlotWidget):
             apply_plot_theme(plot, theme)
             self._apply_cursor_theme(plot)
+
+    def _trace_colors(self) -> list[str]:
+        return trace_colors_for_theme(self._theme)
+
+    def _color_for_label(self, label: object) -> str:
+        return color_for_trace_name(label, self._trace_colors(), theme=self._theme)
 
     def _show_status(self, text: str) -> None:
         self.statusChanged.emit(str(text))
@@ -530,7 +560,7 @@ class DiagnosticPage(QtWidgets.QWidget):
                     y_plot = np.full_like(y, center, dtype=float)
                 else:
                     y_plot = ((y - y_min) / span - 0.5) * 0.72 + center
-                color = TRACE_COLORS[index % len(TRACE_COLORS)]
+                color = self._color_for_label(curve.label)
                 label = self._unique_saved_label(saved, curve.label)
                 plot.plot(x, y_plot, pen=pg.mkPen(color, width=1.35), name=label)
                 text = pg.TextItem(label, color=color, anchor=(0.0, 0.5))
@@ -568,7 +598,7 @@ class DiagnosticPage(QtWidgets.QWidget):
                 self._axis_scaling_plot = None
             return plotted
         for index, (curve, x, y) in enumerate(prepared):
-            color = TRACE_COLORS[index % len(TRACE_COLORS)]
+            color = self._color_for_label(curve.label)
             label = self._unique_saved_label(saved, curve.label)
             plot.plot(x, y, pen=pg.mkPen(color, width=1.5), name=label)
             saved[label] = (x, y)
@@ -658,9 +688,12 @@ class DiagnosticPage(QtWidgets.QWidget):
         items = self._cursor_items.get(plot)
         if not items:
             return
-        plot.addItem(items["line"], ignoreBounds=True)
-        plot.addItem(items["point"])
-        plot.addItem(items["text"])
+        if items["line"].scene() is None:
+            plot.addItem(items["line"], ignoreBounds=True)
+        if items["point"].scene() is None:
+            plot.addItem(items["point"])
+        if items["text"].scene() is None:
+            plot.addItem(items["text"])
 
     def _set_cursor_position(
         self, plot: pg.PlotWidget, cursor_x: float, cursor_y: float, trace: str | None = None
@@ -1102,6 +1135,7 @@ class VibrationAnalysisPage(DiagnosticPage):
         self._preferred_frequency_labels: set[str] = set()
         self._preferred_log_group = ""
         self._preferred_log_labels: set[str] = set()
+        self._log_ranges: dict[str, tuple[int, int]] = {}
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -1111,8 +1145,6 @@ class VibrationAnalysisPage(DiagnosticPage):
 
         controls = QtWidgets.QWidget()
         configure_control_panel(controls)
-        controls.setMinimumWidth(300)
-        controls.setMaximumWidth(360)
         controls_layout = QtWidgets.QVBoxLayout(controls)
         controls_layout.setContentsMargins(0, 0, 0, 0)
         controls_layout.setSpacing(5)
@@ -1133,7 +1165,7 @@ class VibrationAnalysisPage(DiagnosticPage):
         self.file_list = QtWidgets.QListWidget()
         self.file_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.file_list.setAlternatingRowColors(True)
-        self.file_list.setMinimumHeight(180)
+        self.file_list.setMinimumHeight(110)
         data_layout.addWidget(self.file_list, 1)
         controls_layout.addWidget(data_group)
 
@@ -1143,12 +1175,18 @@ class VibrationAnalysisPage(DiagnosticPage):
         self.frequency_pair_list = QtWidgets.QListWidget()
         self.frequency_pair_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.frequency_pair_list.setAlternatingRowColors(True)
-        self.frequency_pair_list.setMinimumHeight(120)
+        self.frequency_pair_list.setMinimumHeight(84)
         self.log_group_combo = QtWidgets.QComboBox()
+        self.log_range_start = QtWidgets.QLineEdit()
+        self.log_range_start.setValidator(QtGui.QIntValidator(1, 2_000_000_000, self))
+        self.log_range_end = QtWidgets.QLineEdit()
+        self.log_range_end.setValidator(QtGui.QIntValidator(1, 2_000_000_000, self))
+        self.log_range_start.setMinimumWidth(84)
+        self.log_range_end.setMinimumWidth(84)
         self.log_channel_list = QtWidgets.QListWidget()
         self.log_channel_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.log_channel_list.setAlternatingRowColors(True)
-        self.log_channel_list.setMinimumHeight(110)
+        self.log_channel_list.setMinimumHeight(84)
         self.demean_check = create_toggle_button("去均值")
         self.hold_check = create_toggle_button("保持曲线")
         self.plot_button = QtWidgets.QPushButton("绘图")
@@ -1156,17 +1194,27 @@ class VibrationAnalysisPage(DiagnosticPage):
         set_button_role(self.plot_button, "primary")
         set_button_role(self.export_button, "secondary")
 
+        log_range_row = QtWidgets.QHBoxLayout()
+        log_range_row.setContentsMargins(0, 0, 0, 0)
+        log_range_row.setSpacing(5)
+        log_range_row.addWidget(self.log_range_start)
+        log_range_row.addWidget(QtWidgets.QLabel("至"))
+        log_range_row.addWidget(self.log_range_end)
+
         settings_layout.addWidget(QtWidgets.QLabel("绘图模式"), 0, 0)
         settings_layout.addWidget(self.plot_mode_combo, 0, 1)
         settings_layout.addWidget(QtWidgets.QLabel("频响曲线"), 1, 0, QtCore.Qt.AlignTop)
         settings_layout.addWidget(self.frequency_pair_list, 1, 1)
         settings_layout.addWidget(QtWidgets.QLabel("日志分组"), 2, 0)
         settings_layout.addWidget(self.log_group_combo, 2, 1)
-        settings_layout.addWidget(QtWidgets.QLabel("日志通道"), 3, 0, QtCore.Qt.AlignTop)
-        settings_layout.addWidget(self.log_channel_list, 3, 1)
+        settings_layout.addWidget(QtWidgets.QLabel("样本范围"), 3, 0)
+        settings_layout.addLayout(log_range_row, 3, 1)
+        settings_layout.addWidget(QtWidgets.QLabel("日志通道"), 4, 0, QtCore.Qt.AlignTop)
+        settings_layout.addWidget(self.log_channel_list, 4, 1)
         controls_layout.addWidget(settings_group)
 
         action_group, action_layout = create_group_box("3. 操作", layout_type=QtWidgets.QGridLayout)
+        self.action_group = action_group
         action_layout.addWidget(self.plot_button, 0, 0)
         action_layout.addWidget(self.export_button, 0, 1)
         action_layout.addWidget(self.demean_check, 1, 0)
@@ -1182,7 +1230,22 @@ class VibrationAnalysisPage(DiagnosticPage):
         self.tabs.addTab(self.frequency_plot, "频响分析")
         self.tabs.addTab(self.log_plot, "日志 / 传感器")
 
-        layout.addWidget(controls)
+        controls_layout.removeWidget(action_group)
+        self.controls_scroll = create_control_scroll_area(
+            controls,
+            minimum_width=0,
+            maximum_width=16_777_215,
+        )
+        self.controls_column = QtWidgets.QWidget()
+        configure_control_panel(self.controls_column)
+        self.controls_column.setMinimumWidth(260)
+        self.controls_column.setMaximumWidth(310)
+        controls_column_layout = QtWidgets.QVBoxLayout(self.controls_column)
+        controls_column_layout.setContentsMargins(0, 0, 0, 0)
+        controls_column_layout.setSpacing(5)
+        controls_column_layout.addWidget(self.controls_scroll, 1)
+        controls_column_layout.addWidget(action_group, 0)
+        layout.addWidget(self.controls_column)
         layout.addWidget(self.tabs, 1)
 
         self.load_button.clicked.connect(self._choose_files)
@@ -1190,6 +1253,8 @@ class VibrationAnalysisPage(DiagnosticPage):
         self.clear_button.clicked.connect(self.clear)
         self.file_list.currentRowChanged.connect(lambda _row: self._on_file_selection_changed())
         self.log_group_combo.currentIndexChanged.connect(lambda _index: self._on_log_group_changed())
+        self.log_range_start.editingFinished.connect(self._on_log_range_changed)
+        self.log_range_end.editingFinished.connect(self._on_log_range_changed)
         self.frequency_pair_list.itemSelectionChanged.connect(self._on_frequency_selection_changed)
         self.log_channel_list.itemSelectionChanged.connect(self._on_log_selection_changed)
         self.tabs.currentChanged.connect(lambda _index: self._auto_plot_from_control_change())
@@ -1235,6 +1300,8 @@ class VibrationAnalysisPage(DiagnosticPage):
         self.frequency_pair_list.clear()
         self.log_group_combo.clear()
         self.log_channel_list.clear()
+        self._log_ranges.clear()
+        self._configure_log_range_controls(None)
         self.frequency_plot.clear()
         self.log_plot.clear()
         self._plot_curves.clear()
@@ -1294,6 +1361,25 @@ class VibrationAnalysisPage(DiagnosticPage):
             self._preferred_log_group = self.log_group_combo.currentText()
             self._preferred_log_labels.clear()
         self._refresh_log_channels()
+        self._auto_plot_from_control_change()
+
+    def _on_log_range_changed(self) -> None:
+        if self._updating_controls:
+            return
+        current = self.current_file()
+        if current is None:
+            return
+        key = self._file_key(current)
+        start, end = self._resolved_log_range_values(current)
+        changed = self._log_ranges.get(key) != (start, end)
+        self._log_ranges[key] = (start, end)
+        self._updating_controls = True
+        try:
+            self._set_log_range_controls(current.table.row_count, (start, end), enabled=True)
+        finally:
+            self._updating_controls = False
+        if not changed and self._plot_curves.get(self.log_plot):
+            return
         self._auto_plot_from_control_change()
 
     def _on_plot_mode_changed(self) -> None:
@@ -1369,7 +1455,9 @@ class VibrationAnalysisPage(DiagnosticPage):
             self.log_group_combo.clear()
             self.log_channel_list.clear()
             if current is None:
+                self._configure_log_range_controls(None)
                 return
+            self._configure_log_range_controls(current)
             selected_frequency_labels = set(self._preferred_frequency_labels)
             if not selected_frequency_labels:
                 selected_frequency_labels = {item.text() for item in self.frequency_pair_list.selectedItems()}
@@ -1432,20 +1520,91 @@ class VibrationAnalysisPage(DiagnosticPage):
             for item in selected_items
             if item.data(QtCore.Qt.UserRole) is not None
         ]
-        x = np.asarray(current.table.metadata.get("sample_index", np.arange(1, current.table.row_count + 1, dtype=float)), dtype=float)
+        start, end = self._log_slice_bounds()
+        x = np.asarray(
+            current.table.metadata.get("sample_index", np.arange(1, current.table.row_count + 1, dtype=float)),
+            dtype=float,
+        )
+        if x.size < current.table.row_count:
+            x = np.arange(1, current.table.row_count + 1, dtype=float)
+        x = x[start:end]
         curves: list[CurvePair] = []
         for index, label in selected_channels:
-            y = np.asarray(current.table.data[:, index], dtype=float)
+            y = np.asarray(current.table.data[start:end, index], dtype=float)
             if self.demean_check.isChecked():
-                y = y - np.nanmean(y)
+                y = self._demean_vector(y)
             curves.append(CurvePair(label, x[: y.size], y, "样本序号", label))
         return curves
+
+    def _configure_log_range_controls(self, current: VibrationAnalysisFile | None) -> None:
+        if current is None or current.table.row_count <= 0:
+            self._set_log_range_controls(1, (1, 1), enabled=False)
+            return
+        count = int(current.table.row_count)
+        stored = self._log_ranges.get(self._file_key(current), (1, count))
+        self._set_log_range_controls(count, stored, enabled=True)
+
+    def _set_log_range_controls(self, count: int, values: tuple[int, int], *, enabled: bool) -> None:
+        count = max(1, int(count))
+        start, end = values
+        start = max(1, min(int(start), count))
+        end = max(1, min(int(end), count))
+        if end < start:
+            start, end = end, start
+        self.log_range_start.setPlaceholderText("1")
+        self.log_range_end.setPlaceholderText(str(count))
+        self.log_range_start.setText(str(start))
+        self.log_range_end.setText(str(end))
+        self.log_range_start.setEnabled(enabled)
+        self.log_range_end.setEnabled(enabled)
+
+    @staticmethod
+    def _parse_log_range_text(text: str, *, default: int, count: int) -> int:
+        raw = str(text or "").strip()
+        if not raw:
+            return default
+        try:
+            value = int(round(float(raw)))
+        except ValueError:
+            value = default
+        return max(1, min(int(count), value))
+
+    def _resolved_log_range_values(self, current: VibrationAnalysisFile) -> tuple[int, int]:
+        count = max(1, int(current.table.row_count))
+        start = self._parse_log_range_text(self.log_range_start.text(), default=1, count=count)
+        end = self._parse_log_range_text(self.log_range_end.text(), default=count, count=count)
+        if end < start:
+            start, end = end, start
+        return start, end
+
+    def _log_slice_bounds(self) -> tuple[int, int]:
+        current = self.current_file()
+        if current is None:
+            return 0, 1
+        start_value, end_value = self._resolved_log_range_values(current)
+        start = max(0, start_value - 1)
+        end = max(start + 1, end_value)
+        count = max(1, current.table.row_count)
+        return min(start, count - 1), min(max(end, start + 1), count)
+
+    @staticmethod
+    def _file_key(current: VibrationAnalysisFile) -> str:
+        return str(current.table.path)
+
+    @staticmethod
+    def _demean_vector(values: np.ndarray) -> np.ndarray:
+        result = np.asarray(values, dtype=float).copy()
+        valid = np.isfinite(result)
+        if np.any(valid):
+            result[valid] = result[valid] - float(np.mean(result[valid]))
+        return result
 
     def _delete_selected(self) -> None:
         rows = sorted({item.row() for item in self.file_list.selectedIndexes()}, reverse=True)
         for row in rows:
             if 0 <= row < len(self.files):
-                self.files.pop(row)
+                removed = self.files.pop(row)
+                self._log_ranges.pop(self._file_key(removed), None)
                 self.file_list.takeItem(row)
         self._refresh_controls()
         self._auto_plot_from_control_change()
@@ -1467,6 +1626,9 @@ class VibrationAnalysisPage(DiagnosticPage):
 
 class TraceAnalysisPage(DiagnosticPage):
     IDE_SUFFIX_CATEGORIES = ("Prox", "FB", "ACC", "POS")
+    TRACE_FILE_LIST_MIN_HEIGHT = 90
+    TRANS_FILE_LIST_MIN_HEIGHT = 50
+    TRANS_INFO_LINE_COUNT = 3
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1475,8 +1637,13 @@ class TraceAnalysisPage(DiagnosticPage):
         self._suppress_auto_plot = False
         self._ide_ranges: dict[str, tuple[int, int]] = {}
         self._hac_ranges: dict[str, tuple[int, int]] = {}
+        self._cangfu_ranges: dict[str, tuple[int, int]] = {}
+        self._ide_trans_frequency_ranges: dict[str, tuple[float, float]] = {}
+        self._ide_trans_sampling_settings: dict[str, tuple[float, float]] = {}
+        self._hac_trans_frequency_ranges: dict[str, tuple[float, float]] = {}
         self._plot_windows: list[QtWidgets.QDialog] = []
         self._last_trace_file_index: int | None = None
+        self._rename_edit_autofill_text = ""
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -1486,11 +1653,10 @@ class TraceAnalysisPage(DiagnosticPage):
 
         controls = QtWidgets.QWidget()
         configure_control_panel(controls)
-        controls.setMinimumWidth(330)
-        controls.setMaximumWidth(390)
         controls_layout = QtWidgets.QVBoxLayout(controls)
         controls_layout.setContentsMargins(0, 0, 0, 0)
         controls_layout.setSpacing(5)
+        self.controls_layout = controls_layout
 
         data_group, data_layout = create_group_box("1. 数据", layout_type=QtWidgets.QVBoxLayout)
         button_row = QtWidgets.QHBoxLayout()
@@ -1509,21 +1675,40 @@ class TraceAnalysisPage(DiagnosticPage):
         self.current_file_edit.setReadOnly(True)
         data_layout.addWidget(self.current_file_edit)
 
+        rename_row = QtWidgets.QHBoxLayout()
+        rename_row.setContentsMargins(0, 0, 0, 0)
+        rename_row.addWidget(QtWidgets.QLabel("重命名"))
+        self.rename_edit = QtWidgets.QLineEdit()
+        self.rename_edit.setPlaceholderText("当前数据名称")
+        self.rename_edit.setEnabled(False)
+        rename_row.addWidget(self.rename_edit, 1)
+        data_layout.addLayout(rename_row)
+
         self.file_list = QtWidgets.QListWidget()
         self.file_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.file_list.setAlternatingRowColors(True)
-        self.file_list.setMinimumHeight(120)
+        self.file_list.setMinimumHeight(self.TRACE_FILE_LIST_MIN_HEIGHT)
         data_layout.addWidget(self.file_list, 1)
         controls_layout.addWidget(data_group)
 
         self.settings_stack = QtWidgets.QStackedWidget()
         self.ide_settings_group = self._build_ide_settings_group()
         self.hac_settings_group = self._build_hac_settings_group()
+        self.cangfu_settings_group = self._build_cangfu_settings_group()
+        self.ide_trans_settings_group = self._build_ide_trans_settings_group()
+        self.hac_trans_settings_group = self._build_hac_trans_settings_group()
         self.settings_stack.addWidget(self.ide_settings_group)
         self.settings_stack.addWidget(self.hac_settings_group)
+        self.settings_stack.addWidget(self.cangfu_settings_group)
+        self.settings_stack.addWidget(self.ide_trans_settings_group)
+        self.settings_stack.addWidget(self.hac_trans_settings_group)
         controls_layout.addWidget(self.settings_stack, 1)
 
         action_group, action_layout = create_group_box("3. 操作", layout_type=QtWidgets.QGridLayout)
+        self.action_group = action_group
+        action_group.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
+        action_layout.setContentsMargins(8, 16, 8, 8)
+        action_layout.setVerticalSpacing(4)
         self.demean_check = create_toggle_button("去均值")
         self.hold_check = create_toggle_button("保持曲线")
         self.plot_button = QtWidgets.QPushButton("绘图")
@@ -1547,6 +1732,9 @@ class TraceAnalysisPage(DiagnosticPage):
         ide_header.setContentsMargins(0, 0, 0, 0)
         self.ide_selected_label = QtWidgets.QLabel("当前 IDE 文件：未选择")
         self.ide_context_label = QtWidgets.QLabel("模式 / X 轴 / 范围 / 采样率")
+        for label in (self.ide_selected_label, self.ide_context_label):
+            label.setMinimumWidth(0)
+            label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         ide_text = QtWidgets.QVBoxLayout()
         ide_text.setContentsMargins(0, 0, 0, 0)
         ide_text.addWidget(self.ide_selected_label)
@@ -1574,6 +1762,9 @@ class TraceAnalysisPage(DiagnosticPage):
         hac_layout.setSpacing(5)
         self.hac_selected_label = QtWidgets.QLabel("当前 HAC 文件：未选择")
         self.hac_context_label = QtWidgets.QLabel("预设 / 模式 / 范围 / X 轴")
+        for label in (self.hac_selected_label, self.hac_context_label):
+            label.setMinimumWidth(0)
+            label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         hac_header = QtWidgets.QHBoxLayout()
         hac_header.setContentsMargins(0, 0, 0, 0)
         hac_text = QtWidgets.QVBoxLayout()
@@ -1587,10 +1778,192 @@ class TraceAnalysisPage(DiagnosticPage):
         hac_layout.addLayout(hac_header)
         self.hac_plot = self._create_plot_widget("HAC 时域")
         hac_layout.addWidget(self.hac_plot, 1)
+        self.cangfu_tab = QtWidgets.QWidget()
+        cangfu_layout = QtWidgets.QVBoxLayout(self.cangfu_tab)
+        cangfu_layout.setContentsMargins(6, 6, 6, 6)
+        cangfu_layout.setSpacing(5)
+        self.cangfu_selected_label = QtWidgets.QLabel("当前 Cangfu 文件：未选择")
+        self.cangfu_context_label = QtWidgets.QLabel("模式 / X 轴 / 范围 / 采样率")
+        for label in (self.cangfu_selected_label, self.cangfu_context_label):
+            label.setMinimumWidth(0)
+            label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+        cangfu_header = QtWidgets.QHBoxLayout()
+        cangfu_header.setContentsMargins(0, 0, 0, 0)
+        cangfu_text = QtWidgets.QVBoxLayout()
+        cangfu_text.setContentsMargins(0, 0, 0, 0)
+        cangfu_text.addWidget(self.cangfu_selected_label)
+        cangfu_text.addWidget(self.cangfu_context_label)
+        cangfu_header.addLayout(cangfu_text, 1)
+        self.cangfu_time_window_button = QtWidgets.QPushButton("时域图")
+        self.cangfu_psd_window_button = QtWidgets.QPushButton("PSD图")
+        set_button_role(self.cangfu_time_window_button, "secondary")
+        set_button_role(self.cangfu_psd_window_button, "secondary")
+        cangfu_header.addWidget(self.cangfu_time_window_button)
+        cangfu_header.addWidget(self.cangfu_psd_window_button)
+        cangfu_layout.addLayout(cangfu_header)
+        cangfu_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        self.cangfu_time_plot = self._create_plot_widget("Cangfu Trace 时域")
+        self.cangfu_psd_plot = self._create_plot_widget("Cangfu Trace PSD")
+        cangfu_splitter.addWidget(self.cangfu_time_plot)
+        cangfu_splitter.addWidget(self.cangfu_psd_plot)
+        cangfu_splitter.setStretchFactor(0, 1)
+        cangfu_splitter.setStretchFactor(1, 1)
+        cangfu_layout.addWidget(cangfu_splitter, 1)
+
+        self.ide_trans_tab = QtWidgets.QWidget()
+        ide_trans_layout = QtWidgets.QVBoxLayout(self.ide_trans_tab)
+        ide_trans_layout.setContentsMargins(6, 6, 6, 6)
+        ide_trans_layout.setSpacing(5)
+        self.ide_trans_selected_label = QtWidgets.QLabel("当前 IDE Trans 文件：未选择")
+        self.ide_trans_context_label = QtWidgets.QLabel("采样率 / 频率分辨率 / 频率范围")
+        for label in (self.ide_trans_selected_label, self.ide_trans_context_label):
+            label.setMinimumWidth(0)
+            label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+        ide_trans_layout.addWidget(self.ide_trans_selected_label)
+        ide_trans_layout.addWidget(self.ide_trans_context_label)
+
+        self.ide_trans_time_plot = self._create_plot_widget("IDE Trans 时域")
+        self.ide_trans_power_plot = self._create_plot_widget("IDE Trans 功率谱")
+        self.ide_trans_magnitude_plot = self._create_plot_widget("IDE Trans 传递函数幅值")
+        self.ide_trans_phase_plot = self._create_plot_widget("IDE Trans 相位")
+        self.ide_trans_coherence_plot = self._create_plot_widget("IDE Trans 相干性")
+
+        self.ide_trans_view_tabs = QtWidgets.QTabWidget()
+
+        def add_plot_window_button_row(target_layout, *buttons: QtWidgets.QPushButton) -> None:
+            button_row = QtWidgets.QHBoxLayout()
+            button_row.setContentsMargins(0, 0, 0, 0)
+            button_row.setSpacing(5)
+            button_row.addStretch(1)
+            for button in buttons:
+                button_row.addWidget(button)
+            target_layout.addLayout(button_row)
+
+        time_power_page = QtWidgets.QWidget()
+        time_power_layout = QtWidgets.QVBoxLayout(time_power_page)
+        time_power_layout.setContentsMargins(0, 0, 0, 0)
+        time_power_layout.setSpacing(4)
+        add_plot_window_button_row(
+            time_power_layout,
+            self.ide_trans_time_window_button,
+            self.ide_trans_power_window_button,
+        )
+        time_power_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        time_power_splitter.addWidget(self.ide_trans_time_plot)
+        time_power_splitter.addWidget(self.ide_trans_power_plot)
+        time_power_splitter.setStretchFactor(0, 1)
+        time_power_splitter.setStretchFactor(1, 1)
+        time_power_layout.addWidget(time_power_splitter)
+
+        transfer_page = QtWidgets.QWidget()
+        transfer_layout = QtWidgets.QVBoxLayout(transfer_page)
+        transfer_layout.setContentsMargins(0, 0, 0, 0)
+        transfer_layout.setSpacing(4)
+        add_plot_window_button_row(
+            transfer_layout,
+            self.ide_trans_magnitude_window_button,
+            self.ide_trans_phase_window_button,
+        )
+        transfer_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        transfer_splitter.addWidget(self.ide_trans_magnitude_plot)
+        transfer_splitter.addWidget(self.ide_trans_phase_plot)
+        transfer_splitter.setStretchFactor(0, 1)
+        transfer_splitter.setStretchFactor(1, 1)
+        transfer_layout.addWidget(transfer_splitter)
+
+        coherence_page = QtWidgets.QWidget()
+        coherence_layout = QtWidgets.QVBoxLayout(coherence_page)
+        coherence_layout.setContentsMargins(0, 0, 0, 0)
+        coherence_layout.setSpacing(4)
+        add_plot_window_button_row(coherence_layout, self.ide_trans_coherence_window_button)
+        coherence_layout.addWidget(self.ide_trans_coherence_plot)
+
+        self.ide_trans_view_tabs.addTab(time_power_page, "时域 / 功率谱")
+        self.ide_trans_view_tabs.addTab(transfer_page, "传函 / 相位")
+        self.ide_trans_view_tabs.addTab(coherence_page, "相干性")
+        ide_trans_layout.addWidget(self.ide_trans_view_tabs, 1)
+
+        self.hac_trans_tab = QtWidgets.QWidget()
+        hac_trans_layout = QtWidgets.QVBoxLayout(self.hac_trans_tab)
+        hac_trans_layout.setContentsMargins(6, 6, 6, 6)
+        hac_trans_layout.setSpacing(5)
+        self.hac_trans_selected_label = QtWidgets.QLabel("当前 HAC Trans 文件：未选择")
+        self.hac_trans_context_label = QtWidgets.QLabel("采样率 / 频率分辨率 / 频率范围")
+        for label in (self.hac_trans_selected_label, self.hac_trans_context_label):
+            label.setMinimumWidth(0)
+            label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+        hac_trans_layout.addWidget(self.hac_trans_selected_label)
+        hac_trans_layout.addWidget(self.hac_trans_context_label)
+
+        self.hac_trans_time_plot = self._create_plot_widget("HAC Trans 时域")
+        self.hac_trans_magnitude_plot = self._create_plot_widget("HAC Trans 传递函数幅值")
+        self.hac_trans_phase_plot = self._create_plot_widget("HAC Trans 相位")
+        self.hac_trans_coherence_plot = self._create_plot_widget("HAC Trans 相干性")
+        self.hac_trans_view_tabs = QtWidgets.QTabWidget()
+
+        hac_time_page = QtWidgets.QWidget()
+        hac_time_layout = QtWidgets.QVBoxLayout(hac_time_page)
+        hac_time_layout.setContentsMargins(0, 0, 0, 0)
+        hac_time_layout.setSpacing(4)
+        add_plot_window_button_row(hac_time_layout, self.hac_trans_time_window_button)
+        hac_time_layout.addWidget(self.hac_trans_time_plot)
+
+        hac_transfer_page = QtWidgets.QWidget()
+        hac_transfer_layout = QtWidgets.QVBoxLayout(hac_transfer_page)
+        hac_transfer_layout.setContentsMargins(0, 0, 0, 0)
+        hac_transfer_layout.setSpacing(4)
+        add_plot_window_button_row(
+            hac_transfer_layout,
+            self.hac_trans_magnitude_window_button,
+            self.hac_trans_phase_window_button,
+        )
+        hac_transfer_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        hac_transfer_splitter.addWidget(self.hac_trans_magnitude_plot)
+        hac_transfer_splitter.addWidget(self.hac_trans_phase_plot)
+        hac_transfer_splitter.setStretchFactor(0, 1)
+        hac_transfer_splitter.setStretchFactor(1, 1)
+        hac_transfer_layout.addWidget(hac_transfer_splitter)
+
+        hac_coherence_page = QtWidgets.QWidget()
+        hac_coherence_layout = QtWidgets.QVBoxLayout(hac_coherence_page)
+        hac_coherence_layout.setContentsMargins(0, 0, 0, 0)
+        hac_coherence_layout.setSpacing(4)
+        add_plot_window_button_row(hac_coherence_layout, self.hac_trans_coherence_window_button)
+        hac_coherence_layout.addWidget(self.hac_trans_coherence_plot)
+
+        self.hac_trans_view_tabs.addTab(hac_time_page, "激励 / 响应")
+        self.hac_trans_view_tabs.addTab(hac_transfer_page, "传函 / 相位")
+        self.hac_trans_view_tabs.addTab(hac_coherence_page, "相干性")
+        hac_trans_layout.addWidget(self.hac_trans_view_tabs, 1)
+
         self.tabs.addTab(self.ide_tab, "IDE Trace")
         self.tabs.addTab(self.hac_tab, "HAC Trace")
+        self.tabs.addTab(self.cangfu_tab, "Cangfu Trace")
+        self.tabs.addTab(self.ide_trans_tab, "IDE Trans")
+        self.tabs.addTab(self.hac_trans_tab, "HAC Trans")
 
-        layout.addWidget(controls)
+        controls_layout.removeWidget(action_group)
+        self.controls_scroll = create_control_scroll_area(
+            controls,
+            minimum_width=0,
+            maximum_width=16_777_215,
+        )
+        self.controls_scroll.setMinimumHeight(0)
+        scroll_policy = self.controls_scroll.sizePolicy()
+        scroll_policy.setVerticalPolicy(QtWidgets.QSizePolicy.Ignored)
+        self.controls_scroll.setSizePolicy(scroll_policy)
+        self.controls_column = QtWidgets.QWidget()
+        configure_control_panel(self.controls_column)
+        self.controls_column.setMinimumWidth(260)
+        self.controls_column.setMaximumWidth(300)
+        controls_column_layout = QtWidgets.QVBoxLayout(self.controls_column)
+        controls_column_layout.setContentsMargins(0, 0, 0, 0)
+        controls_column_layout.setSpacing(5)
+        controls_column_layout.addWidget(self.controls_scroll, 1)
+        controls_column_layout.addWidget(action_group, 0)
+        controls_column_layout.setStretch(0, 1)
+        controls_column_layout.setStretch(1, 0)
+        layout.addWidget(self.controls_column)
         layout.addWidget(self.tabs, 1)
 
         self._install_legacy_aliases()
@@ -1599,6 +1972,8 @@ class TraceAnalysisPage(DiagnosticPage):
         self.delete_button.clicked.connect(self._delete_selected)
         self.clear_button.clicked.connect(self.clear_plots)
         self.file_list.currentRowChanged.connect(lambda _row: self._on_file_selection_changed())
+        self.rename_edit.editingFinished.connect(self._rename_current_file_from_editor)
+        self.rename_edit.returnPressed.connect(self._rename_current_file_confirmed)
         self.ide_x_axis_combo.currentIndexChanged.connect(lambda _index: self._auto_plot_from_control_change())
         self.ide_plot_mode_combo.currentIndexChanged.connect(lambda _index: self._on_plot_mode_changed())
         self.ide_range_start.valueChanged.connect(lambda _value: self._on_range_changed("ide"))
@@ -1611,6 +1986,18 @@ class TraceAnalysisPage(DiagnosticPage):
         self.hac_range_start.valueChanged.connect(lambda _value: self._on_range_changed("hac"))
         self.hac_range_end.valueChanged.connect(lambda _value: self._on_range_changed("hac"))
         self.hac_channel_list.itemSelectionChanged.connect(self._auto_plot_from_control_change)
+        self.cangfu_x_axis_combo.currentIndexChanged.connect(lambda _index: self._auto_plot_from_control_change())
+        self.cangfu_plot_mode_combo.currentIndexChanged.connect(lambda _index: self._on_plot_mode_changed())
+        self.cangfu_range_start.valueChanged.connect(lambda _value: self._on_range_changed("cangfu"))
+        self.cangfu_range_end.valueChanged.connect(lambda _value: self._on_range_changed("cangfu"))
+        self.cangfu_channel_list.itemSelectionChanged.connect(self._auto_plot_from_control_change)
+        self.ide_trans_frequency_min.editingFinished.connect(self._on_ide_trans_frequency_changed)
+        self.ide_trans_frequency_max.editingFinished.connect(self._on_ide_trans_frequency_changed)
+        self.ide_trans_sample_frequency.editingFinished.connect(self._on_ide_trans_sampling_changed)
+        self.ide_trans_update_rate.editingFinished.connect(self._on_ide_trans_sampling_changed)
+        self.ide_trans_update_rate_reset.clicked.connect(self._reset_ide_trans_update_rate)
+        self.hac_trans_frequency_min.editingFinished.connect(self._on_hac_trans_frequency_changed)
+        self.hac_trans_frequency_max.editingFinished.connect(self._on_hac_trans_frequency_changed)
         self.demean_check.toggled.connect(lambda _checked: self._auto_plot_from_control_change())
         self.tabs.currentChanged.connect(lambda _index: self._on_tab_changed())
         self.plot_button.clicked.connect(self.plot_current)
@@ -1624,6 +2011,27 @@ class TraceAnalysisPage(DiagnosticPage):
         self.hac_window_button.clicked.connect(
             lambda: self._open_plot_window(self.hac_plot, "HAC 时域图")
         )
+        self.cangfu_time_window_button.clicked.connect(
+            lambda: self._open_plot_window(self.cangfu_time_plot, "Cangfu Trace 时域图")
+        )
+        self.cangfu_psd_window_button.clicked.connect(
+            lambda: self._open_plot_window(self.cangfu_psd_plot, "Cangfu Trace PSD 图")
+        )
+        for button, plot, title in (
+            (self.ide_trans_time_window_button, self.ide_trans_time_plot, "IDE Trans 时域图"),
+            (self.ide_trans_power_window_button, self.ide_trans_power_plot, "IDE Trans 功率谱图"),
+            (self.ide_trans_magnitude_window_button, self.ide_trans_magnitude_plot, "IDE Trans 传递函数幅值图"),
+            (self.ide_trans_phase_window_button, self.ide_trans_phase_plot, "IDE Trans 相位图"),
+            (self.ide_trans_coherence_window_button, self.ide_trans_coherence_plot, "IDE Trans 相干性图"),
+        ):
+            button.clicked.connect(lambda _checked=False, source=plot, name=title: self._open_plot_window(source, name))
+        for button, plot, title in (
+            (self.hac_trans_time_window_button, self.hac_trans_time_plot, "HAC Trans 激励/响应图"),
+            (self.hac_trans_magnitude_window_button, self.hac_trans_magnitude_plot, "HAC Trans 传递函数幅值图"),
+            (self.hac_trans_phase_window_button, self.hac_trans_phase_plot, "HAC Trans 相位图"),
+            (self.hac_trans_coherence_window_button, self.hac_trans_coherence_plot, "HAC Trans 相干性图"),
+        ):
+            button.clicked.connect(lambda _checked=False, source=plot, name=title: self._open_plot_window(source, name))
         self._update_settings_stack()
         self._sync_hold_availability()
 
@@ -1638,17 +2046,22 @@ class TraceAnalysisPage(DiagnosticPage):
         self.ide_range_start.setRange(1, 2_000_000_000)
         self.ide_range_end = QtWidgets.QSpinBox()
         self.ide_range_end.setRange(1, 2_000_000_000)
+        for spin in (self.ide_range_start, self.ide_range_end):
+            spin.setMinimumWidth(72)
+            spin.setMaximumWidth(96)
         self.ide_channel_list = QtWidgets.QListWidget()
         self.ide_channel_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.ide_channel_list.setAlternatingRowColors(True)
-        self.ide_channel_list.setMinimumHeight(105)
+        self.ide_channel_list.setMinimumHeight(78)
 
         self.ide_eu_table = QtWidgets.QTableWidget(0, 3)
         self.ide_eu_table.setHorizontalHeaderLabels(["通道", "工程系数", "启用"])
-        configure_data_table(self.ide_eu_table, minimum_height=92, maximum_height=130)
+        configure_data_table(self.ide_eu_table, minimum_height=78, maximum_height=120)
         self.ide_eu_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
-        self.ide_eu_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
-        self.ide_eu_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
+        self.ide_eu_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.Interactive)
+        self.ide_eu_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.Interactive)
+        self.ide_eu_table.horizontalHeader().resizeSection(1, 72)
+        self.ide_eu_table.horizontalHeader().resizeSection(2, 44)
 
         range_row = QtWidgets.QHBoxLayout()
         range_row.setContentsMargins(0, 0, 0, 0)
@@ -1666,13 +2079,14 @@ class TraceAnalysisPage(DiagnosticPage):
         for column, category in enumerate(self.IDE_SUFFIX_CATEGORIES):
             label = QtWidgets.QLabel(f"{category}:")
             edit = QtWidgets.QLineEdit()
-            edit.setMaximumWidth(62)
+            edit.setMinimumWidth(42)
+            edit.setMaximumWidth(66)
             self.ide_suffix_edits[category] = edit
             suffix_layout.addWidget(label, column // 2, (column % 2) * 2)
             suffix_layout.addWidget(edit, column // 2, (column % 2) * 2 + 1)
         self.ide_suffix_apply_button = QtWidgets.QPushButton("按后缀应用")
         set_button_role(self.ide_suffix_apply_button, "secondary")
-        suffix_layout.addWidget(self.ide_suffix_apply_button, 0, 4, 2, 1)
+        suffix_layout.addWidget(self.ide_suffix_apply_button, 2, 0, 1, 4)
 
         layout.addWidget(QtWidgets.QLabel("X 轴"), 0, 0)
         layout.addWidget(self.ide_x_axis_combo, 0, 1)
@@ -1682,10 +2096,12 @@ class TraceAnalysisPage(DiagnosticPage):
         layout.addLayout(range_row, 2, 1)
         layout.addWidget(QtWidgets.QLabel("通道"), 3, 0, QtCore.Qt.AlignTop)
         layout.addWidget(self.ide_channel_list, 3, 1)
-        layout.addWidget(QtWidgets.QLabel("按后缀工程系数"), 4, 0, QtCore.Qt.AlignTop)
-        layout.addWidget(suffix_widget, 4, 1)
-        layout.addWidget(QtWidgets.QLabel("工程单位"), 5, 0, QtCore.Qt.AlignTop)
-        layout.addWidget(self.ide_eu_table, 5, 1)
+        layout.addWidget(QtWidgets.QLabel("按后缀工程系数"), 4, 0, 1, 2)
+        layout.addWidget(suffix_widget, 5, 0, 1, 2)
+        layout.addWidget(QtWidgets.QLabel("工程单位"), 6, 0, 1, 2)
+        layout.addWidget(self.ide_eu_table, 7, 0, 1, 2)
+        layout.setColumnMinimumWidth(0, 62)
+        layout.setColumnStretch(1, 1)
         layout.setRowStretch(3, 1)
         return group
 
@@ -1698,10 +2114,13 @@ class TraceAnalysisPage(DiagnosticPage):
         self.hac_range_start.setRange(1, 2_000_000_000)
         self.hac_range_end = QtWidgets.QSpinBox()
         self.hac_range_end.setRange(1, 2_000_000_000)
+        for spin in (self.hac_range_start, self.hac_range_end):
+            spin.setMinimumWidth(72)
+            spin.setMaximumWidth(96)
         self.hac_channel_list = QtWidgets.QListWidget()
         self.hac_channel_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.hac_channel_list.setAlternatingRowColors(True)
-        self.hac_channel_list.setMinimumHeight(260)
+        self.hac_channel_list.setMinimumHeight(120)
 
         range_row = QtWidgets.QHBoxLayout()
         range_row.setContentsMargins(0, 0, 0, 0)
@@ -1721,6 +2140,166 @@ class TraceAnalysisPage(DiagnosticPage):
         layout.setRowStretch(3, 1)
         return group
 
+    def _build_cangfu_settings_group(self) -> QtWidgets.QGroupBox:
+        group, layout = create_group_box("2. Cangfu Trace 设置")
+        self.cangfu_x_axis_combo = QtWidgets.QComboBox()
+        self.cangfu_x_axis_combo.addItem("样本序号", "sample")
+        self.cangfu_x_axis_combo.addItem("时间 (s)", "time")
+        self.cangfu_plot_mode_combo = QtWidgets.QComboBox()
+        self.cangfu_plot_mode_combo.addItems(["叠加", "子图"])
+        self.cangfu_range_start = QtWidgets.QSpinBox()
+        self.cangfu_range_start.setRange(1, 2_000_000_000)
+        self.cangfu_range_end = QtWidgets.QSpinBox()
+        self.cangfu_range_end.setRange(1, 2_000_000_000)
+        for spin in (self.cangfu_range_start, self.cangfu_range_end):
+            spin.setMinimumWidth(72)
+            spin.setMaximumWidth(96)
+        self.cangfu_channel_list = QtWidgets.QListWidget()
+        self.cangfu_channel_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.cangfu_channel_list.setAlternatingRowColors(True)
+        self.cangfu_channel_list.setMinimumHeight(120)
+
+        range_row = QtWidgets.QHBoxLayout()
+        range_row.setContentsMargins(0, 0, 0, 0)
+        range_row.setSpacing(5)
+        range_row.addWidget(self.cangfu_range_start)
+        range_row.addWidget(QtWidgets.QLabel("至"))
+        range_row.addWidget(self.cangfu_range_end)
+
+        layout.addWidget(QtWidgets.QLabel("X 轴"), 0, 0)
+        layout.addWidget(self.cangfu_x_axis_combo, 0, 1)
+        layout.addWidget(QtWidgets.QLabel("绘图模式"), 1, 0)
+        layout.addWidget(self.cangfu_plot_mode_combo, 1, 1)
+        layout.addWidget(QtWidgets.QLabel("样本范围"), 2, 0)
+        layout.addLayout(range_row, 2, 1)
+        layout.addWidget(QtWidgets.QLabel("通道"), 3, 0, QtCore.Qt.AlignTop)
+        layout.addWidget(self.cangfu_channel_list, 3, 1)
+        layout.setRowStretch(3, 1)
+        return group
+
+    def _build_ide_trans_settings_group(self) -> QtWidgets.QGroupBox:
+        group, layout = create_group_box("2. IDE Trans 设置")
+        self.ide_trans_frequency_min = QtWidgets.QDoubleSpinBox()
+        self.ide_trans_frequency_max = QtWidgets.QDoubleSpinBox()
+        for spin in (self.ide_trans_frequency_min, self.ide_trans_frequency_max):
+            spin.setRange(0.0, 1_000_000.0)
+            spin.setDecimals(4)
+            spin.setSuffix(" Hz")
+            spin.setKeyboardTracking(False)
+            spin.setMinimumWidth(86)
+        self.ide_trans_frequency_min.setValue(0.1)
+        self.ide_trans_frequency_max.setValue(400.0)
+
+        self.ide_trans_sample_frequency = QtWidgets.QDoubleSpinBox()
+        self.ide_trans_sample_frequency.setRange(0.000001, 100_000_000.0)
+        self.ide_trans_sample_frequency.setDecimals(1)
+        self.ide_trans_sample_frequency.setSuffix(" Hz")
+        self.ide_trans_sample_frequency.setKeyboardTracking(False)
+        self.ide_trans_sample_frequency.setFixedWidth(76)
+        self.ide_trans_update_rate = QtWidgets.QSpinBox()
+        self.ide_trans_update_rate.setRange(1, 1_000_000)
+        self.ide_trans_update_rate.setKeyboardTracking(False)
+        self.ide_trans_update_rate.setFixedWidth(52)
+        self.ide_trans_update_rate_reset = QtWidgets.QPushButton("自动")
+        self.ide_trans_update_rate_reset.setFixedWidth(42)
+        set_button_role(self.ide_trans_update_rate_reset, "secondary")
+
+        frequency_row = QtWidgets.QHBoxLayout()
+        frequency_row.setContentsMargins(0, 0, 0, 0)
+        frequency_row.setSpacing(5)
+        frequency_row.addWidget(self.ide_trans_frequency_min)
+        frequency_row.addWidget(QtWidgets.QLabel("至"))
+        frequency_row.addWidget(self.ide_trans_frequency_max)
+
+        update_rate_row = QtWidgets.QHBoxLayout()
+        update_rate_row.setContentsMargins(0, 0, 0, 0)
+        update_rate_row.setSpacing(5)
+        update_rate_row.addWidget(self.ide_trans_sample_frequency, 1)
+        update_rate_row.addWidget(QtWidgets.QLabel("÷"))
+        update_rate_row.addWidget(self.ide_trans_update_rate)
+        update_rate_row.addWidget(self.ide_trans_update_rate_reset)
+
+        self.ide_trans_info_label = QtWidgets.QLabel("请选择 SDM 文件")
+        self._configure_trans_info_label(self.ide_trans_info_label)
+        self.ide_trans_info_label.setFixedHeight(self.ide_trans_info_label.fontMetrics().lineSpacing() + 2)
+        self.ide_trans_time_window_button = QtWidgets.QPushButton("时域图")
+        self.ide_trans_power_window_button = QtWidgets.QPushButton("功率谱")
+        self.ide_trans_magnitude_window_button = QtWidgets.QPushButton("传函幅值")
+        self.ide_trans_phase_window_button = QtWidgets.QPushButton("相位")
+        self.ide_trans_coherence_window_button = QtWidgets.QPushButton("相干性")
+        for button in (
+            self.ide_trans_time_window_button,
+            self.ide_trans_power_window_button,
+            self.ide_trans_magnitude_window_button,
+            self.ide_trans_phase_window_button,
+            self.ide_trans_coherence_window_button,
+        ):
+            set_button_role(button, "secondary")
+
+        layout.addWidget(QtWidgets.QLabel("频率范围"), 0, 0)
+        layout.addLayout(frequency_row, 0, 1)
+        layout.addWidget(QtWidgets.QLabel("采样/更新"), 1, 0)
+        layout.addLayout(update_rate_row, 1, 1)
+        layout.addWidget(self.ide_trans_info_label, 2, 0, 1, 2)
+        layout.setColumnStretch(0, 1)
+        layout.setColumnStretch(1, 1)
+        return group
+
+    def _build_hac_trans_settings_group(self) -> QtWidgets.QGroupBox:
+        group, layout = create_group_box("2. HAC Trans 设置")
+        self.hac_trans_frequency_min = QtWidgets.QDoubleSpinBox()
+        self.hac_trans_frequency_max = QtWidgets.QDoubleSpinBox()
+        for spin in (self.hac_trans_frequency_min, self.hac_trans_frequency_max):
+            spin.setRange(0.0, 1_000_000.0)
+            spin.setDecimals(4)
+            spin.setSuffix(" Hz")
+            spin.setKeyboardTracking(False)
+            spin.setMinimumWidth(78)
+        self.hac_trans_frequency_min.setValue(0.1)
+        self.hac_trans_frequency_max.setValue(625.0)
+
+        frequency_row = QtWidgets.QHBoxLayout()
+        frequency_row.setContentsMargins(0, 0, 0, 0)
+        frequency_row.setSpacing(5)
+        frequency_row.addWidget(self.hac_trans_frequency_min)
+        frequency_row.addWidget(QtWidgets.QLabel("至"))
+        frequency_row.addWidget(self.hac_trans_frequency_max)
+
+        self.hac_trans_info_label = QtWidgets.QLabel("请选择 HAC 传函 CSV 文件")
+        self._configure_trans_info_label(self.hac_trans_info_label)
+        self.hac_trans_time_window_button = QtWidgets.QPushButton("激励/响应")
+        self.hac_trans_magnitude_window_button = QtWidgets.QPushButton("传函幅值")
+        self.hac_trans_phase_window_button = QtWidgets.QPushButton("相位")
+        self.hac_trans_coherence_window_button = QtWidgets.QPushButton("相干性")
+        for button in (
+            self.hac_trans_time_window_button,
+            self.hac_trans_magnitude_window_button,
+            self.hac_trans_phase_window_button,
+            self.hac_trans_coherence_window_button,
+        ):
+            set_button_role(button, "secondary")
+
+        layout.addWidget(QtWidgets.QLabel("频率范围"), 0, 0)
+        layout.addLayout(frequency_row, 0, 1)
+        layout.addWidget(self.hac_trans_info_label, 1, 0, 1, 2)
+        layout.setColumnStretch(0, 1)
+        layout.setColumnStretch(1, 1)
+        return group
+
+    def _configure_trans_info_label(self, label: QtWidgets.QLabel) -> None:
+        label.setWordWrap(False)
+        label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+        label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
+        line_height = label.fontMetrics().lineSpacing()
+        label.setFixedHeight(line_height * self.TRANS_INFO_LINE_COUNT + 6)
+
+    @staticmethod
+    def _set_trans_info_text(label: QtWidgets.QLabel, *lines: str) -> None:
+        text = "\n".join(lines)
+        label.setText(text)
+        label.setToolTip(text)
+
     def _install_legacy_aliases(self) -> None:
         self.x_axis_combo = self.ide_x_axis_combo
         self.plot_mode_combo = self.ide_plot_mode_combo
@@ -1734,41 +2313,135 @@ class TraceAnalysisPage(DiagnosticPage):
             self,
             "加载减振器软件测试数据",
             str(self._last_directory),
-            "测试数据文件 (*.txt *.csv);;所有文件 (*.*)",
+            "测试数据文件 (*.txt *.csv *.dat *.mat *.rpt *.para *.sdm);;所有文件 (*.*)",
         )
         if paths:
             self.load_paths([Path(path) for path in paths])
 
     def load_paths(self, paths: list[Path]) -> None:
         loaded = 0
-        for path in paths:
+        reloaded = 0
+        reloaded_rows: set[int] = set()
+        trans_target_row: int | None = None
+        load_paths = self._dedupe_trace_paths(paths)
+        for path in load_paths:
+            dataset_key = self._trace_dataset_key(path)
+            existing_index = next(
+                (
+                    index
+                    for index, item in enumerate(self.files)
+                    if self._trace_dataset_key(item.table.path) == dataset_key
+                ),
+                None,
+            )
+            if existing_index is not None:
+                existing = self.files[existing_index]
+                same_path = self._resolved_path_text(existing.table.path) == self._resolved_path_text(path)
+                if not same_path and self._trace_path_priority(existing.table.path) <= self._trace_path_priority(path):
+                    continue
             try:
                 loaded_file = load_trace_analysis_file(path)
             except Exception as exc:
                 self._show_status(f"加载 {path.name} 失败：{exc}")
                 continue
-            self.files.append(loaded_file)
-            self.file_list.addItem(f"{loaded_file.table.name} ({self._kind_label(loaded_file.trace_kind)})")
-            loaded += 1
-        self._remember_paths(paths)
+            if existing_index is None:
+                self.files.append(loaded_file)
+                self.file_list.addItem(self._file_list_text(loaded_file))
+                target_row = len(self.files) - 1
+                loaded += 1
+            else:
+                previous = self.files[existing_index]
+                if previous.table.metadata.get("trace_custom_display_name"):
+                    loaded_file.table.name = previous.table.name
+                    loaded_file.table.metadata["trace_custom_display_name"] = True
+                previous_key = self._file_key(previous)
+                self._ide_ranges.pop(previous_key, None)
+                self._hac_ranges.pop(previous_key, None)
+                self._cangfu_ranges.pop(previous_key, None)
+                self._ide_trans_frequency_ranges.pop(previous_key, None)
+                self._ide_trans_sampling_settings.pop(previous_key, None)
+                self._hac_trans_frequency_ranges.pop(previous_key, None)
+                self.files[existing_index] = loaded_file
+                item = self.file_list.item(existing_index)
+                if item is not None:
+                    item.setText(self._file_list_text(loaded_file))
+                target_row = existing_index
+                reloaded += 1
+                reloaded_rows.add(existing_index)
+            if loaded_file.trace_kind in {"ide_trans", "hac_trans"}:
+                trans_target_row = target_row
+        self._remember_paths(load_paths or paths)
         self._suppress_auto_plot = True
-        if self.file_list.count() and self.file_list.currentRow() < 0:
+        if trans_target_row is not None:
+            self.file_list.setCurrentRow(trans_target_row)
+        elif self.file_list.count() and self.file_list.currentRow() < 0:
             self.file_list.setCurrentRow(0)
         self._last_trace_file_index = self._valid_file_index(self.file_list.currentRow())
         self._refresh_controls()
         self._select_default_tab_for_current_file()
         self._suppress_auto_plot = False
-        self._show_status(f"已加载测试文件：{loaded} 个，请选择通道后点击绘图")
+        current_row = self.file_list.currentRow()
+        if current_row in reloaded_rows:
+            current = self.current_file()
+            if current is not None:
+                self._clear_plots_for_kind(current.trace_kind)
+                self.plot_current()
+        if reloaded:
+            self._show_status(f"已加载 {loaded} 个、重新读取 {reloaded} 个测试文件")
+        else:
+            self._show_status(f"已加载测试文件：{loaded} 个，请选择通道后点击绘图")
+
+    def _dedupe_trace_paths(self, paths: list[Path]) -> list[Path]:
+        selected: dict[tuple[str, str], Path] = {}
+        for raw_path in paths:
+            path = Path(raw_path)
+            key = self._trace_dataset_key(path)
+            current = selected.get(key)
+            if current is None or self._trace_path_priority(path) <= self._trace_path_priority(current):
+                selected[key] = path
+        return list(selected.values())
+
+    @staticmethod
+    def _resolved_path_text(path: Path) -> str:
+        try:
+            return str(Path(path).resolve()).lower()
+        except OSError:
+            return str(Path(path).absolute()).lower()
+
+    @staticmethod
+    def _trace_dataset_key(path: Path) -> tuple[str, str]:
+        resolved = Path(path)
+        try:
+            resolved = resolved.resolve()
+        except OSError:
+            pass
+        if resolved.suffix.lower() in {".txt", ".mat"}:
+            return (str(resolved.parent).lower(), resolved.stem.lower())
+        return (str(resolved.parent).lower(), resolved.name.lower())
+
+    @staticmethod
+    def _trace_path_priority(path: Path) -> int:
+        suffix = Path(path).suffix.lower()
+        if suffix == ".txt":
+            return 0
+        if suffix == ".mat":
+            return 1
+        return 2
 
     def clear(self) -> None:
         self.files.clear()
         self.file_list.clear()
         self.ide_channel_list.clear()
         self.hac_channel_list.clear()
+        self.cangfu_channel_list.clear()
         self.hac_preset_combo.clear()
         self.ide_eu_table.setRowCount(0)
         self._ide_ranges.clear()
         self._hac_ranges.clear()
+        self._cangfu_ranges.clear()
+        self._ide_trans_frequency_ranges.clear()
+        self._ide_trans_sampling_settings.clear()
+        self._hac_trans_frequency_ranges.clear()
         self._last_trace_file_index = None
         self._close_plot_windows()
         self.clear_plots(show_status=False)
@@ -1776,11 +2449,49 @@ class TraceAnalysisPage(DiagnosticPage):
         self._show_status("减振器软件测试数据分析已清空")
 
     def clear_plots(self, *, show_status: bool = True) -> None:
-        for plot in (self.ide_time_plot, self.ide_psd_plot, self.hac_plot):
+        for plot in (
+            self.ide_time_plot,
+            self.ide_psd_plot,
+            self.hac_plot,
+            self.cangfu_time_plot,
+            self.cangfu_psd_plot,
+            self.ide_trans_time_plot,
+            self.ide_trans_power_plot,
+            self.ide_trans_magnitude_plot,
+            self.ide_trans_phase_plot,
+            self.ide_trans_coherence_plot,
+            self.hac_trans_time_plot,
+            self.hac_trans_magnitude_plot,
+            self.hac_trans_phase_plot,
+            self.hac_trans_coherence_plot,
+        ):
             self._clear_plot_widget(plot)
         self._close_plot_windows()
         if show_status:
             self._show_status("已清空减振器软件测试数据图像")
+
+    def _clear_plots_for_kind(self, kind: str) -> None:
+        groups = {
+            "ide_trace": (self.ide_time_plot, self.ide_psd_plot),
+            "hac_trace": (self.hac_plot,),
+            "cangfu_trace": (self.cangfu_time_plot, self.cangfu_psd_plot),
+            "ide_trans": (
+                self.ide_trans_time_plot,
+                self.ide_trans_power_plot,
+                self.ide_trans_magnitude_plot,
+                self.ide_trans_phase_plot,
+                self.ide_trans_coherence_plot,
+            ),
+            "hac_trans": (
+                self.hac_trans_time_plot,
+                self.hac_trans_magnitude_plot,
+                self.hac_trans_phase_plot,
+                self.hac_trans_coherence_plot,
+            ),
+        }
+        for plot in groups.get(kind, ()):
+            self._clear_plot_widget(plot)
+        self._close_plot_windows()
 
     def current_file(self) -> TraceAnalysisFile | None:
         row = self.file_list.currentRow()
@@ -1799,6 +2510,12 @@ class TraceAnalysisPage(DiagnosticPage):
             return
         if active_kind == "hac_trace":
             self._plot_hac_current(current)
+        elif active_kind == "cangfu_trace":
+            self._plot_cangfu_current(current)
+        elif active_kind == "ide_trans":
+            self._plot_ide_trans_current(current)
+        elif active_kind == "hac_trans":
+            self._plot_hac_trans_current(current)
         else:
             self._plot_ide_current(current)
 
@@ -1828,10 +2545,111 @@ class TraceAnalysisPage(DiagnosticPage):
     def _on_range_changed(self, kind: str) -> None:
         current = self.current_file()
         if current is not None and current.trace_kind == f"{kind}_trace":
-            ranges = self._ide_ranges if kind == "ide" else self._hac_ranges
-            start_box = self.ide_range_start if kind == "ide" else self.hac_range_start
-            end_box = self.ide_range_end if kind == "ide" else self.hac_range_end
+            if kind == "ide":
+                ranges = self._ide_ranges
+                start_box = self.ide_range_start
+                end_box = self.ide_range_end
+            elif kind == "hac":
+                ranges = self._hac_ranges
+                start_box = self.hac_range_start
+                end_box = self.hac_range_end
+            else:
+                ranges = self._cangfu_ranges
+                start_box = self.cangfu_range_start
+                end_box = self.cangfu_range_end
             ranges[self._file_key(current)] = self._spin_range_values(start_box, end_box)
+        self._auto_plot_from_control_change()
+
+    def _on_ide_trans_frequency_changed(self) -> None:
+        current = self.current_file()
+        if current is not None and current.trace_kind == "ide_trans":
+            low = float(self.ide_trans_frequency_min.value())
+            high = float(self.ide_trans_frequency_max.value())
+            if high < low:
+                low, high = high, low
+            self._ide_trans_frequency_ranges[self._file_key(current)] = (low, high)
+        self._auto_plot_from_control_change()
+
+    def _on_ide_trans_sampling_changed(self) -> None:
+        current = self.current_file()
+        if current is None or current.trace_kind != "ide_trans":
+            return
+        sample_frequency = float(self.ide_trans_sample_frequency.value())
+        update_rate = float(self.ide_trans_update_rate.value())
+        if not np.isfinite(sample_frequency) or sample_frequency <= 0.0:
+            return
+        if not np.isfinite(update_rate) or update_rate <= 0.0:
+            return
+        file_key = self._file_key(current)
+        self._ide_trans_sampling_settings[file_key] = (sample_frequency, update_rate)
+        self._ide_trans_frequency_ranges.pop(file_key, None)
+        self._apply_ide_trans_sampling(current, sample_frequency, update_rate)
+        self.ide_trans_update_rate_reset.setEnabled(True)
+        self._refresh_ide_trans_frequency_controls(current)
+        self._auto_plot_from_control_change()
+
+    def _reset_ide_trans_update_rate(self) -> None:
+        current = self.current_file()
+        if current is None or current.trace_kind != "ide_trans":
+            return
+        file_key = self._file_key(current)
+        self._ide_trans_sampling_settings.pop(file_key, None)
+        self._ide_trans_frequency_ranges.pop(file_key, None)
+        sample_frequency, update_rate = self._inferred_ide_trans_sampling(current)
+        self.ide_trans_sample_frequency.blockSignals(True)
+        self.ide_trans_sample_frequency.setValue(sample_frequency)
+        self.ide_trans_sample_frequency.blockSignals(False)
+        self.ide_trans_update_rate.blockSignals(True)
+        self.ide_trans_update_rate.setValue(int(round(update_rate)))
+        self.ide_trans_update_rate.blockSignals(False)
+        self.ide_trans_update_rate_reset.setEnabled(False)
+        self._apply_ide_trans_sampling(current, sample_frequency, update_rate)
+        self._refresh_ide_trans_frequency_controls(current)
+        self._auto_plot_from_control_change()
+
+    @staticmethod
+    def _inferred_ide_trans_sampling(current: TraceAnalysisFile) -> tuple[float, float]:
+        metadata = current.table.metadata
+        sample_frequency = float(metadata.get("ide_trans_sample_frequency_hz", 0.0) or 0.0)
+        update_rate = float(metadata.get("ide_trans_update_rate", 0.0) or 0.0)
+        if not np.isfinite(sample_frequency) or sample_frequency <= 0.0:
+            sample_frequency = float(metadata.get("ide_trans_inferred_update_rate_hz", 0.0) or 0.0)
+            update_rate = 1.0
+        if not np.isfinite(sample_frequency) or sample_frequency <= 0.0:
+            sample_frequency = float(current.sample_rate)
+        if not np.isfinite(update_rate) or update_rate <= 0.0:
+            update_rate = 1.0
+        return max(sample_frequency, 0.000001), max(update_rate, 0.000001)
+
+    @staticmethod
+    def _apply_ide_trans_sampling(
+        current: TraceAnalysisFile,
+        sample_frequency: float,
+        update_rate: float,
+    ) -> None:
+        metadata = current.table.metadata
+        effective_rate = float(sample_frequency) / float(update_rate)
+        time_count = max((np.asarray(values).size for values in current.channels.values()), default=0)
+        current.sample_rate = effective_rate
+        current.time_s = np.arange(time_count, dtype=float) / effective_rate
+
+        frequency = np.asarray(metadata.get("ide_trans_frequency_hz", np.array([], dtype=float)), dtype=float)
+        sample_count = int(metadata.get("ide_trans_sample_count", 0) or 0)
+        if sample_count <= 0:
+            sample_count = max(time_count, frequency.size * 2, 1)
+        df_hz = effective_rate / float(sample_count)
+        metadata["ide_trans_df_hz"] = df_hz
+        metadata["ide_trans_effective_sample_rate_hz"] = effective_rate
+        metadata["ide_trans_frequency_hz"] = np.arange(frequency.size, dtype=float) * df_hz
+
+    def _on_hac_trans_frequency_changed(self) -> None:
+        current = self.current_file()
+        if current is not None and current.trace_kind == "hac_trans":
+            low = float(self.hac_trans_frequency_min.value())
+            high = float(self.hac_trans_frequency_max.value())
+            if high < low:
+                low, high = high, low
+            self._hac_trans_frequency_ranges[self._file_key(current)] = (low, high)
         self._auto_plot_from_control_change()
 
     def _on_hac_preset_changed(self) -> None:
@@ -1941,6 +2759,9 @@ class TraceAnalysisPage(DiagnosticPage):
             self._update_current_file_label(current)
             self._refresh_ide_controls(current if current and current.trace_kind == "ide_trace" else None)
             self._refresh_hac_controls(current if current and current.trace_kind == "hac_trace" else None)
+            self._refresh_cangfu_controls(current if current and current.trace_kind == "cangfu_trace" else None)
+            self._refresh_ide_trans_controls(current if current and current.trace_kind == "ide_trans" else None)
+            self._refresh_hac_trans_controls(current if current and current.trace_kind == "hac_trans" else None)
             self._update_settings_stack()
         finally:
             self._updating_controls = False
@@ -1948,7 +2769,21 @@ class TraceAnalysisPage(DiagnosticPage):
     def _selected_time_curves(self, current: TraceAnalysisFile) -> list[CurvePair]:
         if current.trace_kind == "hac_trace":
             return self._selected_hac_curves(current)
+        if current.trace_kind == "cangfu_trace":
+            return self._selected_cangfu_curves(current)
         return self._selected_ide_curves(current)
+
+    @staticmethod
+    def _curves_with_file_display_name(current: TraceAnalysisFile, curves: list[CurvePair]) -> list[CurvePair]:
+        if not current.table.metadata.get("trace_custom_display_name"):
+            return curves
+        prefix = str(current.table.name).strip()
+        if not prefix:
+            return curves
+        return [
+            CurvePair(f"{prefix} | {curve.label}", curve.x, curve.y, curve.x_label, curve.y_label)
+            for curve in curves
+        ]
 
     def _selected_ide_curves(self, current: TraceAnalysisFile) -> list[CurvePair]:
         names = [item.text() for item in self.ide_channel_list.selectedItems()]
@@ -2009,6 +2844,46 @@ class TraceAnalysisPage(DiagnosticPage):
             curves.append(CurvePair(name, x, y, x_label, "工程值"))
         return curves
 
+    def _selected_cangfu_curves(self, current: TraceAnalysisFile) -> list[CurvePair]:
+        transfer_pairs = self._cangfu_transfer_pairs(current)
+        if transfer_pairs:
+            names = {item.text() for item in self.cangfu_channel_list.selectedItems()}
+            start, end = self._slice_bounds(self.cangfu_range_start, self.cangfu_range_end)
+            curves: list[CurvePair] = []
+            for pair in transfer_pairs:
+                if names and pair.label not in names:
+                    continue
+                curves.append(
+                    CurvePair(
+                        pair.label,
+                        np.asarray(pair.x, dtype=float)[start:end],
+                        np.asarray(pair.y, dtype=float)[start:end],
+                        pair.x_label,
+                        pair.y_label,
+                    )
+                )
+            return curves
+        names = [item.text() for item in self.cangfu_channel_list.selectedItems()]
+        if not names:
+            names = list(current.channels)[: min(8, len(current.channels))]
+        start, end = self._slice_bounds(self.cangfu_range_start, self.cangfu_range_end)
+        if self.cangfu_x_axis_combo.currentData() == "time":
+            x_full = np.asarray(current.time_s, dtype=float)
+            x_label = "时间 (s)"
+        else:
+            x_full = np.asarray(current.table.metadata.get("sample_index", np.arange(1, current.table.row_count + 1, dtype=float)), dtype=float)
+            x_label = "样本序号"
+        curves: list[CurvePair] = []
+        for name in names:
+            y = np.asarray(current.channels.get(name, np.array([], dtype=float)), dtype=float)
+            x = np.asarray(x_full[: y.size], dtype=float)
+            x = x[start:end]
+            y = y[start:end]
+            if self.demean_check.isChecked() and y.size:
+                y = y - np.nanmean(y)
+            curves.append(CurvePair(name, x, y, x_label, "工程值"))
+        return curves
+
     def _psd_curves(self, current: TraceAnalysisFile, curves: list[CurvePair]) -> list[CurvePair]:
         psd_curves: list[CurvePair] = []
         fs = max(float(current.sample_rate), 1.0)
@@ -2038,6 +2913,7 @@ class TraceAnalysisPage(DiagnosticPage):
 
     def _plot_ide_current(self, current: TraceAnalysisFile) -> None:
         curves = self._selected_ide_curves(current)
+        curves = self._curves_with_file_display_name(current, curves)
         if not curves:
             self._show_status("没有可绘制的 IDE 通道")
             return
@@ -2071,6 +2947,7 @@ class TraceAnalysisPage(DiagnosticPage):
 
     def _plot_hac_current(self, current: TraceAnalysisFile) -> None:
         curves = self._selected_hac_curves(current)
+        curves = self._curves_with_file_display_name(current, curves)
         if not curves:
             self._show_status("没有可绘制的 HAC 通道")
             return
@@ -2090,6 +2967,335 @@ class TraceAnalysisPage(DiagnosticPage):
         )
         self._update_hac_context(current, plotted)
         self._show_status(f"已绘制 HAC 通道：{plotted} 个")
+
+    def _plot_cangfu_current(self, current: TraceAnalysisFile) -> None:
+        transfer_pairs = self._cangfu_transfer_pairs(current)
+        if transfer_pairs:
+            curves = self._selected_cangfu_curves(current)
+            curves = self._curves_with_file_display_name(current, curves)
+            if not curves:
+                self._show_status("没有可绘制的 Cangfu Trace 传递函数")
+                return
+            subplots = self.cangfu_plot_mode_combo.currentIndex() == 1
+            self._sync_hold_availability()
+            hold = self.hold_check.isChecked() and not subplots
+            plotted = self._plot_trace_curves_on_widget(
+                self.cangfu_time_plot,
+                curves,
+                title=f"Cangfu Trace 传递函数 - {current.table.name}",
+                x_label=curves[0].x_label,
+                y_label=curves[0].y_label,
+                log_x=True,
+                log_y=False,
+                subplots=subplots,
+                hold=hold,
+            )
+            self._clear_plot_widget(self.cangfu_psd_plot)
+            self.cangfu_psd_plot.setTitle("Cangfu Trace PSD - 传递函数模式不适用")
+            self.cangfu_psd_plot.setLabel("bottom", "Frequency (Hz)")
+            self.cangfu_psd_plot.setLabel("left", "PSD")
+            self._update_cangfu_context(current, plotted)
+            self._show_status(f"已绘制 Cangfu Trace 传递函数：{plotted} 条")
+            return
+        curves = self._selected_cangfu_curves(current)
+        curves = self._curves_with_file_display_name(current, curves)
+        if not curves:
+            self._show_status("没有可绘制的 Cangfu Trace 通道")
+            return
+        subplots = self.cangfu_plot_mode_combo.currentIndex() == 1
+        self._sync_hold_availability()
+        hold = self.hold_check.isChecked() and not subplots
+        x_label = curves[0].x_label
+        plotted = self._plot_trace_curves_on_widget(
+            self.cangfu_time_plot,
+            curves,
+            title=f"Cangfu Trace 时域 - {current.table.name}",
+            x_label=x_label,
+            y_label="工程值",
+            subplots=subplots,
+            hold=hold,
+        )
+        psd_curves = self._psd_curves(current, curves)
+        self._plot_trace_curves_on_widget(
+            self.cangfu_psd_plot,
+            psd_curves,
+            title=f"Cangfu Trace PSD - {current.table.name}",
+            x_label="频率 (Hz)",
+            y_label="PSD",
+            log_x=True,
+            log_y=True,
+            subplots=subplots,
+            hold=hold,
+        )
+        self._update_cangfu_context(current, plotted)
+        self._show_status(f"已绘制 Cangfu Trace 通道：{plotted} 个")
+
+    def _plot_ide_trans_current(self, current: TraceAnalysisFile) -> None:
+        metadata = current.table.metadata
+        input_name = str(metadata.get("ide_trans_input_name") or "激励信号")
+        response_name = str(metadata.get("ide_trans_response_name") or "响应信号")
+        hold = self.hold_check.isChecked()
+
+        time_curves: list[CurvePair] = []
+        for name, values in current.channels.items():
+            y = np.asarray(values, dtype=float)
+            x = np.asarray(current.time_s[: y.size], dtype=float)
+            if self.demean_check.isChecked() and y.size:
+                y = y - np.nanmean(y)
+            time_curves.append(CurvePair(name, x, y, "时间 (s)", "幅值 (digits)"))
+        time_curves = self._curves_with_file_display_name(current, time_curves)
+        time_count = self._plot_trace_curves_on_widget(
+            self.ide_trans_time_plot,
+            time_curves,
+            title=f"IDE Trans 时域 - {current.table.name}",
+            x_label="时间 (s)",
+            y_label="幅值 (digits)",
+            hold=hold,
+        )
+
+        frequency = np.asarray(metadata.get("ide_trans_frequency_hz", np.array([], dtype=float)), dtype=float)
+        frequency_min, frequency_max = self._ide_trans_frequency_range(current, frequency)
+
+        power_curves: list[CurvePair] = []
+        for label, key in (
+            (input_name, "ide_trans_autospectrum_input"),
+            (response_name, "ide_trans_autospectrum_response"),
+        ):
+            values = metadata.get(key)
+            if values is None:
+                continue
+            power = np.asarray(values, dtype=float)
+            count = min(frequency.size, power.size)
+            power_db = 10.0 * np.log10(np.maximum(np.abs(power[:count]), 1e-30))
+            power_curves.append(CurvePair(label, frequency[:count], power_db, "频率 (Hz)", "幅值 (dB)"))
+        power_curves = self._frequency_limited_curves(power_curves, frequency_min, frequency_max)
+        power_curves = self._curves_with_file_display_name(current, power_curves)
+        power_count = self._plot_trace_curves_on_widget(
+            self.ide_trans_power_plot,
+            power_curves,
+            title=f"IDE Trans 功率谱 - {current.table.name}",
+            x_label="频率 (Hz)",
+            y_label="幅值 (dB)",
+            log_x=True,
+            hold=hold,
+        )
+
+        transfer_label = f"{response_name} / {input_name}"
+        magnitude = np.asarray(metadata.get("ide_trans_magnitude_db", np.array([], dtype=float)), dtype=float)
+        magnitude_count = min(frequency.size, magnitude.size)
+        magnitude_curves = self._frequency_limited_curves(
+            [CurvePair(transfer_label, frequency[:magnitude_count], magnitude[:magnitude_count], "频率 (Hz)", "幅值 (dB)")],
+            frequency_min,
+            frequency_max,
+        )
+        magnitude_curves = self._curves_with_file_display_name(current, magnitude_curves)
+        magnitude_plotted = self._plot_trace_curves_on_widget(
+            self.ide_trans_magnitude_plot,
+            magnitude_curves,
+            title=f"传递函数（输出 / 输入）- {current.table.name}",
+            x_label="频率 (Hz)",
+            y_label="幅值 (dB)",
+            log_x=True,
+            hold=hold,
+        )
+
+        phase = np.asarray(metadata.get("ide_trans_phase_deg", np.array([], dtype=float)), dtype=float)
+        phase_count = min(frequency.size, phase.size)
+        phase_curves = self._frequency_limited_curves(
+            [CurvePair(transfer_label, frequency[:phase_count], phase[:phase_count], "频率 (Hz)", "相位 (deg)")],
+            frequency_min,
+            frequency_max,
+        )
+        phase_curves = self._curves_with_file_display_name(current, phase_curves)
+        phase_plotted = self._plot_trace_curves_on_widget(
+            self.ide_trans_phase_plot,
+            phase_curves,
+            title=f"IDE Trans 相位 - {current.table.name}",
+            x_label="频率 (Hz)",
+            y_label="相位 (deg)",
+            log_x=True,
+            hold=hold,
+        )
+        if phase_plotted:
+            self.ide_trans_phase_plot.setYRange(-180.0, 180.0, padding=0.02)
+
+        coherence = np.asarray(metadata.get("ide_trans_coherence", np.array([], dtype=float)), dtype=float)
+        coherence_count = min(frequency.size, coherence.size)
+        coherence_curves = self._frequency_limited_curves(
+            [
+                CurvePair(
+                    transfer_label,
+                    frequency[:coherence_count],
+                    np.clip(coherence[:coherence_count], 0.0, 1.0),
+                    "频率 (Hz)",
+                    "相干性",
+                )
+            ],
+            frequency_min,
+            frequency_max,
+        )
+        coherence_curves = self._curves_with_file_display_name(current, coherence_curves)
+        coherence_plotted = self._plot_trace_curves_on_widget(
+            self.ide_trans_coherence_plot,
+            coherence_curves,
+            title=f"IDE Trans 相干性 - {current.table.name}",
+            x_label="频率 (Hz)",
+            y_label="相干性",
+            log_x=True,
+            hold=hold,
+        )
+        if coherence_plotted:
+            self.ide_trans_coherence_plot.setYRange(0.0, 1.0, padding=0.02)
+
+        self._update_ide_trans_context(current)
+        total = time_count + power_count + magnitude_plotted + phase_plotted + coherence_plotted
+        self._show_status(f"已绘制 IDE Trans：{total} 条曲线")
+
+    def _ide_trans_frequency_range(
+        self,
+        current: TraceAnalysisFile,
+        frequency: np.ndarray,
+    ) -> tuple[float, float]:
+        stored = self._ide_trans_frequency_ranges.get(self._file_key(current))
+        if stored is not None:
+            return stored
+        positive = np.asarray(frequency, dtype=float)
+        positive = positive[np.isfinite(positive) & (positive > 0.0)]
+        if positive.size:
+            return float(positive[0]), float(positive[-1])
+        return 0.0, 0.0
+
+    def _plot_hac_trans_current(self, current: TraceAnalysisFile) -> None:
+        metadata = current.table.metadata
+        input_name = str(metadata.get("ide_trans_input_name") or "激励信号")
+        response_name = str(metadata.get("ide_trans_response_name") or "响应信号")
+        hold = self.hold_check.isChecked()
+
+        time_curves: list[CurvePair] = []
+        for name, values in current.channels.items():
+            y = np.asarray(values, dtype=float)
+            x = np.asarray(current.time_s[: y.size], dtype=float)
+            if self.demean_check.isChecked() and y.size:
+                y = y - np.nanmean(y)
+            time_curves.append(CurvePair(name, x, y, "时间 (s)", "幅值"))
+        time_curves = self._curves_with_file_display_name(current, time_curves)
+        time_count = self._plot_trace_curves_on_widget(
+            self.hac_trans_time_plot,
+            time_curves,
+            title=f"HAC Trans 激励 / 响应 - {current.table.name}",
+            x_label="时间 (s)",
+            y_label="幅值",
+            hold=hold,
+        )
+
+        frequency = np.asarray(metadata.get("ide_trans_frequency_hz", np.array([], dtype=float)), dtype=float)
+        frequency_min, frequency_max = self._hac_trans_frequency_range(current, frequency)
+        transfer_label = f"{response_name} / {input_name}"
+
+        magnitude = np.asarray(metadata.get("ide_trans_magnitude_db", np.array([], dtype=float)), dtype=float)
+        count = min(frequency.size, magnitude.size)
+        magnitude_curves = self._frequency_limited_curves(
+            [CurvePair(transfer_label, frequency[:count], magnitude[:count], "频率 (Hz)", "幅值 (dB)")],
+            frequency_min,
+            frequency_max,
+        )
+        magnitude_curves = self._curves_with_file_display_name(current, magnitude_curves)
+        magnitude_count = self._plot_trace_curves_on_widget(
+            self.hac_trans_magnitude_plot,
+            magnitude_curves,
+            title=f"HAC Trans 传递函数（输出 / 输入）- {current.table.name}",
+            x_label="频率 (Hz)",
+            y_label="幅值 (dB)",
+            log_x=True,
+            hold=hold,
+        )
+
+        phase = np.asarray(metadata.get("ide_trans_phase_deg", np.array([], dtype=float)), dtype=float)
+        count = min(frequency.size, phase.size)
+        phase_curves = self._frequency_limited_curves(
+            [CurvePair(transfer_label, frequency[:count], phase[:count], "频率 (Hz)", "相位 (deg)")],
+            frequency_min,
+            frequency_max,
+        )
+        phase_curves = self._curves_with_file_display_name(current, phase_curves)
+        phase_count = self._plot_trace_curves_on_widget(
+            self.hac_trans_phase_plot,
+            phase_curves,
+            title=f"HAC Trans 相位 - {current.table.name}",
+            x_label="频率 (Hz)",
+            y_label="相位 (deg)",
+            log_x=True,
+            hold=hold,
+        )
+        if phase_count:
+            self.hac_trans_phase_plot.setYRange(-180.0, 180.0, padding=0.02)
+
+        coherence = np.asarray(metadata.get("ide_trans_coherence", np.array([], dtype=float)), dtype=float)
+        count = min(frequency.size, coherence.size)
+        coherence_curves = self._frequency_limited_curves(
+            [
+                CurvePair(
+                    transfer_label,
+                    frequency[:count],
+                    np.clip(coherence[:count], 0.0, 1.0),
+                    "频率 (Hz)",
+                    "相干性",
+                )
+            ],
+            frequency_min,
+            frequency_max,
+        )
+        coherence_curves = self._curves_with_file_display_name(current, coherence_curves)
+        coherence_count = self._plot_trace_curves_on_widget(
+            self.hac_trans_coherence_plot,
+            coherence_curves,
+            title=f"HAC Trans 相干性 - {current.table.name}",
+            x_label="频率 (Hz)",
+            y_label="相干性",
+            log_x=True,
+            hold=hold,
+        )
+        if coherence_count:
+            self.hac_trans_coherence_plot.setYRange(0.0, 1.0, padding=0.02)
+
+        self._update_hac_trans_context(current)
+        total = time_count + magnitude_count + phase_count + coherence_count
+        self._show_status(f"已绘制 HAC Trans：{total} 条曲线")
+
+    def _hac_trans_frequency_range(
+        self,
+        current: TraceAnalysisFile,
+        frequency: np.ndarray,
+    ) -> tuple[float, float]:
+        stored = self._hac_trans_frequency_ranges.get(self._file_key(current))
+        if stored is not None:
+            return stored
+        positive = np.asarray(frequency, dtype=float)
+        positive = positive[np.isfinite(positive) & (positive > 0.0)]
+        if positive.size:
+            return float(positive[0]), float(positive[-1])
+        return 0.0, 0.0
+
+    @staticmethod
+    def _frequency_limited_curves(
+        curves: list[CurvePair],
+        frequency_min: float,
+        frequency_max: float,
+    ) -> list[CurvePair]:
+        limited: list[CurvePair] = []
+        low = min(float(frequency_min), float(frequency_max))
+        high = max(float(frequency_min), float(frequency_max))
+        for curve in curves:
+            x = np.asarray(curve.x, dtype=float)
+            y = np.asarray(curve.y, dtype=float)
+            count = min(x.size, y.size)
+            x = x[:count]
+            y = y[:count]
+            valid = np.isfinite(x) & np.isfinite(y) & (x > 0.0)
+            if high > low:
+                valid &= (x >= low) & (x <= high)
+            limited.append(CurvePair(curve.label, x[valid], y[valid], curve.x_label, curve.y_label))
+        return limited
 
     def _plot_trace_curves_on_widget(
         self,
@@ -2175,6 +3381,142 @@ class TraceAnalysisPage(DiagnosticPage):
             self.hac_preset_combo.setCurrentText(previous_group)
         self._refresh_hac_channels()
         self._update_hac_context(current, self.hac_channel_list.count())
+
+    def _refresh_cangfu_controls(self, current: TraceAnalysisFile | None) -> None:
+        preferred = self._selected_item_texts(self.cangfu_channel_list)
+        self.cangfu_channel_list.clear()
+        self.cangfu_settings_group.setEnabled(current is not None)
+        self.cangfu_x_axis_combo.setEnabled(True)
+        if current is None:
+            self._configure_range_controls(self.cangfu_range_start, self.cangfu_range_end, 1, (1, 1))
+            self.cangfu_selected_label.setText("当前 Cangfu 文件：未选择")
+            self.cangfu_context_label.setText("模式 / X 轴 / 范围 / 采样率")
+            return
+
+        transfer_pairs = self._cangfu_transfer_pairs(current)
+        count = max(1, transfer_pairs[0].x.size if transfer_pairs else current.table.row_count)
+        stored = self._cangfu_ranges.get(self._file_key(current), (1, count))
+        self._configure_range_controls(self.cangfu_range_start, self.cangfu_range_end, count, stored)
+        if transfer_pairs:
+            self.cangfu_x_axis_combo.setEnabled(False)
+            selected = preferred if preferred else [pair.label for pair in transfer_pairs]
+            for pair in transfer_pairs:
+                item = QtWidgets.QListWidgetItem(pair.label)
+                self.cangfu_channel_list.addItem(item)
+                item.setSelected(pair.label in selected or not selected)
+            self._update_cangfu_context(current, len(selected))
+            return
+        selected = preferred if preferred else list(current.channels)[: min(8, len(current.channels))]
+        for name in current.channels:
+            item = QtWidgets.QListWidgetItem(name)
+            self.cangfu_channel_list.addItem(item)
+            item.setSelected(name in selected or not selected)
+        self._update_cangfu_context(current, len(selected))
+
+    def _refresh_ide_trans_frequency_controls(self, current: TraceAnalysisFile) -> None:
+        metadata = current.table.metadata
+        frequency = np.asarray(metadata.get("ide_trans_frequency_hz", np.array([], dtype=float)), dtype=float)
+        positive = frequency[np.isfinite(frequency) & (frequency > 0.0)]
+        first_frequency = float(positive[0]) if positive.size else 0.0
+        last_frequency = float(positive[-1]) if positive.size else 0.0
+        stored = self._ide_trans_frequency_ranges.get(
+            self._file_key(current),
+            (first_frequency, last_frequency),
+        )
+        maximum = max(last_frequency, float(stored[1]), 1.0)
+        for spin in (self.ide_trans_frequency_min, self.ide_trans_frequency_max):
+            spin.blockSignals(True)
+            spin.setRange(0.0, maximum)
+        self.ide_trans_frequency_min.setValue(max(0.0, min(float(stored[0]), maximum)))
+        self.ide_trans_frequency_max.setValue(max(0.0, min(float(stored[1]), maximum)))
+        for spin in (self.ide_trans_frequency_min, self.ide_trans_frequency_max):
+            spin.blockSignals(False)
+
+    def _refresh_ide_trans_controls(self, current: TraceAnalysisFile | None) -> None:
+        enabled = current is not None
+        self.ide_trans_settings_group.setEnabled(enabled)
+        if current is None:
+            self.ide_trans_selected_label.setText("当前 IDE Trans 文件：未选择")
+            self.ide_trans_context_label.setText("采样频率 / 更新率 / 频率范围")
+            self.ide_trans_update_rate_reset.setEnabled(False)
+            self._set_trans_info_text(self.ide_trans_info_label, "请选择 SDM 文件")
+            return
+
+        metadata = current.table.metadata
+        file_key = self._file_key(current)
+        sample_frequency, update_rate = self._ide_trans_sampling_settings.get(
+            file_key,
+            self._inferred_ide_trans_sampling(current),
+        )
+        self.ide_trans_sample_frequency.blockSignals(True)
+        self.ide_trans_sample_frequency.setValue(sample_frequency)
+        self.ide_trans_sample_frequency.blockSignals(False)
+        self.ide_trans_update_rate.blockSignals(True)
+        self.ide_trans_update_rate.setValue(int(round(update_rate)))
+        self.ide_trans_update_rate.blockSignals(False)
+        self.ide_trans_update_rate_reset.setEnabled(file_key in self._ide_trans_sampling_settings)
+        self._apply_ide_trans_sampling(current, sample_frequency, update_rate)
+        self._refresh_ide_trans_frequency_controls(current)
+
+        frequency = np.asarray(metadata.get("ide_trans_frequency_hz", np.array([], dtype=float)), dtype=float)
+        df_hz = float(metadata.get("ide_trans_df_hz", 0.0) or 0.0)
+        input_name = str(metadata.get("ide_trans_input_name") or "激励信号")
+        response_name = str(metadata.get("ide_trans_response_name") or "响应信号")
+        time_source = str(metadata.get("ide_trans_time_source") or "")
+        time_source_label = {
+            "sdm_raw": "SDM 原始时域",
+            "spectrum_ifft": "频谱反变换",
+        }.get(time_source, "无")
+        self._set_trans_info_text(
+            self.ide_trans_info_label,
+            f"{input_name} -> {response_name} | 时域：{time_source_label} | 点数：{current.time_s.size}/{frequency.size}",
+        )
+        self.ide_trans_info_label.setToolTip(
+            f"输入：{input_name}\n输出：{response_name}\n"
+            f"时域来源：{time_source_label}\n"
+            f"时域/频率点：{current.time_s.size}/{frequency.size}  Δf：{df_hz:.6g} Hz"
+        )
+        self._update_ide_trans_context(current)
+
+    def _refresh_hac_trans_controls(self, current: TraceAnalysisFile | None) -> None:
+        enabled = current is not None
+        self.hac_trans_settings_group.setEnabled(enabled)
+        if current is None:
+            self.hac_trans_selected_label.setText("当前 HAC Trans 文件：未选择")
+            self.hac_trans_context_label.setText("采样率 / 频率分辨率 / 频率范围")
+            self._set_trans_info_text(self.hac_trans_info_label, "请选择 HAC 传函 CSV 文件")
+            return
+
+        metadata = current.table.metadata
+        frequency = np.asarray(metadata.get("ide_trans_frequency_hz", np.array([], dtype=float)), dtype=float)
+        positive = frequency[np.isfinite(frequency) & (frequency > 0.0)]
+        first_frequency = float(positive[0]) if positive.size else 0.0
+        last_frequency = float(positive[-1]) if positive.size else 0.0
+        stored = self._hac_trans_frequency_ranges.get(
+            self._file_key(current),
+            (first_frequency, last_frequency),
+        )
+        maximum = max(last_frequency, float(stored[1]), 1.0)
+        for spin in (self.hac_trans_frequency_min, self.hac_trans_frequency_max):
+            spin.blockSignals(True)
+            spin.setRange(0.0, maximum)
+        self.hac_trans_frequency_min.setValue(max(0.0, min(float(stored[0]), maximum)))
+        self.hac_trans_frequency_max.setValue(max(0.0, min(float(stored[1]), maximum)))
+        for spin in (self.hac_trans_frequency_min, self.hac_trans_frequency_max):
+            spin.blockSignals(False)
+
+        df_hz = float(metadata.get("ide_trans_df_hz", 0.0) or 0.0)
+        input_name = str(metadata.get("ide_trans_input_name") or "激励信号")
+        response_name = str(metadata.get("ide_trans_response_name") or "响应信号")
+        header = metadata.get("hac_trans_header", {})
+        average = header.get("Average", "--") if isinstance(header, dict) else "--"
+        self._set_trans_info_text(
+            self.hac_trans_info_label,
+            f"输入：{input_name}",
+            f"输出：{response_name}",
+            f"点数：{current.time_s.size}/{frequency.size}  Δf：{df_hz:.6g} Hz  平均：{average}",
+        )
+        self._update_hac_trans_context(current)
 
     def _refresh_hac_channels(self) -> None:
         current = self.current_file()
@@ -2330,7 +3672,42 @@ class TraceAnalysisPage(DiagnosticPage):
         self._show_status(f"已删除测试文件：{len(rows)} 个")
 
     def _export_active(self) -> None:
-        if self.tabs.currentWidget() is self.hac_tab:
+        if self.tabs.currentWidget() is self.hac_trans_tab:
+            plots = (
+                self.hac_trans_time_plot,
+                self.hac_trans_magnitude_plot,
+                self.hac_trans_phase_plot,
+                self.hac_trans_coherence_plot,
+            )
+            plot = self._active_plot if self._active_plot in plots else self.hac_trans_magnitude_plot
+            default_names = {
+                self.hac_trans_time_plot: "hac_trans_time.csv",
+                self.hac_trans_magnitude_plot: "hac_trans_magnitude.csv",
+                self.hac_trans_phase_plot: "hac_trans_phase.csv",
+                self.hac_trans_coherence_plot: "hac_trans_coherence.csv",
+            }
+            default_name = default_names.get(plot, "hac_trans_plot.csv")
+        elif self.tabs.currentWidget() is self.ide_trans_tab:
+            plots = (
+                self.ide_trans_time_plot,
+                self.ide_trans_power_plot,
+                self.ide_trans_magnitude_plot,
+                self.ide_trans_phase_plot,
+                self.ide_trans_coherence_plot,
+            )
+            plot = self._active_plot if self._active_plot in plots else self.ide_trans_magnitude_plot
+            default_names = {
+                self.ide_trans_time_plot: "ide_trans_time.csv",
+                self.ide_trans_power_plot: "ide_trans_power.csv",
+                self.ide_trans_magnitude_plot: "ide_trans_magnitude.csv",
+                self.ide_trans_phase_plot: "ide_trans_phase.csv",
+                self.ide_trans_coherence_plot: "ide_trans_coherence.csv",
+            }
+            default_name = default_names.get(plot, "ide_trans_plot.csv")
+        elif self.tabs.currentWidget() is self.cangfu_tab:
+            plot = self.cangfu_psd_plot if self._plot_curves.get(self.cangfu_psd_plot) else self.cangfu_time_plot
+            default_name = "cangfu_trace_plot.csv"
+        elif self.tabs.currentWidget() is self.hac_tab:
             plot = self.hac_plot
             default_name = "hac_trace_plot.csv"
         elif self._plot_curves.get(self.ide_psd_plot) and not self._plot_curves.get(self.ide_time_plot):
@@ -2373,7 +3750,7 @@ class TraceAnalysisPage(DiagnosticPage):
             plot.plot(
                 np.asarray(x, dtype=float),
                 np.asarray(y, dtype=float),
-                pen=pg.mkPen(TRACE_COLORS[index % len(TRACE_COLORS)], width=1.5),
+                pen=pg.mkPen(self._color_for_label(label), width=1.5),
                 name=label,
             )
         layout.addWidget(plot)
@@ -2395,35 +3772,121 @@ class TraceAnalysisPage(DiagnosticPage):
         current = self.current_file()
         if current is None:
             return
-        target = self.hac_tab if current.trace_kind == "hac_trace" else self.ide_tab
+        if current.trace_kind == "hac_trace":
+            target = self.hac_tab
+        elif current.trace_kind == "cangfu_trace":
+            target = self.cangfu_tab
+        elif current.trace_kind == "ide_trans":
+            target = self.ide_trans_tab
+        elif current.trace_kind == "hac_trans":
+            target = self.hac_trans_tab
+        else:
+            target = self.ide_tab
         if self.tabs.currentWidget() is not target:
             self.tabs.setCurrentWidget(target)
         self._update_settings_stack()
 
     def _active_tab_kind(self) -> str:
-        return "hac_trace" if self.tabs.currentWidget() is self.hac_tab else "ide_trace"
+        if self.tabs.currentWidget() is self.hac_tab:
+            return "hac_trace"
+        if self.tabs.currentWidget() is self.cangfu_tab:
+            return "cangfu_trace"
+        if self.tabs.currentWidget() is self.ide_trans_tab:
+            return "ide_trans"
+        if self.tabs.currentWidget() is self.hac_trans_tab:
+            return "hac_trans"
+        return "ide_trace"
 
     def _update_settings_stack(self) -> None:
         if hasattr(self, "settings_stack"):
-            self.settings_stack.setCurrentIndex(1 if self._active_tab_kind() == "hac_trace" else 0)
+            active_kind = self._active_tab_kind()
+            self.settings_stack.setCurrentIndex(
+                {"ide_trace": 0, "hac_trace": 1, "cangfu_trace": 2, "ide_trans": 3, "hac_trans": 4}.get(
+                    active_kind, 0
+                )
+            )
+            is_trans_page = active_kind in {"ide_trans", "hac_trans"}
+            self.file_list.setMinimumHeight(
+                self.TRANS_FILE_LIST_MIN_HEIGHT if is_trans_page else self.TRACE_FILE_LIST_MIN_HEIGHT
+            )
+            policy = self.settings_stack.sizePolicy()
+            if is_trans_page:
+                current_group = self.settings_stack.currentWidget()
+                if current_group.layout() is not None:
+                    current_group.layout().activate()
+                compact_height = max(
+                    current_group.minimumSizeHint().height(),
+                    current_group.sizeHint().height(),
+                )
+                self.settings_stack.setMinimumHeight(compact_height)
+                self.settings_stack.setMaximumHeight(compact_height)
+                policy.setVerticalPolicy(QtWidgets.QSizePolicy.Fixed)
+                self.controls_layout.setStretchFactor(self.settings_stack, 0)
+            else:
+                self.settings_stack.setMinimumHeight(0)
+                self.settings_stack.setMaximumHeight(16_777_215)
+                policy.setVerticalPolicy(QtWidgets.QSizePolicy.Expanding)
+                self.controls_layout.setStretchFactor(self.settings_stack, 1)
+            self.settings_stack.setSizePolicy(policy)
+            self.settings_stack.updateGeometry()
 
     def _sync_hold_availability(self) -> None:
         if not hasattr(self, "hold_check"):
             return
-        subplots = (
-            self.hac_plot_mode_combo.currentIndex() == 1
-            if self._active_tab_kind() == "hac_trace"
-            else self.ide_plot_mode_combo.currentIndex() == 1
-        )
+        active_kind = self._active_tab_kind()
+        if active_kind == "hac_trace":
+            subplots = self.hac_plot_mode_combo.currentIndex() == 1
+        elif active_kind == "cangfu_trace":
+            subplots = self.cangfu_plot_mode_combo.currentIndex() == 1
+        elif active_kind == "ide_trans":
+            subplots = False
+        elif active_kind == "hac_trans":
+            subplots = False
+        else:
+            subplots = self.ide_plot_mode_combo.currentIndex() == 1
         if subplots and self.hold_check.isChecked():
             self.hold_check.setChecked(False)
         self.hold_check.setEnabled(not subplots)
 
     def _update_current_file_label(self, current: TraceAnalysisFile | None) -> None:
+        self.rename_edit.blockSignals(True)
         if current is None:
             self.current_file_edit.setText("未选择文件")
+            self._rename_edit_autofill_text = ""
+            self.rename_edit.clear()
+            self.rename_edit.setEnabled(False)
         else:
             self.current_file_edit.setText(f"{current.table.name} ({self._kind_label(current.trace_kind)})")
+            self._rename_edit_autofill_text = str(current.table.name)
+            self.rename_edit.setText(self._rename_edit_autofill_text)
+            self.rename_edit.setEnabled(True)
+        self.rename_edit.blockSignals(False)
+
+    def _rename_current_file_confirmed(self) -> None:
+        self._rename_current_file_from_editor(force=True)
+
+    def _rename_current_file_from_editor(self, *, force: bool = False) -> None:
+        current = self.current_file()
+        if current is None:
+            return
+        name = self.rename_edit.text().strip()
+        if not name:
+            self._update_current_file_label(current)
+            return
+        if not force and name == self._rename_edit_autofill_text:
+            return
+        current.table.name = name
+        current.table.metadata["trace_custom_display_name"] = True
+        row = self.file_list.currentRow()
+        item = self.file_list.item(row)
+        if item is not None:
+            item.setText(self._file_list_text(current))
+        self._update_current_file_label(current)
+        self.plot_current()
+        self._show_status(f"当前数据已重命名为：{name}")
+
+    def _file_list_text(self, current: TraceAnalysisFile) -> str:
+        return f"{current.table.name} ({self._kind_label(current.trace_kind)})"
 
     def _update_ide_context(self, current: TraceAnalysisFile, plotted_count: int) -> None:
         start, end = self._spin_range_values(self.ide_range_start, self.ide_range_end)
@@ -2441,6 +3904,57 @@ class TraceAnalysisPage(DiagnosticPage):
             f"预设：{self.hac_preset_combo.currentText()} | 模式：{self.hac_plot_mode_combo.currentText()} | "
             f"范围：{start}-{end} | X 轴：{x_source} | 通道：{plotted_count}"
         )
+
+    def _update_cangfu_context(self, current: TraceAnalysisFile, plotted_count: int) -> None:
+        start, end = self._spin_range_values(self.cangfu_range_start, self.cangfu_range_end)
+        self.cangfu_selected_label.setText(f"当前 Cangfu 文件：{current.table.name}")
+        if self._cangfu_transfer_pairs(current):
+            average_count = current.table.metadata.get("cangfu_average_count")
+            average_text = f" | 平均次数：{average_count}" if average_count else ""
+            self.cangfu_context_label.setText(
+                f"类型：传递函数 | 范围：{start}-{end} | 采样率：{current.sample_rate:.6g} Hz | 曲线：{plotted_count}{average_text}"
+            )
+            return
+        self.cangfu_context_label.setText(
+            f"模式：{self.cangfu_plot_mode_combo.currentText()} | X 轴：{self.cangfu_x_axis_combo.currentText()} | "
+            f"范围：{start}-{end} | 采样率：{current.sample_rate:.6g} Hz | 通道：{plotted_count}"
+        )
+
+    def _update_ide_trans_context(self, current: TraceAnalysisFile) -> None:
+        metadata = current.table.metadata
+        frequency = np.asarray(metadata.get("ide_trans_frequency_hz", np.array([], dtype=float)), dtype=float)
+        low, high = self._ide_trans_frequency_range(current, frequency)
+        df_hz = float(metadata.get("ide_trans_df_hz", 0.0) or 0.0)
+        file_key = self._file_key(current)
+        sample_frequency, update_rate = self._ide_trans_sampling_settings.get(
+            file_key,
+            self._inferred_ide_trans_sampling(current),
+        )
+        rate_source = "手动" if file_key in self._ide_trans_sampling_settings else "SDM"
+        self.ide_trans_selected_label.setText(f"当前 IDE Trans 文件：{current.table.name}")
+        self.ide_trans_context_label.setText(
+            f"采样：{sample_frequency:.6g} Hz | 更新：{update_rate:.6g}（{rate_source}） | "
+            f"有效：{current.sample_rate:.6g} Hz | Δf：{df_hz:.6g} Hz | "
+            f"频率范围：{low:.6g}-{high:.6g} Hz"
+        )
+
+    def _update_hac_trans_context(self, current: TraceAnalysisFile) -> None:
+        metadata = current.table.metadata
+        frequency = np.asarray(metadata.get("ide_trans_frequency_hz", np.array([], dtype=float)), dtype=float)
+        low, high = self._hac_trans_frequency_range(current, frequency)
+        df_hz = float(metadata.get("ide_trans_df_hz", 0.0) or 0.0)
+        self.hac_trans_selected_label.setText(f"当前 HAC Trans 文件：{current.table.name}")
+        self.hac_trans_context_label.setText(
+            f"采样率：{current.sample_rate:.6g} Hz | Δf：{df_hz:.6g} Hz | "
+            f"频率范围：{low:.6g}-{high:.6g} Hz"
+        )
+
+    @staticmethod
+    def _cangfu_transfer_pairs(current: TraceAnalysisFile) -> list[CurvePair]:
+        pairs = current.table.metadata.get("cangfu_transfer_pairs")
+        if not isinstance(pairs, list):
+            return []
+        return [pair for pair in pairs if isinstance(pair, CurvePair)]
 
     def _configure_range_controls(
         self,
@@ -2483,6 +3997,12 @@ class TraceAnalysisPage(DiagnosticPage):
 
     @staticmethod
     def _kind_label(kind: str) -> str:
+        if kind == "cangfu_trace":
+            return "Cangfu Trace"
+        if kind == "ide_trans":
+            return "IDE Trans"
+        if kind == "hac_trans":
+            return "HAC Trans"
         return "HAC Trace" if kind == "hac_trace" else "IDE Trace"
 
     @staticmethod
@@ -2535,8 +4055,9 @@ class ModalShapePage(DiagnosticPage):
     LINE_HEADERS = ["启用", "起点", "终点", "来源"]
     POINT_CSV_HEADERS = ["point_id", "file_name", "x_ch", "y_ch", "z_ch", "x_scale", "y_scale", "z_scale", "x", "y", "z", "use"]
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, data_store=None):
         super().__init__(parent)
+        self._data_store = data_store
         self.files: list[ModalFile] = []
         self.last_mode: dict[str, object] | None = None
         self._active_frequency: float | None = None
@@ -2550,7 +4071,12 @@ class ModalShapePage(DiagnosticPage):
         self._preview_timer.timeout.connect(self._advance_preview)
         self._layout_mode = None
         self._bulk_table_update = False
+        self._pending_data_store_sync_reason: str | None = None
+        self._retired_candidate_items: list[QtWidgets.QListWidgetItem] = []
         self._build_ui_matlab_style()
+        if self._data_store is not None:
+            self._data_store.changed.connect(self._on_shared_data_store_changed)
+            self.sync_from_data_store(show_status=False)
 
     def _build_ui_matlab_style(self) -> None:
         layout = QtWidgets.QHBoxLayout(self)
@@ -2590,7 +4116,7 @@ class ModalShapePage(DiagnosticPage):
         self.import_mapping_button = QtWidgets.QPushButton("导入映射表")
         self.export_mapping_button = QtWidgets.QPushButton("导出映射表")
         self.clear_button = QtWidgets.QPushButton("清空")
-        set_button_role(self.load_button, "secondary")
+        set_button_role(self.load_button, "primary")
         set_button_role(self.load_folder_button, "secondary")
         set_button_role(self.delete_button, "danger")
         set_button_role(self.import_mapping_button, "secondary")
@@ -2831,8 +4357,8 @@ class ModalShapePage(DiagnosticPage):
         preview_group, preview_group_layout = create_group_box("3D预览区", layout_type=QtWidgets.QVBoxLayout)
         self.preview_tabs = QtWidgets.QTabWidget()
         self.preview_tabs.setObjectName("modalPreviewTabs")
-        self.layout_plot = Modal3DView()
-        self.mode_plot = Modal3DView()
+        self.layout_plot = self._create_modal_preview_widget("结构布局")
+        self.mode_plot = self._create_modal_preview_widget("模态振型")
         self.layout_plot.setMinimumSize(320, 240)
         self.mode_plot.setMinimumSize(320, 240)
         self.layout_preview_tab = QtWidgets.QWidget()
@@ -2876,8 +4402,8 @@ class ModalShapePage(DiagnosticPage):
         self.view_elevation_spin.valueChanged.connect(lambda _value: self._view_changed())
         self.mode_gain_spin.valueChanged.connect(lambda _value: self._mode_gain_changed())
         self.view_reset_button.clicked.connect(self._reset_view)
-        self.layout_plot.cameraChanged.connect(self._sync_view_from_3d_camera)
-        self.mode_plot.cameraChanged.connect(self._sync_view_from_3d_camera)
+        self._connect_modal_preview_widget(self.layout_plot)
+        self._connect_modal_preview_widget(self.mode_plot)
         self.extract_button.clicked.connect(self.extract_mode)
         self.preview_button.clicked.connect(self.preview_mode)
         self.export_gif_button.clicked.connect(self._choose_export_gif)
@@ -3096,8 +4622,8 @@ class ModalShapePage(DiagnosticPage):
         plots = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         plots.setChildrenCollapsible(False)
         self.frf_plot = self._create_plot_widget("FRF / 峰值")
-        self.layout_plot = Modal3DView()
-        self.mode_plot = Modal3DView()
+        self.layout_plot = self._create_modal_preview_widget("结构布局")
+        self.mode_plot = self._create_modal_preview_widget("模态振型")
         self.layout_plot.setMinimumSize(280, 220)
         self.mode_plot.setMinimumSize(280, 220)
 
@@ -3144,8 +4670,8 @@ class ModalShapePage(DiagnosticPage):
         self.view_elevation_spin.valueChanged.connect(lambda _value: self._view_changed())
         self.mode_gain_spin.valueChanged.connect(lambda _value: self._mode_gain_changed())
         self.view_reset_button.clicked.connect(self._reset_view)
-        self.layout_plot.cameraChanged.connect(self._sync_view_from_3d_camera)
-        self.mode_plot.cameraChanged.connect(self._sync_view_from_3d_camera)
+        self._connect_modal_preview_widget(self.layout_plot)
+        self._connect_modal_preview_widget(self.mode_plot)
         self.extract_button.clicked.connect(self.extract_mode)
         self.preview_button.clicked.connect(self.preview_mode)
         self.export_gif_button.clicked.connect(self._choose_export_gif)
@@ -3172,6 +4698,25 @@ class ModalShapePage(DiagnosticPage):
         button.style().polish(button)
         button.update()
 
+    def _create_modal_preview_widget(self, title: str) -> QtWidgets.QWidget:
+        disabled = os.environ.get("PYTHON_VNA_DISABLE_MODAL_OPENGL", "").strip().lower()
+        if disabled in {"1", "true", "yes", "on"}:
+            return self._create_modal_projection_widget(title)
+        try:
+            return Modal3DView()
+        except Exception as exc:
+            append_log(f"modal 3D preview disabled; using 2D fallback: {exc}")
+            return self._create_modal_projection_widget(title)
+
+    def _create_modal_projection_widget(self, title: str) -> pg.PlotWidget:
+        plot = self._create_plot_widget(f"{title} (2D 投影兼容模式)")
+        plot.setAspectLocked(False)
+        return plot
+
+    def _connect_modal_preview_widget(self, widget: QtWidgets.QWidget) -> None:
+        if isinstance(widget, Modal3DView):
+            widget.cameraChanged.connect(self._sync_view_from_3d_camera)
+
     def _choose_files(self) -> None:
         paths, _filter = QtWidgets.QFileDialog.getOpenFileNames(
             self,
@@ -3194,6 +4739,9 @@ class ModalShapePage(DiagnosticPage):
         self.load_paths(paths)
 
     def load_paths(self, paths: list[Path]) -> None:
+        if self._data_store is not None:
+            self._load_paths_into_data_store(paths)
+            return
         loaded = 0
         existing = {modal_file.path.name.lower() for modal_file in self.files}
         existing_point_files = {
@@ -3239,11 +4787,206 @@ class ModalShapePage(DiagnosticPage):
         self.find_peaks()
         self._show_status(f"已加载模态文件：{loaded} 个")
 
+    def _load_paths_into_data_store(self, paths: list[Path]) -> None:
+        loaded = 0
+        existing_names = {
+            Path(dataset.path).name.lower()
+            for dataset in getattr(self._data_store, "datasets", [])
+            if self._dataset_supports_modal(dataset)
+        }
+        for path in paths:
+            if path.name.lower() in existing_names:
+                continue
+            try:
+                dataset_id = int(getattr(self._data_store, "next_dataset_id", 1))
+                dataset = load_analysis_path(path, dataset_id=dataset_id)
+            except Exception as exc:
+                self._show_status(f"加载 {path.name} 失败：{exc}")
+                continue
+            self._data_store.next_dataset_id = dataset_id + 1
+            self._data_store.datasets.append(dataset)
+            existing_names.add(path.name.lower())
+            loaded += 1
+        self._remember_paths(paths)
+        if loaded:
+            self._data_store.changed.emit("load", self)
+        else:
+            self.sync_from_data_store(show_status=False)
+        self._show_status(f"已加载模态文件：{loaded} 个")
+
+    def _on_shared_data_store_changed(self, reason: str, payload: object) -> None:
+        append_log(f"modal.shared.begin reason={reason} payload_self={payload is self}")
+        if payload is self:
+            append_log(f"modal.shared.self_sync.begin reason={reason}")
+            self.sync_from_data_store(show_status=False)
+            append_log(f"modal.shared.self_sync.end reason={reason}")
+            return
+        if reason in {"delete", "clear"}:
+            self._pending_data_store_sync_reason = None
+            append_log(f"modal.shared.delete_sync.begin reason={reason}")
+            self._sync_removed_data_store_files_without_plotting(show_status=False)
+            append_log(f"modal.shared.delete_sync.end reason={reason}")
+            return
+        if reason == "load":
+            self._pending_data_store_sync_reason = None
+            append_log("modal.shared.load_sync.begin")
+            self.sync_from_data_store(show_status=False, refresh_candidates=reason == "load")
+            append_log("modal.shared.load_sync.end")
+            return
+        if reason in {"refresh", "current_measurement"}:
+            self._pending_data_store_sync_reason = reason
+            append_log(f"modal.shared.timer_schedule reason={reason}")
+            QtCore.QTimer.singleShot(0, self._flush_data_store_sync)
+
+    def _flush_data_store_sync(self) -> None:
+        reason = self._pending_data_store_sync_reason or "refresh"
+        self._pending_data_store_sync_reason = None
+        self.sync_from_data_store(show_status=False, refresh_candidates=reason not in {"delete", "clear"})
+
+    def _sync_removed_data_store_files_without_plotting(self, *, show_status: bool = True) -> None:
+        append_log("modal.sync_removed.begin")
+        if self._data_store is None:
+            append_log("modal.sync_removed.no_store")
+            return
+        self._invalidate_mode()
+        append_log("modal.sync_removed.after_invalidate")
+        datasets = [
+            dataset
+            for dataset in getattr(self._data_store, "datasets", [])
+            if self._dataset_supports_modal(dataset)
+        ]
+        previous_names = [modal_file.path.name.lower() for modal_file in self.files]
+        next_files = [ModalFile(path=Path(dataset.path), dataset=dataset) for dataset in datasets]
+        next_names = [modal_file.path.name.lower() for modal_file in next_files]
+        removed_names = set(previous_names) - set(next_names)
+        append_log(
+            f"modal.sync_removed.names previous={len(previous_names)} next={len(next_names)} removed={len(removed_names)}"
+        )
+
+        previous_bulk = self._bulk_table_update
+        previous_point_signals = self.point_table.blockSignals(True)
+        previous_line_signals = self.line_table.blockSignals(True)
+        previous_file_signals = self.file_list.blockSignals(True)
+        self._bulk_table_update = True
+        self.point_table.setUpdatesEnabled(False)
+        self.line_table.setUpdatesEnabled(False)
+        self.file_list.setUpdatesEnabled(False)
+        try:
+            append_log("modal.sync_removed.table_update.begin")
+            for row in range(self.point_table.rowCount() - 1, -1, -1):
+                file_name = self._table_text(self.point_table, row, 2, "").lower()
+                if file_name in removed_names:
+                    self.point_table.removeRow(row)
+            self.files = next_files
+            self.file_list.clear()
+            for modal_file in self.files:
+                self.file_list.addItem(modal_file.path.name)
+            append_log("modal.sync_removed.table_update.end")
+        finally:
+            self.file_list.setUpdatesEnabled(True)
+            self.line_table.setUpdatesEnabled(True)
+            self.point_table.setUpdatesEnabled(True)
+            self.file_list.blockSignals(previous_file_signals)
+            self.line_table.blockSignals(previous_line_signals)
+            self.point_table.blockSignals(previous_point_signals)
+            self._bulk_table_update = previous_bulk
+            append_log("modal.sync_removed.table_update.finally")
+
+        if removed_names:
+            append_log("modal.sync_removed.remove_invalid_lines.begin")
+            self._remove_invalid_lines()
+            append_log("modal.sync_removed.remove_invalid_lines.end")
+        if not self.files:
+            append_log("modal.sync_removed.clear_lists.begin")
+            self._clear_candidate_list_safely("sync_removed")
+            self._auto_peaks.clear()
+            self._manual_peaks.clear()
+            self._active_frequency = None
+            append_log("modal.sync_removed.clear_lists.end")
+        if show_status:
+            self._show_status(f"已同步 VNA 数据到模态振型：{len(self.files)} 个")
+
+    def sync_from_data_store(self, *, show_status: bool = True, refresh_candidates: bool = True) -> None:
+        if self._data_store is None:
+            return
+        self._invalidate_mode()
+        datasets = [
+            dataset
+            for dataset in getattr(self._data_store, "datasets", [])
+            if self._dataset_supports_modal(dataset)
+        ]
+        existing_point_files = {
+            self._table_text(self.point_table, row, 2, "").lower()
+            for row in range(self.point_table.rowCount())
+            if self._table_text(self.point_table, row, 2, "")
+        }
+        previous_names = [modal_file.path.name.lower() for modal_file in self.files]
+        next_files = [ModalFile(path=Path(dataset.path), dataset=dataset) for dataset in datasets]
+        next_names = [modal_file.path.name.lower() for modal_file in next_files]
+        if previous_names == next_names and all(
+            old.dataset is new.dataset for old, new in zip(self.files, next_files, strict=False)
+        ):
+            return
+        removed_names = set(previous_names) - set(next_names)
+
+        previous_bulk = self._bulk_table_update
+        previous_point_signals = self.point_table.blockSignals(True)
+        previous_line_signals = self.line_table.blockSignals(True)
+        previous_file_signals = self.file_list.blockSignals(True)
+        self._bulk_table_update = True
+        self.point_table.setUpdatesEnabled(False)
+        self.line_table.setUpdatesEnabled(False)
+        self.file_list.setUpdatesEnabled(False)
+        appended_points = 0
+        try:
+            for row in range(self.point_table.rowCount() - 1, -1, -1):
+                file_name = self._table_text(self.point_table, row, 2, "").lower()
+                if file_name in removed_names:
+                    self.point_table.removeRow(row)
+            self.files = next_files
+            self.file_list.clear()
+            for modal_file in self.files:
+                self.file_list.addItem(modal_file.path.name)
+                if modal_file.path.name.lower() not in existing_point_files:
+                    self._append_default_point_row_for_file(modal_file.path.name, existing_files=existing_point_files)
+                    existing_point_files.add(modal_file.path.name.lower())
+                    appended_points += 1
+        finally:
+            self.file_list.setUpdatesEnabled(True)
+            self.line_table.setUpdatesEnabled(True)
+            self.point_table.setUpdatesEnabled(True)
+            self.file_list.blockSignals(previous_file_signals)
+            self.line_table.blockSignals(previous_line_signals)
+            self.point_table.blockSignals(previous_point_signals)
+            self._bulk_table_update = previous_bulk
+
+        if removed_names:
+            self._remove_invalid_lines()
+        if appended_points:
+            self.auto_build_lines(show_status=False, refresh=False)
+        self._refresh_layout_plot()
+        if self.files and refresh_candidates:
+            self.find_peaks()
+        else:
+            self._clear_candidate_list_safely("sync_from_data_store")
+            self._auto_peaks.clear()
+            self._manual_peaks.clear()
+            self._clear_plot_widget(self.frf_plot)
+        if show_status:
+            self._show_status(f"已同步 VNA 数据到模态振型：{len(self.files)} 个")
+
+    @staticmethod
+    def _dataset_supports_modal(dataset: AnalysisDataset) -> bool:
+        frequency = getattr(dataset, "frequency_hz", None)
+        if frequency is None or np.asarray(frequency).size == 0:
+            return False
+        return bool(getattr(dataset, "frf", None) or getattr(dataset, "autospectrum", None))
+
     def clear(self) -> None:
         self._preview_timer.stop()
         self.files.clear()
         self.file_list.clear()
-        self.candidate_list.clear()
+        self._clear_candidate_list_safely("clear")
         self.point_table.setRowCount(0)
         self.line_table.setRowCount(0)
         self.last_mode = None
@@ -3257,7 +5000,7 @@ class ModalShapePage(DiagnosticPage):
 
     def find_peaks(self) -> list[float]:
         freq, db_values = self._aggregate_frf_curve()
-        self.candidate_list.clear()
+        self._clear_candidate_list_safely("find_peaks")
         self._auto_peaks = []
         if freq.size < 3:
             self._show_status("没有可用于峰值搜索的有效 FRF 曲线")
@@ -3386,25 +5129,17 @@ class ModalShapePage(DiagnosticPage):
             if extracted is None:
                 raise ValueError("没有可导出的模态振型。")
         destination = Path(path)
-        saved = False
-        if self.last_mode is not None:
-            try:
-                write_mode_animation_gif(
-                    destination,
-                    self.last_mode,
-                    frame_count=self._gif_frame_count(),
-                    azimuth_deg=self._view_azimuth,
-                    elevation_deg=self._view_elevation,
-                )
-                saved = True
-            except Exception:
-                saved = False
-        if not saved:
-            pixmap = self.mode_plot.grab()
-            if not pixmap.isNull():
-                saved = bool(pixmap.save(str(destination), "GIF"))
-        if not saved:
-            destination.write_bytes(base64.b64decode(_MINIMAL_GIF_BASE64))
+        try:
+            write_mode_animation_gif(
+                destination,
+                self.last_mode,
+                frame_count=self._gif_frame_count(),
+                azimuth_deg=self._view_azimuth,
+                elevation_deg=self._view_elevation,
+            )
+        except Exception as exc:
+            self._show_status(f"GIF 导出失败：{exc}")
+            raise ValueError(f"GIF 导出失败：{exc}") from exc
         self._show_status(f"已导出 GIF：{destination.name}")
         return destination
 
@@ -4310,10 +6045,31 @@ class ModalShapePage(DiagnosticPage):
                 y_min, y_max = -1.0, 1.0
             self.frf_plot.plot([active, active], [y_min, y_max], pen=pg.mkPen("#d7263d", width=1.5), name="当前频率")
 
+    def _clear_candidate_list_safely(self, reason: str) -> None:
+        if not hasattr(self, "candidate_list"):
+            return
+        append_log(f"modal.candidates.clear.begin reason={reason} count={self.candidate_list.count()}")
+        previous_signals = self.candidate_list.blockSignals(True)
+        self.candidate_list.setUpdatesEnabled(False)
+        try:
+            self.candidate_list.setCurrentRow(-1)
+            while self.candidate_list.count():
+                item = self.candidate_list.takeItem(0)
+                if item is not None:
+                    item.setSelected(False)
+                    self._retired_candidate_items.append(item)
+        finally:
+            self.candidate_list.setUpdatesEnabled(True)
+            self.candidate_list.blockSignals(previous_signals)
+            append_log(
+                f"modal.candidates.clear.end reason={reason} "
+                f"count={self.candidate_list.count()} retired={len(self._retired_candidate_items)}"
+            )
+
     def _refresh_candidate_list(self) -> None:
         selected = self._active_frequency
-        self.candidate_list.blockSignals(True)
-        self.candidate_list.clear()
+        previous_signals = self.candidate_list.blockSignals(True)
+        self._clear_candidate_list_safely("refresh_candidate_list")
         display: list[tuple[str, float]] = []
         for freq in self._manual_peaks:
             display.append((f"[手动] {freq:.8g} Hz", float(freq)))
@@ -4332,7 +6088,7 @@ class ModalShapePage(DiagnosticPage):
             seen.append(freq)
         if self.candidate_list.count():
             self.candidate_list.setCurrentRow(selected_row)
-        self.candidate_list.blockSignals(False)
+        self.candidate_list.blockSignals(previous_signals)
 
     def _candidate_frequency(self, item: QtWidgets.QListWidgetItem | None) -> float | None:
         if item is None:
@@ -4380,11 +6136,12 @@ def apply_plot_theme(plot: pg.PlotWidget, theme: dict[str, object]) -> None:
     if not theme:
         return
     plot.setBackground(str(theme.get("plot_bg", "#ffffff")))
-    plot.showGrid(x=True, y=True, alpha=float(theme.get("grid_alpha", 0.22)))
+    plot.showGrid(x=True, y=True, alpha=float(theme.get("grid_alpha", 0.20)))
     for axis_name in ("left", "bottom"):
         axis = plot.getAxis(axis_name)
         axis.setPen(pg.mkPen(str(theme.get("axis", "#172033"))))
         axis.setTextPen(pg.mkPen(str(theme.get("axis", "#172033"))))
+    apply_plot_legend_theme(plot, theme)
 
 
 def finite_xy(
@@ -4872,10 +6629,15 @@ def project_points_3d(coords: np.ndarray, *, azimuth_deg: float = 35.0, elevatio
     x = points[:, 0]
     y = points[:, 1]
     z = points[:, 2]
-    x_rot = x * math.cos(azimuth) - y * math.sin(azimuth)
-    y_rot = x * math.sin(azimuth) + y * math.cos(azimuth)
-    y_proj = y_rot * math.cos(elevation) - z * math.sin(elevation)
-    return np.column_stack([x_rot, y_proj])
+    # Match GLViewWidget's Euler camera transform: rotate elevation - 90
+    # around +X after rotating azimuth + 90 around -Z.
+    x_view = -x * math.sin(azimuth) + y * math.cos(azimuth)
+    y_view = (
+        -x * math.cos(azimuth) * math.sin(elevation)
+        - y * math.sin(azimuth) * math.sin(elevation)
+        + z * math.cos(elevation)
+    )
+    return np.column_stack([x_view, y_view])
 
 
 def write_mode_animation_gif(
@@ -5287,7 +7049,9 @@ def gif_lzw_encode(data: bytes, *, min_code_size: int) -> bytes:
             if next_code < 4096:
                 dictionary[combined] = next_code
                 next_code += 1
-                if next_code >= (1 << code_size) and code_size < 12:
+                # The decoder adds this entry after reading the next emitted
+                # code, so the encoder must change width one code later.
+                if next_code > (1 << code_size) and code_size < 12:
                     code_size += 1
             else:
                 write_code(clear_code)
@@ -5310,6 +7074,3 @@ _MODE_GIF_PALETTE = [
     (237, 243, 250),
     (29, 114, 201),
 ]
-
-
-_MINIMAL_GIF_BASE64 = "R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="

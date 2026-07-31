@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import tempfile
+import threading
+import time
 import unittest
 import zipfile
 
@@ -13,6 +15,7 @@ from python_vna.continuous_recording import (
     iter_dat_frames,
     read_dat_header,
 )
+from python_vna.analysis_data import load_analysis_path, load_continuous_channels
 from python_vna.daq.base import BackendFrame
 from python_vna.storage import default_session_config
 
@@ -196,6 +199,50 @@ class ContinuousRecordingTests(unittest.TestCase):
             self.assertEqual(manifest["error"], "manual stop")
             self.assertEqual(len(manifest["segments"]), 2)
 
+    def test_dat_writer_queues_segment_compression_without_blocking_rotation(self):
+        class _SlowCompressionWriter(ContinuousDatWriter):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.compression_started = threading.Event()
+                self.release_compression = threading.Event()
+
+            def _compress_segment(self, segment_path):
+                self.compression_started.set()
+                self.release_compression.wait(timeout=2.0)
+                return super()._compress_segment(segment_path)
+
+        clock = _Clock()
+        session = default_session_config()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "recording"
+            writer = _SlowCompressionWriter(
+                output_dir,
+                session,
+                device_name="Dev1",
+                channel_names=["ai0", "ai1"],
+                software_version="test",
+                segment_seconds=1.0,
+                time_fn=clock.time_ns,
+                monotonic_fn=clock.monotonic_seconds,
+            )
+            writer.start()
+            writer.write_frame(self._frame(1, 1.0))
+            clock.advance(2.0)
+            start = time.perf_counter()
+            writer.write_frame(self._frame(2, 2.0))
+            elapsed = time.perf_counter() - start
+
+            self.assertLess(elapsed, 0.5)
+            self.assertTrue(writer.compression_started.wait(timeout=1.0))
+            self.assertTrue((output_dir / "segment_0001.dat").exists())
+            self.assertTrue((output_dir / "segment_0002.dat").exists())
+
+            writer.release_compression.set()
+            writer.close()
+            manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["segments"][0]["path"], "segment_0001.zip")
+            self.assertTrue(manifest["segments"][0]["compressed"])
+
     def test_dat_writer_rotates_segments_by_size_limit(self):
         clock = _Clock()
         session = default_session_config()
@@ -248,6 +295,40 @@ class ContinuousRecordingTests(unittest.TestCase):
             manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["total_frames"], 2)
             self.assertEqual(manifest["total_samples"], 6)
+
+    def test_binary_writer_persists_fast_segments_and_analysis_reads_channels(self):
+        clock = _Clock()
+        session = default_session_config()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "recording"
+            writer = ContinuousDatWriter(
+                output_dir,
+                session,
+                device_name="Dev1",
+                channel_names=["ai0", "ai1"],
+                software_version="test",
+                storage_format="binary",
+                compress_closed_segments=False,
+                time_fn=clock.time_ns,
+                monotonic_fn=clock.monotonic_seconds,
+            )
+            writer.start()
+            writer.write_frame(self._frame(1, 10.0))
+            writer.close()
+
+            segment_path = output_dir / "segment_0001.bin"
+            manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+            dataset = load_analysis_path(output_dir / "manifest.json")
+            time_s, channels = load_continuous_channels(dataset, ["ai1"])
+
+            self.assertTrue(segment_path.exists())
+            self.assertEqual(segment_path.stat().st_size, 2 * 3 * 8)
+            self.assertEqual(manifest["storage_format"], "binary")
+            self.assertEqual(manifest["binary_layout"], "sample_major")
+            self.assertFalse(manifest["segments"][0]["compressed"])
+            self.assertFalse((output_dir / ".analysis_cache").exists())
+            np.testing.assert_allclose(time_s, np.array([0.0, 1.0, 2.0]) / 2560.0)
+            np.testing.assert_allclose(channels["ai1"], [13.0, 14.0, 15.0])
 
 
 if __name__ == "__main__":

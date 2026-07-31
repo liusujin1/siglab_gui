@@ -276,7 +276,6 @@ def write_icon_set(canvas: Canvas, stem: str) -> None:
 
 def main() -> int:
     write_icon_set(draw_vianalysis(), "vianalysis_icon")
-    write_icon_set(draw_diagnostic(), "python_vna_diagnostic_icon")
     return 0
 
 

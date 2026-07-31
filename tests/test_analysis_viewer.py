@@ -15,8 +15,16 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from python_vna.analysis_derivation import (
     DERIVE_BASE_TO_TOP,
     DERIVE_TOP_TO_BASE,
+    diagonal_psd_matrix,
     derive_psd_from_transfer,
     derive_time_from_transfer,
+    fully_correlated_psd_matrix,
+    invert_mimo_independent_input_psd,
+    invert_mimo_input_psd,
+    predict_mimo_response_psd,
+    psd_matrix_diagonal,
+    solve_mimo_independent_psd,
+    synthesize_time_from_psd,
 )
 from python_vna.analysis_curve_editing import (
     apply_db_magnitude_profile,
@@ -31,6 +39,7 @@ from python_vna.analysis_algorithms import (
     apply_filter_to_signal,
     compute_cumulative_spectrum,
     compute_dynamic_stiffness,
+    compute_mimo_transfer_function_welch,
     compute_transfer_function_welch,
     compute_welch_psd,
     compute_periodogram_psd,
@@ -38,6 +47,9 @@ from python_vna.analysis_algorithms import (
     compute_third_octave_velocity_rms,
     convert_acceleration_psd,
     convert_acceleration_time_series,
+    quantity_cumulative_label,
+    quantity_psd_label,
+    quantity_time_label,
 )
 from python_vna.analysis_data import (
     AnalysisDataset,
@@ -50,7 +62,13 @@ from python_vna.continuous_recording import ContinuousDatWriter
 from python_vna.daq.base import BackendFrame
 from python_vna.models import MeasurementSet
 from python_vna.storage import default_session_config
-from python_vna.ui.analysis_viewer import AnalysisViewer, _vc_reference_frequency_velocity
+from python_vna.ui.analysis_viewer import (
+    AnalysisViewer,
+    _vc_reference_acceleration_psd,
+    _vc_reference_acceleration_psd_for_transfer_grid,
+    _vc_reference_band_edges,
+    _vc_reference_frequency_velocity,
+)
 from python_vna.ui.main_window import DataTipText, VnaAxisItem
 
 
@@ -99,6 +117,42 @@ class AnalysisAlgorithmTests(unittest.TestCase):
         self.assertAlmostEqual(welch_freqs[int(np.argmax(welch_psd))], 50.0, delta=4.0)
         self.assertEqual(cumulative_f.shape, cumulative.shape)
         self.assertGreater(float(cumulative[-1]), 0.0)
+
+    def test_psd_to_time_synthesis_infers_sample_rate_when_missing(self):
+        frequency = np.array([10.0, 20.0, 30.0, 40.0], dtype=float)
+        psd = np.ones(frequency.shape, dtype=float)
+
+        time_s, values, sample_rate = synthesize_time_from_psd(frequency, psd, 0.0, seed=1)
+
+        self.assertGreater(sample_rate, 0.0)
+        self.assertGreaterEqual(time_s.size, 32)
+        self.assertEqual(time_s.size, values.size)
+        self.assertGreater(float(np.std(values)), 0.0)
+
+    def test_vc_psd_time_synthesis_preserves_third_octave_levels(self):
+        frequency, acceleration_psd = _vc_reference_acceleration_psd("VC C")
+        band_edges = _vc_reference_band_edges("VC C")
+        self.assertIsNotNone(band_edges)
+
+        time_s, values, sample_rate = synthesize_time_from_psd(
+            frequency,
+            acceleration_psd,
+            4096.0,
+            seed=2,
+            duration_s=32.0,
+            band_edges=band_edges,
+        )
+
+        self.assertGreater(time_s.size, 1000)
+        welch_freqs, welch_psd = compute_periodogram_psd(values, sample_rate)
+        rbw_hz = float(np.median(np.diff(welch_freqs)))
+        centers, velocity = compute_third_octave_velocity_rms(welch_freqs, welch_psd, rbw_hz)
+        target_centers, target_velocity = _vc_reference_frequency_velocity("VC C")
+        expected = np.interp(centers, target_centers, target_velocity)
+        in_band = (centers >= 2.0) & (centers <= 800.0)
+        ratio = velocity[in_band] / expected[in_band]
+        self.assertLess(float(np.nanmax(ratio)), 1.35)
+        self.assertGreater(float(np.nanmin(ratio)), 0.65)
 
     def test_welch_transfer_from_time_data_recovers_gain(self):
         sample_rate = 1000.0
@@ -167,6 +221,147 @@ class AnalysisAlgorithmTests(unittest.TestCase):
         np.testing.assert_allclose(top_psd, psd * 16.0)
         np.testing.assert_allclose(base_f, freqs)
         np.testing.assert_allclose(base_psd, psd)
+
+    def test_mimo_forward_matches_scalar_diagonal_transfer(self):
+        freqs = np.array([10.0, 20.0], dtype=float)
+        transfer = np.zeros((2, 3, 3), dtype=complex)
+        gains = np.array([2.0, 3.0, 4.0], dtype=float)
+        transfer[:, np.arange(3), np.arange(3)] = gains
+        input_psd = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=float)
+
+        out_f, output_matrix = predict_mimo_response_psd(
+            freqs,
+            transfer,
+            diagonal_psd_matrix(input_psd),
+        )
+
+        np.testing.assert_allclose(out_f, freqs)
+        np.testing.assert_allclose(psd_matrix_diagonal(output_matrix), input_psd * gains**2)
+        np.testing.assert_allclose(output_matrix[:, 0, 1], 0.0)
+
+    def test_mimo_forward_adds_coupled_independent_axis_contributions(self):
+        freqs = np.array([15.0], dtype=float)
+        transfer = np.array([[[1.0, 0.5, 0.0], [0.25, 2.0, 0.0]]], dtype=complex)
+        input_psd = np.array([[4.0, 9.0, 0.0]], dtype=float)
+
+        _out_f, output_matrix = predict_mimo_response_psd(
+            freqs,
+            transfer,
+            diagonal_psd_matrix(input_psd),
+        )
+
+        output_psd = psd_matrix_diagonal(output_matrix)
+        np.testing.assert_allclose(output_psd[0, 0], 1.0**2 * 4.0 + 0.5**2 * 9.0)
+        np.testing.assert_allclose(output_psd[0, 1], 0.25**2 * 4.0 + 2.0**2 * 9.0)
+
+    def test_mimo_independent_inverse_then_forward_recovers_target(self):
+        freqs = np.array([10.0, 20.0], dtype=float)
+        transfer = np.zeros((2, 3, 3), dtype=complex)
+        transfer[:] = np.array(
+            [
+                [1.2, 0.2, 0.1],
+                [0.1, 1.4, 0.15],
+                [0.05, 0.25, 1.1],
+            ],
+            dtype=complex,
+        )
+        target_psd = np.array([[2.0, 3.0, 4.0], [5.0, 6.0, 7.0]], dtype=float)
+
+        out_f, input_psd = invert_mimo_independent_input_psd(
+            freqs,
+            transfer,
+            target_psd,
+        )
+        check_f, output_matrix = predict_mimo_response_psd(
+            out_f,
+            transfer,
+            diagonal_psd_matrix(input_psd),
+        )
+
+        np.testing.assert_allclose(out_f, freqs)
+        np.testing.assert_allclose(check_f, freqs)
+        np.testing.assert_allclose(psd_matrix_diagonal(output_matrix), target_psd, rtol=1e-10, atol=1e-10)
+
+    def test_mimo_independent_inverse_default_preserves_small_unitful_transfer(self):
+        freqs = np.array([3.0, 10.0], dtype=float)
+        transfer = np.zeros((2, 3, 3), dtype=complex)
+        gains = np.array([5e-14, 2e-13, 8e-13], dtype=float)
+        transfer[:, np.arange(3), np.arange(3)] = gains
+        target_psd = np.array([[8e-8, 8e-8, 8e-8], [2e-7, 2e-7, 2e-7]], dtype=float)
+
+        out_f, input_psd, predicted_psd = solve_mimo_independent_psd(freqs, transfer, target_psd)
+
+        np.testing.assert_allclose(out_f, freqs)
+        self.assertTrue(np.all(np.isfinite(input_psd)))
+        np.testing.assert_allclose(predicted_psd, target_psd, rtol=1e-10, atol=1e-20)
+
+    def test_mimo_full_cross_psd_inverse_handles_correlated_axes(self):
+        freqs = np.array([25.0], dtype=float)
+        transfer = np.array(
+            [
+                [
+                    [1.0 + 0.0j, 0.15 + 0.05j, 0.0 + 0.0j],
+                    [0.0 + 0.0j, 1.1 + 0.0j, 0.2 - 0.05j],
+                    [0.1 + 0.0j, 0.0 + 0.0j, 0.9 + 0.0j],
+                ]
+            ],
+            dtype=complex,
+        )
+        source_psd = fully_correlated_psd_matrix(np.array([[3.0, 2.0, 1.0]], dtype=float))
+        _f, target_matrix = predict_mimo_response_psd(freqs, transfer, source_psd)
+
+        inv_f, recovered_input = invert_mimo_input_psd(freqs, transfer, target_matrix, regularization_floor=0.0)
+        check_f, recovered_output = predict_mimo_response_psd(inv_f, transfer, recovered_input)
+
+        np.testing.assert_allclose(check_f, freqs)
+        np.testing.assert_allclose(recovered_output, target_matrix, rtol=1e-10, atol=1e-10)
+
+    def test_mimo_inverse_regularization_prevents_near_singular_blowup(self):
+        freqs = np.array([10.0], dtype=float)
+        transfer = np.array([[[1e-9, 0.0], [0.0, 1.0]]], dtype=complex)
+        target = diagonal_psd_matrix(np.array([[1.0, 1.0]], dtype=float))
+
+        out_f, input_matrix = invert_mimo_input_psd(
+            freqs,
+            transfer,
+            target,
+            regularization_floor=1e-3,
+        )
+
+        np.testing.assert_allclose(out_f, freqs)
+        self.assertTrue(np.all(np.isfinite(input_matrix)))
+        self.assertLess(float(psd_matrix_diagonal(input_matrix)[0, 0]), 1e6)
+
+    def test_mimo_welch_transfer_recovers_correlated_time_inputs(self):
+        rng = np.random.default_rng(123)
+        sample_rate = 1024.0
+        sample_count = 8192
+        input_x = rng.standard_normal(sample_count)
+        input_y = 0.75 * input_x + 0.4 * rng.standard_normal(sample_count)
+        input_z = -0.3 * input_x + 0.2 * input_y + 0.5 * rng.standard_normal(sample_count)
+        inputs = np.vstack([input_x, input_y, input_z])
+        expected = np.array(
+            [
+                [1.0, 0.35, 0.10],
+                [0.20, 1.30, -0.25],
+                [-0.15, 0.45, 0.90],
+            ],
+            dtype=float,
+        )
+        outputs = expected @ inputs
+
+        frequency, transfer = compute_mimo_transfer_function_welch(
+            inputs,
+            outputs,
+            sample_rate,
+            2048,
+            regularization_floor=0.0,
+        )
+
+        self.assertGreater(frequency.size, 10)
+        np.testing.assert_allclose(np.median(np.real(transfer), axis=0), expected, rtol=1e-10, atol=1e-10)
+        _pair_f, pair_h = compute_transfer_function_welch(inputs[0], outputs[0], sample_rate, 2048)
+        self.assertGreater(abs(float(np.median(np.real(pair_h))) - expected[0, 0]), 0.1)
 
     def test_manual_transfer_points_fit_in_log_frequency(self):
         control_f = np.array([10.0, 100.0, 1000.0], dtype=float)
@@ -304,6 +499,22 @@ class AnalysisAlgorithmTests(unittest.TestCase):
         self.assertEqual(velocity.shape, signal.shape)
         self.assertTrue(np.all(np.isfinite(velocity)))
 
+    def test_force_quantity_conversions_keep_raw_force_units(self):
+        freqs = np.array([1.0, 10.0, 100.0], dtype=float)
+        force_psd = np.array([4.0, 9.0, 16.0], dtype=float)
+        force_f, converted_force_psd = convert_acceleration_psd(freqs, force_psd, "Force")
+
+        np.testing.assert_allclose(force_f, freqs)
+        np.testing.assert_allclose(converted_force_psd, force_psd)
+
+        sample_rate = 1000.0
+        force = np.sin(2.0 * np.pi * 20.0 * np.arange(1000) / sample_rate)
+        converted_force = convert_acceleration_time_series(force, sample_rate, "Force")
+        np.testing.assert_allclose(converted_force, force)
+        self.assertEqual(quantity_time_label("Force"), "Force (N)")
+        self.assertEqual(quantity_psd_label("Force"), "N^2/Hz")
+        self.assertEqual(quantity_cumulative_label("Force"), "3 sigma force (N)")
+
     def test_foundation_helpers_compute_expected_curves(self):
         freqs = np.linspace(2.0, 200.0, 200)
         psd = np.full_like(freqs, 1e-6)
@@ -357,6 +568,245 @@ class AnalysisDataTests(unittest.TestCase):
         np.testing.assert_allclose(time_s, [0.0, 0.1, 0.2])
         np.testing.assert_allclose(values, [2.0, 4.0, 6.0])
 
+    def test_load_headered_csv_with_time_column_and_trailing_empty_header(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "sim_saved.csv"
+            path.write_text(
+                "time,pay_below_x,pay_below_y,pay_below_z,\n"
+                "0.000000,0.000096,0.000122,0.000000\n"
+                "0.000400,0.000089,-0.036738,-0.000001\n"
+                "0.000800,0.000093,-0.069735,-0.000006\n",
+                encoding="utf-8",
+            )
+
+            dataset = load_analysis_path(path, fs_hint=100.0)
+
+        self.assertEqual(dataset.metadata["source"], "headered_time_table")
+        self.assertAlmostEqual(dataset.sample_rate, 2500.0)
+        self.assertEqual(
+            [series.display_name for series in dataset.series],
+            ["pay_below_x", "pay_below_y", "pay_below_z"],
+        )
+        time_s, values = dataset.load_time_series("pay_below_y")
+        np.testing.assert_allclose(time_s, [0.0, 0.0004, 0.0008])
+        np.testing.assert_allclose(values, [0.000122, -0.036738, -0.069735])
+
+    def test_load_plot_export_psd_dataset(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "exported_psd.csv"
+            path.write_text(
+                "# python_vna_plot_export=1\n"
+                "# plot_kind=psd\n"
+                "active_trace_x,active_trace_y\n"
+                "1,0.25\n"
+                "2,0.5\n"
+                "4,1\n",
+                encoding="utf-8-sig",
+            )
+
+            dataset = load_analysis_path(path, fs_hint=100.0)
+
+        self.assertEqual(dataset.metadata["source"], "plot_export")
+        self.assertEqual(dataset.metadata["autospectrum_kind"], "psd")
+        np.testing.assert_allclose(dataset.frequency_hz, [1.0, 2.0, 4.0])
+        self.assertIn("active trace", dataset.autospectrum)
+        np.testing.assert_allclose(dataset.autospectrum["active trace"], [0.25, 0.5, 1.0])
+
+    def test_load_plot_export_transfer_dataset(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "exported_transfer.csv"
+            path.write_text(
+                "# python_vna_plot_export=1\n"
+                "# plot_kind=transfer\n"
+                "top_to_base_x,top_to_base_y\n"
+                "1,0\n"
+                "2,6.020599913279624\n"
+                "4,-6.020599913279624\n",
+                encoding="utf-8-sig",
+            )
+
+            dataset = load_analysis_path(path, fs_hint=100.0)
+
+        self.assertEqual(dataset.metadata["source"], "plot_export")
+        self.assertEqual(dataset.metadata["plot_kind"], "transfer")
+        self.assertEqual([series.channel_key for series in dataset.series], ["Input", "top to base"])
+        self.assertIn("Input->top to base", dataset.frf)
+        np.testing.assert_allclose(np.abs(dataset.frf["Input->top to base"]), [1.0, 2.0, 0.5])
+
+    def test_forced_csv_import_as_psd_uses_first_column_as_frequency(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "generic_frequency.csv"
+            path.write_text(
+                "Frequency,base,top\n"
+                "1,0.25,0.5\n"
+                "2,0.5,1.0\n"
+                "4,1.0,2.0\n",
+                encoding="utf-8",
+            )
+
+            dataset = load_analysis_path(path, fs_hint=100.0, import_kind="psd")
+
+        self.assertEqual(dataset.metadata["import_kind"], "psd")
+        self.assertEqual(dataset.metadata["autospectrum_kind"], "psd")
+        np.testing.assert_allclose(dataset.frequency_hz, [1.0, 2.0, 4.0])
+        self.assertIn("base", dataset.autospectrum)
+        self.assertIn("top", dataset.autospectrum)
+        np.testing.assert_allclose(dataset.autospectrum["top"], [0.5, 1.0, 2.0])
+
+    def test_forced_csv_import_as_transfer_uses_db_magnitude_columns(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "generic_transfer.csv"
+            path.write_text(
+                "Frequency,top\n"
+                "1,0\n"
+                "2,6.020599913279624\n"
+                "4,-6.020599913279624\n",
+                encoding="utf-8",
+            )
+
+            dataset = load_analysis_path(path, fs_hint=100.0, import_kind="transfer")
+
+        self.assertEqual(dataset.metadata["import_kind"], "transfer")
+        self.assertEqual(dataset.metadata["plot_kind"], "transfer")
+        self.assertIn("Input->top", dataset.frf)
+        np.testing.assert_allclose(np.abs(dataset.frf["Input->top"]), [1.0, 2.0, 0.5])
+
+    def test_forced_mat_import_as_psd_accepts_frequency_variable(self):
+        from scipy.io import savemat
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "frequency_psd.mat"
+            savemat(
+                path,
+                {
+                    "frequency": np.array([1.0, 2.0, 4.0], dtype=float),
+                    "base_psd": np.array([0.25, 0.5, 1.0], dtype=float),
+                },
+            )
+
+            dataset = load_analysis_path(path, fs_hint=100.0, import_kind="psd")
+
+        self.assertEqual(dataset.metadata["import_kind"], "psd")
+        self.assertIn("base_psd", dataset.autospectrum)
+        np.testing.assert_allclose(dataset.frequency_hz, [1.0, 2.0, 4.0])
+        np.testing.assert_allclose(dataset.autospectrum["base_psd"], [0.25, 0.5, 1.0])
+
+    def test_load_floor_response_eu_ascii_as_acceleration_psd(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "Gxxsv00005 - TF-0003.txt"
+            path.write_text(
+                "Data written for 3 signals in a group signal\n"
+                "Ref Chan:Resp Chan\t 0-Z:0-Z\t 0-Z:0-Z\t 0-Z:0-Z\n"
+                "Channel Names\tI2\tI3\tI4\n"
+                "Channel Comments\t\t\t\n"
+                "\n"
+                "   \t G2, 2\t G3, 3\t G4, 4\n"
+                "Frequency\t Mag\tMag\tMag\n"
+                "   \tEU\tEU\tEU\n"
+                "\n"
+                "Units:\n"
+                "Hz\tg\tg\tg\n"
+                "0.0000000000000e+000\t0.10\t0.20\t0.30\n"
+                "3.1250000000000e-001\t0.20\t0.30\t0.40\n"
+                "6.2500000000000e-001\t0.40\t0.50\t0.60\n",
+                encoding="utf-8",
+            )
+
+            dataset = load_analysis_path(path, fs_hint=100.0)
+
+        expected_first = (0.10 * 9.8) ** 2 / 0.9376
+        expected_second = (0.20 * 9.8) ** 2 / 0.9376
+        self.assertEqual(dataset.metadata["source"], "floor_response_eu_ascii")
+        self.assertEqual(dataset.metadata["autospectrum_kind"], "psd")
+        self.assertAlmostEqual(dataset.rbw_hz, 0.3125)
+        np.testing.assert_allclose(dataset.frequency_hz, [0.0, 0.3125, 0.625])
+        self.assertEqual(
+            [series.channel_key for series in dataset.series],
+            ["I2 (G2, 2)", "I3 (G3, 3)", "I4 (G4, 4)"],
+        )
+        np.testing.assert_allclose(dataset.autospectrum["I2 (G2, 2)"][:2], [expected_first, expected_second])
+
+    def test_load_simulink_mat_with_global_time_and_numeric_channels(self):
+        from scipy.io import savemat
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "sim_export.mat"
+            time_s = np.array([0.0, 0.1, 0.2, 0.3], dtype=float)
+            savemat(
+                path,
+                {
+                    "tout": time_s,
+                    "motor_speed": np.array([1.0, 2.0, 4.0, 8.0], dtype=float),
+                    "controller": np.column_stack((time_s, time_s + 10.0, time_s + 20.0)),
+                },
+            )
+
+            dataset = load_analysis_path(path, fs_hint=100.0)
+
+        self.assertEqual(dataset.metadata["source"], "simulink_mat")
+        self.assertAlmostEqual(dataset.sample_rate, 10.0)
+        self.assertIn("motor_speed", dataset.channels)
+        self.assertIn("controller_1", dataset.channels)
+        self.assertIn("controller_2", dataset.channels)
+        np.testing.assert_allclose(dataset.time_s, time_s)
+        np.testing.assert_allclose(dataset.channels["motor_speed"], [1.0, 2.0, 4.0, 8.0])
+        np.testing.assert_allclose(dataset.channels["controller_1"], time_s + 10.0)
+        np.testing.assert_allclose(dataset.channels["controller_2"], time_s + 20.0)
+
+    def test_load_simulink_mat_structure_with_time_signals_values(self):
+        from scipy.io import savemat
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "structure_with_time.mat"
+            time_s = np.array([0.0, 0.05, 0.10, 0.15], dtype=float)
+            values = np.column_stack((np.sin(time_s), np.cos(time_s)))
+            savemat(
+                path,
+                {
+                    "simout": {
+                        "time": time_s,
+                        "signals": {
+                            "values": values,
+                            "label": "plant",
+                        },
+                    },
+                },
+            )
+
+            dataset = load_analysis_path(path, fs_hint=100.0)
+
+        self.assertEqual(dataset.metadata["source"], "simulink_mat")
+        self.assertAlmostEqual(dataset.sample_rate, 20.0)
+        self.assertIn("plant_1", dataset.channels)
+        self.assertIn("plant_2", dataset.channels)
+        np.testing.assert_allclose(dataset.channels["plant_1"], values[:, 0])
+        np.testing.assert_allclose(dataset.channels["plant_2"], values[:, 1])
+
+    def test_load_simulink_mat_v73_hdf5_numeric_channels(self):
+        import h5py
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "sim_export_v73.mat"
+            time_s = np.array([0.0, 0.1, 0.2, 0.3], dtype=float)
+            with h5py.File(path, "w") as handle:
+                handle.create_dataset("tout", data=time_s)
+                handle.create_dataset("motor_speed", data=np.array([1.0, 2.0, 4.0, 8.0], dtype=float))
+                handle.create_dataset("controller", data=np.column_stack((time_s, time_s + 10.0)))
+
+            with mock.patch(
+                "scipy.io.loadmat",
+                side_effect=NotImplementedError("Please use HDF reader for matlab v7.3 files, e.g. h5py"),
+            ):
+                dataset = load_analysis_path(path, fs_hint=100.0)
+
+        self.assertEqual(dataset.metadata["source"], "simulink_mat")
+        self.assertAlmostEqual(dataset.sample_rate, 10.0)
+        self.assertIn("motor_speed", dataset.channels)
+        self.assertIn("controller", dataset.channels)
+        np.testing.assert_allclose(dataset.time_s, time_s)
+        np.testing.assert_allclose(dataset.channels["motor_speed"], [1.0, 2.0, 4.0, 8.0])
+        np.testing.assert_allclose(dataset.channels["controller"], time_s + 10.0)
+
     def test_load_continuous_manifest_lazily_reads_frames(self):
         session = default_session_config()
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -393,6 +843,162 @@ class AnalysisDataTests(unittest.TestCase):
         np.testing.assert_allclose(bulk_time_s, time_s)
         np.testing.assert_allclose(bulk_channels["ai0"], [1.0, 2.0, 3.0])
         np.testing.assert_allclose(bulk_channels["ai1"], [4.0, 5.0, 6.0])
+
+    def test_load_continuous_zip_segments_uses_bulk_table_path(self):
+        session = default_session_config()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "recording"
+            writer = ContinuousDatWriter(
+                output_dir,
+                session,
+                device_name="Dev1",
+                channel_names=["ai0", "ai1"],
+                software_version="test",
+                compress_closed_segments=True,
+            )
+            writer.start()
+            writer.write_frame(
+                BackendFrame(
+                    sample_rate=2560.0,
+                    channel_names=["ai0", "ai1"],
+                    data=np.array([[1.0, 2.0, 3.0], [11.0, 12.0, 13.0]], dtype=float),
+                    timestamps=np.array([0.0, 1.0 / 2560.0, 2.0 / 2560.0]),
+                    frame_index=1,
+                    metadata={},
+                )
+            )
+            writer.close()
+
+            dataset = load_analysis_path(output_dir / "manifest.json")
+            self.assertEqual(dataset.continuous_segments[0].path.suffix.lower(), ".zip")
+            time_s, channels = load_continuous_channels(dataset, ["ai0", "ai1"])
+
+        np.testing.assert_allclose(time_s, np.array([0.0, 1.0, 2.0]) / 2560.0)
+        np.testing.assert_allclose(channels["ai0"], [1.0, 2.0, 3.0])
+        np.testing.assert_allclose(channels["ai1"], [11.0, 12.0, 13.0])
+
+    def test_load_continuous_full_range_reuses_channel_cache(self):
+        session = default_session_config()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "recording"
+            writer = ContinuousDatWriter(
+                output_dir,
+                session,
+                device_name="Dev1",
+                channel_names=["ai0", "ai1"],
+                software_version="test",
+                compress_closed_segments=True,
+            )
+            writer.start()
+            writer.write_frame(
+                BackendFrame(
+                    sample_rate=2560.0,
+                    channel_names=["ai0", "ai1"],
+                    data=np.array([[1.0, 2.0, 3.0], [11.0, 12.0, 13.0]], dtype=float),
+                    timestamps=np.array([0.0, 1.0 / 2560.0, 2.0 / 2560.0]),
+                    frame_index=1,
+                    metadata={},
+                )
+            )
+            writer.close()
+
+            dataset = load_analysis_path(output_dir / "manifest.json")
+            first_time_s, first_channels = load_continuous_channels(dataset, ["ai0"])
+            for segment in dataset.continuous_segments:
+                segment.path.unlink()
+            cached_time_s, cached_channels = load_continuous_channels(dataset, ["ai0"])
+
+        np.testing.assert_allclose(first_time_s, cached_time_s)
+        np.testing.assert_allclose(first_channels["ai0"], cached_channels["ai0"])
+
+    def test_load_continuous_multiple_segments_keeps_manifest_order(self):
+        session = default_session_config()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "recording"
+            writer = ContinuousDatWriter(
+                output_dir,
+                session,
+                device_name="Dev1",
+                channel_names=["ai0"],
+                software_version="test",
+                segment_seconds=0.01,
+                compress_closed_segments=True,
+            )
+            writer.start()
+            writer.write_frame(
+                BackendFrame(
+                    sample_rate=100.0,
+                    channel_names=["ai0"],
+                    data=np.array([[1.0, 2.0]], dtype=float),
+                    timestamps=np.array([0.0, 0.01]),
+                    frame_index=1,
+                    metadata={},
+                )
+            )
+            writer._monotonic_fn = lambda: 1.0
+            writer.write_frame(
+                BackendFrame(
+                    sample_rate=100.0,
+                    channel_names=["ai0"],
+                    data=np.array([[3.0, 4.0]], dtype=float),
+                    timestamps=np.array([0.02, 0.03]),
+                    frame_index=2,
+                    metadata={},
+                )
+            )
+            writer.close()
+
+            dataset = load_analysis_path(output_dir / "manifest.json")
+            time_s, channels = load_continuous_channels(dataset, ["ai0"])
+
+        np.testing.assert_allclose(time_s, np.arange(4, dtype=float) / 2560.0)
+        np.testing.assert_allclose(channels["ai0"], [1.0, 2.0, 3.0, 4.0])
+
+    def test_load_numeric_text_attaches_readme_condition_for_grouped_numbers(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            folder = Path(tmpdir)
+            path = folder / "007.csv"
+            path.write_text("0,1\n0.1,2\n", encoding="utf-8")
+            (folder / "readme.txt").write_text("004:Z\n005:X\n006,007:Y\n", encoding="utf-8")
+
+            dataset = load_analysis_path(path, fs_hint=100.0)
+
+        self.assertEqual(dataset.condition_number, "007")
+        self.assertEqual(dataset.condition_text, "Y")
+        self.assertIn("006,007:Y", dataset.readme_text)
+        self.assertEqual(dataset.readme_path.name, "readme.txt")
+
+    def test_load_continuous_manifest_attaches_directory_or_parent_readme(self):
+        session = default_session_config()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            parent = Path(tmpdir)
+            output_dir = parent / "rec_012"
+            (parent / "readme.txt").write_text("012:父目录工况\n", encoding="utf-8")
+            writer = ContinuousDatWriter(
+                output_dir,
+                session,
+                device_name="Dev1",
+                channel_names=["ai0"],
+                software_version="test",
+            )
+            writer.start()
+            writer.write_frame(
+                BackendFrame(
+                    sample_rate=2560.0,
+                    channel_names=["ai0"],
+                    data=np.array([[1.0, 2.0, 3.0]], dtype=float),
+                    timestamps=np.array([0.0, 1.0 / 2560.0, 2.0 / 2560.0]),
+                    frame_index=1,
+                    metadata={},
+                )
+            )
+            writer.close()
+
+            dataset = load_analysis_path(output_dir / "manifest.json")
+
+        self.assertEqual(dataset.condition_number, "012")
+        self.assertEqual(dataset.condition_text, "父目录工况")
+        self.assertEqual(dataset.readme_path.parent, parent)
 
     def test_load_legacy_vna_exposes_frequency_results(self):
         dataset = load_analysis_path(r"D:\SynologyDrive\codex\vna\dsa\vna\sample.vna")
@@ -557,6 +1163,65 @@ class AnalysisViewerUiTests(unittest.TestCase):
         finally:
             viewer.close()
 
+    def test_floor_response_foundation_curve_matches_matlab_script_integration(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "floor_ascii.txt"
+            path.write_text(
+                "Data written for 3 signals in a group signal\n"
+                "Ref Chan:Resp Chan\t 0-Z:0-Z\t 0-Z:0-Z\t 0-Z:0-Z\n"
+                "Channel Names\tI2\tI3\tI4\n"
+                "Channel Comments\t\t\t\n"
+                "\n"
+                "   \t G2, 2\t G3, 3\t G4, 4\n"
+                "Frequency\t Mag\tMag\tMag\n"
+                "   \tEU\tEU\tEU\n"
+                "\n"
+                "Units:\n"
+                "Hz\tg\tg\tg\n"
+                "0.0000\t0.10\t0.20\t0.30\n"
+                "1.0000\t0.20\t0.30\t0.40\n"
+                "2.0000\t0.40\t0.50\t0.60\n"
+                "4.0000\t0.80\t0.90\t1.00\n",
+                encoding="utf-8",
+            )
+            dataset = load_analysis_path(path, fs_hint=100.0)
+            viewer = AnalysisViewer()
+            try:
+                centers, velocity = viewer._foundation_vibration_curve(dataset, dataset.series[0])
+                f = np.asarray(dataset.frequency_hz, dtype=float)[1:]
+                aspec = np.asarray(dataset.autospectrum[dataset.series[0].channel_key], dtype=float)[1:]
+                expected_centers, expected_velocity = compute_third_octave_velocity_rms(f, aspec, dataset.rbw_hz)
+
+                np.testing.assert_allclose(centers, expected_centers)
+                np.testing.assert_allclose(velocity, expected_velocity)
+
+                viewer._load_path(path)
+                self.assertEqual(viewer.foundation_vib_edit.text(), "1,2,3")
+            finally:
+                viewer.close()
+
+    def test_same_channel_from_multiple_files_uses_distinct_curve_colors(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            first = Path(tmpdir) / "first.csv"
+            second = Path(tmpdir) / "second.csv"
+            first.write_text("0,1\n0.1,2\n0.2,1\n0.3,0\n", encoding="utf-8")
+            second.write_text("0,2\n0.1,3\n0.2,2\n0.3,1\n", encoding="utf-8")
+            viewer = AnalysisViewer()
+            try:
+                viewer._load_path(first)
+                viewer._load_path(second)
+                for index in range(viewer.series_list.count()):
+                    viewer.series_list.item(index).setSelected(True)
+
+                plot = viewer.main_plots[0]
+                curve_items = [viewer._plot_item_for_label(plot, label) for label in viewer._plot_curves[plot]]
+                curve_colors = [item.opts["pen"].color().name() for item in curve_items if item is not None]
+
+                self.assertEqual(len(curve_colors), 2)
+                self.assertEqual(len(set(curve_colors)), 2)
+            finally:
+                viewer.close()
+
     def test_viewer_loads_multiple_files_and_matches_matlab_series_names(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             first = Path(tmpdir) / "first.csv"
@@ -568,6 +1233,9 @@ class AnalysisViewerUiTests(unittest.TestCase):
                 with mock.patch(
                     "python_vna.ui.analysis_viewer.QtWidgets.QFileDialog.getOpenFileNames",
                     return_value=([str(first), str(second)], ""),
+                ), mock.patch(
+                    "python_vna.ui.analysis_viewer.QtWidgets.QInputDialog.getItem",
+                    return_value=("自动识别", True),
                 ):
                     viewer._load_file()
                 self.assertFalse(hasattr(viewer, "dataset_list"))
@@ -578,6 +1246,100 @@ class AnalysisViewerUiTests(unittest.TestCase):
                 labels = [viewer.series_list.item(index).text() for index in range(viewer.series_list.count())]
                 self.assertIn("first.csv+ch1#2", labels)
                 self.assertIn("first.csv+ch2#2", labels)
+            finally:
+                viewer.close()
+
+    def test_viewer_load_file_prompt_can_force_csv_as_psd(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "generic_frequency.csv"
+            path.write_text(
+                "Frequency,base\n"
+                "1,0.25\n"
+                "2,0.5\n"
+                "4,1.0\n",
+                encoding="utf-8",
+            )
+            viewer = AnalysisViewer()
+            try:
+                with mock.patch(
+                    "python_vna.ui.analysis_viewer.QtWidgets.QFileDialog.getOpenFileNames",
+                    return_value=([str(path)], ""),
+                ), mock.patch(
+                    "python_vna.ui.analysis_viewer.QtWidgets.QInputDialog.getItem",
+                    return_value=("PSD数据", True),
+                ):
+                    viewer._load_file()
+
+                self.assertEqual(len(viewer._datasets), 1)
+                dataset = viewer._datasets[0]
+                self.assertEqual(dataset.metadata["import_kind"], "psd")
+                self.assertIn("base", dataset.autospectrum)
+                np.testing.assert_allclose(dataset.frequency_hz, [1.0, 2.0, 4.0])
+            finally:
+                viewer.close()
+
+    def test_viewer_readme_panel_follows_selected_dataset(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            folder = Path(tmpdir)
+            first = folder / "006.csv"
+            second = folder / "007.csv"
+            first.write_text("0,1\n0.1,2\n", encoding="utf-8")
+            second.write_text("0,3\n0.1,4\n", encoding="utf-8")
+            (folder / "readme.txt").write_text("006:第一工况\n007:第二工况\n", encoding="utf-8")
+            viewer = AnalysisViewer()
+            try:
+                viewer._load_paths([first, second])
+                labels = [viewer.series_list.item(index).text() for index in range(viewer.series_list.count())]
+                self.assertEqual(
+                    labels,
+                    [
+                        "006.csv+ch1（第一工况）",
+                        "006.csv+ch2（第一工况）",
+                        "007.csv+ch1（第二工况）",
+                        "007.csv+ch2（第二工况）",
+                    ],
+                )
+                self.assertIn("007", viewer.show_readme_button.toolTip())
+                self.assertIn("第二工况", viewer.show_readme_button.toolTip())
+
+                viewer.series_list.item(0).setSelected(True)
+
+                self.assertTrue(viewer.show_readme_button.isEnabled())
+                self.assertIn("006", viewer.show_readme_button.toolTip())
+                self.assertIn("第一工况", viewer.show_readme_button.toolTip())
+                self.assertIn("第一工况", viewer.series_list.item(0).toolTip())
+                self.assertEqual(viewer.rename_edit.text(), "第一工况")
+
+                self.assertTrue(viewer.readme_panel.isHidden())
+                central_layout = viewer.left_panel.parentWidget().layout()
+                self.assertIs(central_layout.itemAt(0).widget(), viewer.readme_panel)
+                viewer.show_readme_button.click()
+                self.assertFalse(viewer.readme_panel.isHidden())
+                self.assertIn("006", viewer.readme_summary_label.text())
+                self.assertIn("006:第一工况", viewer.readme_panel_preview.toPlainText())
+                viewer.show_readme_button.click()
+                self.assertTrue(viewer.readme_panel.isHidden())
+            finally:
+                viewer.close()
+
+    def test_viewer_readme_panel_handles_missing_or_unmatched_readme(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            folder = Path(tmpdir)
+            path = folder / "009.csv"
+            path.write_text("0,1\n0.1,2\n", encoding="utf-8")
+            (folder / "readme.txt").write_text("001:其他工况\n", encoding="utf-8")
+            viewer = AnalysisViewer()
+            try:
+                viewer._load_path(path)
+                viewer.series_list.item(0).setSelected(True)
+
+                self.assertEqual(viewer.series_list.item(0).text(), "009.csv+ch1")
+                self.assertTrue(viewer.show_readme_button.isEnabled())
+                self.assertIn("009", viewer.show_readme_button.toolTip())
+                self.assertIn("未匹配", viewer.show_readme_button.toolTip())
+                self.assertIn("001:其他工况", viewer._readme_dialog_text(viewer._dataset_for_readme_panel()))
+                viewer.show_readme_button.click()
+                self.assertIn("001:其他工况", viewer.readme_panel_preview.toPlainText())
             finally:
                 viewer.close()
 
@@ -640,15 +1402,25 @@ class AnalysisViewerUiTests(unittest.TestCase):
                     ]
                     self.assertEqual(
                         action_texts,
-                        ["Back One Zoom", "Auto Scale", "Data Tip", "Cursor Readout", "Clear Data Tips"],
+                        [
+                            "返回上一缩放",
+                            "自动缩放",
+                            "数据提示",
+                            "读数游标",
+                            "清除数据提示",
+                            "删除当前曲线",
+                            "管理当前图窗曲线",
+                        ],
                     )
                     self.assertTrue(actions["data_tip"].isCheckable())
                     self.assertTrue(actions["cursor"].isCheckable())
+                    self.assertTrue(actions["manage_curves"].isEnabled())
                 finally:
                     menu.close()
                 self.assertFalse(plot.getPlotItem().menuEnabled())
                 self.assertFalse(plot.getPlotItem().vb.menuEnabled())
-                self.assertGreaterEqual(viewer.series_list.minimumHeight(), 260)
+                self.assertGreaterEqual(viewer.series_list.minimumHeight(), 80)
+                self.assertLessEqual(viewer.series_list.minimumHeight(), 120)
                 self.assertFalse(hasattr(viewer, "cursor_button"))
                 self.assertFalse(hasattr(viewer, "data_tip_button"))
 
@@ -694,6 +1466,34 @@ class AnalysisViewerUiTests(unittest.TestCase):
         try:
             viewer._suppress_plot_context_menu_once()
             self.assertTrue(viewer._suppress_next_plot_context_menu)
+        finally:
+            viewer.close()
+
+    def test_plot_curve_manager_removes_data_curves_but_protects_reference_lines(self):
+        viewer = AnalysisViewer()
+        try:
+            frequency = np.array([1.0, 2.0, 4.0], dtype=float)
+            values = np.array([1.0, 3.0, 2.0], dtype=float)
+            plot = viewer.main_plots[0]
+            plot.plot(frequency, values, name="测点数据")
+            viewer._plot_curves[plot]["测点数据"] = (frequency, values)
+            viewer._active_trace[plot] = "测点数据"
+            viewer._toggle_data_tip_mode(True)
+            self.assertTrue(viewer._place_data_tip(plot, 2.0, 3.0))
+
+            self.assertEqual(viewer._remove_plot_curves(plot, {"测点数据"}), 1)
+            self.assertNotIn("测点数据", viewer._plot_curves[plot])
+            self.assertEqual(viewer._data_tip_items[plot], [])
+            self.assertIsNone(viewer._active_trace[plot])
+
+            plot.plot(frequency, values, name="VC A")
+            viewer._plot_curves[plot]["VC A"] = (frequency, values)
+            viewer._plot_export_excluded[plot].add("VC A")
+            viewer._active_trace[plot] = "VC A"
+            self.assertFalse(viewer._curve_info_for(plot, "VC A").removable)
+            self.assertFalse(viewer._curve_info_for(plot, "VC A").exportable)
+            self.assertEqual(viewer._remove_plot_curves(plot, {"VC A"}), 0)
+            self.assertIn("VC A", viewer._plot_curves[plot])
         finally:
             viewer.close()
 
@@ -816,6 +1616,62 @@ class AnalysisViewerUiTests(unittest.TestCase):
             finally:
                 viewer.close()
 
+    def test_exported_psd_reimports_without_legacy_scaling(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            destination = Path(tmpdir) / "psd.csv"
+            viewer = AnalysisViewer()
+            try:
+                plot = viewer.main_plots[0]
+                viewer._active_plot = plot
+                viewer._plot_curves[plot] = {
+                    "PSD trace": (np.array([1.0, 2.0, 4.0]), np.array([0.25, 0.5, 1.0])),
+                }
+                viewer._plot_curve_kind[plot] = "psd"
+                with mock.patch(
+                    "python_vna.ui.analysis_viewer.QtWidgets.QFileDialog.getSaveFileName",
+                    return_value=(str(destination), ""),
+                ):
+                    viewer._export_current_csv()
+
+                dataset = load_analysis_path(destination, fs_hint=100.0)
+                series = dataset.series[0]
+                frequency, psd = viewer._psd_for_series(dataset, series, scale=1.0)
+
+                self.assertEqual(dataset.metadata["autospectrum_kind"], "psd")
+                np.testing.assert_allclose(frequency, [1.0, 2.0, 4.0])
+                np.testing.assert_allclose(psd, [0.25, 0.5, 1.0])
+            finally:
+                viewer.close()
+
+    def test_exported_transfer_reimports_as_transfer_option(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            destination = Path(tmpdir) / "transfer.csv"
+            viewer = AnalysisViewer()
+            try:
+                plot = viewer.main_plots[0]
+                viewer._active_plot = plot
+                viewer._plot_curves[plot] = {
+                    "Top response": (
+                        np.array([1.0, 2.0, 4.0]),
+                        np.array([0.0, 6.020599913279624, -6.020599913279624]),
+                    ),
+                }
+                viewer._plot_curve_kind[plot] = "transfer"
+                with mock.patch(
+                    "python_vna.ui.analysis_viewer.QtWidgets.QFileDialog.getSaveFileName",
+                    return_value=(str(destination), ""),
+                ):
+                    viewer._export_current_csv()
+
+                dataset = load_analysis_path(destination, fs_hint=100.0)
+                viewer._datasets = [dataset]
+                options = viewer._derived_transfer_options()
+
+                self.assertIn("Input->Top response", dataset.frf)
+                self.assertTrue(any("Input->Top response" in label for label, _data in options))
+            finally:
+                viewer.close()
+
     def test_interpolation_button_resamples_frequency_plot_curves(self):
         viewer = AnalysisViewer(derived_only=True)
         try:
@@ -855,6 +1711,208 @@ class AnalysisViewerUiTests(unittest.TestCase):
             self.assertLess(float(y_values[1]), 8.0)
             np.testing.assert_allclose(viewer._plot_curves[plot]["VC A"][0], np.array([0.15, 0.45]))
             self.assertIn("已按 0.1 Hz 插值 1 条曲线", viewer.statusBar().currentMessage())
+        finally:
+            viewer.close()
+
+    def test_interpolation_button_resamples_time_plot_curves_by_seconds(self):
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            plot = viewer.derived_plots[1]
+            plot.addLegend(offset=(4, 2))
+            plot.setLogMode(x=False, y=False)
+            plot.setLabel("bottom", "Time (s)")
+            viewer._log_modes[plot] = (False, False)
+            plot.plot(
+                np.array([0.0, 0.5, 1.0], dtype=float),
+                np.array([0.0, 1.0, 0.0], dtype=float),
+                name="时域曲线",
+            )
+            viewer._plot_curves[plot] = {
+                "时域曲线": (
+                    np.array([0.0, 0.5, 1.0], dtype=float),
+                    np.array([0.0, 1.0, 0.0], dtype=float),
+                )
+            }
+
+            with mock.patch.object(
+                viewer,
+                "_show_time_interpolation_dialog",
+                return_value=(0.25, None, None),
+            ) as get_settings:
+                viewer.derived_interpolate_buttons[1].click()
+
+            self.assertIs(get_settings.call_args.args[0], plot)
+            x_values, y_values = viewer._plot_curves[plot]["时域曲线"]
+            np.testing.assert_allclose(x_values, np.array([0.0, 0.25, 0.5, 0.75, 1.0]))
+            np.testing.assert_allclose(y_values, np.array([0.0, 0.5, 1.0, 0.5, 0.0]))
+            self.assertIn("已按 0.25 s 插值 1 条曲线", viewer.statusBar().currentMessage())
+        finally:
+            viewer.close()
+
+    def test_main_interpolation_button_resamples_time_plot_curves(self):
+        viewer = AnalysisViewer()
+        try:
+            plot = viewer.main_plots[0]
+            plot.addLegend(offset=(4, 2))
+            plot.setLogMode(x=False, y=False)
+            plot.setLabel("bottom", "Samples")
+            viewer._log_modes[plot] = (False, False)
+            viewer._plot_curve_kind[plot] = "time"
+            plot.plot(
+                np.array([0.0, 0.5, 1.0], dtype=float),
+                np.array([0.0, 1.0, 0.0], dtype=float),
+                name="主图时域曲线",
+            )
+            viewer._plot_curves[plot] = {
+                "主图时域曲线": (
+                    np.array([0.0, 0.5, 1.0], dtype=float),
+                    np.array([0.0, 1.0, 0.0], dtype=float),
+                )
+            }
+
+            with mock.patch.object(
+                viewer,
+                "_show_time_interpolation_dialog",
+                return_value=(0.25, None, None),
+            ) as get_settings:
+                viewer.main_interpolate_buttons[0].click()
+
+            self.assertIs(get_settings.call_args.args[0], plot)
+            x_values, y_values = viewer._plot_curves[plot]["主图时域曲线"]
+            np.testing.assert_allclose(x_values, np.array([0.0, 0.25, 0.5, 0.75, 1.0]))
+            np.testing.assert_allclose(y_values, np.array([0.0, 0.5, 1.0, 0.5, 0.0]))
+        finally:
+            viewer.close()
+
+    def test_time_interpolation_can_use_duration_and_point_count(self):
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            plot = viewer.derived_plots[1]
+            plot.addLegend(offset=(4, 2))
+            plot.setLogMode(x=False, y=False)
+            plot.setLabel("bottom", "Time (s)")
+            viewer._log_modes[plot] = (False, False)
+            plot.plot(
+                np.array([0.0, 1.0, 2.0], dtype=float),
+                np.array([0.0, 2.0, 0.0], dtype=float),
+                name="时域曲线",
+            )
+            viewer._plot_curves[plot] = {
+                "时域曲线": (
+                    np.array([0.0, 1.0, 2.0], dtype=float),
+                    np.array([0.0, 2.0, 0.0], dtype=float),
+                )
+            }
+
+            viewer._interpolate_plot_curves(
+                plot,
+                0.5,
+                axis_kind="time",
+                duration_s=2.0,
+                point_count=5,
+            )
+
+            x_values, y_values = viewer._plot_curves[plot]["时域曲线"]
+            np.testing.assert_allclose(x_values, np.array([0.0, 0.5, 1.0, 1.5, 2.0]))
+            np.testing.assert_allclose(y_values, np.array([0.0, 1.0, 2.0, 1.0, 0.0]))
+            self.assertIn("已按 5 点插值 1 条曲线", viewer.statusBar().currentMessage())
+        finally:
+            viewer.close()
+
+    def test_psd_synthesized_time_interpolation_regenerates_target_duration_and_points(self):
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            plot = viewer.derived_plots[1]
+            viewer._plot_derived_result_axis(
+                plot,
+                "近似时域",
+                [
+                    {
+                        "label": "PSD源",
+                        "psd": (
+                            np.array([5.0, 10.0, 20.0, 40.0], dtype=float),
+                            np.array([0.5, 1.0, 0.8, 0.2], dtype=float),
+                        ),
+                    }
+                ],
+                keep_existing=False,
+            )
+            label = next(iter(viewer._plot_curves[plot]))
+            self.assertIn(label, viewer._time_curve_psd_sources[plot])
+
+            viewer._interpolate_plot_curves(
+                plot,
+                0.01,
+                axis_kind="time",
+                duration_s=2.0,
+                point_count=201,
+            )
+
+            time_s, values = viewer._plot_curves[plot][label]
+            self.assertEqual(time_s.size, 201)
+            self.assertEqual(values.size, 201)
+            self.assertAlmostEqual(float(time_s[0]), 0.0)
+            self.assertAlmostEqual(float(time_s[-1]), 2.0)
+            self.assertGreater(float(np.std(values)), 0.0)
+        finally:
+            viewer.close()
+
+    def test_current_psd_result_plot_can_switch_to_approximate_time(self):
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            plot = viewer.derived_plots[1]
+            viewer._plot_derived_result_axis(
+                plot,
+                "PSD",
+                [
+                    {
+                        "label": "工作区PSD",
+                        "psd": (
+                            np.array([10.0, 20.0, 30.0, 40.0], dtype=float),
+                            np.array([1.0, 2.0, 1.5, 0.8], dtype=float),
+                        ),
+                    }
+                ],
+                keep_existing=False,
+            )
+
+            viewer.derived_result_mode_combo.setCurrentText("近似时域")
+
+            self.assertEqual(viewer._plot_curve_kind[plot], "time")
+            time_curves = viewer._plot_curves[plot]
+            self.assertTrue(any("PSD合成" in label for label in time_curves))
+            _label, (time_s, values) = next(iter(time_curves.items()))
+            self.assertGreaterEqual(time_s.size, 32)
+            self.assertEqual(time_s.size, values.size)
+            self.assertGreater(float(np.std(values)), 0.0)
+        finally:
+            viewer.close()
+
+    def test_approximate_time_axis_synthesizes_when_result_only_has_psd(self):
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            plot = viewer.derived_plots[1]
+            viewer._plot_derived_result_axis(
+                plot,
+                "近似时域",
+                [
+                    {
+                        "label": "仅PSD",
+                        "psd": (
+                            np.array([5.0, 10.0, 20.0, 40.0], dtype=float),
+                            np.array([0.5, 1.0, 0.8, 0.2], dtype=float),
+                        ),
+                    }
+                ],
+                keep_existing=False,
+            )
+
+            curves = viewer._plot_curves[plot]
+            self.assertEqual(len(curves), 1)
+            label, (time_s, values) = next(iter(curves.items()))
+            self.assertIn("PSD合成", label)
+            self.assertGreaterEqual(time_s.size, 32)
+            self.assertEqual(time_s.size, values.size)
         finally:
             viewer.close()
 
@@ -1019,14 +2077,14 @@ class AnalysisViewerUiTests(unittest.TestCase):
                 viewer.foundation_stiff_file_combo.setCurrentIndex(0)
                 self.assertEqual(viewer.foundation_resp_edit.text(), "2,3")
 
-                self.assertGreaterEqual(viewer.foundation_vib_file_combo.minimumWidth(), 180)
-                self.assertGreaterEqual(viewer.foundation_vib_file_combo.maximumWidth(), 300)
+                self.assertGreaterEqual(viewer.foundation_vib_file_combo.minimumWidth(), 140)
+                self.assertLessEqual(viewer.foundation_vib_file_combo.maximumWidth(), 260)
                 self.assertIn("vib_measurement_with_a_long_file_name", viewer.foundation_vib_file_combo.toolTip())
                 self.assertIn(
                     "stiff_measurement_with_a_long_file_name",
                     viewer.foundation_stiff_file_combo.itemData(1, QtCore.Qt.ToolTipRole),
                 )
-                self.assertGreaterEqual(viewer.foundation_vib_edit.minimumWidth(), 82)
+                self.assertGreaterEqual(viewer.foundation_vib_edit.minimumWidth(), 64)
             finally:
                 viewer.close()
 
@@ -1047,12 +2105,14 @@ class AnalysisViewerUiTests(unittest.TestCase):
             self.assertEqual(viewer.tabs.tabText(1), "地面振动")
             self.assertEqual(viewer.tabs.tabText(2), "换算")
             self.assertEqual(len(viewer.main_open_buttons), 3)
+            self.assertEqual(len(viewer.main_interpolate_buttons), 3)
+            self.assertEqual(viewer.main_interpolate_buttons[0].text(), "插值")
             self.assertEqual(len(viewer.derived_interpolate_buttons), 2)
             self.assertEqual(viewer.derived_interpolate_buttons[0].text(), "插值")
             self.assertEqual(len(viewer.foundation_export_buttons), 3)
             self.assertEqual(len(viewer.derived_export_buttons), 2)
             self.assertLessEqual(viewer.width(), 980)
-            self.assertLessEqual(viewer.left_panel.maximumWidth(), 285)
+            self.assertLessEqual(viewer.left_panel.maximumWidth(), 300)
             foundation_controls = viewer.foundation_tab.layout().itemAt(0).layout()
             self.assertEqual(foundation_controls.count(), 2)
             self.assertEqual(viewer.derived_result_mode_combo.currentText(), "PSD")
@@ -1090,6 +2150,7 @@ class AnalysisViewerUiTests(unittest.TestCase):
             self.assertEqual(viewer.derived_curve_panel_button.text(), "曲线编辑")
             self.assertEqual(viewer.derived_workspace_button.text(), "工作区运算")
             self.assertEqual(viewer.derived_processing_button.text(), "滤波处理")
+            self.assertEqual(viewer.derived_mimo_button.text(), "三轴耦合")
             self.assertEqual(viewer.derived_curve_group.title(), "曲线编辑")
             self.assertIsNone(viewer.derived_stitch_enabled_check.parentWidget())
             self.assertFalse(hasattr(viewer, "left_scroll"))
@@ -1119,6 +2180,32 @@ class AnalysisViewerUiTests(unittest.TestCase):
                 viewer._combo_index_for_data(viewer.derived_input_series_combo, ("vc_reference", "VC C")),
                 0,
             )
+        finally:
+            viewer.close()
+
+    def test_conversion_curve_editor_fits_small_window_and_scrolls_left_controls(self):
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            viewer.resize(960, 600)
+            viewer.show()
+            viewer._show_settings_panel(1)
+            QtWidgets.QApplication.processEvents()
+            QtWidgets.QApplication.processEvents()
+            self.assertLessEqual(viewer.height(), 620)
+            self.assertTrue(hasattr(viewer, "left_panel_scroll"))
+            self.assertGreater(viewer.left_panel_scroll.verticalScrollBar().maximum(), 0)
+            self.assertEqual(viewer.left_panel_scroll.horizontalScrollBar().maximum(), 0)
+            self.assertLessEqual(
+                viewer.left_panel.width(),
+                viewer.left_panel_scroll.viewport().width(),
+            )
+            self.assertLessEqual(
+                viewer.derived_settings_stack.width(),
+                viewer.left_panel_scroll.viewport().width(),
+            )
+            self.assertTrue(viewer.derived_transfer_point_table.isVisible())
+            self.assertGreaterEqual(viewer.derived_transfer_point_table.height(), 120)
+            self.assertGreaterEqual(viewer.derived_transfer_edit_button.width(), 100)
         finally:
             viewer.close()
 
@@ -1203,6 +2290,949 @@ class AnalysisViewerUiTests(unittest.TestCase):
             viewer._delete_datasets_by_ids({1})
             self.assertEqual(viewer._datasets, [])
             _ = before_f
+        finally:
+            viewer.close()
+
+    def test_mimo_coupling_generates_three_input_psd_curves(self):
+        session = default_session_config()
+        freqs = np.array([0.0, 10.0, 20.0, 30.0], dtype=float)
+        time_s = np.arange(256, dtype=float) / 256.0
+        frf: dict[str, np.ndarray] = {}
+        gains = np.array(
+            [
+                [2.0, 0.5, 0.25],
+                [0.2, 3.0, 0.4],
+                [0.1, 0.3, 4.0],
+            ],
+            dtype=float,
+        )
+        for input_index in range(3):
+            for output_index in range(3):
+                frf[f"ai{input_index}->ai{output_index}"] = np.full(
+                    freqs.shape,
+                    gains[output_index, input_index] + 0.0j,
+                    dtype=complex,
+                )
+        measurement = MeasurementSet(
+            sample_rate=256.0,
+            time_data={
+                "t": time_s,
+                "channels": {
+                    "ai0": np.zeros_like(time_s),
+                    "ai1": np.zeros_like(time_s),
+                    "ai2": np.zeros_like(time_s),
+                },
+            },
+            spectra={"f": freqs, "autospectrum": {}},
+            frf=frf,
+            coherence={},
+            cross_spectra={},
+            correlations={},
+            impulse_responses={},
+            metadata={"rbw_hz": 1.0},
+        )
+        target_measurement = MeasurementSet(
+            sample_rate=256.0,
+            time_data={
+                "t": time_s,
+                "channels": {
+                    "ai0": np.zeros_like(time_s),
+                    "ai1": np.zeros_like(time_s),
+                    "ai2": np.zeros_like(time_s),
+                },
+            },
+            spectra={
+                "f": freqs,
+                "autospectrum": {
+                    "ai0": np.array([0.0, 4.0, 4.0, 4.0], dtype=float),
+                    "ai1": np.array([0.0, 9.0, 9.0, 9.0], dtype=float),
+                    "ai2": np.array([0.0, 16.0, 16.0, 16.0], dtype=float),
+                },
+            },
+            frf={},
+            coherence={},
+            cross_spectra={},
+            correlations={},
+            impulse_responses={},
+            metadata={"rbw_hz": 1.0, "legacy_runtime_wincor": 1.0},
+        )
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            viewer._datasets = [
+                dataset_from_measurement(measurement, session_config=session, dataset_id=1, name="mimo"),
+                dataset_from_measurement(target_measurement, session_config=session, dataset_id=2, name="targets"),
+            ]
+            viewer._next_dataset_id = 3
+            viewer._refresh_dataset_lists()
+            transfer_matrix_data = [
+                [
+                    (1, f"ai{input_index}->ai{output_index}", f"ai{input_index}", f"ai{output_index}", "stored")
+                    for input_index in range(3)
+                ]
+                for output_index in range(3)
+            ]
+
+            ok = viewer._execute_mimo_coupling(
+                {
+                    "transfers": transfer_matrix_data,
+                    "targets": [
+                        ("dataset_psd_curve", "2:ai0"),
+                        ("dataset_psd_curve", "2:ai1"),
+                        ("dataset_psd_curve", "2:ai2"),
+                    ],
+                    "relation": "independent",
+                    "regularization": 0.0,
+                    "prefix": "三轴输入",
+                }
+            )
+
+            self.assertTrue(ok)
+            self.assertEqual(len([curve for curve in viewer._workspace_curves if curve.curve_type == "三轴耦合输入PSD"]), 3)
+            plot_curves = viewer._plot_curves[viewer.derived_plots[1]]
+            self.assertTrue(any(label.startswith("三轴输入X") for label in plot_curves))
+            self.assertTrue(any(label.startswith("校核顶部响应X") for label in plot_curves))
+            response_x = plot_curves[next(label for label in plot_curves if label.startswith("校核顶部响应X"))]
+            np.testing.assert_allclose(response_x[1], np.array([4.0, 4.0, 4.0]), rtol=1e-10, atol=1e-10)
+        finally:
+            viewer.close()
+
+    def test_mimo_coupling_respects_top_to_base_direction(self):
+        session = default_session_config()
+        freqs = np.array([0.0, 10.0, 20.0, 30.0], dtype=float)
+        time_s = np.arange(256, dtype=float) / 256.0
+        frf: dict[str, np.ndarray] = {}
+        gains = np.array([2.0, 3.0, 4.0], dtype=float)
+        for input_index in range(3):
+            for output_index in range(3):
+                value = gains[input_index] if input_index == output_index else 0.0
+                frf[f"ai{input_index}->ai{output_index}"] = np.full(
+                    freqs.shape,
+                    value + 0.0j,
+                    dtype=complex,
+                )
+        top_measurement = MeasurementSet(
+            sample_rate=256.0,
+            time_data={
+                "t": time_s,
+                "channels": {
+                    "ai0": np.zeros_like(time_s),
+                    "ai1": np.zeros_like(time_s),
+                    "ai2": np.zeros_like(time_s),
+                },
+            },
+            spectra={
+                "f": freqs,
+                "autospectrum": {
+                    "ai0": np.array([0.0, 16.0, 16.0, 16.0], dtype=float),
+                    "ai1": np.array([0.0, 81.0, 81.0, 81.0], dtype=float),
+                    "ai2": np.array([0.0, 256.0, 256.0, 256.0], dtype=float),
+                },
+            },
+            frf=frf,
+            coherence={},
+            cross_spectra={},
+            correlations={},
+            impulse_responses={},
+            metadata={"rbw_hz": 1.0, "legacy_runtime_wincor": 1.0},
+        )
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            viewer._datasets = [
+                dataset_from_measurement(top_measurement, session_config=session, dataset_id=1, name="top_targets"),
+            ]
+            viewer._next_dataset_id = 2
+            viewer._refresh_dataset_lists()
+            direction_index = viewer._combo_index_for_data(viewer.derived_direction_combo, DERIVE_TOP_TO_BASE)
+            viewer.derived_direction_combo.setCurrentIndex(direction_index)
+            transfer_matrix_data = [
+                [
+                    (1, f"ai{input_index}->ai{output_index}", f"ai{input_index}", f"ai{output_index}", "stored")
+                    for input_index in range(3)
+                ]
+                for output_index in range(3)
+            ]
+
+            ok = viewer._execute_mimo_coupling(
+                {
+                    "transfers": transfer_matrix_data,
+                    "targets": [
+                        ("dataset_psd_curve", "1:ai0"),
+                        ("dataset_psd_curve", "1:ai1"),
+                        ("dataset_psd_curve", "1:ai2"),
+                    ],
+                    "relation": "independent",
+                    "regularization": 0.0,
+                    "prefix": "base_input",
+                }
+            )
+
+            self.assertTrue(ok)
+            input_curves = {
+                label: curve
+                for label, curve in viewer._plot_curves[viewer.derived_plots[1]].items()
+                if label.startswith("base_input")
+            }
+            response_curves = {
+                label: curve
+                for label, curve in viewer._plot_curves[viewer.derived_plots[1]].items()
+                if label.startswith("校核地基响应")
+            }
+            self.assertEqual(len(input_curves), 3)
+            self.assertEqual(len(response_curves), 3)
+            np.testing.assert_allclose(response_curves["校核地基响应X"][1], [16.0, 16.0, 16.0], rtol=1e-10, atol=1e-10)
+            np.testing.assert_allclose(response_curves["校核地基响应Y"][1], [81.0, 81.0, 81.0], rtol=1e-10, atol=1e-10)
+            np.testing.assert_allclose(response_curves["校核地基响应Z"][1], [256.0, 256.0, 256.0], rtol=1e-10, atol=1e-10)
+        finally:
+            viewer.close()
+
+    def test_mimo_coupling_direction_changes_labels_without_inverting_matrix(self):
+        session = default_session_config()
+        freqs = np.array([0.0, 10.0, 20.0, 30.0], dtype=float)
+        time_s = np.arange(256, dtype=float) / 256.0
+        frf: dict[str, np.ndarray] = {}
+        axis_gains = [
+            np.array([0.0, 2.0, 4.0, 8.0], dtype=float),
+            np.array([0.0, 3.0, 6.0, 12.0], dtype=float),
+            np.array([0.0, 5.0, 10.0, 20.0], dtype=float),
+        ]
+        for input_index in range(3):
+            for output_index in range(3):
+                values = axis_gains[output_index] if input_index == output_index else np.zeros_like(freqs)
+                frf[f"ai{input_index}->ai{output_index}"] = values.astype(complex)
+        measurement = MeasurementSet(
+            sample_rate=256.0,
+            time_data={
+                "t": time_s,
+                "channels": {
+                    "ai0": np.zeros_like(time_s),
+                    "ai1": np.zeros_like(time_s),
+                    "ai2": np.zeros_like(time_s),
+                },
+            },
+            spectra={
+                "f": freqs,
+                "autospectrum": {
+                    "ai0": np.array([0.0, 4.0, 4.0, 4.0], dtype=float),
+                    "ai1": np.array([0.0, 9.0, 9.0, 9.0], dtype=float),
+                    "ai2": np.array([0.0, 16.0, 16.0, 16.0], dtype=float),
+                },
+            },
+            frf=frf,
+            coherence={},
+            cross_spectra={},
+            correlations={},
+            impulse_responses={},
+            metadata={"rbw_hz": 1.0, "legacy_runtime_wincor": 1.0},
+        )
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            viewer._datasets = [
+                dataset_from_measurement(measurement, session_config=session, dataset_id=1, name="directional_demo"),
+            ]
+            viewer._next_dataset_id = 2
+            viewer._refresh_dataset_lists()
+            transfer_matrix_data = [
+                [
+                    (1, f"ai{input_index}->ai{output_index}", f"ai{input_index}", f"ai{output_index}", "stored")
+                    for input_index in range(3)
+                ]
+                for output_index in range(3)
+            ]
+            config = {
+                "transfers": transfer_matrix_data,
+                "targets": [
+                    ("dataset_psd_curve", "1:ai0"),
+                    ("dataset_psd_curve", "1:ai1"),
+                    ("dataset_psd_curve", "1:ai2"),
+                ],
+                "relation": "independent",
+                "regularization": 0.0,
+                "prefix": "",
+            }
+
+            viewer.derived_direction_combo.setCurrentIndex(
+                viewer._combo_index_for_data(viewer.derived_direction_combo, DERIVE_BASE_TO_TOP)
+            )
+            ok_base_to_top = viewer._execute_mimo_coupling(config)
+            self.assertTrue(ok_base_to_top)
+            curves_base_to_top = {
+                label: curve
+                for label, curve in viewer._plot_curves[viewer.derived_plots[1]].items()
+                if label.startswith("地基输入")
+            }
+
+            viewer.derived_direction_combo.setCurrentIndex(
+                viewer._combo_index_for_data(viewer.derived_direction_combo, DERIVE_TOP_TO_BASE)
+            )
+            ok_top_to_base = viewer._execute_mimo_coupling(config)
+            self.assertTrue(ok_top_to_base)
+            curves_top_to_base = {
+                label: curve
+                for label, curve in viewer._plot_curves[viewer.derived_plots[1]].items()
+                if label.startswith("顶部输入")
+            }
+
+            self.assertEqual(set(curves_base_to_top), {"地基输入X", "地基输入Y", "地基输入Z"})
+            self.assertEqual(set(curves_top_to_base), {"顶部输入X", "顶部输入Y", "顶部输入Z"})
+            np.testing.assert_allclose(curves_base_to_top["地基输入X"][1], [1.0, 0.25, 0.0625], rtol=1e-10, atol=1e-10)
+            np.testing.assert_allclose(curves_top_to_base["顶部输入X"][1], [1.0, 0.25, 0.0625], rtol=1e-10, atol=1e-10)
+            self.assertLess(curves_base_to_top["地基输入X"][1][-1], curves_base_to_top["地基输入X"][1][0])
+            self.assertLess(curves_top_to_base["顶部输入X"][1][-1], curves_top_to_base["顶部输入X"][1][0])
+        finally:
+            viewer.close()
+
+    def test_mimo_result_mode_switch_to_time_keeps_mimo_results(self):
+        session = default_session_config()
+        freqs = np.array([0.0, 10.0, 20.0, 30.0], dtype=float)
+        time_s = np.arange(256, dtype=float) / 256.0
+        frf: dict[str, np.ndarray] = {}
+        gains = np.array([2.0, 3.0, 4.0], dtype=float)
+        for input_index in range(3):
+            for output_index in range(3):
+                value = gains[input_index] if input_index == output_index else 0.0
+                frf[f"ai{input_index}->ai{output_index}"] = np.full(
+                    freqs.shape,
+                    value + 0.0j,
+                    dtype=complex,
+                )
+        top_measurement = MeasurementSet(
+            sample_rate=256.0,
+            time_data={
+                "t": time_s,
+                "channels": {
+                    "ai0": np.sin(2.0 * np.pi * 10.0 * time_s),
+                    "ai1": np.sin(2.0 * np.pi * 10.0 * time_s),
+                    "ai2": np.sin(2.0 * np.pi * 10.0 * time_s),
+                },
+            },
+            spectra={
+                "f": freqs,
+                "autospectrum": {
+                    "ai0": np.array([0.0, 16.0, 16.0, 16.0], dtype=float),
+                    "ai1": np.array([0.0, 81.0, 81.0, 81.0], dtype=float),
+                    "ai2": np.array([0.0, 256.0, 256.0, 256.0], dtype=float),
+                },
+            },
+            frf=frf,
+            coherence={},
+            cross_spectra={},
+            correlations={},
+            impulse_responses={},
+            metadata={"rbw_hz": 1.0, "legacy_runtime_wincor": 1.0},
+        )
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            viewer._datasets = [
+                dataset_from_measurement(top_measurement, session_config=session, dataset_id=1, name="top_targets"),
+            ]
+            viewer._next_dataset_id = 2
+            viewer._refresh_dataset_lists()
+            viewer.derived_direction_combo.setCurrentIndex(
+                viewer._combo_index_for_data(viewer.derived_direction_combo, DERIVE_TOP_TO_BASE)
+            )
+            transfer_matrix_data = [
+                [
+                    (1, f"ai{input_index}->ai{output_index}", f"ai{input_index}", f"ai{output_index}", "stored")
+                    for input_index in range(3)
+                ]
+                for output_index in range(3)
+            ]
+            ok = viewer._execute_mimo_coupling(
+                {
+                    "transfers": transfer_matrix_data,
+                    "targets": [
+                        ("dataset_psd_curve", "1:ai0"),
+                        ("dataset_psd_curve", "1:ai1"),
+                        ("dataset_psd_curve", "1:ai2"),
+                    ],
+                    "relation": "independent",
+                    "regularization": 0.0,
+                    "prefix": "",
+                }
+            )
+            self.assertTrue(ok)
+            plot = viewer.derived_plots[1]
+            self.assertEqual(
+                set(viewer._plot_curves[plot]),
+                {
+                    "顶部输入X",
+                    "顶部输入Y",
+                    "顶部输入Z",
+                    "校核地基响应X",
+                    "校核地基响应Y",
+                    "校核地基响应Z",
+                },
+            )
+
+            viewer.derived_result_mode_combo.setCurrentText("近似时域")
+            viewer._auto_plot_derived_from_control_change()
+
+            self.assertEqual(viewer._plot_curve_kind[plot], "time")
+            time_labels = set(viewer._plot_curves[plot])
+            self.assertTrue(any(label.startswith("顶部输入X") for label in time_labels))
+            self.assertTrue(any(label.startswith("校核地基响应X") for label in time_labels))
+            self.assertFalse(any("VC A" in label for label in time_labels))
+        finally:
+            viewer.close()
+
+    def test_mimo_target_dataset_psd_is_not_reinterpreted_by_quantity_mode(self):
+        session = default_session_config()
+        freqs = np.array([0.0, 10.0, 20.0, 40.0], dtype=float)
+        time_s = np.arange(256, dtype=float) / 256.0
+        frf: dict[str, np.ndarray] = {}
+        for input_index in range(3):
+            for output_index in range(3):
+                value = 2.0 if input_index == output_index else 0.0
+                frf[f"ai{input_index}->ai{output_index}"] = np.full(
+                    freqs.shape,
+                    value + 0.0j,
+                    dtype=complex,
+                )
+        measurement = MeasurementSet(
+            sample_rate=256.0,
+            time_data={
+                "t": time_s,
+                "channels": {
+                    "ai0": np.zeros_like(time_s),
+                    "ai1": np.zeros_like(time_s),
+                    "ai2": np.zeros_like(time_s),
+                },
+            },
+            spectra={
+                "f": freqs,
+                "autospectrum": {
+                    "ai0": np.array([0.0, 4.0, 16.0, 64.0], dtype=float),
+                    "ai1": np.array([0.0, 4.0, 16.0, 64.0], dtype=float),
+                    "ai2": np.array([0.0, 4.0, 16.0, 64.0], dtype=float),
+                },
+            },
+            frf=frf,
+            coherence={},
+            cross_spectra={},
+            correlations={},
+            impulse_responses={},
+            metadata={"rbw_hz": 1.0, "legacy_runtime_wincor": 1.0, "autospectrum_kind": "psd"},
+        )
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            viewer._datasets = [
+                dataset_from_measurement(measurement, session_config=session, dataset_id=1, name="quantity_demo"),
+            ]
+            viewer._next_dataset_id = 2
+            viewer._refresh_dataset_lists()
+            transfer_matrix_data = [
+                [
+                    (1, f"ai{input_index}->ai{output_index}", f"ai{input_index}", f"ai{output_index}", "stored")
+                    for input_index in range(3)
+                ]
+                for output_index in range(3)
+            ]
+            config = {
+                "transfers": transfer_matrix_data,
+                "targets": [
+                    ("dataset_psd_curve", "1:ai0"),
+                    ("dataset_psd_curve", "1:ai1"),
+                    ("dataset_psd_curve", "1:ai2"),
+                ],
+                "relation": "independent",
+                "regularization": 0.0,
+                "prefix": "test_",
+            }
+
+            viewer.quantity_combo.setCurrentText("Acceleration")
+            self.assertTrue(viewer._execute_mimo_coupling(config))
+            accel_curves = {
+                label: curve
+                for label, curve in viewer._plot_curves[viewer.derived_plots[1]].items()
+                if label.startswith("test_")
+            }
+
+            viewer.quantity_combo.setCurrentText("Velocity")
+            self.assertTrue(viewer._execute_mimo_coupling(config))
+            velocity_curves = {
+                label: curve
+                for label, curve in viewer._plot_curves[viewer.derived_plots[1]].items()
+                if label.startswith("test_")
+            }
+
+            accel_psd = accel_curves["test_X"][1]
+            velocity_psd = velocity_curves["test_X"][1]
+            np.testing.assert_allclose(accel_psd, [1.0, 4.0, 16.0], rtol=1e-10, atol=1e-10)
+            expected_velocity = accel_psd / ((2.0 * np.pi * np.array([10.0, 20.0, 40.0])) ** 2) * 1e12
+            np.testing.assert_allclose(velocity_psd, expected_velocity, rtol=1e-10, atol=1e-10)
+        finally:
+            viewer.close()
+
+    def test_mimo_coupling_uses_full_target_correlation_from_time_series(self):
+        session = default_session_config()
+        sample_rate = 256.0
+        time_s = np.arange(4096, dtype=float) / sample_rate
+        freqs = np.fft.rfftfreq(time_s.size, d=1.0 / sample_rate)
+        positive = freqs > 0.0
+        freq_axis = np.concatenate(([0.0], freqs[positive]))
+
+        transfer = np.array(
+            [
+                [1.0 + 0.0j, 0.30 + 0.10j, 0.05 + 0.00j],
+                [0.10 - 0.05j, 1.20 + 0.0j, 0.25 - 0.10j],
+                [0.05 + 0.02j, 0.20 + 0.06j, 0.90 + 0.0j],
+            ],
+            dtype=complex,
+        )
+        frf: dict[str, np.ndarray] = {}
+        for input_index in range(3):
+            for output_index in range(3):
+                values = np.full(freq_axis.shape, 0.0 + 0.0j, dtype=complex)
+                values[1:] = transfer[output_index, input_index]
+                frf[f"ai{input_index}->ai{output_index}"] = values
+
+        rng = np.random.default_rng(1234)
+        input_x = rng.standard_normal(time_s.size)
+        input_y = 0.7 * input_x + 0.3 * rng.standard_normal(time_s.size)
+        input_z = -0.25 * input_x + 0.4 * input_y + 0.25 * rng.standard_normal(time_s.size)
+        inputs = np.vstack([input_x, input_y, input_z])
+        outputs = np.real(transfer @ inputs)
+
+        source_measurement = MeasurementSet(
+            sample_rate=sample_rate,
+            time_data={
+                "t": time_s,
+                "channels": {
+                    "ai0": np.zeros_like(time_s),
+                    "ai1": np.zeros_like(time_s),
+                    "ai2": np.zeros_like(time_s),
+                },
+            },
+            spectra={"f": freq_axis, "autospectrum": {}},
+            frf=frf,
+            coherence={},
+            cross_spectra={},
+            correlations={},
+            impulse_responses={},
+            metadata={"rbw_hz": float(freq_axis[2] - freq_axis[1]), "legacy_runtime_wincor": 1.0},
+        )
+        target_measurement = MeasurementSet(
+            sample_rate=sample_rate,
+            time_data={
+                "t": time_s,
+                "channels": {
+                    "ai0": outputs[0],
+                    "ai1": outputs[1],
+                    "ai2": outputs[2],
+                },
+            },
+            spectra={"f": freq_axis, "autospectrum": {}},
+            frf={},
+            coherence={},
+            cross_spectra={},
+            correlations={},
+            impulse_responses={},
+            metadata={"rbw_hz": float(freq_axis[2] - freq_axis[1]), "legacy_runtime_wincor": 1.0},
+        )
+
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            viewer._datasets = [
+                dataset_from_measurement(source_measurement, session_config=session, dataset_id=1, name="mimo_transfer"),
+                dataset_from_measurement(target_measurement, session_config=session, dataset_id=2, name="mimo_target"),
+            ]
+            viewer._next_dataset_id = 3
+            viewer._refresh_dataset_lists()
+            transfer_matrix_data = [
+                [
+                    (1, f"ai{input_index}->ai{output_index}", f"ai{input_index}", f"ai{output_index}", "stored")
+                    for input_index in range(3)
+                ]
+                for output_index in range(3)
+            ]
+            ok = viewer._execute_mimo_coupling(
+                {
+                    "transfers": transfer_matrix_data,
+                    "targets": [
+                        ("dataset_psd_curve", "2:ai0"),
+                        ("dataset_psd_curve", "2:ai1"),
+                        ("dataset_psd_curve", "2:ai2"),
+                    ],
+                    "relation": "independent",
+                    "regularization": 1e-8,
+                    "prefix": "corr_",
+                }
+            )
+
+            self.assertTrue(ok)
+            self.assertIn("时域重算互谱反演", viewer.statusBar().currentMessage())
+            plot_curves = viewer._plot_curves[viewer.derived_plots[1]]
+            predicted_x = plot_curves["校核顶部响应X"][1]
+            predicted_y = plot_curves["校核顶部响应Y"][1]
+            predicted_z = plot_curves["校核顶部响应Z"][1]
+            target_x = plot_curves["corr_X"][0]
+
+            target_dataset = viewer._dataset_by_id(2)
+            self.assertIsNotNone(target_dataset)
+            dataset = target_dataset
+            assert dataset is not None
+            expected = []
+            for channel_key in ("ai0", "ai1", "ai2"):
+                series = next(series for series in dataset.series if series.channel_key == channel_key)
+                f_psd, psd = viewer._psd_for_series(dataset, series, scale=float(series.scale or 1.0))
+                expected.append(np.interp(target_x, f_psd, psd, left=0.0, right=0.0))
+
+            np.testing.assert_allclose(predicted_x, expected[0], rtol=0.25, atol=1e-8)
+            np.testing.assert_allclose(predicted_y, expected[1], rtol=0.25, atol=1e-8)
+            np.testing.assert_allclose(predicted_z, expected[2], rtol=0.25, atol=1e-8)
+        finally:
+            viewer.close()
+
+    def test_mimo_time_transfer_matrix_from_rows_uses_joint_time_estimator(self):
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            rng = np.random.default_rng(42)
+            sample_rate = 1024.0
+            time_s = np.arange(8192, dtype=float) / sample_rate
+            input_x = rng.standard_normal(time_s.size)
+            input_y = 0.75 * input_x + 0.4 * rng.standard_normal(time_s.size)
+            input_z = -0.3 * input_x + 0.2 * input_y + 0.5 * rng.standard_normal(time_s.size)
+            inputs = np.vstack([input_x, input_y, input_z])
+            expected = np.array(
+                [
+                    [1.0, 0.35, 0.10],
+                    [0.20, 1.30, -0.25],
+                    [-0.15, 0.45, 0.90],
+                ],
+                dtype=float,
+            )
+            outputs = expected @ inputs
+            series = [
+                AnalysisSeries(dataset_id=1, channel_index=index, channel_key=f"ai{index}", display_name=f"ai{index}")
+                for index in range(6)
+            ]
+            dataset = AnalysisDataset(
+                id=1,
+                path=Path("time_mimo.vna"),
+                name="time_mimo.vna",
+                sample_rate=sample_rate,
+                series=series,
+                time_s=time_s,
+                channels={
+                    "ai0": inputs[0],
+                    "ai1": inputs[1],
+                    "ai2": inputs[2],
+                    "ai3": outputs[0],
+                    "ai4": outputs[1],
+                    "ai5": outputs[2],
+                },
+            )
+            viewer._datasets = [dataset]
+            viewer._next_dataset_id = 2
+            viewer._refresh_dataset_lists()
+            preferred_last = (1, "ai2->ai5", "ai2", "ai5", "time")
+            option_data = {data for _label, data in viewer._mimo_transfer_options()}
+            self.assertIn(preferred_last, option_data)
+            self.assertEqual(
+                viewer._preferred_mimo_transfer_data(output_index=2, input_index=2),
+                preferred_last,
+            )
+            transfer_rows = [
+                [
+                    (1, f"ai{input_index}->ai{output_index + 3}", f"ai{input_index}", f"ai{output_index + 3}", "time")
+                    for input_index in range(3)
+                ]
+                for output_index in range(3)
+            ]
+
+            result = viewer._mimo_time_transfer_matrix_from_rows(transfer_rows, regularization=0.0)
+            self.assertIsNotNone(result)
+            assert result is not None
+            frequency, transfer_matrix, _labels = result
+
+            self.assertGreater(frequency.size, 10)
+            np.testing.assert_allclose(np.median(np.real(transfer_matrix), axis=0), expected, rtol=1e-10, atol=1e-10)
+            pair = viewer._transfer_from_mimo_data(transfer_rows[0][0])
+            self.assertIsNotNone(pair)
+            assert pair is not None
+            _pair_f, pair_h, _label, _phase = pair
+            self.assertGreater(abs(float(np.median(np.real(pair_h))) - expected[0, 0]), 0.1)
+        finally:
+            viewer.close()
+
+    def test_mimo_time_recomputed_cross_psd_preserves_complex_pair_direction(self):
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            sample_rate = 256.0
+            time_s = np.arange(2048, dtype=float) / sample_rate
+            signal_x = np.sin(2.0 * np.pi * 13.0 * time_s)
+            signal_y = np.sin(2.0 * np.pi * 13.0 * time_s + np.pi / 3.0)
+            signal_z = 0.2 * np.sin(2.0 * np.pi * 19.0 * time_s + np.pi / 5.0)
+            dataset = AnalysisDataset(
+                id=1,
+                path=Path("pair.vna"),
+                name="pair.vna",
+                sample_rate=sample_rate,
+                series=[
+                    AnalysisSeries(dataset_id=1, channel_index=0, channel_key="ai0", display_name="X", scale=1.0),
+                    AnalysisSeries(dataset_id=1, channel_index=1, channel_key="ai1", display_name="Y", scale=1.0),
+                    AnalysisSeries(dataset_id=1, channel_index=2, channel_key="ai2", display_name="Z", scale=1.0),
+                ],
+                time_s=time_s,
+                channels={
+                    "ai0": signal_x,
+                    "ai1": signal_y,
+                    "ai2": signal_z,
+                },
+            )
+            viewer._datasets = [dataset]
+            viewer._refresh_dataset_lists()
+            grid = np.linspace(1.0, 100.0, 128)
+            matrix = viewer._time_domain_cross_psd_matrix_for_targets(dataset, dataset.series, grid)
+            self.assertIsNotNone(matrix)
+            assert matrix is not None
+            peak_index = int(np.argmax(np.abs(matrix[:, 0, 1])))
+            self.assertGreater(np.imag(matrix[peak_index, 0, 1]), 0.0)
+            self.assertLess(np.imag(matrix[peak_index, 1, 0]), 0.0)
+        finally:
+            viewer.close()
+
+    def test_mimo_result_time_mode_uses_joint_matrix_synthesis(self):
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            freqs = np.array([10.0, 20.0, 30.0], dtype=float)
+            matrix = fully_correlated_psd_matrix(np.array([[1.0, 0.5, 0.25], [1.0, 0.5, 0.25], [1.0, 0.5, 0.25]]))
+            viewer._last_derived_results = [
+                {
+                    "label": "X",
+                    "source_label": "target X",
+                    "psd": (freqs, np.array([1.0, 0.5, 0.25], dtype=float)),
+                    "mimo_time_group": "input",
+                    "mimo_axis_index": 0,
+                    "mimo_time_matrix": matrix,
+                    "mimo_time_frequency": freqs,
+                },
+                {
+                    "label": "Y",
+                    "source_label": "target Y",
+                    "psd": (freqs, np.array([1.0, 0.5, 0.25], dtype=float)),
+                    "mimo_time_group": "input",
+                    "mimo_axis_index": 1,
+                    "mimo_time_matrix": matrix,
+                    "mimo_time_frequency": freqs,
+                },
+            ]
+            viewer._plot_derived_result_axis(
+                viewer.derived_plots[1],
+                "近似时域",
+                viewer._last_derived_results,
+                keep_existing=False,
+            )
+            plot_curves = viewer._plot_curves[viewer.derived_plots[1]]
+            self.assertTrue(any("PSD合成" in label for label in plot_curves))
+            self.assertGreaterEqual(len(plot_curves), 2)
+        finally:
+            viewer.close()
+
+    def test_mimo_common_frequency_grid_accepts_phase_flag_transfer_curves(self):
+        curves = [
+            (np.array([10.0, 20.0, 30.0], dtype=float), np.ones(3, dtype=complex), "X", True),
+            (np.array([12.0, 20.0, 28.0], dtype=float), np.ones(3, dtype=complex), "Y", False),
+        ]
+        grid = AnalysisViewer._mimo_common_frequency_grid(curves)
+        np.testing.assert_allclose(grid, np.array([12.0, 20.0, 28.0], dtype=float))
+
+    def test_mimo_coupling_without_phase_falls_back_to_independent_psd(self):
+        session = default_session_config()
+        freqs = np.array([0.0, 10.0, 20.0, 30.0], dtype=float)
+        time_s = np.arange(256, dtype=float) / 256.0
+        frf: dict[str, np.ndarray] = {}
+        gains = np.array([2.0, 3.0, 4.0], dtype=float)
+        for input_index in range(3):
+            for output_index in range(3):
+                value = gains[input_index] if input_index == output_index else 0.0
+                frf[f"ai{input_index}->ai{output_index}"] = np.full(
+                    freqs.shape,
+                    value,
+                    dtype=float,
+                )
+        measurement = MeasurementSet(
+            sample_rate=256.0,
+            time_data={
+                "t": time_s,
+                "channels": {
+                    "ai0": np.zeros_like(time_s),
+                    "ai1": np.zeros_like(time_s),
+                    "ai2": np.zeros_like(time_s),
+                },
+            },
+            spectra={"f": freqs, "autospectrum": {}},
+            frf=frf,
+            coherence={},
+            cross_spectra={},
+            correlations={},
+            impulse_responses={},
+            metadata={"rbw_hz": 1.0},
+        )
+        target_measurement = MeasurementSet(
+            sample_rate=256.0,
+            time_data={
+                "t": time_s,
+                "channels": {
+                    "ai0": np.sin(2.0 * np.pi * 10.0 * time_s),
+                    "ai1": np.sin(2.0 * np.pi * 10.0 * time_s),
+                    "ai2": np.sin(2.0 * np.pi * 10.0 * time_s),
+                },
+            },
+            spectra={
+                "f": freqs,
+                "autospectrum": {
+                    "ai0": np.array([0.0, 16.0, 16.0, 16.0], dtype=float),
+                    "ai1": np.array([0.0, 81.0, 81.0, 81.0], dtype=float),
+                    "ai2": np.array([0.0, 256.0, 256.0, 256.0], dtype=float),
+                },
+            },
+            frf={},
+            coherence={},
+            cross_spectra={},
+            correlations={},
+            impulse_responses={},
+            metadata={"rbw_hz": 1.0, "legacy_runtime_wincor": 1.0},
+        )
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            viewer._datasets = [
+                dataset_from_measurement(measurement, session_config=session, dataset_id=1, name="mimo_real_frf"),
+                dataset_from_measurement(target_measurement, session_config=session, dataset_id=2, name="mimo_target"),
+            ]
+            viewer._next_dataset_id = 3
+            viewer._refresh_dataset_lists()
+            ok = viewer._execute_mimo_coupling(
+                {
+                    "transfers": [
+                        [
+                            (1, f"ai{input_index}->ai{output_index}", f"ai{input_index}", f"ai{output_index}", "stored")
+                            for input_index in range(3)
+                        ]
+                        for output_index in range(3)
+                    ],
+                    "targets": [
+                        ("dataset_psd_curve", "2:ai0"),
+                        ("dataset_psd_curve", "2:ai1"),
+                        ("dataset_psd_curve", "2:ai2"),
+                    ],
+                    "relation": "independent",
+                    "regularization": 0.0,
+                    "prefix": "fallback_",
+                }
+            )
+            self.assertTrue(ok)
+            self.assertIn("独立PSD近似", viewer.statusBar().currentMessage())
+            plot_curves = viewer._plot_curves[viewer.derived_plots[1]]
+            np.testing.assert_allclose(plot_curves["校核顶部响应X"][1], [16.0, 16.0, 16.0], rtol=1e-10, atol=1e-10)
+        finally:
+            viewer.close()
+
+    def test_derived_time_mode_synthesizes_time_curve_from_psd_only(self):
+        dataset = AnalysisDataset(
+            id=1,
+            path=Path("psd_only.vna"),
+            name="psd_only.vna",
+            sample_rate=256.0,
+            series=[
+                AnalysisSeries(
+                    dataset_id=1,
+                    channel_index=0,
+                    channel_key="ai0",
+                    display_name="PSD Only",
+                    unit="",
+                    scale=1.0,
+                )
+            ],
+            frequency_hz=np.array([10.0, 20.0, 30.0, 40.0, 50.0], dtype=float),
+            autospectrum={"ai0": np.ones(5, dtype=float)},
+            rbw_hz=1.0,
+            wincor=1.0,
+            metadata={"legacy_yapcor_index": 1},
+        )
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            viewer._datasets = [dataset]
+            viewer._next_dataset_id = 2
+            viewer._refresh_dataset_lists()
+            manual_index = viewer._combo_index_for_data(viewer.derived_transfer_combo, ("manual_transfer",))
+            input_index = viewer._combo_index_for_data(viewer.derived_input_series_combo, "1:ai0")
+            viewer.derived_transfer_combo.setCurrentIndex(manual_index)
+            viewer.derived_input_series_combo.setCurrentIndex(input_index)
+            viewer.derived_result_mode_combo.setCurrentText("近似时域")
+
+            viewer._plot_derived()
+
+            time_curves = viewer._plot_curves[viewer.derived_plots[1]]
+            self.assertTrue(any("PSD合成" in label for label in time_curves))
+            _label, (time_synth, values) = next(iter(time_curves.items()))
+            self.assertGreaterEqual(time_synth.size, 32)
+            self.assertEqual(time_synth.size, values.size)
+            self.assertGreater(float(np.std(values)), 0.0)
+        finally:
+            viewer.close()
+
+    def test_vc_result_mode_switch_uses_band_limited_time_synthesis(self):
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            manual_index = viewer._combo_index_for_data(viewer.derived_transfer_combo, ("manual_transfer",))
+            vc_index = viewer._combo_index_for_data(viewer.derived_input_series_combo, ("vc_reference", "VC C"))
+            viewer.derived_transfer_combo.setCurrentIndex(manual_index)
+            viewer.derived_input_series_combo.setCurrentIndex(vc_index)
+            viewer._set_current_transfer_control_points(
+                np.array([1.0, 1000.0], dtype=float),
+                np.array([0.0, 0.0], dtype=float),
+                replot=False,
+            )
+            viewer._plot_derived()
+
+            with mock.patch.object(
+                viewer,
+                "_plot_current_psd_curves_as_time",
+                side_effect=AssertionError("should replot derived result instead of converting stale PSD plot"),
+            ):
+                viewer.derived_result_mode_combo.setCurrentText("近似时域")
+
+            self.assertEqual(viewer._plot_curve_kind[viewer.derived_plots[1]], "time")
+            self.assertTrue(viewer._time_curve_psd_sources[viewer.derived_plots[1]])
+            _label, psd_source = next(iter(viewer._time_curve_psd_sources[viewer.derived_plots[1]].items()))
+            self.assertIsNotNone(psd_source[2])
+        finally:
+            viewer.close()
+
+    def test_vc_time_extension_keeps_band_limited_psd_source(self):
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            manual_index = viewer._combo_index_for_data(viewer.derived_transfer_combo, ("manual_transfer",))
+            vc_index = viewer._combo_index_for_data(viewer.derived_input_series_combo, ("vc_reference", "VC C"))
+            viewer.derived_transfer_combo.setCurrentIndex(manual_index)
+            viewer.derived_input_series_combo.setCurrentIndex(vc_index)
+            viewer._set_current_transfer_control_points(
+                np.array([1.0, 1000.0], dtype=float),
+                np.array([0.0, 0.0], dtype=float),
+                replot=False,
+            )
+            viewer.derived_result_mode_combo.setCurrentText("近似时域")
+            plot = viewer.derived_plots[1]
+            label = next(iter(viewer._plot_curves[plot]))
+            before_source = viewer._time_curve_psd_sources[plot][label]
+            self.assertIsNotNone(before_source[2])
+
+            viewer._interpolate_plot_curves(
+                plot,
+                0.005,
+                axis_kind="time",
+                duration_s=20.0,
+                point_count=4001,
+            )
+
+            time_s, values = viewer._plot_curves[plot][label]
+            after_source = viewer._time_curve_psd_sources[plot][label]
+            self.assertEqual(time_s.size, 4001)
+            self.assertAlmostEqual(float(time_s[-1]), 20.0)
+            self.assertGreater(float(np.std(values)), 0.0)
+            self.assertIsNotNone(after_source[2])
+            np.testing.assert_allclose(after_source[0], before_source[0])
         finally:
             viewer.close()
 
@@ -1294,11 +3324,24 @@ class AnalysisViewerUiTests(unittest.TestCase):
             viewer._plot_derived()
             psd_with_source = viewer._plot_curves[viewer.derived_plots[1]]
             self.assertTrue(any(label.startswith("待换算:") for label in psd_with_source))
+            psd_before_roundtrip = {
+                label: (np.asarray(curve[0], dtype=float).copy(), np.asarray(curve[1], dtype=float).copy())
+                for label, curve in psd_with_source.items()
+            }
 
             viewer.derived_result_mode_combo.setCurrentText("近似时域")
             viewer._plot_derived()
             time_curves = viewer._plot_curves[viewer.derived_plots[1]]
             self.assertGreater(len(time_curves), 0)
+
+            viewer.derived_result_mode_combo.setCurrentText("PSD")
+            viewer._plot_derived()
+            psd_curves_after_roundtrip = viewer._plot_curves[viewer.derived_plots[1]]
+            self.assertEqual(set(psd_curves_after_roundtrip), set(psd_before_roundtrip))
+            for label, (expected_f, expected_psd) in psd_before_roundtrip.items():
+                actual_f, actual_psd = psd_curves_after_roundtrip[label]
+                np.testing.assert_allclose(actual_f, expected_f)
+                np.testing.assert_allclose(actual_psd, expected_psd)
 
             viewer.derived_result_mode_combo.setCurrentText("地基振动")
             viewer.derived_vc_checks["VC A"].setChecked(True)
@@ -1325,6 +3368,221 @@ class AnalysisViewerUiTests(unittest.TestCase):
             self.assertTrue(any(label.startswith("VC C") for label in vc_derived_curves))
         finally:
             viewer.close()
+
+    def test_vc_reference_top_to_base_force_keeps_force_psd_units(self):
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            viewer.quantity_combo.setCurrentText("Force")
+            self.assertEqual(viewer.quantity_combo.currentText(), "Force")
+
+            center_f, _center_psd = _vc_reference_acceleration_psd("VC C")
+            dense_source = _vc_reference_acceleration_psd_for_transfer_grid("VC C", center_f)
+            self.assertIsNotNone(dense_source)
+            source_f, _source_psd = dense_source
+            expected_source = _vc_reference_acceleration_psd_for_transfer_grid("VC C", source_f)
+            self.assertIsNotNone(expected_source)
+            expected_f, expected_psd = expected_source
+            transfer_h = np.full(source_f.shape, 2.0 + 0.0j, dtype=complex)
+
+            result = viewer._derived_result_for_vc_reference(
+                "VC C",
+                None,
+                None,
+                None,
+                source_f,
+                transfer_h,
+                direction=DERIVE_TOP_TO_BASE,
+                regularization=0.0,
+                freq_min=None,
+                freq_max=None,
+                input_factor=1.0,
+            )
+
+            self.assertIsNotNone(result)
+            out_f, out_psd = result["psd"]
+            np.testing.assert_allclose(out_f, expected_f)
+            np.testing.assert_allclose(out_psd, expected_psd / 4.0)
+            self.assertNotIn("foundation", result)
+            self.assertNotIn("source_psd", result)
+            self.assertIn("source_foundation", result)
+        finally:
+            viewer.close()
+
+    def test_derived_psd_roundtrip_preserves_display_curve_with_edit_profile(self):
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            plot = viewer.derived_plots[1]
+            viewer._plot_derived_result_axis(
+                plot,
+                "PSD",
+                [
+                    {
+                        "label": "编辑PSD",
+                        "psd": (
+                            np.array([10.0, 20.0, 40.0, 80.0], dtype=float),
+                            np.array([1.0, 2.0, 1.5, 0.5], dtype=float),
+                        ),
+                        "display_psd": (
+                            np.array([10.0, 20.0, 40.0, 80.0], dtype=float),
+                            np.array([1.0, 2.0, 1.5, 0.5], dtype=float),
+                        ),
+                    }
+                ],
+                keep_existing=False,
+            )
+            viewer._psd_edit_points["编辑PSD"] = (
+                np.array([10.0, 80.0], dtype=float),
+                np.array([3.0, 3.0], dtype=float),
+            )
+            viewer._plot_derived_result_axis(
+                plot,
+                "PSD",
+                [
+                    {
+                        "label": "编辑PSD",
+                        "psd": (
+                            np.array([10.0, 20.0, 40.0, 80.0], dtype=float),
+                            np.array([1.0, 2.0, 1.5, 0.5], dtype=float),
+                        ),
+                        "display_psd": (
+                            np.array([10.0, 20.0, 40.0, 80.0], dtype=float),
+                            np.array([1.0, 2.0, 1.5, 0.5], dtype=float),
+                        ),
+                    }
+                ],
+                keep_existing=False,
+            )
+            before = {
+                label: (np.asarray(curve[0], dtype=float).copy(), np.asarray(curve[1], dtype=float).copy())
+                for label, curve in viewer._plot_curves[plot].items()
+            }
+
+            viewer._plot_derived_result_axis(
+                plot,
+                "近似时域",
+                [
+                    {
+                        "label": "编辑PSD",
+                        "psd": (
+                            np.array([10.0, 20.0, 40.0, 80.0], dtype=float),
+                            np.array([1.0, 2.0, 1.5, 0.5], dtype=float),
+                        ),
+                        "display_psd": (
+                            np.array([10.0, 20.0, 40.0, 80.0], dtype=float),
+                            np.array([1.0, 2.0, 1.5, 0.5], dtype=float),
+                        ),
+                    }
+                ],
+                keep_existing=False,
+            )
+            viewer._plot_derived_result_axis(
+                plot,
+                "PSD",
+                [
+                    {
+                        "label": "编辑PSD",
+                        "psd": (
+                            np.array([10.0, 20.0, 40.0, 80.0], dtype=float),
+                            np.array([1.0, 2.0, 1.5, 0.5], dtype=float),
+                        ),
+                        "display_psd": (
+                            np.array([10.0, 20.0, 40.0, 80.0], dtype=float),
+                            np.array([1.0, 2.0, 1.5, 0.5], dtype=float),
+                        ),
+                    }
+                ],
+                keep_existing=False,
+            )
+            after = viewer._plot_curves[plot]
+
+            self.assertEqual(set(after), set(before))
+            for label, (before_x, before_y) in before.items():
+                after_x, after_y = after[label]
+                np.testing.assert_allclose(after_x, before_x)
+                np.testing.assert_allclose(after_y, before_y)
+        finally:
+            viewer.close()
+
+    def test_current_psd_edit_button_populates_point_table_for_psd_context(self):
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            plot = viewer.derived_plots[1]
+            viewer._plot_derived_result_axis(
+                plot,
+                "PSD",
+                [
+                    {
+                        "label": "待编辑PSD",
+                        "psd": (
+                            np.array([10.0, 20.0, 40.0, 80.0], dtype=float),
+                            np.array([1.0, 2.0, 4.0, 8.0], dtype=float),
+                        ),
+                    }
+                ],
+                keep_existing=False,
+            )
+            viewer._active_trace[plot] = "待编辑PSD"
+
+            viewer._initialize_psd_edit_points_from_active_curve()
+
+            self.assertEqual(viewer._curve_point_edit_mode, "psd")
+            self.assertEqual(viewer._active_psd_edit_label, "待编辑PSD")
+            self.assertGreaterEqual(viewer.derived_transfer_point_table.rowCount(), 2)
+            self.assertEqual(viewer.derived_curve_point_label.text(), "PSD修正点")
+
+            viewer.derived_transfer_point_table.item(0, 1).setText("6")
+            edited_f, edited_db = viewer._psd_edit_points["待编辑PSD"]
+
+            self.assertAlmostEqual(float(edited_db[0]), 6.0)
+            self.assertGreater(float(edited_f[0]), 0.0)
+        finally:
+            viewer.close()
+
+    def test_imported_two_psd_curves_can_be_used_as_transfer_ratio(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "two_psd.csv"
+            path.write_text(
+                "# python_vna_plot_export=1\n"
+                "# plot_kind=psd\n"
+                "base_X,base_Y,top_X,top_Y\n"
+                "1,1,1,4\n"
+                "2,1,2,4\n"
+                "4,1,4,4\n",
+                encoding="utf-8",
+            )
+            dataset = load_analysis_path(path, fs_hint=100.0, dataset_id=1)
+            viewer = AnalysisViewer(derived_only=True)
+            try:
+                viewer._datasets = [dataset]
+                viewer._next_dataset_id = 2
+                viewer._refresh_dataset_lists()
+
+                options = viewer._derived_transfer_options()
+                psd_options = [(label, data) for label, data in options if isinstance(data, tuple) and data and data[0] == "psd_pair"]
+
+                self.assertTrue(psd_options)
+                label, data = next((item for item in psd_options if "base" in item[0] and "top" in item[0]), psd_options[0])
+                viewer.derived_transfer_combo.setCurrentIndex(viewer._combo_index_for_data(viewer.derived_transfer_combo, data))
+                selected = viewer._selected_derived_transfer()
+                self.assertIsNotNone(selected)
+                transfer = viewer._transfer_for_derived(
+                    selected[0],
+                    selected[1],
+                    selected[2],
+                    selected[3],
+                    selected[4],
+                    transfer_factor=1.0,
+                    edit_key=tuple(data),
+                )
+
+                self.assertIsNotNone(transfer)
+                frequency, values, phase_available = transfer
+                np.testing.assert_allclose(frequency, [1.0, 2.0, 4.0])
+                np.testing.assert_allclose(np.abs(values), [2.0, 2.0, 2.0])
+                self.assertFalse(phase_available)
+                _ = label
+            finally:
+                viewer.close()
 
     def test_hold_and_selection_buttons_show_feedback(self):
         viewer = AnalysisViewer()
@@ -1442,6 +3700,62 @@ class AnalysisViewerUiTests(unittest.TestCase):
                 _time_s, values = reloaded.load_time_series(reloaded.series[0].channel_key)
                 np.testing.assert_allclose(values, [10.0, 30.0, 50.0])
                 self.assertEqual(viewer.refresh_button.text(), "刷新")
+            finally:
+                viewer.close()
+
+    def test_condition_text_prefills_rename_without_renaming_until_user_edits(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            folder = Path(tmpdir)
+            path = folder / "012.csv"
+            path.write_text("0,1\n0.1,2\n0.2,3\n", encoding="utf-8")
+            (folder / "readme.txt").write_text("012:冲击测试\n", encoding="utf-8")
+            viewer = AnalysisViewer()
+            try:
+                viewer._load_path(path)
+                viewer.series_list.item(0).setSelected(True)
+
+                self.assertEqual(viewer.rename_edit.text(), "冲击测试")
+                viewer._rename_selected_series_from_editor()
+                self.assertEqual(viewer.series_list.item(0).text(), "012.csv+ch1（冲击测试）")
+
+                viewer._rename_selected_series_confirmed()
+                self.assertEqual(viewer.series_list.item(0).text(), "冲击测试（冲击测试）")
+
+                viewer.rename_edit.setText("hammer")
+                viewer._rename_selected_series_from_editor()
+                self.assertEqual(viewer.series_list.item(0).text(), "hammer（冲击测试）")
+            finally:
+                viewer.close()
+
+    def test_readme_panel_does_not_change_window_width(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            folder = Path(tmpdir)
+            path = folder / "012.csv"
+            path.write_text("0,1\n0.1,2\n", encoding="utf-8")
+            (folder / "readme.txt").write_text("012:冲击测试\n", encoding="utf-8")
+            viewer = AnalysisViewer()
+            try:
+                viewer.resize(900, 620)
+                viewer.show()
+                QtWidgets.QApplication.processEvents()
+                viewer._load_path(path)
+                viewer.series_list.item(0).setSelected(True)
+                QtWidgets.QApplication.processEvents()
+
+                collapsed_size = viewer.size()
+                collapsed_minimum_size = viewer.minimumSize()
+                viewer.show_readme_button.click()
+                QtWidgets.QApplication.processEvents()
+                expanded_size = viewer.size()
+                self.assertGreater(expanded_size.width(), collapsed_size.width())
+                viewer.show_readme_button.click()
+                QtWidgets.QApplication.processEvents()
+                QtCore.QTimer.singleShot(0, self.app.quit)
+                self.app.exec()
+                QtWidgets.QApplication.processEvents()
+
+                self.assertEqual(viewer.size(), collapsed_size)
+                self.assertEqual(viewer.minimumSize(), collapsed_minimum_size)
             finally:
                 viewer.close()
 

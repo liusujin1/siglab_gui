@@ -7,6 +7,7 @@ import sys
 from python_vna.app import resource_path
 from python_vna.diagnostics import append_log, enable_fault_log
 from python_vna.optional import require
+from python_vna.update_client import cleanup_stale_updater_runner
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -18,6 +19,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     enable_fault_log()
     append_log("conversion app start")
+    cleanup_stale_updater_runner()
     args = parse_args(argv)
     QtWidgets = require("PySide6.QtWidgets", "python -m pip install -e .[gui]")
     QtGui = require("PySide6.QtGui", "python -m pip install -e .[gui]")

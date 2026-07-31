@@ -9,6 +9,7 @@ from python_vna.controller import VnaController
 from python_vna.diagnostics import append_log, enable_fault_log
 from python_vna.optional import require
 from python_vna.storage import default_session_config, load_legacy_vna
+from python_vna.update_client import cleanup_stale_updater_runner
 
 
 def resource_path(relative_path: str) -> Path:
@@ -67,6 +68,7 @@ def _env_flag(name: str) -> bool:
 def main(argv: list[str] | None = None) -> int:
     enable_fault_log()
     append_log("app start")
+    cleanup_stale_updater_runner()
     args = parse_args(argv)
     if args.probe_ni_devices_json:
         from python_vna.daq.device_probe import main as probe_main
@@ -79,6 +81,10 @@ def main(argv: list[str] | None = None) -> int:
 
     append_log("qapplication create: begin")
     app = QtWidgets.QApplication(sys.argv if argv is None else argv)
+    app.setStyle("Fusion")
+    font = QtGui.QFont("Segoe UI", 9)
+    font.setStyleHint(QtGui.QFont.SansSerif)
+    app.setFont(font)
     append_log("qapplication create: end")
     icon_path = resource_path("assets/python_vna_icon.ico")
     if icon_path.exists():

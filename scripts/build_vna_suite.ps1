@@ -1,3 +1,8 @@
+param(
+    [switch]$SkipTests,
+    [switch]$SkipReleaseArchives
+)
+
 $ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent $PSScriptRoot
@@ -7,6 +12,24 @@ $spec = Join-Path $root 'PythonVNA_Suite.spec'
 $distRoot = Join-Path $root 'dist'
 $dist = Join-Path $distRoot 'PythonVNA_Suite'
 $latestPathFile = Join-Path $distRoot 'LATEST_SUITE_PATH.txt'
+
+function Find-7Zip {
+    $candidates = @(
+        (Join-Path $env:ProgramFiles '7-Zip\7z.exe'),
+        (Join-Path ${env:ProgramFiles(x86)} '7-Zip\7z.exe'),
+        '7z.exe'
+    )
+    foreach ($candidate in $candidates) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) {
+            continue
+        }
+        $resolved = Get-Command $candidate -ErrorAction SilentlyContinue
+        if ($resolved -and (Test-Path -LiteralPath $resolved.Source)) {
+            return $resolved.Source
+        }
+    }
+    return $null
+}
 
 function Get-SuiteVersion {
     $initPath = Join-Path $root 'python_vna\__init__.py'
@@ -56,9 +79,11 @@ if (-not (Test-Path $spec)) {
 
 Push-Location $root
 try {
-    & $python -m pytest tests
-    if ($LASTEXITCODE -ne 0) {
-        throw "pytest failed with exit code $LASTEXITCODE"
+    if (-not $SkipTests) {
+        & $python -m pytest tests
+        if ($LASTEXITCODE -ne 0) {
+            throw "pytest failed with exit code $LASTEXITCODE"
+        }
     }
 
     & $python scripts\generate_suite_icons.py
@@ -90,9 +115,17 @@ try {
         'Executables:'
         'VIanalysis.exe = vibration diagnostic UI'
         'PythonVNATest.exe = VNA test/acquisition UI'
-        'PythonVNADiagnostic.exe = VNA conversion/analysis UI'
+        'PythonVNAUpdater.exe = online update helper'
     ) -join [Environment]::NewLine
     [System.IO.File]::WriteAllText((Join-Path $dist 'VERSION.txt'), $versionInfo, [System.Text.UTF8Encoding]::new($false))
+    $updateConfigSource = Join-Path $root 'update_config.json'
+    if (Test-Path -LiteralPath $updateConfigSource) {
+        Copy-Item -LiteralPath $updateConfigSource -Destination (Join-Path $dist 'update_config.json') -Force
+    }
+    $updateConfigExample = Join-Path $root 'update_config.example.json'
+    if (Test-Path -LiteralPath $updateConfigExample) {
+        Copy-Item -LiteralPath $updateConfigExample -Destination (Join-Path $dist 'update_config.example.json') -Force
+    }
 
     if (Test-Path -LiteralPath $releaseDist) {
         Remove-Item -LiteralPath $releaseDist -Recurse -Force
@@ -104,19 +137,42 @@ try {
     $sharedBytes = (Get-ChildItem -LiteralPath (Join-Path $releaseDist '_internal') -Recurse -File | Measure-Object -Property Length -Sum).Sum
     $totalBytes = $exeBytes + $sharedBytes
     $totalMiB = [Math]::Round($totalBytes / 1MB, 2)
-    $estimatedSeparateMiB = [Math]::Round(($exeBytes + ($sharedBytes * 3)) / 1MB, 2)
-    $estimatedSavedMiB = [Math]::Round(($sharedBytes * 2) / 1MB, 2)
+    $estimatedSeparateMiB = [Math]::Round(($exeBytes + ($sharedBytes * 2)) / 1MB, 2)
+    $estimatedSavedMiB = [Math]::Round($sharedBytes / 1MB, 2)
     Write-Host "Built $releaseDist"
     Write-Host "Version: $suiteVersion"
     Write-Host "Total size: $totalMiB MiB"
     Write-Host "Shared dependency size: $([Math]::Round($sharedBytes / 1MB, 2)) MiB"
-    Write-Host "Estimated three separate folders: $estimatedSeparateMiB MiB"
+    Write-Host "Estimated two separate folders: $estimatedSeparateMiB MiB"
     Write-Host "Estimated saved by sharing: $estimatedSavedMiB MiB"
     Write-Host "Largest files:"
     Get-ChildItem -LiteralPath $releaseDist -Recurse -File |
         Sort-Object Length -Descending |
         Select-Object -First 20 @{Name='MiB';Expression={[Math]::Round($_.Length / 1MB, 2)}}, FullName |
         Format-Table -AutoSize
+
+    if (-not $SkipReleaseArchives) {
+        $sevenZip = Find-7Zip
+        if ($sevenZip) {
+            $archivePath = Join-Path $distRoot "$releaseName.7z"
+            if (Test-Path -LiteralPath $archivePath) {
+                Remove-Item -LiteralPath $archivePath -Force
+            }
+            & $sevenZip a -t7z -mx=9 -m0=LZMA2 -md=256m -mfb=273 -ms=on $archivePath $releaseDist | Out-Host
+            if ($LASTEXITCODE -ne 0) {
+                throw "7-Zip failed with exit code $LASTEXITCODE"
+            }
+            $archive = Get-Item -LiteralPath $archivePath
+            Write-Host "Archive: $archivePath"
+            Write-Host "Archive size: $([Math]::Round($archive.Length / 1MB, 2)) MiB"
+        }
+        else {
+            throw "7-Zip was not found. Install 7-Zip before building a full release archive."
+        }
+    }
+    else {
+        Write-Host "Skipping local full release archives."
+    }
 }
 finally {
     Pop-Location

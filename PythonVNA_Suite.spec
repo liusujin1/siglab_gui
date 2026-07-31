@@ -20,14 +20,12 @@ def _filter_bundle_entries(entries):
     blocked_prefixes = (
         "assets/python_vna_icon.png",
         "assets/vianalysis_icon.png",
-        "assets/python_vna_diagnostic_icon.png",
         "nidaqmx/_stubs/",
         "opengl/dlls/",
         "pyside6/translations/",
-        "scipy/optimize/_highspy/",
+        "pyqtgraph/icons/peegee/",
     )
     blocked_exact = {
-        "pyside6/opengl32sw.dll",
         "pyside6/qt6pdf.dll",
         "pyside6/qt6quick.dll",
         "pyside6/qt6qml.dll",
@@ -38,6 +36,13 @@ def _filter_bundle_entries(entries):
         "pyside6/plugins/platforms/qdirect2d.dll",
         "pyside6/plugins/platforms/qminimal.dll",
         "pyside6/plugins/platforms/qoffscreen.dll",
+        "pyside6/plugins/imageformats/qicns.dll",
+        "pyside6/plugins/imageformats/qjpeg.dll",
+        "pyside6/plugins/imageformats/qpdf.dll",
+        "pyside6/plugins/imageformats/qtga.dll",
+        "pyside6/plugins/imageformats/qtiff.dll",
+        "pyside6/plugins/imageformats/qwbmp.dll",
+        "pyside6/plugins/imageformats/qwebp.dll",
     }
     filtered = []
     for entry in entries:
@@ -55,19 +60,28 @@ def _merged_toc(*parts):
     return normalize_toc(merged)
 
 
-def _build_analysis(script, *, datas=None, hiddenimports=None):
+def _build_analysis(
+    script,
+    *,
+    datas=None,
+    hiddenimports=None,
+    include_common_datas=True,
+    include_common_hiddenimports=True,
+):
+    common_datas = COMMON_DATAS if include_common_datas else []
+    common_hiddenimports = COMMON_HIDDENIMPORTS if include_common_hiddenimports else []
     analysis = Analysis(
         [script],
         pathex=[PROJECT_ROOT],
         binaries=[],
-        datas=COMMON_DATAS + list(datas or []),
-        hiddenimports=COMMON_HIDDENIMPORTS + list(hiddenimports or []),
+        datas=common_datas + list(datas or []),
+        hiddenimports=common_hiddenimports + list(hiddenimports or []),
         hookspath=[],
         hooksconfig={},
         runtime_hooks=[],
         excludes=EXCLUDES,
-        noarchive=False,
-        optimize=0,
+        noarchive=True,
+        optimize=1,
     )
     analysis.datas = _filter_bundle_entries(analysis.datas)
     analysis.binaries = _filter_bundle_entries(analysis.binaries)
@@ -97,12 +111,12 @@ def _build_exe(pyz, scripts, *, name, icon):
 
 COMMON_DATAS = [
     ("dsa\\vna\\default.vna", "dsa\\vna"),
+    ("update_config.json", "."),
+    ("update_config.example.json", "."),
     ("assets\\python_vna_icon.ico", "assets"),
     ("assets\\python_vna_icon.png", "assets"),
     ("assets\\vianalysis_icon.ico", "assets"),
     ("assets\\vianalysis_icon.png", "assets"),
-    ("assets\\python_vna_diagnostic_icon.ico", "assets"),
-    ("assets\\python_vna_diagnostic_icon.png", "assets"),
 ]
 
 COMMON_HIDDENIMPORTS = [
@@ -117,6 +131,8 @@ COMMON_HIDDENIMPORTS = [
 SCIPY_CURVE_HIDDENIMPORTS = [
     "scipy.interpolate",
 ]
+
+SCIPY_HIGHS_HIDDENIMPORTS = collect_submodules("scipy.optimize._highspy")
 
 OPENGL_HIDDENIMPORTS = [
     "OpenGL",
@@ -162,14 +178,12 @@ EXCLUDES = [
     "PySide6.QtQuickWidgets",
     "PySide6.QtSql",
     "PySide6.QtTest",
-    "scipy.optimize._highspy",
-    "scipy.optimize._highspy._core",
-    "scipy.optimize._highspy._highs_options",
 ]
 
 
-# Per-exe Analysis/PYZ keeps each launcher from loading a single suite-wide
-# Python archive, while COLLECT still shares binary/data dependencies.
+# noarchive=True keeps pure Python modules in the shared _internal tree instead
+# of embedding large per-exe PYZ archives. The launchers stay small, and updates
+# can replace changed Python modules without republishing both main executables.
 analysis_vianalysis = _build_analysis(
     "scripts\\entry_vianalysis.py",
     hiddenimports=SCIPY_CURVE_HIDDENIMPORTS + OPENGL_HIDDENIMPORTS,
@@ -179,13 +193,13 @@ vianalysis = _build_exe(
     pyz_vianalysis,
     analysis_vianalysis.scripts,
     name="VIanalysis",
-    icon="assets\\python_vna_diagnostic_icon.ico",
+    icon="assets\\vianalysis_icon.ico",
 )
 
 analysis_python_vna_test = _build_analysis(
     "scripts\\entry_python_vna_test.py",
     datas=NI_DATAS,
-    hiddenimports=SCIPY_CURVE_HIDDENIMPORTS + NI_HIDDENIMPORTS,
+    hiddenimports=SCIPY_CURVE_HIDDENIMPORTS + SCIPY_HIGHS_HIDDENIMPORTS + NI_HIDDENIMPORTS,
 )
 pyz_python_vna_test = PYZ(analysis_python_vna_test.pure)
 python_vna_test = _build_exe(
@@ -195,31 +209,32 @@ python_vna_test = _build_exe(
     icon="assets\\python_vna_icon.ico",
 )
 
-analysis_python_vna_diagnostic = _build_analysis(
-    "scripts\\entry_python_vna_diagnostic.py",
-    hiddenimports=SCIPY_CURVE_HIDDENIMPORTS,
+analysis_python_vna_updater = _build_analysis(
+    "scripts\\entry_python_vna_updater.py",
+    include_common_datas=False,
+    include_common_hiddenimports=False,
 )
-pyz_python_vna_diagnostic = PYZ(analysis_python_vna_diagnostic.pure)
-python_vna_diagnostic = _build_exe(
-    pyz_python_vna_diagnostic,
-    analysis_python_vna_diagnostic.scripts,
-    name="PythonVNADiagnostic",
-    icon="assets\\vianalysis_icon.ico",
+pyz_python_vna_updater = PYZ(analysis_python_vna_updater.pure)
+python_vna_updater = _build_exe(
+    pyz_python_vna_updater,
+    analysis_python_vna_updater.scripts,
+    name="PythonVNAUpdater",
+    icon="assets\\python_vna_icon.ico",
 )
 
 coll = COLLECT(
     vianalysis,
     python_vna_test,
-    python_vna_diagnostic,
+    python_vna_updater,
     _merged_toc(
         analysis_vianalysis.binaries,
         analysis_python_vna_test.binaries,
-        analysis_python_vna_diagnostic.binaries,
+        analysis_python_vna_updater.binaries,
     ),
     _merged_toc(
         analysis_vianalysis.datas,
         analysis_python_vna_test.datas,
-        analysis_python_vna_diagnostic.datas,
+        analysis_python_vna_updater.datas,
     ),
     strip=False,
     upx=True,

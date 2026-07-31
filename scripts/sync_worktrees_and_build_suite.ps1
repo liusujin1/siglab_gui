@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('All', 'Test', 'Converter', 'Diagnostic')]
+    [ValidateSet('All', 'Test', 'Diagnostic')]
     [string[]]$Source = @('All'),
 
     [switch]$Apply,
@@ -7,7 +7,11 @@ param(
 
     [string]$Version = '',
 
-    [string[]]$ExtraPath = @()
+    [string[]]$ExtraPath = @(),
+
+    [switch]$SkipTests,
+
+    [switch]$SkipReleaseArchives
 )
 
 $ErrorActionPreference = 'Stop'
@@ -16,36 +20,39 @@ $root = Split-Path -Parent $PSScriptRoot
 
 $worktrees = @{
     Test = Join-Path $root '.worktrees\vna_diagnose_isolated'
-    Converter = Join-Path $root '.worktrees\vna_converter_isolated'
     Diagnostic = Join-Path $root '.worktrees\vna_diagnostic_current'
 }
 
 # Current suite naming:
 # - Test       -> PythonVNATest.exe
-# - Converter  -> PythonVNADiagnostic.exe
 # - Diagnostic -> VIanalysis.exe
 $syncPaths = @{
     Test = @(
         'python_vna\app.py',
         'python_vna\condition_notes.py',
+        'python_vna\continuous_recording.py',
         'python_vna\daq\device_probe.py',
+        'python_vna\daq\ni.py',
         'python_vna\ui\main_window.py',
         'tests\test_app.py',
-        'tests\test_main_window.py'
+        'tests\test_condition_notes.py',
+        'tests\test_continuous_recording.py',
+        'tests\test_main_window.py',
+        'tests\test_signal_pipeline.py'
     )
-    Converter = @(
-        'python_vna\conversion_app.py',
-        'python_vna\ui\analysis_viewer.py',
+    Diagnostic = @(
+        'python_vna\analysis_algorithms.py',
         'python_vna\analysis_curve_editing.py',
         'python_vna\analysis_data.py',
         'python_vna\analysis_derivation.py',
-        'tests\test_analysis_viewer.py'
-    )
-    Diagnostic = @(
         'python_vna\diagnostic\__init__.py',
+        'python_vna\diagnostic\app.py',
         'python_vna\diagnostic\data.py',
         'python_vna\diagnostic\pages.py',
         'python_vna\diagnostic\shell.py',
+        'python_vna\ui\analysis_viewer.py',
+        'python_vna\ui\diagnostic_theme.py',
+        'tests\test_analysis_viewer.py',
         'tests\test_diagnostic_app.py'
     )
 }
@@ -236,7 +243,7 @@ function Apply-SuiteLocalPatches {
 }
 
 $selectedSources = if ($Source -contains 'All') {
-    @('Test', 'Converter', 'Diagnostic')
+    @('Test', 'Diagnostic')
 }
 else {
     $Source
@@ -266,9 +273,16 @@ foreach ($name in $selectedSources) {
         $destinationPath = Resolve-WorkspacePath -Base $root -RelativePath $relativePath
         $key = $destinationPath.ToLowerInvariant()
         if ($destinations.ContainsKey($key)) {
-            throw "Destination selected more than once: $relativePath from $($destinations[$key]) and $name"
+            $existing = $destinations[$key]
+            if (-not (Test-DifferentPath -SourcePath $sourcePath -DestinationPath $existing.SourcePath)) {
+                continue
+            }
+            throw "Destination selected more than once: $relativePath from $($existing.SourceName) and $name"
         }
-        $destinations[$key] = $name
+        $destinations[$key] = [pscustomobject]@{
+            SourceName = $name
+            SourcePath = $sourcePath
+        }
 
         if (Test-DifferentPath -SourcePath $sourcePath -DestinationPath $destinationPath) {
             $plan.Add([pscustomobject]@{
@@ -318,7 +332,14 @@ if ($Build) {
         Write-Host ""
         Write-Host "Building current suite project without applying previewed worktree differences."
     }
-    & (Join-Path $PSScriptRoot 'build_vna_suite.ps1')
+    $buildArgs = @()
+    if ($SkipTests) {
+        $buildArgs += '-SkipTests'
+    }
+    if ($SkipReleaseArchives) {
+        $buildArgs += '-SkipReleaseArchives'
+    }
+    & (Join-Path $PSScriptRoot 'build_vna_suite.ps1') @buildArgs
     if ($LASTEXITCODE -ne 0) {
         throw "Suite build failed with exit code $LASTEXITCODE"
     }

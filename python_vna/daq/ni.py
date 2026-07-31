@@ -182,6 +182,14 @@ class NIDaqBackend(BaseDaqBackend):
         return int(round(frame_size * delay_percent / 100.0))
 
     @staticmethod
+    def _continuous_input_buffer_samples(session: SessionConfig) -> int:
+        frame_size = max(1, int(session.acquisition.frame_size))
+        sample_rate = max(1.0, float(session.acquisition.sample_rate))
+        configured = frame_size * max(1, int(session.acquisition.buffer_frames))
+        ten_seconds = int(round(sample_rate * 10.0))
+        return max(configured, ten_seconds, frame_size * 16)
+
+    @staticmethod
     def _normalize_physical_name(device_name: str, channel_name: str) -> str:
         normalized = (channel_name or "").strip()
         if not normalized:
@@ -381,9 +389,16 @@ class NIDaqBackend(BaseDaqBackend):
                 else constants.AcquisitionType.CONTINUOUS
             ),
             samps_per_chan=(
-                frame_size if finite_ai_sampling else frame_size * session.acquisition.buffer_frames
+                frame_size
+                if finite_ai_sampling
+                else self._continuous_input_buffer_samples(session)
             ),
         )
+        if not finite_ai_sampling:
+            try:
+                self._ai_task.in_stream.input_buf_size = self._continuous_input_buffer_samples(session)
+            except Exception:
+                pass
 
         if trigger.enabled and trigger.source != "immediate":
             source = self._normalize_trigger_source(trigger.source, selected)

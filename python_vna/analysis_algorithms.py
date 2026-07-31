@@ -170,6 +170,30 @@ def compute_periodogram_psd(
     return freqs[valid], psd[valid]
 
 
+def compute_cross_spectrum_periodogram(
+    reference: np.ndarray,
+    response: np.ndarray,
+    sample_rate: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    ref, resp = _finite_pair(reference, response)
+    if ref.size < 2 or not np.isfinite(sample_rate) or sample_rate <= 0.0:
+        return np.array([], dtype=float), np.array([], dtype=complex)
+    freqs, cross = _signal().csd(
+        ref,
+        resp,
+        fs=float(sample_rate),
+        window="boxcar",
+        nperseg=ref.size,
+        noverlap=0,
+        nfft=ref.size,
+        detrend=False,
+        scaling="density",
+        return_onesided=True,
+    )
+    valid = np.isfinite(freqs) & np.isfinite(np.real(cross)) & np.isfinite(np.imag(cross)) & (freqs > 0.0)
+    return freqs[valid], cross[valid]
+
+
 def compute_hann_periodogram_psd(
     values: np.ndarray,
     sample_rate: float,
@@ -256,6 +280,97 @@ def compute_transfer_function_welch(
     return freqs[valid], frf[valid]
 
 
+def compute_mimo_transfer_function_welch(
+    inputs: np.ndarray,
+    outputs: np.ndarray,
+    sample_rate: float,
+    block_size: int,
+    *,
+    regularization_floor: float = 1e-9,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Estimate a MIMO transfer matrix with H(f) = S_yx(f) S_xx(f)^-1."""
+    x = np.asarray(inputs, dtype=float)
+    y = np.asarray(outputs, dtype=float)
+    if x.ndim == 1:
+        x = x.reshape(1, -1)
+    if y.ndim == 1:
+        y = y.reshape(1, -1)
+    if x.ndim != 2 or y.ndim != 2 or x.shape[0] == 0 or y.shape[0] == 0:
+        return np.array([], dtype=float), np.zeros((0, 0, 0), dtype=complex)
+    count = min(x.shape[1], y.shape[1])
+    if count < 2 or not np.isfinite(sample_rate) or sample_rate <= 0.0:
+        return np.array([], dtype=float), np.zeros((0, y.shape[0], x.shape[0]), dtype=complex)
+    x = x[:, :count]
+    y = y[:, :count]
+    finite = np.all(np.isfinite(x), axis=0) & np.all(np.isfinite(y), axis=0)
+    x = x[:, finite]
+    y = y[:, finite]
+    if x.shape[1] < 2:
+        return np.array([], dtype=float), np.zeros((0, y.shape[0], x.shape[0]), dtype=complex)
+    x = x - np.mean(x, axis=1, keepdims=True)
+    y = y - np.mean(y, axis=1, keepdims=True)
+    nperseg = _validated_block_size(x.shape[1], sample_rate, block_size)
+    if nperseg < 2:
+        return np.array([], dtype=float), np.zeros((0, y.shape[0], x.shape[0]), dtype=complex)
+
+    sig = _signal()
+    csd_kwargs = {
+        "fs": float(sample_rate),
+        "window": "hann",
+        "nperseg": nperseg,
+        "noverlap": nperseg // 2,
+        "detrend": "constant",
+        "scaling": "density",
+    }
+    freqs: np.ndarray | None = None
+    sxx: np.ndarray | None = None
+    syx: np.ndarray | None = None
+    for input_i in range(x.shape[0]):
+        for input_j in range(x.shape[0]):
+            current_freqs, cross = sig.csd(x[input_i], x[input_j], **csd_kwargs)
+            if freqs is None:
+                freqs = np.asarray(current_freqs, dtype=float)
+                sxx = np.zeros((freqs.size, x.shape[0], x.shape[0]), dtype=complex)
+                syx = np.zeros((freqs.size, y.shape[0], x.shape[0]), dtype=complex)
+            if sxx is None or current_freqs.size != freqs.size:
+                return np.array([], dtype=float), np.zeros((0, y.shape[0], x.shape[0]), dtype=complex)
+            sxx[:, input_i, input_j] = cross
+    if freqs is None or sxx is None or syx is None:
+        return np.array([], dtype=float), np.zeros((0, y.shape[0], x.shape[0]), dtype=complex)
+    for output_i in range(y.shape[0]):
+        for input_i in range(x.shape[0]):
+            current_freqs, cross = sig.csd(x[input_i], y[output_i], **csd_kwargs)
+            if current_freqs.size != freqs.size:
+                return np.array([], dtype=float), np.zeros((0, y.shape[0], x.shape[0]), dtype=complex)
+            syx[:, output_i, input_i] = cross
+
+    valid = (
+        np.isfinite(freqs)
+        & (freqs > 0.0)
+        & np.all(np.isfinite(np.real(sxx)) & np.isfinite(np.imag(sxx)), axis=(1, 2))
+        & np.all(np.isfinite(np.real(syx)) & np.isfinite(np.imag(syx)), axis=(1, 2))
+    )
+    if not np.any(valid):
+        return np.array([], dtype=float), np.zeros((0, y.shape[0], x.shape[0]), dtype=complex)
+    freqs = freqs[valid]
+    sxx = sxx[valid]
+    syx = syx[valid]
+    transfer = np.empty((freqs.size, y.shape[0], x.shape[0]), dtype=complex)
+    floor = max(float(regularization_floor), 0.0)
+    for index in range(freqs.size):
+        current_sxx = sxx[index]
+        scale = float(np.real(np.trace(current_sxx))) / max(current_sxx.shape[0], 1)
+        if floor > 0.0 and np.isfinite(scale) and scale > 0.0:
+            current_sxx = current_sxx + floor * scale * np.eye(current_sxx.shape[0], dtype=complex)
+        for output_i in range(y.shape[0]):
+            try:
+                transfer[index, output_i, :] = np.linalg.solve(current_sxx, syx[index, output_i, :])
+            except np.linalg.LinAlgError:
+                transfer[index, output_i, :] = np.linalg.pinv(current_sxx) @ syx[index, output_i, :]
+    finite_transfer = np.all(np.isfinite(np.real(transfer)) & np.isfinite(np.imag(transfer)), axis=(1, 2))
+    return freqs[finite_transfer], transfer[finite_transfer]
+
+
 def compute_matlab_tfestimate(
     reference: np.ndarray,
     response: np.ndarray,
@@ -322,6 +437,30 @@ def compute_coherence_welch(
     return freqs[valid], coherence[valid]
 
 
+def compute_cross_spectrum_welch(
+    reference: np.ndarray,
+    response: np.ndarray,
+    sample_rate: float,
+    block_size: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    ref, resp = _finite_pair(reference, response)
+    nperseg = _validated_block_size(ref.size, sample_rate, block_size)
+    if nperseg < 2:
+        return np.array([], dtype=float), np.array([], dtype=complex)
+    freqs, cross = _signal().csd(
+        ref,
+        resp,
+        fs=float(sample_rate),
+        window="hann",
+        nperseg=nperseg,
+        noverlap=nperseg // 2,
+        detrend="constant",
+        scaling="density",
+    )
+    valid = np.isfinite(freqs) & np.isfinite(np.real(cross)) & np.isfinite(np.imag(cross)) & (freqs > 0.0)
+    return freqs[valid], cross[valid]
+
+
 def _finite_signal(values: np.ndarray) -> np.ndarray:
     y = np.asarray(values, dtype=float).ravel()
     y = y[np.isfinite(y)]
@@ -368,7 +507,7 @@ def convert_acceleration_time_series(
 ) -> np.ndarray:
     values = np.asarray(acceleration, dtype=float).ravel()
     mode = normalize_quantity_mode(quantity_mode)
-    if mode == "acceleration":
+    if mode in {"acceleration", "force"}:
         return values.copy()
     if values.size < 2 or sample_rate <= 0.0:
         return np.array([], dtype=float)
@@ -416,7 +555,7 @@ def convert_acceleration_psd(
     elif mode == "displacement":
         psd = psd / (omega**4) * 1e12
 
-    if mode != "acceleration" and highpass_enabled and np.isfinite(highpass_hz) and highpass_hz > 0.0:
+    if mode not in {"acceleration", "force"} and highpass_enabled and np.isfinite(highpass_hz) and highpass_hz > 0.0:
         keep = f >= float(highpass_hz)
         f = f[keep]
         psd = psd[keep]
@@ -541,6 +680,8 @@ def compute_dynamic_stiffness(
 
 def normalize_quantity_mode(value: str) -> str:
     text = str(value or "").strip().lower()
+    if text.startswith("force") or text in {"n", "newton", "newtons", "力"}:
+        return "force"
     if text.startswith("vel"):
         return "velocity"
     if text.startswith("disp"):
@@ -550,6 +691,8 @@ def normalize_quantity_mode(value: str) -> str:
 
 def quantity_time_label(quantity_mode: str) -> str:
     mode = normalize_quantity_mode(quantity_mode)
+    if mode == "force":
+        return "Force (N)"
     if mode == "velocity":
         return "Velocity (um/s)"
     if mode == "displacement":
@@ -559,6 +702,8 @@ def quantity_time_label(quantity_mode: str) -> str:
 
 def quantity_psd_label(quantity_mode: str) -> str:
     mode = normalize_quantity_mode(quantity_mode)
+    if mode == "force":
+        return "N^2/Hz"
     if mode == "velocity":
         return "(um/s)^2/Hz"
     if mode == "displacement":
@@ -568,6 +713,8 @@ def quantity_psd_label(quantity_mode: str) -> str:
 
 def quantity_cumulative_label(quantity_mode: str) -> str:
     mode = normalize_quantity_mode(quantity_mode)
+    if mode == "force":
+        return "3 sigma force (N)"
     if mode == "velocity":
         return "3 sigma velocity (um/s)"
     if mode == "displacement":

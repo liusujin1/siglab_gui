@@ -56,6 +56,23 @@ from python_vna.storage import (
     save_session_json,
 )
 from python_vna.ui.legend_placement import place_legend_away_from_curves
+from python_vna.ui.diagnostic_theme import (
+    DARK_TRACE_COLORS as SHARED_DARK_TRACE_COLORS,
+    LIGHT_TRACE_COLORS as SHARED_LIGHT_TRACE_COLORS,
+    THEMES as SHARED_UI_THEMES,
+    build_acquisition_stylesheet,
+    color_for_trace_name,
+    color_map_for_trace_names,
+    resolve_theme,
+    set_button_role,
+    trace_colors_for_theme as shared_trace_colors_for_theme,
+)
+from python_vna.update_client import (
+    fetch_manifest,
+    launch_updater,
+    load_update_settings,
+    select_update,
+)
 
 QtCore = require("PySide6.QtCore", "python -m pip install -e .[gui]")
 QtGui = require("PySide6.QtGui", "python -m pip install -e .[gui]")
@@ -210,14 +227,14 @@ class DetachedPlotWindow(QtWidgets.QDialog):
         toolbar.setContentsMargins(0, 0, 0, 0)
         toolbar.setSpacing(6)
         self.data_tip_button = QtWidgets.QToolButton()
-        self.data_tip_button.setText("Data Tip")
+        self.data_tip_button.setText("数据标注")
         self.data_tip_button.setCheckable(True)
         self.data_tip_button.toggled.connect(self._toggle_data_tip_mode)
         self.clear_tips_button = QtWidgets.QToolButton()
-        self.clear_tips_button.setText("Clear Tips")
+        self.clear_tips_button.setText("清除标注")
         self.clear_tips_button.clicked.connect(self._clear_all_data_tips)
         self.auto_scale_button = QtWidgets.QToolButton()
-        self.auto_scale_button.setText("Auto Scale")
+        self.auto_scale_button.setText("自动范围")
         self.auto_scale_button.clicked.connect(self._auto_scale_all_plots)
         toolbar.addWidget(self.data_tip_button)
         toolbar.addWidget(self.clear_tips_button)
@@ -228,7 +245,15 @@ class DetachedPlotWindow(QtWidgets.QDialog):
         self.upper_plot = pg.PlotWidget(title="Upper")
         self.lower_plot = pg.PlotWidget(title="Lower")
         for key, plot in (("top", self.upper_plot), ("bottom", self.lower_plot)):
-            legend = plot.addLegend(offset=(3, 2))
+            legend = plot.addLegend(
+                offset=(3, 2),
+                labelTextSize="8pt",
+                colCount=4,
+                horSpacing=4,
+                verSpacing=-2,
+                sampleType=CompactLegendSample,
+            )
+            legend.setZValue(LEGEND_Z)
             plot.getPlotItem().setMenuEnabled(False)
             self._attach_plot_context_menu(key, plot)
             self._attach_data_tip_clicks(key, plot)
@@ -262,6 +287,8 @@ class DetachedPlotWindow(QtWidgets.QDialog):
             if not isinstance(curves, dict):
                 continue
             trace_colors = MainWindow.trace_colors_for_theme(self._theme)
+            panel_color_map = panel.get("colors", {}) if isinstance(panel.get("colors", {}), dict) else {}
+            stable_color_map = color_map_for_trace_names(list(curves.keys()), trace_colors)
             for index, (trace_name, curve) in enumerate(curves.items()):
                 x_data, y_data = curve
                 x_arr = np.asarray(x_data, dtype=float)
@@ -273,16 +300,15 @@ class DetachedPlotWindow(QtWidgets.QDialog):
                     x_arr[:point_count].copy(),
                     y_arr[:point_count].copy(),
                 )
-                color_map = panel.get("colors", {})
                 color = (
-                    color_map.get(trace_name)
-                    if isinstance(color_map, dict)
-                    else None
-                ) or trace_colors[index % len(trace_colors)]
+                    panel_color_map.get(trace_name)
+                    or stable_color_map.get(str(trace_name).strip())
+                    or color_for_trace_name(trace_name, trace_colors)
+                )
                 plot.plot(
                     x_arr[:point_count],
                     y_arr[:point_count],
-                    pen=pg.mkPen(color, width=1.4),
+                    pen=pg.mkPen(color, width=1.6),
                     name=str(panel.get("legend_names", {}).get(trace_name, trace_name))
                     if isinstance(panel.get("legend_names", {}), dict)
                     else str(trace_name),
@@ -291,29 +317,38 @@ class DetachedPlotWindow(QtWidgets.QDialog):
 
     def apply_theme(self, theme: dict[str, object]) -> None:
         self._theme = dict(theme)
+        on_accent = self._theme.get("on_accent", "#ffffff")
         self.setStyleSheet(
             MainWindow._theme_stylesheet(
-                """
-                QDialog {
+                f"""
+                QDialog {{
                     background: @window_bg@;
                     color: @text@;
-                }
-                QToolButton {
-                    background: @accent@;
-                    color: #ffffff;
-                    font-weight: bold;
-                    border: 1px solid @accent_hover@;
-                    border-radius: 7px;
+                }}
+                QToolButton {{
+                    background: @control_bg@;
+                    color: @text@;
+                    font-weight: 600;
+                    border: 1px solid @control_border@;
+                    border-radius: 4px;
                     padding: 4px 10px;
                     min-height: 22px;
-                }
-                QToolButton:hover {
-                    background: @accent_hover@;
-                }
-                QToolButton:checked {
+                }}
+                QToolButton:hover {{
+                    background: @cell_bg@;
+                    border-color: @accent@;
+                    color: @accent@;
+                }}
+                QToolButton:checked {{
                     background: @accent_alt@;
                     border-color: @accent_alt@;
-                }
+                    color: {on_accent};
+                }}
+                QToolButton[role="primary"] {{
+                    background: @accent@;
+                    color: {on_accent};
+                    border-color: @accent@;
+                }}
                 """,
                 self._theme,
             )
@@ -329,7 +364,7 @@ class DetachedPlotWindow(QtWidgets.QDialog):
         legend = plot.plotItem.legend
         if legend is not None:
             legend.setBrush(pg.mkBrush(*self._theme["legend_bg"]))
-            legend.setPen(pg.mkPen(str(self._theme["legend_text"]), width=0.8))
+            legend.setPen(pg.mkPen(str(self._theme["legend_text"]), width=1.0))
             legend.opts["labelTextColor"] = str(self._theme["legend_text"])
             for _sample, label in legend.items:
                 label.setText(label.text, color=str(self._theme["legend_text"]))
@@ -618,8 +653,8 @@ class DetachedPlotWindow(QtWidgets.QDialog):
     def _build_data_tip_menu(self) -> tuple[QtWidgets.QMenu, dict[str, QtGui.QAction]]:
         menu = QtWidgets.QMenu(self)
         actions = {
-            "delete_this": menu.addAction("Delete This Data Tip"),
-            "delete_all": menu.addAction("Delete All Data Tips"),
+            "delete_this": menu.addAction("删除当前标注"),
+            "delete_all": menu.addAction("删除全部标注"),
         }
         return menu, actions
 
@@ -640,12 +675,12 @@ class DetachedPlotWindow(QtWidgets.QDialog):
     ) -> tuple[QtWidgets.QMenu, dict[str, QtGui.QAction]]:
         menu = QtWidgets.QMenu(self)
         actions: dict[str, QtGui.QAction] = {}
-        actions["auto_scale"] = menu.addAction("Auto Scale")
-        actions["data_tip"] = menu.addAction("Data Tip")
+        actions["auto_scale"] = menu.addAction("自动范围")
+        actions["data_tip"] = menu.addAction("数据标注")
         actions["data_tip"].setCheckable(True)
         actions["data_tip"].setChecked(self._data_tip_enabled)
         actions["data_tip"].setEnabled(scene_pos is not None and bool(self._curves.get(key)))
-        actions["clear_data_tips"] = menu.addAction("Clear Data Tips")
+        actions["clear_data_tips"] = menu.addAction("清除数据标注")
         actions["clear_data_tips"].setEnabled(bool(self._data_tip_items[key]))
         return menu, actions
 
@@ -823,16 +858,18 @@ def _data_tip_anchor_for_label_drag(
 class CompactLegendSample(pg.graphicsItems.LegendItem.ItemSample):
     def __init__(self, item):
         super().__init__(item)
-        self.setFixedWidth(8)
-        self.setFixedHeight(10)
+        self.setFixedWidth(18)
+        self.setFixedHeight(14)
 
     def boundingRect(self):
-        return QtCore.QRectF(0, 0, 8, 10)
+        return QtCore.QRectF(0, 0, 18, 14)
 
     def paint(self, p, *args):
         opts = self.item.opts
-        p.setPen(pg.mkPen(opts["pen"]))
-        p.drawLine(0, 5, 8, 5)
+        pen = pg.mkPen(opts["pen"])
+        pen.setWidthF(max(2.0, pen.widthF()))
+        p.setPen(pen)
+        p.drawLine(0, 7, 18, 7)
 
 
 class VnaViewBox(pg.ViewBox):
@@ -841,8 +878,8 @@ class VnaViewBox(pg.ViewBox):
         self._on_left_drag = on_left_drag
         self._on_right_drag_zoom = on_right_drag_zoom
         self._zoom_box = QtWidgets.QGraphicsRectItem()
-        self._zoom_box.setPen(pg.mkPen("#5eead4", width=1.6, style=QtCore.Qt.DashLine))
-        self._zoom_box.setBrush(pg.mkBrush(94, 234, 212, 48))
+        self._zoom_box.setPen(pg.mkPen("#2a9aab", width=1.6, style=QtCore.Qt.DashLine))
+        self._zoom_box.setBrush(pg.mkBrush(42, 154, 171, 48))
         self._zoom_box.setZValue(CURSOR_Z + 5)
         self._zoom_box.setVisible(False)
         self.addItem(self._zoom_box, ignoreBounds=True)
@@ -1228,6 +1265,8 @@ class ContinuousRecordingWorker(QtCore.QObject):
                 channel_names=channel_names,
                 software_version=PYTHON_VNA_VERSION,
                 segment_seconds=self._segment_seconds,
+                storage_format="binary",
+                compress_closed_segments=False,
             )
             self._writer.start()
             self._controller.start()
@@ -1475,80 +1514,9 @@ class MainWindow(QtWidgets.QMainWindow):
     TRIGGER_LEVEL_PERCENT_OPTIONS = [
         f"{int(round(value))}%" for value in TRIGGER_LEVEL_PERCENT_VALUES
     ]
-    TRACE_COLORS = [
-        "#56c7ff",
-        "#ffd166",
-        "#45e6a8",
-        "#ff6b8a",
-        "#b992ff",
-        "#ff9f43",
-        "#9be15d",
-        "#f7a8ff",
-    ]
-    LIGHT_TRACE_COLORS = [
-        "#1f77b4",
-        "#d95f02",
-        "#1b8a5a",
-        "#c2185b",
-        "#6d3fc5",
-        "#007c89",
-        "#7a5195",
-        "#4b5563",
-    ]
-    UI_THEMES = {
-        "dark": {
-            "window_bg": "#121822",
-            "panel_bg": "#172231",
-            "panel_bg_alt": "#1b2533",
-            "cell_bg": "#203247",
-            "plot_bg": "#000000",
-            "plot_workspace_bg": "#121822",
-            "menu_bg": "#0b111a",
-            "text": "#eef6ff",
-            "muted_text": "#a9bed4",
-            "label_text": "#d9f7ff",
-            "axis": "#ffffff",
-            "accent": "#2563eb",
-            "accent_hover": "#1d4ed8",
-            "accent_alt": "#5eead4",
-            "border": "#334155",
-            "control_border": "#3a4a60",
-            "table_bg": "#0f141c",
-            "disabled_bg": "#1b2531",
-            "disabled_text": "#64748b",
-            "danger": "#dc2626",
-            "danger_hover": "#b91c1c",
-            "legend_bg": (12, 18, 28, 215),
-            "legend_text": "#f6f1df",
-            "grid_alpha": 0.35,
-        },
-        "light": {
-            "window_bg": "#f4f7fb",
-            "panel_bg": "#ffffff",
-            "panel_bg_alt": "#edf3fa",
-            "cell_bg": "#e5eef8",
-            "plot_bg": "#ffffff",
-            "plot_workspace_bg": "#eaf1f8",
-            "menu_bg": "#f7fbff",
-            "text": "#102033",
-            "muted_text": "#395268",
-            "label_text": "#17324d",
-            "axis": "#172033",
-            "accent": "#1d72c9",
-            "accent_hover": "#145da8",
-            "accent_alt": "#0f9f8f",
-            "border": "#b8c6d8",
-            "control_border": "#95a9bf",
-            "table_bg": "#ffffff",
-            "disabled_bg": "#dce5ef",
-            "disabled_text": "#7b8794",
-            "danger": "#d13f37",
-            "danger_hover": "#b52f29",
-            "legend_bg": (255, 255, 255, 230),
-            "legend_text": "#102033",
-            "grid_alpha": 0.22,
-        },
-    }
+    TRACE_COLORS = list(SHARED_DARK_TRACE_COLORS)
+    LIGHT_TRACE_COLORS = list(SHARED_LIGHT_TRACE_COLORS)
+    UI_THEMES = {name: dict(tokens) for name, tokens in SHARED_UI_THEMES.items()}
 
     CHANNEL_FULL_SCALE_OPTIONS = [
         10.0,
@@ -1635,6 +1603,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.controller = controller
         self.session = session or default_session_config()
         self._close_confirmed = False
+        self._update_exit_requested = False
         self._tray_icon: QtWidgets.QSystemTrayIcon | None = None
         self._last_plot_cache: dict[str, dict[str, tuple[np.ndarray, np.ndarray]]] = {}
         self._stored_overlays: dict[str, deque[dict[str, tuple[np.ndarray, np.ndarray]]]] = {
@@ -1778,15 +1747,23 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage("Theme preference could not be saved")
 
     def _theme(self) -> dict[str, object]:
-        return self.UI_THEMES.get(self._theme_name, self.UI_THEMES["dark"])
+        mode = self._theme_name if self._theme_name in self.UI_THEMES else "dark"
+        return resolve_theme(self.UI_THEMES.get(mode, self.UI_THEMES["dark"]), mode=mode)
 
     @classmethod
     def trace_colors_for_theme(cls, theme: dict[str, object]) -> list[str]:
-        plot_bg = str(theme.get("plot_bg", "#000000")).lower()
-        return cls.LIGHT_TRACE_COLORS if plot_bg in {"#ffffff", "white"} else cls.TRACE_COLORS
+        return shared_trace_colors_for_theme(theme)
 
     def _trace_colors(self) -> list[str]:
         return self.trace_colors_for_theme(self._theme())
+
+    def _color_for_trace(self, name: object, colors: list[str] | None = None) -> str:
+        palette = list(colors) if colors is not None else self._trace_colors()
+        return color_for_trace_name(name, palette)
+
+    def _color_map_for_traces(self, names: list[object] | tuple[object, ...] | set[object], colors: list[str] | None = None) -> dict[str, str]:
+        palette = list(colors) if colors is not None else self._trace_colors()
+        return color_map_for_trace_names(names, palette)
 
     @staticmethod
     def _theme_stylesheet(template: str, theme: dict[str, object]) -> str:
@@ -1814,156 +1791,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _apply_legacy_theme(self) -> None:
         theme = self._theme()
-        self.setStyleSheet(
-            self._theme_stylesheet(
-            """
-            QMainWindow, QWidget {
-                background: @window_bg@;
-                color: @text@;
-                font-family: "Microsoft Sans Serif", "Noto Sans SC", "Segoe UI", Arial;
-            }
-            QMenuBar {
-                background: @menu_bg@;
-                color: @text@;
-                border-bottom: 1px solid @border@;
-                padding: 2px;
-            }
-            QMenuBar::item:selected {
-                background: @accent@;
-                color: #ffffff;
-                border-radius: 5px;
-            }
-            QMenu {
-                background: @menu_bg@;
-                color: @text@;
-                border: 1px solid @border@;
-                border-radius: 7px;
-                padding: 4px;
-            }
-            QMenu::item:selected {
-                background: @accent@;
-                color: #ffffff;
-                border-radius: 5px;
-            }
-            QTabWidget::pane {
-                border: 1px solid @border@;
-                background: @window_bg@;
-                border-radius: 8px;
-            }
-            QTabBar::tab {
-                background: @panel_bg_alt@;
-                color: @label_text@;
-                font-weight: bold;
-                padding: 6px 12px;
-                border: 1px solid @border@;
-                border-top-left-radius: 7px;
-                border-top-right-radius: 7px;
-            }
-            QTabBar::tab:selected {
-                background: @accent@;
-                color: #ffffff;
-            }
-            QGroupBox {
-                background: @panel_bg@;
-                color: @text@;
-                font-weight: bold;
-                border: 1px solid @border@;
-                border-radius: 10px;
-                margin-top: 18px;
-                padding: 10px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 3px 10px;
-                background: @accent@;
-                color: #ffffff;
-                font-weight: bold;
-                border-radius: 6px;
-            }
-            QLabel, QCheckBox {
-                color: @muted_text@;
-                font-weight: bold;
-            }
-            QCheckBox:enabled {
-                color: @text@;
-            }
-            QLineEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {
-                background: @panel_bg_alt@;
-                color: @text@;
-                selection-background-color: @accent@;
-                selection-color: #ffffff;
-                border: 1px solid @control_border@;
-                border-radius: 7px;
-                padding: 3px 6px;
-                min-height: 22px;
-            }
-            QLineEdit:focus, QPlainTextEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {
-                border: 1px solid @accent_alt@;
-            }
-            QPushButton, QToolButton {
-                background: @accent@;
-                color: #ffffff;
-                font-weight: bold;
-                border: 1px solid @accent_hover@;
-                border-radius: 8px;
-                padding: 3px 9px;
-            }
-            QPushButton:hover, QToolButton:hover {
-                background: @accent_hover@;
-                border-color: @accent@;
-            }
-            QPushButton:pressed, QToolButton:pressed {
-                background: @accent_hover@;
-            }
-            QPushButton:checked, QToolButton:checked {
-                background: @accent_alt@;
-                border-color: @accent_alt@;
-            }
-            QPushButton#dangerButton:enabled {
-                background: @danger@;
-                border-color: @danger_hover@;
-            }
-            QPushButton#dangerButton:hover:enabled {
-                background: @danger_hover@;
-            }
-            QPushButton:disabled, QToolButton:disabled {
-                background: @disabled_bg@;
-                color: @disabled_text@;
-                border-color: @border@;
-            }
-            QTableWidget {
-                background: @table_bg@;
-                color: @text@;
-                gridline-color: @border@;
-                border: 1px solid @border@;
-                border-radius: 8px;
-            }
-            QHeaderView::section {
-                background: @cell_bg@;
-                color: @label_text@;
-                font-weight: bold;
-                padding: 4px;
-                border: 1px solid @border@;
-            }
-            QTableWidget::item {
-                background: @panel_bg@;
-                color: @text@;
-                padding: 2px;
-            }
-            QScrollArea {
-                background: @window_bg@;
-                border: none;
-            }
-            QStatusBar {
-                background: @menu_bg@;
-                color: @label_text@;
-                border-top: 1px solid @border@;
-            }
-            """,
-            theme,
-            )
-        )
+        self.setStyleSheet(build_acquisition_stylesheet(theme))
         self._apply_theme_to_child_widgets()
 
     def _apply_theme_to_child_widgets(self) -> None:
@@ -2013,33 +1841,36 @@ class MainWindow(QtWidgets.QMainWindow):
     @staticmethod
     def _toolbar_stylesheet(theme: dict[str, object]) -> str:
         return (
-            f"#topToolbar {{ background: {theme['window_bg']}; }} "
-            f"#topToolbar QLabel {{ color: {theme['label_text']}; font-weight: bold; }} "
-            "#topToolbar QPushButton, #topToolbar QToolButton { border-radius: 7px; min-height: 22px; font-size: 8pt; }"
+            f"#topToolbar {{ background: {theme['panel_bg']}; border: 1px solid {theme['border']}; "
+            f"border-radius: 7px; }} "
+            f"#topToolbar QLabel {{ color: {theme['label_text']}; font-weight: 600; }} "
+            "#topToolbar QPushButton, #topToolbar QToolButton { border-radius: 5px; min-height: 22px; "
+            "font-size: 8pt; padding: 2px 8px; } "
+            f"#topToolbar QFrame#toolbarDivider {{ background: {theme['border']}; max-width: 1px; min-width: 1px; margin: 4px 3px; }}"
         )
 
     @staticmethod
     def _trace_list_stylesheet(theme: dict[str, object]) -> str:
         return (
-            f"QListWidget {{ background: {theme['table_bg']}; color: {theme['label_text']}; font-weight: bold; "
-            f"border: 1px solid {theme['border']}; border-radius: 7px; }} "
-            "QListWidget::item { min-height: 23px; padding: 0px 1px; } "
+            f"QListWidget {{ background: {theme['table_bg']}; color: {theme['label_text']}; font-weight: 600; "
+            f"border: 1px solid {theme['border']}; border-radius: 5px; }} "
+            "QListWidget::item { min-height: 20px; padding: 1px 2px; } "
             f"QListWidget::item:selected {{ background: {theme['cell_bg']}; color: {theme['text']}; }} "
-            "QListWidget::indicator { width: 16px; height: 16px; } "
-            f"QListWidget::indicator:unchecked {{ border: 2px solid {theme['control_border']}; background: {theme['menu_bg']}; border-radius: 3px; }} "
-            f"QListWidget::indicator:checked {{ border: 2px solid {theme['axis']}; background: {theme['accent_alt']}; border-radius: 3px; }}"
+            "QListWidget::indicator { width: 14px; height: 14px; } "
+            f"QListWidget::indicator:unchecked {{ border: 1px solid {theme['control_border']}; background: {theme['menu_bg']}; border-radius: 3px; }} "
+            f"QListWidget::indicator:checked {{ border: 1px solid {theme['axis']}; background: {theme['accent_alt']}; border-radius: 3px; }}"
         )
 
     @staticmethod
     def _axis_control_panel_stylesheet(theme: dict[str, object]) -> str:
         return (
             f"QWidget {{ background: {theme['window_bg']}; }} "
-            f"QComboBox {{ background: {theme['panel_bg_alt']}; color: {theme['text']}; padding: 2px 18px 2px 5px; "
-            f"border: 1px solid {theme['control_border']}; border-radius: 6px; font-size: 8pt; }} "
-            f"QComboBox:focus {{ border: 1px solid {theme['accent_alt']}; }} "
-            f"QLabel#vnaControlLabel {{ background: {theme['cell_bg']}; color: {theme['label_text']}; padding: 3px; font-weight: bold; border-radius: 5px; font-size: 8pt; }} "
-            f"QLabel#vnaPanelTitle {{ color: {theme['accent']}; font-weight: bold; font-size: 8pt; }} "
-            f"QLabel#vnaMiniLabel {{ color: {theme['text']}; background: {theme['panel_bg_alt']}; padding: 3px; font-weight: bold; border-radius: 5px; font-size: 8pt; }}"
+            f"QComboBox {{ background: {theme.get('control_bg', theme['panel_bg_alt'])}; color: {theme['text']}; padding: 2px 16px 2px 4px; "
+            f"border: 1px solid {theme['control_border']}; border-radius: 4px; font-size: 8pt; min-height: 20px; }} "
+            f"QComboBox:focus {{ border: 1px solid {theme['accent']}; }} "
+            f"QLabel#vnaControlLabel {{ background: {theme['cell_bg']}; color: {theme['label_text']}; padding: 2px 4px; font-weight: 600; border-radius: 4px; font-size: 8pt; }} "
+            f"QLabel#vnaPanelTitle {{ color: {theme['accent']}; font-weight: 700; font-size: 8.5pt; }} "
+            f"QLabel#vnaMiniLabel {{ color: {theme['text']}; background: {theme['panel_bg_alt']}; padding: 2px 4px; font-weight: 600; border-radius: 4px; font-size: 8pt; }}"
         )
 
     @staticmethod
@@ -2049,7 +1880,7 @@ class MainWindow(QtWidgets.QMainWindow):
         legend = plot.plotItem.legend
         if legend is not None:
             legend.setBrush(pg.mkBrush(*theme["legend_bg"]))
-            legend.setPen(pg.mkPen(str(theme["legend_text"]), width=0.8))
+            legend.setPen(pg.mkPen(str(theme["legend_text"]), width=1.0))
             legend.opts["labelTextColor"] = str(theme["legend_text"])
             for _sample, label in legend.items:
                 label.setText(label.text, color=str(theme["legend_text"]))
@@ -2105,8 +1936,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.left_panel.addWidget(self.controls_panel)
         self.left_panel.addWidget(self.condition_panel)
         self.left_panel.setCurrentWidget(self.controls_panel)
-        self.left_panel.setMinimumWidth(360)
-        self.left_panel.setMaximumWidth(430)
+        self.left_panel.setMinimumWidth(380)
+        self.left_panel.setMaximumWidth(460)
         self.main_splitter.addWidget(self.left_panel)
 
         right_panel = QtWidgets.QWidget()
@@ -2114,8 +1945,8 @@ class MainWindow(QtWidgets.QMainWindow):
         right_panel.setObjectName("plotWorkspace")
         right_panel.setStyleSheet(self._plot_workspace_stylesheet(self._theme()))
         right_layout = QtWidgets.QVBoxLayout(right_panel)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(6)
+        right_layout.setContentsMargins(8, 8, 8, 8)
+        right_layout.setSpacing(8)
         right_layout.addWidget(self._build_toolbar())
         self._build_top_control_strip()
 
@@ -2149,7 +1980,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._attach_axis_history(self.bottom_plot, "bottom")
         self._attach_dynamic_y_scaling(self.top_plot, "top")
         self._attach_dynamic_y_scaling(self.bottom_plot, "bottom")
-        self.statusBar().showMessage("Ready")
+        self.statusBar().showMessage("就绪")
 
     def _create_vna_plot(self, title: str, key: str):
         view_box = VnaViewBox(
@@ -2173,12 +2004,12 @@ class MainWindow(QtWidgets.QMainWindow):
         legend = plot.addLegend(
             offset=(3, 2),
             brush=pg.mkBrush(*theme["legend_bg"]),
-            pen=pg.mkPen(str(theme["legend_text"]), width=0.8),
+            pen=pg.mkPen(str(theme["legend_text"]), width=1.0),
             labelTextColor=str(theme["legend_text"]),
-            labelTextSize="6pt",
-            colCount=8,
-            horSpacing=0,
-            verSpacing=-6,
+            labelTextSize="8pt",
+            colCount=4,
+            horSpacing=4,
+            verSpacing=-2,
             sampleType=CompactLegendSample,
         )
         legend.setZValue(LEGEND_Z)
@@ -2241,11 +2072,11 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.lower_axis_panel = panel
         panel.setObjectName(f"{title.lower()}AxisPanel")
-        panel.setFixedWidth(176)
+        panel.setFixedWidth(196)
         panel.setStyleSheet(self._axis_control_panel_stylesheet(self._theme()))
         layout = QtWidgets.QVBoxLayout(panel)
-        layout.setContentsMargins(3, 3, 3, 3)
-        layout.setSpacing(3)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
 
         title_label = QtWidgets.QLabel(title)
         title_label.setObjectName("vnaPanelTitle")
@@ -2272,7 +2103,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.setSpacing(2)
         label = QtWidgets.QLabel(label_text)
         label.setObjectName("vnaControlLabel")
-        label.setMinimumWidth(26 if len(label_text) <= 2 else 46)
+        label.setMinimumWidth(30 if len(label_text) <= 2 else 52)
         self._style_vna_control_combo(combo)
         layout.addWidget(label)
         layout.addWidget(combo, 1)
@@ -2323,6 +2154,8 @@ class MainWindow(QtWidgets.QMainWindow):
         file_menu.addAction("打开 VNA", self._import_legacy_vna)
         file_menu.addAction("保存 VNA", self._save_session)
         file_menu.addAction("保存为默认", self._save_to_default_vna)
+        file_menu.addSeparator()
+        file_menu.addAction("检查更新", self._check_for_updates)
         file_menu.addSeparator()
         file_menu.addAction("退出", self.close)
 
@@ -2431,6 +2264,59 @@ class MainWindow(QtWidgets.QMainWindow):
         self._analysis_viewer.show()
         self.statusBar().showMessage("Analysis Viewer opened")
 
+    def _check_for_updates(self) -> None:
+        try:
+            settings = load_update_settings()
+            if settings is None:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "检查更新",
+                    "未配置更新地址。请在程序目录创建 update_config.json，并填写 NAS 上的 manifest.json 地址。",
+                )
+                return
+            manifest = fetch_manifest(settings.manifest_url)
+            decision = select_update(
+                manifest,
+                current_version=PYTHON_VNA_VERSION,
+                manifest_url=settings.manifest_url,
+                allow_full=True,
+            )
+            if not decision.available or decision.package is None:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "检查更新",
+                    f"当前版本：{decision.current_version}\n最新版本：{decision.latest_version}\n{decision.message}",
+                )
+                return
+            reply = QtWidgets.QMessageBox.question(
+                self,
+                "发现更新",
+                (
+                    f"当前版本：{decision.current_version}\n"
+                    f"最新版本：{decision.latest_version}\n\n"
+                    "是否关闭当前程序并开始更新？"
+                ),
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No,
+            )
+            if reply != QtWidgets.QMessageBox.Yes:
+                return
+            launch_updater(
+                manifest_url=settings.manifest_url,
+                current_version=PYTHON_VNA_VERSION,
+                restart_executable="PythonVNATest.exe",
+            )
+            self._request_update_exit()
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "检查更新失败", str(exc))
+
+    def _request_update_exit(self) -> None:
+        self._update_exit_requested = True
+        self._close_confirmed = True
+        if self._tray_icon is not None:
+            self._tray_icon.hide()
+        QtCore.QTimer.singleShot(0, self.close)
+
     def _open_mc_setup_dialog(self) -> None:
         dialog = MCSetupDialog(self)
         dialog.exec()
@@ -2510,18 +2396,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 background: @cell_bg@;
                 color: @label_text@;
                 font-size: 8pt;
-                font-weight: bold;
+                font-weight: 600;
                 padding: 4px 6px;
-                border-radius: 6px;
+                border-radius: 4px;
             }
             QDoubleSpinBox {
-                background: @panel_bg_alt@;
+                background: @control_bg@;
                 color: @text@;
                 font-size: 8pt;
-                font-weight: bold;
+                font-weight: normal;
                 min-height: 22px;
                 border: 1px solid @control_border@;
-                border-radius: 7px;
+                border-radius: 4px;
                 padding: 1px 20px 1px 6px;
             }
             QDoubleSpinBox::up-button {
@@ -2560,17 +2446,24 @@ class MainWindow(QtWidgets.QMainWindow):
                 border-top: 6px solid @label_text@;
             }
             QPushButton {
-                background: @accent@;
-                color: #ffffff;
+                background: @control_bg@;
+                color: @text@;
                 font-size: 8pt;
-                font-weight: bold;
+                font-weight: 600;
                 min-width: 70px;
                 min-height: 20px;
-                border: 1px solid @accent_hover@;
-                border-radius: 8px;
+                border: 1px solid @control_border@;
+                border-radius: 4px;
             }
             QPushButton:hover {
-                background: @accent_hover@;
+                background: @cell_bg@;
+                border-color: @accent@;
+                color: @accent@;
+            }
+            QPushButton[role="primary"] {
+                background: @accent@;
+                color: @on_accent@;
+                border-color: @accent@;
             }
             """,
             theme,
@@ -2904,12 +2797,12 @@ class MainWindow(QtWidgets.QMainWindow):
         menu = QtWidgets.QMenu(plot)
         menu.setToolTipsVisible(True)
         actions: dict[str, QtGui.QAction] = {}
-        actions["restore_zoom"] = menu.addAction("Back One Zoom")
-        actions["restore_zoom"].setToolTip("Restore the previous zoom level; falls back to auto scale.")
-        actions["auto_scale"] = menu.addAction("Auto Scale")
-        actions["auto_scale"].setToolTip("Reset this plot to the current data X/Y range.")
+        actions["restore_zoom"] = menu.addAction("返回上一缩放")
+        actions["restore_zoom"].setToolTip("恢复上一次缩放范围；没有历史范围时自动适应。")
+        actions["auto_scale"] = menu.addAction("自动范围")
+        actions["auto_scale"].setToolTip("将当前图窗恢复到当前数据的 X/Y 范围。")
         menu.addSeparator()
-        actions["cursor_readout"] = menu.addAction("Cursor Readout")
+        actions["cursor_readout"] = menu.addAction("游标读数")
         actions["cursor_readout"].setCheckable(True)
         actions["cursor_readout"].setChecked(self._cursor_enabled)
         return menu, actions
@@ -2948,7 +2841,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"Data Tip mode {state}")
 
     def _create_marker_lines(self, plot, key: str) -> None:
-        pens = [pg.mkPen("#ffb000", width=1.2), pg.mkPen("#00d1b2", width=1.2)]
+        theme = self._theme()
+        colors = [
+            str(theme.get("marker_a", "#e0a04a")),
+            str(theme.get("marker_b", "#2a9aab")),
+        ]
+        pens = [pg.mkPen(color, width=1.2) for color in colors]
         for index, pen in enumerate(pens):
             line = pg.InfiniteLine(angle=90, movable=True, pen=pen)
             line.setZValue(MARKER_Z)
@@ -2962,7 +2860,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self._marker_lines[key].append(line)
 
     def _create_marker_points(self, plot, key: str) -> None:
-        brushes = [pg.mkBrush("#ffb000"), pg.mkBrush("#00d1b2")]
+        theme = self._theme()
+        colors = [
+            str(theme.get("marker_a", "#e0a04a")),
+            str(theme.get("marker_b", "#2a9aab")),
+        ]
+        brushes = [pg.mkBrush(color) for color in colors]
         for index, brush in enumerate(brushes):
             point = pg.ScatterPlotItem(
                 size=12,
@@ -2977,7 +2880,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._marker_points[key].append(point)
             text = pg.TextItem(
                 text="",
-                color=("#ffb000" if index == 0 else "#00d1b2"),
+                color=colors[index],
                 anchor=(0, 1),
             )
             text.setZValue(MARKER_Z + 2)
@@ -3205,8 +3108,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _show_data_tip_menu(self, key: str, data_tip: dict[str, object], screen_pos) -> None:
         self._suppress_plot_context_menu_once()
         menu = QtWidgets.QMenu(self)
-        delete_this = menu.addAction("Delete This Data Tip")
-        delete_all = menu.addAction("Delete All Data Tips")
+        delete_this = menu.addAction("删除当前标注")
+        delete_all = menu.addAction("删除全部标注")
         action = menu.exec(QtCore.QPoint(int(screen_pos.x()), int(screen_pos.y())))
         if action is delete_this:
             self._delete_data_tip(key, data_tip)
@@ -3579,8 +3482,16 @@ class MainWindow(QtWidgets.QMainWindow):
         container.setObjectName("topToolbar")
         container.setStyleSheet(self._toolbar_stylesheet(self._theme()))
         layout = QtWidgets.QHBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(6)
+
+        def _divider() -> QtWidgets.QFrame:
+            line = QtWidgets.QFrame()
+            line.setObjectName("toolbarDivider")
+            line.setFrameShape(QtWidgets.QFrame.NoFrame)
+            line.setFixedWidth(1)
+            return line
+
         self.backend_combo = QtWidgets.QComboBox()
         self.backend_combo.addItems(["simulated", "ni"])
         self.backend_combo.currentTextChanged.connect(self._backend_changed)
@@ -3598,9 +3509,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.start_button.setToolTip("瞬时采集")
         self.avg_button = QtWidgets.QPushButton("平均")
         self.record_button = QtWidgets.QPushButton("连续记录")
-        self.record_button.setToolTip("连续记录时域数据到 DAT 文件")
+        self.record_button.setToolTip("连续记录时域数据到高速二进制文件")
         self.stop_button = QtWidgets.QPushButton("停止")
         self.stop_button.setObjectName("dangerButton")
+        set_button_role(self.stop_button, "danger")
         self.stop_button.setEnabled(False)
         self.export_button = QtWidgets.QPushButton("导出")
         self.export_button.setToolTip("导出当前测量")
@@ -3630,20 +3542,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.import_legacy_button.clicked.connect(self._import_legacy_vna)
         self.open_vna_button.clicked.connect(self._import_legacy_vna)
 
-        for widget in (
-            self.controls_button,
-            self.condition_button,
-            self.open_vna_button,
-            self.save_session_button,
-            self.toolbar_data_tip_button,
-            self.start_button,
-            self.avg_button,
-            self.record_button,
-            self.stop_button,
-        ):
-            if isinstance(widget, (QtWidgets.QPushButton, QtWidgets.QToolButton)):
-                self._fit_button_text(widget)
-            layout.addWidget(widget)
+        set_button_role(self.start_button, "primary")
+        set_button_role(self.avg_button, "primary")
+        set_button_role(self.record_button, "secondary")
+        set_button_role(self.open_vna_button, "secondary")
+        set_button_role(self.save_session_button, "secondary")
+        set_button_role(self.toolbar_data_tip_button, "secondary")
+        set_button_role(self.controls_button, "secondary")
+        set_button_role(self.condition_button, "secondary")
+
+        groups = (
+            (self.controls_button, self.condition_button),
+            (self.open_vna_button, self.save_session_button, self.toolbar_data_tip_button),
+            (self.start_button, self.avg_button, self.record_button, self.stop_button),
+        )
+        for group_index, group in enumerate(groups):
+            if group_index:
+                layout.addWidget(_divider())
+            for widget in group:
+                if isinstance(widget, (QtWidgets.QPushButton, QtWidgets.QToolButton)):
+                    self._fit_button_text(widget)
+                layout.addWidget(widget)
         layout.addStretch(1)
         scroll_area = QtWidgets.QScrollArea()
         scroll_area.setWidget(container)
@@ -3661,14 +3580,15 @@ class MainWindow(QtWidgets.QMainWindow):
         if not hasattr(self, "toolbar_scroll_area") or not hasattr(self, "toolbar_container"):
             return
         self.toolbar_container.adjustSize()
-        height = max(34, self.toolbar_container.sizeHint().height() + 10)
+        height = max(36, self.toolbar_container.sizeHint().height() + 6)
         self.toolbar_scroll_area.setFixedHeight(height)
 
     @staticmethod
     def _fit_button_text(button) -> None:
         metrics = button.fontMetrics()
-        width = metrics.horizontalAdvance(button.text()) + 36
-        button.setMinimumWidth(max(54, width))
+        # Extra room for Chinese glyphs + QSS horizontal padding.
+        width = metrics.horizontalAdvance(button.text()) + 22
+        button.setMinimumWidth(max(48, width))
         button.setSizePolicy(QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed)
 
     def _build_display_strip(self):
@@ -4282,8 +4202,8 @@ class MainWindow(QtWidgets.QMainWindow):
         panel.setObjectName("legacyLeftPanel")
         panel.setStyleSheet(self._legacy_left_panel_stylesheet())
         layout = QtWidgets.QGridLayout(panel)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(2)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
         layout.addWidget(self._build_legacy_channel_panel(), 0, 0)
         layout.addWidget(self._build_legacy_frequency_panel(), 0, 1)
         layout.addWidget(self._build_legacy_processing_panel(), 1, 0)
@@ -4304,55 +4224,70 @@ class MainWindow(QtWidgets.QMainWindow):
             QFrame#legacyPanel {
                 background: @panel_bg@;
                 border: 1px solid @border@;
-                border-radius: 12px;
+                border-radius: 10px;
             }
             QLabel#legacyPanelTitle {
-                background: @accent@;
-                color: #ffffff;
-                font-weight: bold;
-                font-size: 10pt;
-                padding: 4px 6px;
-                border-radius: 7px;
+                background: transparent;
+                color: @accent@;
+                font-weight: 700;
+                font-size: 9pt;
+                padding: 4px 6px 4px 8px;
+                border-left: 3px solid @accent@;
+                border-radius: 0;
+            }
+            QLabel#legacyGroupTitle {
+                background: transparent;
+                color: @accent@;
+                font-weight: 700;
+                font-size: 9pt;
+                padding: 2px 0;
+            }
+            QLabel#legacyMiniLabel {
+                background: transparent;
+                color: @muted_text@;
+                font-weight: normal;
+                font-size: 8pt;
+                padding: 0;
             }
             QLabel#legacyText {
                 background: @cell_bg@;
                 color: @label_text@;
-                font-weight: bold;
+                font-weight: 600;
                 font-size: 8pt;
                 padding: 4px;
-                border-radius: 6px;
+                border-radius: 4px;
             }
             QLabel#legacyCell {
                 background: @panel_bg_alt@;
                 color: @text@;
-                font-weight: bold;
+                font-weight: 600;
                 font-size: 8pt;
                 padding: 4px;
                 border: 1px solid @control_border@;
-                border-radius: 6px;
+                border-radius: 4px;
             }
             QLabel#legacyGrayCell {
                 background: @cell_bg@;
                 color: @label_text@;
-                font-weight: bold;
+                font-weight: 600;
                 font-size: 8pt;
                 padding: 4px;
-                border-radius: 6px;
+                border-radius: 4px;
             }
             QComboBox, QLineEdit, QSpinBox, QDoubleSpinBox {
-                background: @panel_bg_alt@;
+                background: @control_bg@;
                 color: @text@;
-                font-weight: bold;
+                font-weight: normal;
                 font-size: 8pt;
                 min-height: 22px;
                 border: 1px solid @control_border@;
-                border-radius: 6px;
+                border-radius: 4px;
                 padding: 1px 16px 1px 5px;
                 selection-background-color: @accent@;
-                selection-color: #ffffff;
+                selection-color: @on_accent@;
             }
             QComboBox:focus, QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus {
-                border: 1px solid @accent_alt@;
+                border: 1px solid @accent@;
             }
             QSpinBox#legacyNoArrowSpinBox, QDoubleSpinBox#legacyNoArrowSpinBox {
                 padding: 1px 5px;
@@ -4365,7 +4300,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 border-left: 1px solid @border@;
                 border-bottom: 1px solid @border@;
                 background: @cell_bg@;
-                border-top-right-radius: 6px;
+                border-top-right-radius: 4px;
             }
             QSpinBox::down-button, QDoubleSpinBox::down-button {
                 subcontrol-origin: border;
@@ -4374,7 +4309,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 height: 12px;
                 border-left: 1px solid @border@;
                 background: @cell_bg@;
-                border-bottom-right-radius: 6px;
+                border-bottom-right-radius: 4px;
             }
             QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
                 image: none;
@@ -4393,21 +4328,32 @@ class MainWindow(QtWidgets.QMainWindow):
                 border-top: 6px solid @label_text@;
             }
             QPushButton {
-                background: @accent@;
-                color: #ffffff;
-                font-weight: bold;
+                background: @control_bg@;
+                color: @text@;
+                font-weight: 600;
                 font-size: 8pt;
                 min-height: 22px;
-                border: 1px solid @accent_hover@;
-                border-radius: 6px;
+                border: 1px solid @control_border@;
+                border-radius: 4px;
                 padding: 1px 5px;
             }
             QPushButton:hover {
-                background: @accent_hover@;
+                background: @cell_bg@;
                 border-color: @accent@;
+                color: @accent@;
             }
             QPushButton:pressed {
+                background: @border@;
+            }
+            QPushButton[role="primary"] {
+                background: @accent@;
+                color: @on_accent@;
+                border-color: @accent@;
+            }
+            QPushButton[role="primary"]:hover {
                 background: @accent_hover@;
+                border-color: @accent_hover@;
+                color: @on_accent@;
             }
             QPushButton:disabled {
                 background: @disabled_bg@;
@@ -4417,12 +4363,12 @@ class MainWindow(QtWidgets.QMainWindow):
             QCheckBox {
                 background: @cell_bg@;
                 color: @text@;
-                font-weight: bold;
+                font-weight: normal;
                 font-size: 8pt;
                 min-height: 22px;
                 padding: 1px 5px;
                 border: 1px solid @control_border@;
-                border-radius: 6px;
+                border-radius: 4px;
             }
             QCheckBox::indicator {
                 width: 13px;
@@ -4606,6 +4552,10 @@ class MainWindow(QtWidgets.QMainWindow):
         source_row.addWidget(self.trigger_source_combo, 1)
         source_row.addWidget(self.trigger_level_percent_combo, 1)
         layout.addLayout(source_row)
+        abs_row = QtWidgets.QHBoxLayout()
+        abs_row.addWidget(self._legacy_label("Abs Level (V)", "legacyText"))
+        abs_row.addWidget(self.trigger_level_edit, 1)
+        layout.addLayout(abs_row)
 
         abs_label = self._legacy_label("绝对阈值", "legacyText")
         abs_label.setAlignment(QtCore.Qt.AlignCenter)
@@ -5141,13 +5091,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self._rebuild_channel_list()
         self.channel_list.setCurrentRow(row)
         self._reload_channel_selectors(include_new_responses=not full_scale_only)
-        self._read_session_from_widgets()
         full_scale_changed_aliases: set[str] = set()
+        trigger_full_scale_changed = False
+        trigger_channel_index = self._trigger_channel_index()
         for target_row in target_rows:
             new_full_scale = self._channel_table_full_scale(target_row)
             if not np.isclose(old_full_scales[target_row], new_full_scale, rtol=1e-12, atol=1e-12):
                 full_scale_changed_aliases.update(old_aliases[target_row])
                 full_scale_changed_aliases.update(self._channel_aliases_for_table_row(target_row))
+                if target_row == trigger_channel_index:
+                    trigger_full_scale_changed = True
+        if trigger_full_scale_changed:
+            self._trigger_level_percent_changed(self.trigger_level_percent_combo.currentText())
+        self._read_session_from_widgets()
         self._refresh_full_scale_axis_ranges_for_channels(
             list(full_scale_changed_aliases)
             if full_scale_changed_aliases
@@ -5273,7 +5229,12 @@ class MainWindow(QtWidgets.QMainWindow):
         percent = abs(self._parse_trigger_percent_text(text))
         channel_index = self._trigger_channel_index()
         full_scale = self._channel_full_scale_for_trigger(channel_index)
+        self.trigger_level_edit.blockSignals(True)
         self.trigger_level_edit.setValue(full_scale * percent / 100.0)
+        self.trigger_level_edit.blockSignals(False)
+
+    def _trigger_level_abs_changed(self, value: float) -> None:
+        self._set_trigger_percent_from_level(float(value))
 
     def _trigger_channel_index(self) -> int:
         text = self.trigger_source_combo.currentText()
@@ -5415,6 +5376,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.trigger_level_edit = QtWidgets.QDoubleSpinBox()
         self.trigger_level_edit.setRange(0.0, 10.0)
         self.trigger_level_edit.setDecimals(3)
+        self.trigger_level_edit.setSingleStep(0.01)
+        self.trigger_level_edit.setSuffix(" V")
+        self.trigger_level_edit.setMinimumWidth(78)
+        self.trigger_level_edit.setToolTip(
+            "Absolute trigger threshold in volts. Plot auto range does not change this value."
+        )
+        self.trigger_level_edit.valueChanged.connect(self._trigger_level_abs_changed)
         self.trigger_level_percent_combo = QtWidgets.QComboBox()
         self.trigger_level_percent_combo.addItems(self.TRIGGER_LEVEL_PERCENT_OPTIONS)
         self.trigger_level_percent_combo.setCurrentText("0%")
@@ -5480,32 +5448,39 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @staticmethod
     def _legacy_trigger_panel_stylesheet(theme: dict[str, object]) -> str:
+        on_accent = theme.get("on_accent", "#ffffff")
         return (
-            f"QGroupBox#legacyTriggerPanel {{ background: {theme['panel_bg']}; color: {theme['text']}; font-weight: bold; "
-            f"border: 1px solid {theme['border']}; border-radius: 12px; margin-top: 18px; }} "
-            f"QGroupBox#legacyTriggerPanel::title {{ subcontrol-origin: margin; left: 10px; padding: 3px 12px; background: {theme['accent']}; color: #ffffff; border-radius: 6px; }} "
-            f"QGroupBox#legacyTriggerPanel QLabel, QGroupBox#legacyTriggerPanel QCheckBox {{ color: {theme['text']}; }} "
-            f"QComboBox, QLineEdit, QSpinBox, QDoubleSpinBox {{ background: {theme['panel_bg_alt']}; color: {theme['text']}; min-height: 22px; font-weight: bold; "
-            f"border: 1px solid {theme['control_border']}; border-radius: 7px; padding: 2px 18px 2px 6px; }} "
-            f"QPushButton {{ background: {theme['accent']}; color: #ffffff; font-weight: bold; padding: 6px 14px; border: 1px solid {theme['accent_hover']}; border-radius: 8px; }} "
-            f"QPushButton:hover {{ background: {theme['accent_hover']}; }} "
+            f"QGroupBox#legacyTriggerPanel {{ background: {theme['panel_bg']}; color: {theme['text']}; font-weight: 700; "
+            f"border: 1px solid {theme['border']}; border-radius: 8px; margin-top: 16px; }} "
+            f"QGroupBox#legacyTriggerPanel::title {{ subcontrol-origin: margin; left: 10px; padding: 2px 8px; "
+            f"background: {theme['window_bg']}; color: {theme['accent']}; border-left: 3px solid {theme['accent']}; }} "
+            f"QGroupBox#legacyTriggerPanel QLabel, QGroupBox#legacyTriggerPanel QCheckBox {{ color: {theme['text']}; font-weight: normal; }} "
+            f"QComboBox, QLineEdit, QSpinBox, QDoubleSpinBox {{ background: {theme.get('control_bg', theme['panel_bg_alt'])}; color: {theme['text']}; min-height: 22px; "
+            f"border: 1px solid {theme['control_border']}; border-radius: 4px; padding: 2px 18px 2px 6px; }} "
+            f"QPushButton {{ background: {theme.get('control_bg', theme['panel_bg_alt'])}; color: {theme['text']}; font-weight: 600; padding: 6px 14px; "
+            f"border: 1px solid {theme['control_border']}; border-radius: 4px; }} "
+            f"QPushButton:hover {{ background: {theme['cell_bg']}; border-color: {theme['accent']}; color: {theme['accent']}; }} "
+            f"QPushButton[role=\"primary\"] {{ background: {theme['accent']}; color: {on_accent}; border-color: {theme['accent']}; }} "
             f"QSlider::groove:horizontal {{ background: {theme['panel_bg_alt']}; height: 24px; border: 1px solid {theme['control_border']}; border-radius: 12px; }} "
             f"QSlider::handle:horizontal {{ background: {theme['accent_alt']}; width: 16px; margin: -2px 0px; border: 1px solid {theme['label_text']}; border-radius: 8px; }}"
         )
 
     def _mc_setup_dialog_stylesheet(self) -> str:
         theme = self._theme()
+        on_accent = theme.get("on_accent", "#ffffff")
         return (
             f"QDialog {{ background: {theme['window_bg']}; color: {theme['text']}; }} "
-            f"QHeaderView::section {{ background: {theme['cell_bg']}; color: {theme['label_text']}; font-size: 9pt; font-weight: bold; padding: 4px; border: 1px solid {theme['control_border']}; }} "
-            f"QTableWidget {{ background: {theme['table_bg']}; color: {theme['text']}; gridline-color: {theme['border']}; font-size: 9pt; font-weight: bold; border: 1px solid {theme['border']}; border-radius: 8px; }} "
+            f"QHeaderView::section {{ background: {theme['cell_bg']}; color: {theme['label_text']}; font-size: 9pt; font-weight: 700; padding: 4px; border: 1px solid {theme['control_border']}; }} "
+            f"QTableWidget {{ background: {theme['table_bg']}; color: {theme['text']}; gridline-color: {theme['border']}; font-size: 9pt; border: 1px solid {theme['border']}; border-radius: 6px; }} "
             f"QTableWidget::item {{ background: {theme['panel_bg']}; color: {theme['text']}; padding: 2px; border-radius: 3px; }} "
-            f"QTableWidget::item:selected {{ background: {theme['accent']}; color: #ffffff; }} "
-            f"QPushButton {{ min-width: 72px; padding: 5px 10px; font-size: 9pt; font-weight: bold; background: {theme['accent']}; color: #ffffff; border: 1px solid {theme['accent_hover']}; border-radius: 7px; }} "
-            f"QPushButton:hover {{ background: {theme['accent_hover']}; }} "
-            f"QPushButton:pressed {{ background: {theme['accent_hover']}; }} "
-            f"QLabel, QCheckBox {{ color: {theme['text']}; font-size: 9pt; font-weight: bold; }} "
-            f"QComboBox {{ background: {theme['panel_bg_alt']}; color: {theme['text']}; font-size: 9pt; padding: 3px 22px 3px 6px; border: 1px solid {theme['control_border']}; border-radius: 6px; }}"
+            f"QTableWidget::item:selected {{ background: {theme.get('selection_bg', theme['accent'])}; color: {theme.get('selection_text', on_accent)}; }} "
+            f"QPushButton {{ min-width: 72px; padding: 5px 10px; font-size: 9pt; font-weight: 600; "
+            f"background: {theme.get('control_bg', theme['panel_bg_alt'])}; color: {theme['text']}; border: 1px solid {theme['control_border']}; border-radius: 4px; }} "
+            f"QPushButton:hover {{ background: {theme['cell_bg']}; border-color: {theme['accent']}; color: {theme['accent']}; }} "
+            f"QPushButton[role=\"primary\"] {{ background: {theme['accent']}; color: {on_accent}; border-color: {theme['accent']}; }} "
+            f"QPushButton[role=\"primary\"]:hover {{ background: {theme['accent_hover']}; border-color: {theme['accent_hover']}; color: {on_accent}; }} "
+            f"QLabel, QCheckBox {{ color: {theme['text']}; font-size: 9pt; font-weight: normal; }} "
+            f"QComboBox {{ background: {theme.get('control_bg', theme['panel_bg_alt'])}; color: {theme['text']}; font-size: 9pt; padding: 3px 22px 3px 6px; border: 1px solid {theme['control_border']}; border-radius: 4px; }}"
         )
 
     def _build_excitation_tab(self, compact: bool = False):
@@ -6627,6 +6602,7 @@ class MainWindow(QtWidgets.QMainWindow):
     @staticmethod
     def _default_value_mode_for_display(display_mode: str) -> str | None:
         defaults = {
+            "time": "real",
             "autospectrum": "log_power_per_hz",
             "frf": "dB",
         }
@@ -7424,6 +7400,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self._plot_curve_colors[cache_key][trace_name] = color
             current_curves[trace_name] = (x_plot, y_plot)
 
+        def color_for(trace_name: str, available_names: list[str] | None = None) -> str:
+            # Prefer a packed map over the full available channel set so upper/lower
+            # plots share colors even when their visible subsets differ.
+            if available_names:
+                return self._color_map_for_traces(available_names, colors).get(
+                    str(trace_name).strip(),
+                    self._color_for_trace(trace_name, colors),
+                )
+            return self._color_for_trace(trace_name, colors)
+
         if mode == "time":
             time_t = measurement.time_data["t"]
             available_names = list(measurement.time_data["channels"].keys())
@@ -7438,10 +7424,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 curve_item = plot.plot(
                     x_plot,
                     y_plot,
-                    pen=self._curve_pen(colors[idx % len(colors)], name, active_trace_name),
+                    pen=self._curve_pen(color_for(name, available_names), name, active_trace_name),
                     name=legend_name(name),
                 )
-                register_curve(name, curve_item, colors[idx % len(colors)], x_plot, y_plot)
+                register_curve(name, curve_item, color_for(name, available_names), x_plot, y_plot)
             self._last_plot_cache[cache_key] = current_curves
             self._update_trace_selector(cache_key, current_curves, available_names)
             return
@@ -7477,10 +7463,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 curve_item = plot.plot(
                     x_plot,
                     y_plot,
-                    pen=self._curve_pen(colors[idx % len(colors)], name, active_trace_name),
+                    pen=self._curve_pen(color_for(name, available_names), name, active_trace_name),
                     name=legend_name(name),
                 )
-                register_curve(name, curve_item, colors[idx % len(colors)], x_plot, y_plot)
+                register_curve(name, curve_item, color_for(name, available_names), x_plot, y_plot)
             self._last_plot_cache[cache_key] = current_curves
             self._update_trace_selector(cache_key, current_curves, available_names)
             return
@@ -7504,12 +7490,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 curve_item = plot.plot(
                     x_plot,
                     y_plot,
-                    pen=self._curve_pen(colors[idx % len(colors)], name, active_trace_name),
+                    pen=self._curve_pen(color_for(name, available_names), name, active_trace_name),
                     name=legend_name(name),
                     symbol="o" if mode == "foundation_vibration" else None,
                     symbolSize=5 if mode == "foundation_vibration" else None,
                 )
-                register_curve(name, curve_item, colors[idx % len(colors)], x_plot, y_plot)
+                register_curve(name, curve_item, color_for(name, available_names), x_plot, y_plot)
             self._last_plot_cache[cache_key] = current_curves
             self._update_trace_selector(cache_key, current_curves, available_names)
             return
@@ -7531,10 +7517,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 curve_item = plot.plot(
                     x_plot,
                     y_plot,
-                    pen=self._curve_pen(colors[idx % len(colors)], name, active_trace_name),
+                    pen=self._curve_pen(color_for(name, available_names), name, active_trace_name),
                     name=legend_name(name),
                 )
-                register_curve(name, curve_item, colors[idx % len(colors)], x_plot, y_plot)
+                register_curve(name, curve_item, color_for(name, available_names), x_plot, y_plot)
             self._last_plot_cache[cache_key] = current_curves
             self._update_trace_selector(cache_key, current_curves, available_names)
             return
@@ -7550,10 +7536,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 curve_item = plot.plot(
                     x_plot,
                     y_plot,
-                    pen=self._curve_pen(colors[idx % len(colors)], name, active_trace_name),
+                    pen=self._curve_pen(color_for(name, available_names), name, active_trace_name),
                     name=legend_name(name),
                 )
-                register_curve(name, curve_item, colors[idx % len(colors)], x_plot, y_plot)
+                register_curve(name, curve_item, color_for(name, available_names), x_plot, y_plot)
             self._last_plot_cache[cache_key] = current_curves
             self._update_trace_selector(cache_key, current_curves, available_names)
             return
@@ -7578,10 +7564,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 curve_item = plot.plot(
                     x_plot,
                     y_plot,
-                    pen=self._curve_pen(colors[idx % len(colors)], name, active_trace_name),
+                    pen=self._curve_pen(color_for(name, available_names), name, active_trace_name),
                     name=legend_name(name),
                 )
-                register_curve(name, curve_item, colors[idx % len(colors)], x_plot, y_plot)
+                register_curve(name, curve_item, color_for(name, available_names), x_plot, y_plot)
             self._last_plot_cache[cache_key] = current_curves
             self._update_trace_selector(cache_key, current_curves, available_names)
             return
@@ -7598,10 +7584,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 curve_item = plot.plot(
                     x_plot,
                     y_plot,
-                    pen=self._curve_pen(colors[idx % len(colors)], name, active_trace_name),
+                    pen=self._curve_pen(color_for(name, available_names), name, active_trace_name),
                     name=legend_name(name),
                 )
-                register_curve(name, curve_item, colors[idx % len(colors)], x_plot, y_plot)
+                register_curve(name, curve_item, color_for(name, available_names), x_plot, y_plot)
             self._last_plot_cache[cache_key] = current_curves
             self._update_trace_selector(cache_key, current_curves, available_names)
             return
@@ -7626,10 +7612,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 curve_item = plot.plot(
                     x_plot,
                     y_plot,
-                    pen=self._curve_pen(colors[idx % len(colors)], name, active_trace_name),
+                    pen=self._curve_pen(color_for(name, available_names), name, active_trace_name),
                     name=legend_name(name),
                 )
-                register_curve(name, curve_item, colors[idx % len(colors)], x_plot, y_plot)
+                register_curve(name, curve_item, color_for(name, available_names), x_plot, y_plot)
             self._last_plot_cache[cache_key] = current_curves
             self._update_trace_selector(cache_key, current_curves, available_names)
             return
@@ -7648,10 +7634,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 curve_item = plot.plot(
                     x_plot,
                     y_plot,
-                    pen=self._curve_pen(colors[idx % len(colors)], name, active_trace_name),
+                    pen=self._curve_pen(color_for(name, available_names), name, active_trace_name),
                     name=legend_name(name),
                 )
-                register_curve(name, curve_item, colors[idx % len(colors)], x_plot, y_plot)
+                register_curve(name, curve_item, color_for(name, available_names), x_plot, y_plot)
             self._last_plot_cache[cache_key] = current_curves
             self._update_trace_selector(cache_key, current_curves, available_names)
             return
@@ -7669,10 +7655,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 curve_item = plot.plot(
                     x_plot,
                     y_plot,
-                    pen=self._curve_pen(colors[idx % len(colors)], name, active_trace_name),
+                    pen=self._curve_pen(color_for(name, available_names), name, active_trace_name),
                     name=legend_name(name),
                 )
-                register_curve(name, curve_item, colors[idx % len(colors)], x_plot, y_plot)
+                register_curve(name, curve_item, color_for(name, available_names), x_plot, y_plot)
             self._last_plot_cache[cache_key] = current_curves
             self._update_trace_selector(cache_key, current_curves, available_names)
 
@@ -7683,8 +7669,8 @@ class MainWindow(QtWidgets.QMainWindow):
     @staticmethod
     def _curve_pen(color: str, trace_name: str, active_trace_name: str | None):
         if active_trace_name is None or trace_name == active_trace_name:
-            return pg.mkPen(color, width=1.8 if active_trace_name == trace_name else 1.1)
-        return pg.mkPen(color, width=0.9, style=QtCore.Qt.SolidLine)
+            return pg.mkPen(color, width=2.4 if active_trace_name == trace_name else 1.5)
+        return pg.mkPen(color, width=1.2, style=QtCore.Qt.SolidLine)
 
     def _trace_combo_for_key(self, key: str):
         return self.top_trace_combo if key == "top" else self.bottom_trace_combo
@@ -9274,7 +9260,22 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         selected_path = Path(path)
         self._last_vna_directory = selected_path.parent
-        imported = load_legacy_vna(selected_path)
+        try:
+            imported = load_legacy_vna(selected_path)
+        except ModuleNotFoundError as exc:
+            missing = getattr(exc, "name", None) or str(exc)
+            message = (
+                f"打开失败：缺少依赖模块 {missing}。\n\n"
+                "请在当前 Python 环境安装后重试：\n"
+                "python -m pip install scipy h5py numpy"
+            )
+            QtWidgets.QMessageBox.critical(self, "打开 VNA 失败", message)
+            self.statusBar().showMessage(f"打开失败：缺少依赖 {missing}")
+            return
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "打开 VNA 失败", f"无法打开文件：\n{selected_path}\n\n{exc}")
+            self.statusBar().showMessage(f"打开失败：{exc}")
+            return
         self._reset_plot_display_state()
         self.controller.set_session(imported.config)
         self.controller.state.measurement = imported.measurement
@@ -9362,6 +9363,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._restore_from_tray()
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if self._update_exit_requested:
+            self._close_confirmed = True
         if not self._close_confirmed and self.isVisible():
             action = self._confirm_close_action()
             if action == "cancel":

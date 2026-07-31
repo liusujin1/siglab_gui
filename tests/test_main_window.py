@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import sys
 import tempfile
 import time
+import types
 import unittest
 from unittest import mock
 
@@ -118,7 +120,7 @@ class MainWindowTests(unittest.TestCase):
         self.assertGreaterEqual(len(self.window.findChildren(QtWidgets.QSplitter)), 1)
         self.assertTrue(self.window._controls_visible)
         self.assertLessEqual(self.window.width(), 1180)
-        self.assertLessEqual(self.window.left_panel.maximumWidth(), 430)
+        self.assertLessEqual(self.window.left_panel.maximumWidth(), 460)
         self.assertGreaterEqual(self.window.left_panel.minimumWidth(), 360)
         self.assertEqual(self.window.top_display_strip_combo.currentText(), "y(t)")
         self.assertEqual(self.window.bottom_display_strip_combo.currentText(), "xfer")
@@ -186,7 +188,7 @@ class MainWindowTests(unittest.TestCase):
         ]
         self.assertEqual(
             file_action_texts,
-            ["打开 VNA", "保存 VNA", "保存为默认", "退出"],
+            ["打开 VNA", "保存 VNA", "保存为默认", "检查更新", "退出"],
         )
         display_menu = menu_actions["显示"].menu()
         self.assertIsNotNone(display_menu)
@@ -287,13 +289,15 @@ class MainWindowTests(unittest.TestCase):
 
     def test_backend_change_schedules_async_refresh_without_sync_device_scan(self):
         self.backend.list_calls = 0
+        fake_app_module = types.SimpleNamespace(build_backend=mock.Mock(return_value=self.backend))
 
-        with mock.patch("python_vna.app.build_backend", return_value=self.backend), mock.patch.object(
+        with mock.patch.dict(sys.modules, {"python_vna.app": fake_app_module}), mock.patch.object(
             self.window, "refresh_devices_async"
         ) as refresh_async:
             self.window._backend_changed("ni")
 
         self.assertEqual(self.backend.list_calls, 0)
+        fake_app_module.build_backend.assert_called_once_with("ni")
         refresh_async.assert_called_once_with()
 
     def test_startup_session_load_failure_keeps_default_window_alive(self):
@@ -379,40 +383,44 @@ class MainWindowTests(unittest.TestCase):
             if child.objectName() in {"upperAxisPanel", "lowerAxisPanel"}
         ]
         self.assertEqual(len(side_panels), 2)
-        self.assertTrue(all(panel.width() <= 180 for panel in side_panels))
-        self.assertIn("QLabel#vnaMiniLabel { color: #eef6ff", side_panels[0].styleSheet())
-        self.assertIn("border-radius: 6px", side_panels[0].styleSheet())
+        self.assertTrue(all(panel.width() <= 196 for panel in side_panels))
+        self.assertIn("QLabel#vnaMiniLabel { color: #e7f0f3", side_panels[0].styleSheet())
+        self.assertIn("border-radius: 4px", side_panels[0].styleSheet())
 
     def test_dark_background_labels_use_light_text(self):
         stylesheet = self.window.styleSheet()
 
         self.assertEqual(self.window._theme_name, "dark")
-        self.assertIn("QLabel, QCheckBox {\n                color: #a9bed4;", stylesheet)
-        self.assertIn("QCheckBox:enabled {\n                color: #eef6ff;", stylesheet)
+        self.assertIn("QLabel, QCheckBox, QRadioButton {", stylesheet)
+        self.assertIn("color: #e7f0f3;", stylesheet)
         self.assertNotIn("QGroupBox QLabel, QGroupBox QCheckBox {\n                color: #000000;", stylesheet)
         self.assertNotIn("background: #f0f0f0;\n                color: #202020;", stylesheet)
         self.assertIn("QMenuBar", stylesheet)
         self.assertIn("QMenu", stylesheet)
         self.assertIn("QGroupBox::title", stylesheet)
         self.assertIn("color: #ffffff;", stylesheet)
-        self.assertIn("border-radius: 8px", stylesheet)
-        self.assertIn("QPushButton#dangerButton:enabled", stylesheet)
+        self.assertIn("border-radius: 7px", stylesheet)
+        self.assertIn("QPushButton[role=\"danger\"]", stylesheet)
         self.assertIn("QPushButton:disabled, QToolButton:disabled", stylesheet)
-        self.assertIn("color: #64748b;", stylesheet)
+        self.assertIn("color: #5d7179;", stylesheet)
 
     def test_light_theme_switch_updates_main_panels_plots_and_persists(self):
         self.window.light_theme_action.trigger()
 
         self.assertEqual(self.window._theme_name, "light")
         self.assertTrue(self.window.light_theme_action.isChecked())
-        self.assertIn("background: #f4f7fb;", self.window.styleSheet())
-        self.assertIn("#plotWorkspace { background: #eaf1f8; }", self.window.right_panel.styleSheet())
-        self.assertIn("background: #ffffff;", self.window.left_panel.styleSheet())
-        self.assertIn("color: #102033;", self.window.left_panel.styleSheet())
-        self.assertEqual(self.window.top_plot.backgroundBrush().color().name(), "#ffffff")
+        theme = self.window._theme()
+        self.assertIn(f"background: {theme['window_bg']};", self.window.styleSheet())
+        self.assertIn(
+            f"#plotWorkspace {{ background: {theme['plot_workspace_bg']}; }}",
+            self.window.right_panel.styleSheet(),
+        )
+        self.assertIn(f"background: {theme['panel_bg']};", self.window.left_panel.styleSheet())
+        self.assertIn(f"color: {theme['text']};", self.window.left_panel.styleSheet())
+        self.assertEqual(self.window.top_plot.backgroundBrush().color().name(), theme["plot_bg"])
         self.assertEqual(
             self.window.top_plot.getAxis("bottom").pen().color().name(),
-            "#172033",
+            theme["axis"],
         )
         self.assertTrue(self.window._ui_settings_path.exists())
 
@@ -435,21 +443,27 @@ class MainWindowTests(unittest.TestCase):
         first_curve = self.window._plot_curve_items["top"]["ai0"]
         second_curve = self.window._plot_curve_items["top"]["ai1"]
         self.assertEqual(self.window._trace_colors()[:4], self.window.LIGHT_TRACE_COLORS[:4])
-        self.assertEqual(self.window.LIGHT_TRACE_COLORS[3], "#c2185b")
+        self.assertEqual(self.window.LIGHT_TRACE_COLORS[3], "#D43A3A")
         self.assertNotEqual(self.window.LIGHT_TRACE_COLORS[1], self.window.LIGHT_TRACE_COLORS[3])
-        self.assertEqual(first_curve.opts["pen"].color().name(), "#1f77b4")
-        self.assertEqual(second_curve.opts["pen"].color().name(), "#d95f02")
+        self.assertEqual(
+            first_curve.opts["pen"].color().name().lower(),
+            self.window.LIGHT_TRACE_COLORS[0].lower(),
+        )
+        self.assertEqual(
+            second_curve.opts["pen"].color().name().lower(),
+            self.window.LIGHT_TRACE_COLORS[1].lower(),
+        )
         self.assertNotEqual(first_curve.opts["pen"].color().name(), self.window.TRACE_COLORS[0])
 
     def test_legacy_left_panel_avoids_gray_background_black_text(self):
         stylesheet = self.window.left_panel.styleSheet()
 
         self.assertIn("QLabel#legacyGrayCell", stylesheet)
-        self.assertIn("background: #203247;", stylesheet)
-        self.assertIn("color: #ffffff;", stylesheet)
-        self.assertIn("QCheckBox {\n                background: #203247;", stylesheet)
-        self.assertIn("QLabel#legacyText {\n                background: #203247;", stylesheet)
-        self.assertIn("border-radius: 7px", stylesheet)
+        theme = self.window._theme()
+        self.assertIn(f"background: {theme['cell_bg']};", stylesheet)
+        self.assertIn(f"color: {theme['label_text']};", stylesheet)
+        self.assertIn("QLabel#legacyText", stylesheet)
+        self.assertIn("border-radius: 4px", stylesheet)
         self.assertNotIn("background: #c9c9c9;\n                color: #000000;", stylesheet)
         self.assertNotIn("background: #f0f0f0;\n                color: #606060;", stylesheet)
 
@@ -617,6 +631,48 @@ class MainWindowTests(unittest.TestCase):
         self.assertLess(abs(y_range[0]), 1.0)
         self.assertLess(abs(y_range[1]), 1.0)
         self.assertIsNone(self.window._channel_full_scale_focus["top"])
+
+    def test_plot_auto_scale_does_not_change_trigger_absolute_level(self):
+        measurement = self._measurement()
+        measurement.time_data["channels"] = {
+            "ai0": np.array([0.0, 0.001, -0.001, 0.0], dtype=float)
+        }
+        self.window.top_display_combo.setCurrentText("y(t)")
+        self.window.trigger_mode_combo.setCurrentIndex(
+            self.window.trigger_mode_combo.findData("Every Frame")
+        )
+        self.window.trigger_source_combo.setCurrentText("Ch1")
+        self.window.trigger_level_edit.setValue(1.25)
+        self.window._plot_measurement(measurement)
+
+        self.window._auto_scale_plot_xy("top")
+        session = self.window._read_session_from_widgets()
+
+        self.assertAlmostEqual(self.window.trigger_level_edit.value(), 1.25)
+        self.assertAlmostEqual(session.acquisition.trigger.level, 1.25)
+        self.assertEqual(session.acquisition.trigger.source, "ai0")
+
+    def test_trigger_absolute_level_control_does_not_snap_to_percent_value(self):
+        self.window.channel_table.item(0, 9).setText("10")
+        self.window.trigger_source_combo.setCurrentText("Ch1")
+
+        self.window.trigger_level_edit.setValue(3.0)
+
+        self.assertAlmostEqual(self.window.trigger_level_edit.value(), 3.0)
+        self.assertNotEqual(self.window.trigger_level_percent_combo.currentText(), "0%")
+
+    def test_trigger_abs_level_refreshes_when_trigger_channel_full_scale_changes(self):
+        self.window.channel_table.item(0, 9).setText("10")
+        self.window.trigger_source_combo.setCurrentText("Ch1")
+        self.window.trigger_level_percent_combo.setCurrentText("35%")
+        self.assertAlmostEqual(self.window.trigger_level_edit.value(), 3.5)
+
+        self.window.channel_list.setCurrentRow(0)
+        self.window.channel_full_scale_combo.setCurrentText("5 V")
+        session = self.window._read_session_from_widgets()
+
+        self.assertAlmostEqual(self.window.trigger_level_edit.value(), 1.75)
+        self.assertAlmostEqual(session.acquisition.trigger.level, 1.75)
 
     def test_time_full_scale_range_follows_active_channel_even_when_all_channels_visible(self):
         measurement = self._measurement()
@@ -838,6 +894,20 @@ class MainWindowTests(unittest.TestCase):
         self.assertFalse(event.isAccepted())
         minimize_to_tray.assert_called_once_with()
         self.assertFalse(self.window._close_confirmed)
+        self.window.hide()
+
+    def test_update_exit_skips_close_confirmation_dialog(self):
+        self.window.show()
+        QtWidgets.QApplication.processEvents()
+        event = QtGui.QCloseEvent()
+
+        with mock.patch.object(self.window, "_confirm_close_action") as confirm_close:
+            self.window._request_update_exit()
+            self.window.closeEvent(event)
+
+        confirm_close.assert_not_called()
+        self.assertTrue(self.window._close_confirmed)
+        self.assertTrue(self.window._update_exit_requested)
         self.window.hide()
 
     def test_mc_setup_full_scale_change_resets_manual_time_y_range(self):
@@ -1524,7 +1594,7 @@ class MainWindowTests(unittest.TestCase):
             self.assertFalse(controller.aborted)
             self.assertTrue(controller.stopped)
             self.assertTrue((output_dir / "manifest.json").exists())
-            self.assertTrue((output_dir / "segment_0001.zip").exists())
+            self.assertTrue((output_dir / "segment_0001.bin").exists())
 
     def test_continuous_recording_worker_creates_files_before_first_frame(self):
         class _Backend:
@@ -1559,7 +1629,7 @@ class MainWindowTests(unittest.TestCase):
             worker.run()
 
             self.assertTrue((output_dir / "manifest.json").exists())
-            self.assertTrue((output_dir / "segment_0001.zip").exists())
+            self.assertTrue((output_dir / "segment_0001.bin").exists())
 
     def test_acquisition_tab_contains_legacy_style_trigger_panel(self):
         groups = {
@@ -1767,9 +1837,10 @@ class MainWindowTests(unittest.TestCase):
     def test_plot_area_uses_matlab_style_axis_layout(self):
         self.assertEqual(self.window.top_plot.getPlotItem().titleLabel.text, "Upper")
         self.assertEqual(self.window.bottom_plot.getPlotItem().titleLabel.text, "Lower")
-        self.assertEqual(self.window.top_plot.backgroundBrush().color().name(), "#000000")
-        self.assertEqual(self.window.bottom_plot.backgroundBrush().color().name(), "#000000")
-        self.assertEqual(self.window.TRACE_COLORS[:4], ["#56c7ff", "#ffd166", "#45e6a8", "#ff6b8a"])
+        theme = self.window._theme()
+        self.assertEqual(self.window.top_plot.backgroundBrush().color().name(), theme["plot_bg"])
+        self.assertEqual(self.window.bottom_plot.backgroundBrush().color().name(), theme["plot_bg"])
+        self.assertEqual(self.window.TRACE_COLORS[:4], ["#20FF20", "#A4C8F0", "#FFFF00", "#FF8080"])
 
     def test_log_axis_tick_labels_use_plain_values(self):
         axis = VnaAxisItem(orientation="bottom")
@@ -1961,6 +2032,18 @@ class MainWindowTests(unittest.TestCase):
             set(self.window._last_plot_cache["bottom"]),
             {"ai0->ai1", "ai0->ai2", "ai0->ai3"},
         )
+        xfer_colors = {
+            name: curve.opts["pen"].color().name().lower()
+            for name, curve in self.window._plot_curve_items["bottom"].items()
+        }
+        self.assertEqual(
+            xfer_colors,
+            {
+                "ai0->ai1": self.window._trace_colors()[1].lower(),
+                "ai0->ai2": self.window._trace_colors()[2].lower(),
+                "ai0->ai3": self.window._trace_colors()[3].lower(),
+            },
+        )
         self.window.bottom_display_combo.setCurrentText("coh")
         self.window._prepare_trace_selection_for_acquisition()
         self.window._plot_measurement(measurement)
@@ -1968,6 +2051,11 @@ class MainWindowTests(unittest.TestCase):
             set(self.window._last_plot_cache["bottom"]),
             {"ai0->ai1", "ai0->ai2", "ai0->ai3"},
         )
+        coh_colors = {
+            curve.opts["pen"].color().name().lower()
+            for curve in self.window._plot_curve_items["bottom"].values()
+        }
+        self.assertEqual(len(coh_colors), 3)
 
     def test_current_plot_window_uses_existing_upper_lower_plot_cache(self):
         measurement = self._measurement()
@@ -2040,7 +2128,7 @@ class MainWindowTests(unittest.TestCase):
                 for action in menu.actions()
                 if not action.isSeparator()
             ]
-            self.assertEqual(action_texts, ["Auto Scale", "Data Tip", "Clear Data Tips"])
+            self.assertEqual(action_texts, ["自动范围", "数据标注", "清除数据标注"])
             self.assertTrue(actions["data_tip"].isCheckable())
             self.assertFalse(actions["data_tip"].isChecked())
             self.assertTrue(actions["data_tip"].isEnabled())
@@ -2073,15 +2161,16 @@ class MainWindowTests(unittest.TestCase):
         self.window._open_current_plot_window()
         detached = self.window._detached_plot_window
 
-        self.assertIn("background: #f4f7fb;", detached.styleSheet())
-        self.assertEqual(detached.upper_plot.backgroundBrush().color().name(), "#ffffff")
+        light_theme = self.window._theme()
+        self.assertIn(f"background: {light_theme['window_bg']};", detached.styleSheet())
+        self.assertEqual(detached.upper_plot.backgroundBrush().color().name(), light_theme["plot_bg"])
         self.assertEqual(
             detached.upper_plot.getAxis("bottom").pen().color().name(),
-            "#172033",
+            light_theme["axis"],
         )
 
         self.window._set_theme("dark")
-        self.assertEqual(detached.upper_plot.backgroundBrush().color().name(), "#000000")
+        self.assertEqual(detached.upper_plot.backgroundBrush().color().name(), self.window._theme()["plot_bg"])
 
     def test_current_plot_window_data_tip_menu_deletes_labels(self):
         measurement = self._measurement()
@@ -2098,7 +2187,7 @@ class MainWindowTests(unittest.TestCase):
         try:
             self.assertEqual(
                 [action.text() for action in menu.actions()],
-                ["Delete This Data Tip", "Delete All Data Tips"],
+                ["删除当前标注", "删除全部标注"],
             )
         finally:
             menu.close()
@@ -2694,6 +2783,19 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(self.window.top_value_mode_combo.currentText(), "3 sigma")
         self.assertEqual(self.window.top_xscale_combo.currentText(), "log")
         self.assertEqual(self.window.top_yscale_combo.currentText(), "log")
+
+    def test_switching_back_to_time_restores_real_value_mode(self):
+        for key in ("top", "bottom"):
+            display_combo = self.window._display_combo_for_key(key)
+            value_combo = self.window._value_combo_for_key(key)
+            value_strip_combo = self.window._value_strip_combo_for_key(key)
+
+            display_combo.setCurrentText("coh")
+            self.assertEqual(value_combo.currentText(), "mag")
+
+            display_combo.setCurrentText("y(t)")
+            self.assertEqual(value_combo.currentText(), "real")
+            self.assertEqual(value_strip_combo.currentText(), "real")
 
     def test_axis_scales_follow_matlab_display_defaults(self):
         self.window.top_display_combo.setCurrentText("xfer")
@@ -3732,12 +3834,12 @@ class MainWindowTests(unittest.TestCase):
         legend = self.window.top_plot.plotItem.legend
         self.assertIsNotNone(legend)
         self.assertEqual(legend.opts.get("offset"), (3, 2))
-        self.assertEqual(legend.opts.get("labelTextColor"), "#f6f1df")
-        self.assertEqual(legend.opts.get("labelTextSize"), "6pt")
-        self.assertEqual(legend.layout.horizontalSpacing(), 0)
-        self.assertEqual(legend.layout.verticalSpacing(), -6)
+        self.assertEqual(legend.opts.get("labelTextColor"), self.window._theme()["legend_text"])
+        self.assertEqual(legend.opts.get("labelTextSize"), "8pt")
+        self.assertEqual(legend.layout.horizontalSpacing(), 4)
+        self.assertEqual(legend.layout.verticalSpacing(), -2)
         self.assertIs(legend.sampleType, main_window_module.CompactLegendSample)
-        self.assertEqual(legend.columnCount, 8)
+        self.assertEqual(legend.columnCount, 4)
         self.assertGreater(legend.zValue(), main_window_module.CURVE_Z)
         self.assertLess(legend.zValue(), main_window_module.MARKER_Z)
 
@@ -3791,12 +3893,15 @@ class MainWindowTests(unittest.TestCase):
 
         legend = detached.upper_plot.plotItem.legend
         self.assertIsNotNone(legend)
+        self.assertEqual(legend.opts.get("labelTextSize"), "8pt")
+        self.assertEqual(legend.columnCount, 4)
+        self.assertIs(legend.sampleType, main_window_module.CompactLegendSample)
         self.assertIsNotNone(getattr(legend, "_vna_auto_corner", None))
         self.assertNotEqual(legend._vna_auto_corner, "top_left")
 
     def test_right_drag_zoom_box_uses_visible_selection_style(self):
         view_box = self.window.top_plot.getPlotItem().vb
-        self.assertEqual(view_box._zoom_box.pen().color().name(), "#5eead4")
+        self.assertEqual(view_box._zoom_box.pen().color().name(), "#2a9aab")
         self.assertEqual(view_box._zoom_box.brush().color().alpha(), 48)
 
     def test_plot_context_menu_matches_legacy_axis_scale_actions(self):
@@ -3810,9 +3915,9 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(
                 action_texts,
                 [
-                    "Back One Zoom",
-                    "Auto Scale",
-                    "Cursor Readout",
+                    "返回上一缩放",
+                    "自动范围",
+                    "游标读数",
                 ],
             )
             self.assertIn("auto_scale", actions)

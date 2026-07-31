@@ -4,7 +4,9 @@ import json
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import queue
 from tempfile import NamedTemporaryFile
+import threading
 import time
 from typing import Any
 import zipfile
@@ -19,6 +21,8 @@ DEFAULT_SEGMENT_SECONDS = 600.0
 DEFAULT_MAX_SEGMENT_BYTES = 1_500_000_000
 TEXT_DAT_FORMAT = "python_vna_continuous_text_dat"
 TEXT_DAT_VERSION = 3
+BINARY_DAT_FORMAT = "python_vna_continuous_binary_float64"
+BINARY_DAT_VERSION = 1
 SEGMENT_COMPRESSION_FORMAT = "zip"
 
 
@@ -43,6 +47,15 @@ class _SegmentState:
     file: Any = None
 
 
+@dataclass(slots=True)
+class _CompressionResult:
+    segment_path: Path
+    archive_path: Path | None = None
+    raw_bytes: int = 0
+    compressed_bytes: int = 0
+    error: str | None = None
+
+
 def _timestamp_from_unix_ns(unix_ns: int, tz=timezone.utc) -> str:
     seconds, nanoseconds = divmod(int(unix_ns), 1_000_000_000)
     timestamp = datetime.fromtimestamp(seconds, timezone.utc).replace(
@@ -62,6 +75,13 @@ def utc_timestamp_from_unix_ns(unix_ns: int) -> str:
 def recording_directory_name(prefix: str = "recording") -> str:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return f"{prefix}_{stamp}"
+
+
+def _normalize_storage_format(value: str) -> str:
+    text = str(value or "text").strip().lower()
+    if text in {"binary", "bin", "binary_float64", BINARY_DAT_FORMAT}:
+        return "binary"
+    return "text"
 
 
 def session_recording_header(
@@ -111,6 +131,7 @@ class ContinuousDatWriter:
         max_segment_bytes: int | None = DEFAULT_MAX_SEGMENT_BYTES,
         manifest_interval_seconds: float = 5.0,
         compress_closed_segments: bool = True,
+        storage_format: str = "text",
         time_fn=time.time_ns,
         monotonic_fn=time.monotonic,
     ) -> None:
@@ -122,7 +143,8 @@ class ContinuousDatWriter:
         self.segment_seconds = float(segment_seconds)
         self.max_segment_bytes = None if max_segment_bytes is None else int(max_segment_bytes)
         self.manifest_interval_seconds = float(manifest_interval_seconds)
-        self.compress_closed_segments = bool(compress_closed_segments)
+        self.storage_format = _normalize_storage_format(storage_format)
+        self.compress_closed_segments = bool(compress_closed_segments) and self.storage_format == "text"
         self._time_fn = time_fn
         self._monotonic_fn = monotonic_fn
         self.manifest_path = self.output_dir / "manifest.json"
@@ -134,6 +156,9 @@ class ContinuousDatWriter:
         self._start_monotonic: float | None = None
         self._last_manifest_monotonic = 0.0
         self._closed = False
+        self._compression_queue: queue.Queue[Path | None] | None = None
+        self._compression_results: queue.Queue[_CompressionResult] | None = None
+        self._compression_thread: threading.Thread | None = None
 
     @property
     def total_samples(self) -> int:
@@ -151,6 +176,8 @@ class ContinuousDatWriter:
         self.output_dir.mkdir(parents=True, exist_ok=False)
         self._start_unix_ns = int(self._time_fn())
         self._start_monotonic = float(self._monotonic_fn())
+        if self.compress_closed_segments:
+            self._start_compression_worker()
         self._open_segment(1)
         self._write_manifest(completed=False, force=True)
 
@@ -159,15 +186,15 @@ class ContinuousDatWriter:
             raise RuntimeError("Cannot write to a closed continuous recording.")
         if self._segment is None:
             self.start()
-        assert self._segment is not None
-        elapsed_segment = float(self._monotonic_fn()) - self._segment.start_monotonic
-        if self._segment.frames > 0 and (
+        segment = self._require_open_segment()
+        elapsed_segment = float(self._monotonic_fn()) - segment.start_monotonic
+        if segment.frames > 0 and (
             elapsed_segment >= self.segment_seconds
             or self._segment_reached_size_limit()
         ):
             self._close_segment()
             self._open_segment(self._segments[-1]["index"] + 1)
-        assert self._segment is not None
+            segment = self._require_open_segment()
 
         data = np.asarray(frame.data, dtype=float)
         if data.ndim != 2:
@@ -193,22 +220,31 @@ class ContinuousDatWriter:
             )
         )
         frame_start_sample = self._total_samples
-        self._write_text_frame(
-            data,
-            frame_index=int(frame.frame_index),
-            frame_start_unix_ns=frame_unix_ns,
-            frame_start_sample=frame_start_sample,
-            sample_rate=sample_rate,
-        )
-        self._segment.frames += 1
-        self._segment.samples += int(sample_count)
+        if self.storage_format == "binary":
+            self._write_binary_frame(data)
+        else:
+            self._write_text_frame(
+                data,
+                frame_index=int(frame.frame_index),
+                frame_start_unix_ns=frame_unix_ns,
+                frame_start_sample=frame_start_sample,
+                sample_rate=sample_rate,
+            )
+        segment.frames += 1
+        segment.samples += int(sample_count)
         self._total_frames += 1
         self._total_samples += int(sample_count)
+        self._drain_compression_results()
         now = float(self._monotonic_fn())
         if now - self._last_manifest_monotonic >= self.manifest_interval_seconds:
-            self._segment.file.flush()
+            segment.file.flush()
             self._write_manifest(completed=False, force=True)
         return self.status()
+
+    def _require_open_segment(self) -> _SegmentState:
+        if self._segment is None:
+            raise RuntimeError("Continuous recording segment is not open.")
+        return self._segment
 
     def _write_text_frame(
         self,
@@ -219,7 +255,7 @@ class ContinuousDatWriter:
         frame_start_sample: int,
         sample_rate: float,
     ) -> None:
-        assert self._segment is not None
+        segment = self._require_open_segment()
         channel_count, sample_count = data.shape
         if sample_rate <= 0:
             sample_rate = float(self.session.acquisition.sample_rate)
@@ -238,8 +274,13 @@ class ContinuousDatWriter:
                 _format_float(data[channel_index, sample_index])
                 for channel_index in range(channel_count)
             )
-            self._segment.file.write("\t".join(values))
-            self._segment.file.write("\n")
+            segment.file.write("\t".join(values))
+            segment.file.write("\n")
+
+    def _write_binary_frame(self, data: np.ndarray) -> None:
+        segment = self._require_open_segment()
+        # Store sample-major rows so appending frames is a single sequential write.
+        np.asarray(data.T, dtype="<f8", order="C").tofile(segment.file)
 
     def status(self) -> RecordingStatus:
         if self._start_monotonic is None:
@@ -260,24 +301,30 @@ class ContinuousDatWriter:
             return
         if self._segment is not None:
             self._close_segment()
+        self._finish_compression_worker()
+        self._drain_compression_results()
         self._closed = True
         self._write_manifest(completed=completed, error=error, force=True)
 
     def _open_segment(self, index: int) -> None:
         if self._start_unix_ns is None:
             self._start_unix_ns = int(self._time_fn())
-        path = self.output_dir / f"segment_{index:04d}.dat"
+        suffix = ".bin" if self.storage_format == "binary" else ".dat"
+        path = self.output_dir / f"segment_{index:04d}{suffix}"
         start_unix_ns = int(self._time_fn())
-        header = session_recording_header(
-            self.session,
-            device_name=self.device_name,
-            channel_names=self.channel_names,
-            start_unix_ns=start_unix_ns,
-            software_version=self.software_version,
-        )
-        header["segment_index"] = index
-        handle = path.open("w", encoding="utf-8", newline="\n")
-        _write_text_header(handle, header)
+        if self.storage_format == "binary":
+            handle = path.open("wb")
+        else:
+            header = session_recording_header(
+                self.session,
+                device_name=self.device_name,
+                channel_names=self.channel_names,
+                start_unix_ns=start_unix_ns,
+                software_version=self.software_version,
+            )
+            header["segment_index"] = index
+            handle = path.open("w", encoding="utf-8", newline="\n")
+            _write_text_header(handle, header)
         self._segment = _SegmentState(
             index=index,
             path=path,
@@ -287,40 +334,136 @@ class ContinuousDatWriter:
         )
 
     def _close_segment(self) -> None:
-        assert self._segment is not None
-        self._segment.file.flush()
-        self._segment.file.close()
-        segment_path = self._segment.path
+        segment = self._require_open_segment()
+        segment.file.flush()
+        segment.file.close()
+        segment_path = segment.path
         raw_bytes = segment_path.stat().st_size
         manifest_path = segment_path.name
         compressed = False
         compression_error = None
         if self.compress_closed_segments:
-            try:
-                archive_path = self._compress_segment(segment_path)
-            except Exception as exc:
-                compression_error = str(exc)
-            else:
-                manifest_path = archive_path.name
-                compressed = True
+            self._queue_segment_compression(segment_path)
         self._segments.append(
             {
-                "index": self._segment.index,
+                "index": segment.index,
                 "path": manifest_path,
                 "raw_path": segment_path.name,
-                "start_unix_ns": self._segment.start_unix_ns,
-                "start_time_local": local_timestamp_from_unix_ns(self._segment.start_unix_ns),
-                "start_time_utc": utc_timestamp_from_unix_ns(self._segment.start_unix_ns),
-                "frames": self._segment.frames,
-                "samples": self._segment.samples,
-                "bytes": (archive_path if compressed else segment_path).stat().st_size,
+                "start_unix_ns": segment.start_unix_ns,
+                "start_time_local": local_timestamp_from_unix_ns(segment.start_unix_ns),
+                "start_time_utc": utc_timestamp_from_unix_ns(segment.start_unix_ns),
+                "frames": segment.frames,
+                "samples": segment.samples,
+                "bytes": segment_path.stat().st_size,
                 "raw_bytes": raw_bytes,
                 "compressed": compressed,
                 "compression": SEGMENT_COMPRESSION_FORMAT if compressed else None,
                 "compression_error": compression_error,
+                "storage_format": self.storage_format,
+                "dtype": "float64",
+                "layout": "sample_major",
             }
         )
         self._segment = None
+        self._drain_compression_results()
+
+    def _start_compression_worker(self) -> None:
+        if self._compression_thread is not None:
+            return
+        self._compression_queue = queue.Queue()
+        self._compression_results = queue.Queue()
+        self._compression_thread = threading.Thread(
+            target=self._compression_worker_main,
+            name="PythonVNARecordingCompressor",
+            daemon=True,
+        )
+        self._compression_thread.start()
+
+    def _queue_segment_compression(self, segment_path: Path) -> None:
+        if self._compression_queue is None:
+            archive_path = self._compress_segment(segment_path)
+            if self._compression_results is not None:
+                self._compression_results.put(
+                    _CompressionResult(
+                        segment_path=segment_path,
+                        archive_path=archive_path,
+                        raw_bytes=0,
+                        compressed_bytes=archive_path.stat().st_size,
+                    )
+                )
+            return
+        self._compression_queue.put(segment_path)
+
+    def _compression_worker_main(self) -> None:
+        assert self._compression_queue is not None
+        assert self._compression_results is not None
+        while True:
+            segment_path = self._compression_queue.get()
+            if segment_path is None:
+                self._compression_queue.task_done()
+                break
+            raw_bytes = 0
+            try:
+                raw_bytes = segment_path.stat().st_size
+                archive_path = self._compress_segment(segment_path)
+            except Exception as exc:
+                self._compression_results.put(
+                    _CompressionResult(
+                        segment_path=segment_path,
+                        raw_bytes=raw_bytes,
+                        error=str(exc),
+                    )
+                )
+            else:
+                self._compression_results.put(
+                    _CompressionResult(
+                        segment_path=segment_path,
+                        archive_path=archive_path,
+                        raw_bytes=raw_bytes,
+                        compressed_bytes=archive_path.stat().st_size,
+                    )
+                )
+            finally:
+                self._compression_queue.task_done()
+
+    def _finish_compression_worker(self) -> None:
+        if self._compression_queue is not None:
+            self._compression_queue.put(None)
+            self._compression_queue.join()
+        if self._compression_thread is not None:
+            self._compression_thread.join(timeout=30.0)
+            self._compression_thread = None
+        self._compression_queue = None
+
+    def _drain_compression_results(self) -> None:
+        if self._compression_results is None:
+            return
+        while True:
+            try:
+                result = self._compression_results.get_nowait()
+            except queue.Empty:
+                break
+            self._apply_compression_result(result)
+
+    def _apply_compression_result(self, result: _CompressionResult) -> None:
+        raw_name = result.segment_path.name
+        for segment in self._segments:
+            if segment.get("raw_path") != raw_name and segment.get("path") != raw_name:
+                continue
+            if result.archive_path is not None and result.error is None:
+                segment["path"] = result.archive_path.name
+                segment["bytes"] = int(result.compressed_bytes or result.archive_path.stat().st_size)
+                segment["raw_bytes"] = int(result.raw_bytes or segment.get("raw_bytes") or 0)
+                segment["compressed"] = True
+                segment["compression"] = SEGMENT_COMPRESSION_FORMAT
+                segment["compression_error"] = None
+            else:
+                segment["path"] = raw_name
+                segment["bytes"] = int(result.raw_bytes or segment.get("raw_bytes") or segment.get("bytes") or 0)
+                segment["compressed"] = False
+                segment["compression"] = None
+                segment["compression_error"] = result.error
+            break
 
     def _segment_reached_size_limit(self) -> bool:
         if self.max_segment_bytes is None or self.max_segment_bytes <= 0:
@@ -377,6 +520,9 @@ class ContinuousDatWriter:
                 "start_time_utc": utc_timestamp_from_unix_ns(self._segment.start_unix_ns),
                 "frames": self._segment.frames,
                 "samples": self._segment.samples,
+                "storage_format": self.storage_format,
+                "dtype": "float64" if self.storage_format == "binary" else "float64_text",
+                "layout": "sample_major" if self.storage_format == "binary" else "text_table",
             }
         return {
             "format": "python_vna_continuous_manifest",
@@ -398,11 +544,17 @@ class ContinuousDatWriter:
             "sample_rate": float(self.session.acquisition.sample_rate),
             "frame_size": int(self.session.acquisition.frame_size),
             "channel_names": self.channel_names,
+            "session": asdict(self.session),
             "total_frames": self._total_frames,
             "total_samples": self._total_samples,
             "segment_seconds": self.segment_seconds,
             "max_segment_bytes": self.max_segment_bytes,
             "segment_compression": SEGMENT_COMPRESSION_FORMAT if self.compress_closed_segments else None,
+            "storage_format": self.storage_format,
+            "binary_format": BINARY_DAT_FORMAT if self.storage_format == "binary" else None,
+            "binary_format_version": BINARY_DAT_VERSION if self.storage_format == "binary" else None,
+            "binary_dtype": "float64" if self.storage_format == "binary" else None,
+            "binary_layout": "sample_major" if self.storage_format == "binary" else None,
             "segments": self._segments,
             "active_segment": active_segment,
         }
@@ -431,6 +583,92 @@ def read_dat_header(path: str | Path) -> dict[str, Any]:
 
 def read_dat_table_info(path: str | Path) -> tuple[dict[str, Any], list[str], int]:
     return _read_text_header_with_data_start(path)
+
+
+def read_dat_numeric_columns(
+    path: str | Path,
+    usecols: list[int] | tuple[int, ...],
+    *,
+    data_start_line: int | None = None,
+) -> np.ndarray:
+    """Read selected numeric columns from a readable continuous DAT/ZIP segment."""
+    skip_rows = max(0, int(data_start_line or 0))
+    try:
+        with _open_dat_text(path) as handle:
+            raw = np.loadtxt(
+                handle,
+                comments="#",
+                delimiter="\t",
+                skiprows=skip_rows,
+                usecols=list(usecols),
+                dtype=float,
+                ndmin=2,
+            )
+    except ValueError:
+        with _open_dat_text(path) as handle:
+            raw = np.genfromtxt(
+                handle,
+                comments="#",
+                delimiter="\t",
+                skip_header=skip_rows,
+                usecols=list(usecols),
+                dtype=float,
+                invalid_raise=False,
+            )
+    if raw.size == 0:
+        return np.empty((0, len(usecols)), dtype=float)
+    raw = np.asarray(raw, dtype=float)
+    if raw.ndim == 1:
+        raw = raw.reshape((1, -1))
+    return raw
+
+
+def read_dat_sampled_numeric_columns(
+    path: str | Path,
+    usecols: list[int] | tuple[int, ...],
+    *,
+    start_row: int = 0,
+    stop_row: int | None = None,
+    global_offset: int = 0,
+    stride_origin: int = 0,
+    stride: int = 1,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Read sparse rows from a continuous DAT/ZIP without converting skipped rows."""
+    selected_rows: list[int] = []
+    values: list[list[float]] = []
+    cols = [int(col) for col in usecols]
+    if not cols:
+        return np.array([], dtype=np.int64), np.empty((0, 0), dtype=float)
+    start = max(0, int(start_row))
+    stop = None if stop_row is None else max(start, int(stop_row))
+    step = max(1, int(stride))
+    origin = int(stride_origin)
+    offset = int(global_offset)
+    max_col = max(cols)
+    data_row = -1
+    with _open_dat_text(path) as handle:
+        for line in handle:
+            if not line.strip() or line.startswith("#") or line.startswith("time_s\t"):
+                continue
+            data_row += 1
+            if data_row < start:
+                continue
+            if stop is not None and data_row >= stop:
+                break
+            global_row = offset + data_row
+            if step > 1 and ((global_row - origin) % step) != 0:
+                continue
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) <= max_col:
+                continue
+            try:
+                values.append([float(parts[col]) for col in cols])
+            except ValueError:
+                continue
+            selected_rows.append(data_row)
+    if not values:
+        return np.array([], dtype=np.int64), np.empty((0, len(cols)), dtype=float)
+    return np.asarray(selected_rows, dtype=np.int64), np.asarray(values, dtype=float)
 
 
 def iter_dat_frames(path: str | Path):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import math
 from pathlib import Path
+import struct
 import tempfile
 import unittest
 import zipfile
@@ -11,9 +12,9 @@ import numpy as np
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
-from python_vna.diagnostic.app import parse_args
+from python_vna.diagnostic.app import configure_qt_rendering, parse_args
 from python_vna.diagnostic.data import (
     CurvePair,
     curve_pairs_from_table,
@@ -27,6 +28,7 @@ from python_vna.diagnostic.pages import (
     TraceAnalysisPage,
     VibrationAnalysisPage,
     fallback_nearest_auto_edges,
+    project_points_3d,
     read_xlsx_rows_basic,
     render_mode_animation_frames,
 )
@@ -35,6 +37,119 @@ from python_vna.models import ChannelConfig, MeasurementSet, SavedSession
 from python_vna.storage import default_session_config, save_legacy_vna
 from python_vna.ui.analysis_viewer import AnalysisWorkbench, AnalysisViewer
 from python_vna.ui.main_window import DataTipPoint, VnaViewBox
+
+
+def _write_ide_trans_sdm_fixture(
+    path: Path,
+    *,
+    n_samples: int = 2048,
+    df_hz: float = 0.25,
+    sample_frequency_hz: int | None = None,
+    update_rate: int | None = None,
+    include_raw_time: bool = True,
+) -> None:
+    header = bytearray(260)
+    si_offset = 82
+    ei_offset = 153
+    if sample_frequency_hz is not None:
+        header[0:3] = b"\x02CI"
+        offset = 3
+        for index, text in enumerate(("Name goes here", "Description goes here", "S/N goes here")):
+            encoded = text.encode("ascii")
+            header[offset] = len(encoded)
+            offset += 1
+            header[offset : offset + len(encoded)] = encoded
+            offset += len(encoded)
+            if index == 0:
+                struct.pack_into("<I", header, offset, 7)
+                offset += 4
+        struct.pack_into("<4I", header, offset, sample_frequency_hz, 3, 3, 12)
+    header[si_offset : si_offset + 6] = b"SI_1.0"
+    struct.pack_into("<2I", header, si_offset + 6, 2, n_samples)
+    if update_rate is not None:
+        struct.pack_into("<2I", header, si_offset + 14, 1, update_rate)
+    struct.pack_into("<I", header, 140, 0)
+    header[ei_offset : ei_offset + 6] = b"EI_1.0"
+    struct.pack_into("<d", header, ei_offset + 70, df_hz)
+
+    def record(name: str, values: np.ndarray) -> bytes:
+        encoded = name.encode("ascii")
+        payload = np.asarray(values, dtype="<f8").tobytes()
+        return bytes([len(encoded)]) + encoded + struct.pack("<5I", 0, 0, 0, 0, 0) + payload
+
+    def block(records: list[tuple[str, np.ndarray]]) -> bytes:
+        return b"CB_1.0" + struct.pack("<2I", len(records), 0) + b"".join(record(name, values) for name, values in records)
+
+    time_s = np.arange(n_samples, dtype=float) / (df_hz * n_samples)
+    excitation = np.sin(2.0 * np.pi * 8.0 * time_s) + 0.05 * np.random.default_rng(7).standard_normal(n_samples)
+    response = 2.0 * excitation
+
+    def encoded_time_spectrum(values: np.ndarray) -> np.ndarray:
+        spectrum = np.fft.rfft(np.asarray(values, dtype=float), n=n_samples)[:-1] * (2.0 / n_samples)
+        encoded = np.empty(n_samples, dtype=float)
+        encoded[0::2] = spectrum.real
+        encoded[1::2] = spectrum.imag
+        return encoded
+
+    window = np.hanning(n_samples)
+    excitation_spectrum = encoded_time_spectrum(excitation * window)
+    response_spectrum = encoded_time_spectrum(response * window)
+    n_frequency = n_samples // 2
+    autospectrum_input = np.zeros(n_samples, dtype=float)
+    autospectrum_response = np.zeros(n_samples, dtype=float)
+    autospectrum_input[0::2] = np.linspace(1.0, 4.0, n_frequency)
+    autospectrum_response[0::2] = np.linspace(4.0, 16.0, n_frequency)
+    transfer = np.empty(n_samples, dtype=float)
+    transfer[0::2] = 2.0
+    transfer[1::2] = 2.0
+    coherence = np.zeros(n_samples, dtype=float)
+    coherence[0::2] = 0.8
+
+    def sample_block(records: list[np.ndarray]) -> bytes:
+        if not include_raw_time:
+            return b""
+        record_headers = ((3, 0, 0, 1943219864), (2, 0, 6, 128))
+        payload = b""
+        for index, values in enumerate(records):
+            record_header = record_headers[min(index, len(record_headers) - 1)]
+            payload += struct.pack("<4I", *record_header)
+            payload += np.asarray(values, dtype="<f8").tobytes()
+        return b"\x02SB" + struct.pack("<3I", len(records), n_samples, 0) + payload
+
+    path.write_bytes(
+        bytes(header[:255])
+        + sample_block([excitation, response])
+        + block([("Excit.sig.()", excitation_spectrum), ("X trans, stage 6", response_spectrum)])
+        + block([("Excit.sig.()", autospectrum_input), ("X trans, stage 6", autospectrum_response)])
+        + block([("X trans, stage 6", transfer)])
+        + block([("X trans, stage 6", coherence)])
+    )
+
+
+def _write_hac_trans_csv_fixture(path: Path) -> None:
+    rows = []
+    for index in range(17):
+        frequency = index * 3.125
+        rows.append(
+            f"{np.sin(index):.8g},{2.0 * np.sin(index):.8g},{frequency:.8g},"
+            f"{6.020599913:.12g},{-90.0 + index:.8g},{0.8 + 0.01 * index:.8g}"
+        )
+    path.write_text(
+        "Excitation signal,Response signal\n"
+        "Target:controller,Target:measurement\n"
+        "Sample update rate:2.000000\n"
+        "Sample frequency:100.000000HZ\n"
+        "Window type:hann\n"
+        "Block size:32\n"
+        "Sample point number:32\n"
+        "NFFT:32\n"
+        "Average:5\n"
+        "Data:\n"
+        "Excitation signal,Response signal,Frequency,Magnitude response,Phase response,Coherence\n"
+        + "\n".join(rows)
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 class DiagnosticAppTests(unittest.TestCase):
@@ -47,6 +162,33 @@ class DiagnosticAppTests(unittest.TestCase):
 
         self.assertEqual(args.paths, ["one.vna", "trace.csv"])
 
+    def test_diagnostic_app_does_not_force_software_opengl_by_default(self):
+        previous_force = os.environ.pop("PYTHON_VNA_FORCE_SOFTWARE_OPENGL", None)
+        previous_opengl = os.environ.pop("QT_OPENGL", None)
+        try:
+            configure_qt_rendering()
+            self.assertNotIn("QT_OPENGL", os.environ)
+        finally:
+            if previous_force is not None:
+                os.environ["PYTHON_VNA_FORCE_SOFTWARE_OPENGL"] = previous_force
+            if previous_opengl is not None:
+                os.environ["QT_OPENGL"] = previous_opengl
+
+    def test_diagnostic_app_can_force_software_opengl_when_requested(self):
+        previous_force = os.environ.get("PYTHON_VNA_FORCE_SOFTWARE_OPENGL")
+        previous_opengl = os.environ.pop("QT_OPENGL", None)
+        os.environ["PYTHON_VNA_FORCE_SOFTWARE_OPENGL"] = "1"
+        try:
+            configure_qt_rendering()
+            self.assertEqual(os.environ.get("QT_OPENGL"), "software")
+        finally:
+            if previous_force is None:
+                os.environ.pop("PYTHON_VNA_FORCE_SOFTWARE_OPENGL", None)
+            else:
+                os.environ["PYTHON_VNA_FORCE_SOFTWARE_OPENGL"] = previous_force
+            if previous_opengl is not None:
+                os.environ["QT_OPENGL"] = previous_opengl
+
     def test_analysis_viewer_is_still_top_level_compatible_workbench(self):
         viewer = AnalysisViewer()
 
@@ -56,11 +198,261 @@ class DiagnosticAppTests(unittest.TestCase):
     def test_diagnostic_shell_builds_expected_pages(self):
         window = DiagnosticMainWindow()
 
-        self.assertEqual(window.stack.count(), 4)
-        self.assertEqual(window.page_titles(), ["VNA数据分析", "上位机数据分析", "减振器软件测试数据分析", "模态振型"])
+        self.assertEqual(window.stack.count(), 5)
+        self.assertEqual(window.page_titles(), ["VNA数据分析", "数据处理", "模态振型", "上位机数据分析", "减振器软件测试数据分析"])
         self.assertIs(window.stack.currentWidget(), window.analysis_page)
-        window.nav_list.setCurrentRow(2)
+        self.assertEqual(
+            [window.analysis_page.tabs.tabText(index) for index in range(window.analysis_page.tabs.count())],
+            ["主界面", "地面振动"],
+        )
+        self.assertIsNone(window.data_processing_page.tabs)
+        self.assertEqual(window.data_processing_page.derived_plot_button.text(), "换算绘图")
+        menu_actions = {
+            action.text().replace("&", ""): action for action in window.menuBar().actions()
+        }
+        self.assertIn("帮助", menu_actions)
+        help_menu = menu_actions["帮助"].menu()
+        self.assertIsNotNone(help_menu)
+        self.assertIn(
+            "检查更新",
+            {
+                action.text().replace("&", "")
+                for action in help_menu.actions()
+                if not action.isSeparator()
+            },
+        )
+        window.nav_list.setCurrentRow(4)
         self.assertIs(window.stack.currentWidget(), window.trace_page)
+
+    def test_diagnostic_shell_compact_layout_at_960_by_600(self):
+        window = DiagnosticMainWindow()
+        try:
+            window.resize(960, 600)
+            window.show()
+            QtWidgets.QApplication.processEvents()
+
+            self.assertLessEqual(window.nav_list.width(), 204)
+            self.assertEqual(window.nav_rail.width(), 204)
+            self.assertGreaterEqual(window.stack.width(), 750)
+            self.assertEqual(window.analysis_page.minimumWidth(), 0)
+            self.assertLessEqual(
+                window.analysis_page.tabs.geometry().right(),
+                window.analysis_page.width(),
+            )
+            self.assertLessEqual(window.data_processing_page.minimumSizeHint().width(), 780)
+
+            for row, page in ((3, window.vibration_page), (4, window.trace_page)):
+                window.nav_list.setCurrentRow(row)
+                QtWidgets.QApplication.processEvents()
+                self.assertTrue(page.action_group.isVisible())
+                expected_max_width = 300 if page is window.trace_page else 310
+                self.assertLessEqual(page.controls_column.width(), expected_max_width)
+                self.assertLessEqual(page.action_group.geometry().bottom(), page.controls_column.height())
+                self.assertEqual(
+                    page.controls_scroll.horizontalScrollBarPolicy(),
+                    QtCore.Qt.ScrollBarAlwaysOff,
+                )
+                self.assertEqual(page.controls_scroll.horizontalScrollBar().maximum(), 0)
+
+            window.nav_list.setCurrentRow(4)
+            QtWidgets.QApplication.processEvents()
+            self.assertEqual(window.trace_page.tabs.tabBar().elideMode(), QtCore.Qt.ElideRight)
+            self.assertTrue(window.trace_page.tabs.tabBar().usesScrollButtons())
+            self.assertLessEqual(
+                window.trace_page.ide_settings_group.minimumSizeHint().width(),
+                window.trace_page.controls_scroll.viewport().width(),
+            )
+        finally:
+            window.close()
+
+    def test_trans_settings_and_actions_fit_at_supported_window_sizes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            sdm_path = folder / "Xt_ol.sdm"
+            hac_path = folder / "X.csv"
+            _write_ide_trans_sdm_fixture(sdm_path)
+            _write_hac_trans_csv_fixture(hac_path)
+            window = DiagnosticMainWindow()
+            try:
+                window.resize(960, 600)
+                window.show()
+                window.nav_list.setCurrentRow(4)
+                QtWidgets.QApplication.processEvents()
+                page = window.trace_page
+
+                for path, tab, info_label, settings_group, view_tabs, buttons in (
+                    (
+                        sdm_path,
+                        page.ide_trans_tab,
+                        page.ide_trans_info_label,
+                        page.ide_trans_settings_group,
+                        page.ide_trans_view_tabs,
+                        (
+                            page.ide_trans_time_window_button,
+                            page.ide_trans_power_window_button,
+                            page.ide_trans_magnitude_window_button,
+                            page.ide_trans_phase_window_button,
+                            page.ide_trans_coherence_window_button,
+                        ),
+                    ),
+                    (
+                        hac_path,
+                        page.hac_trans_tab,
+                        page.hac_trans_info_label,
+                        page.hac_trans_settings_group,
+                        page.hac_trans_view_tabs,
+                        (
+                            page.hac_trans_time_window_button,
+                            page.hac_trans_magnitude_window_button,
+                            page.hac_trans_phase_window_button,
+                            page.hac_trans_coherence_window_button,
+                        ),
+                    ),
+                ):
+                    page.load_paths([path])
+                    page.tabs.setCurrentWidget(tab)
+                    QtWidgets.QApplication.processEvents()
+
+                    self.assertEqual(page.controls_scroll.verticalScrollBar().maximum(), 0)
+                    self.assertLessEqual(info_label.text().count("\n"), 2)
+                    self.assertLessEqual(info_label.height(), info_label.fontMetrics().lineSpacing() * 3 + 6)
+                    self.assertLessEqual(page.settings_stack.height(), 135)
+                    self.assertTrue(page.action_group.isVisible())
+                    for button in buttons:
+                        self.assertFalse(settings_group.isAncestorOf(button))
+                        self.assertTrue(view_tabs.isAncestorOf(button))
+
+                window.resize(760, 520)
+                QtWidgets.QApplication.processEvents()
+                self.assertEqual(window.size(), QtCore.QSize(760, 520))
+                for row in range(page.file_list.count()):
+                    page.file_list.setCurrentRow(row)
+                    QtWidgets.QApplication.processEvents()
+                    self.assertEqual(page.controls_scroll.verticalScrollBar().maximum(), 0)
+                    self.assertTrue(page.action_group.isVisible())
+                    self.assertLessEqual(page.action_group.geometry().bottom(), page.controls_column.height())
+            finally:
+                window.close()
+
+    def test_vna_analysis_and_data_processing_share_loaded_datasets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "PSD.dat"
+            path.write_text(
+                "006_ch2_X\t006_ch2_Y\n"
+                "1.0\t2.0\n"
+                "2.0\t4.0\n",
+                encoding="utf-8",
+            )
+            window = DiagnosticMainWindow()
+
+            window.analysis_page._load_paths([path])
+
+            self.assertIs(window.analysis_page._data_store, window.data_processing_page._data_store)
+            self.assertEqual(len(window.analysis_page._datasets), 1)
+            self.assertEqual(len(window.data_processing_page._datasets), 1)
+            self.assertEqual(window.data_processing_page.series_list.count(), 1)
+            self.assertEqual(window.data_processing_page._datasets[0].metadata["plot_kind"], "psd")
+
+            window.data_processing_page.series_list.item(0).setSelected(True)
+            window.data_processing_page._delete_selected_datasets()
+            QtWidgets.QApplication.processEvents()
+            QtWidgets.QApplication.processEvents()
+
+        self.assertEqual(window.analysis_page._datasets, [])
+        self.assertEqual(window.analysis_page.series_list.count(), 0)
+        self.assertEqual(window.data_processing_page.series_list.count(), 0)
+
+    def test_vna_analysis_and_modal_shape_share_loaded_vna_datasets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "modal.vna"
+            self._write_modal_vna(path)
+            window = DiagnosticMainWindow()
+
+            window.analysis_page._load_paths([path])
+
+            self.assertIs(window.modal_page._data_store, window.analysis_page._data_store)
+            self.assertEqual(len(window.modal_page.files), 1)
+            self.assertEqual(window.modal_page.files[0].path.name, "modal.vna")
+            self.assertGreaterEqual(window.modal_page.candidate_list.count(), 1)
+
+    def test_modal_shape_load_adds_vna_dataset_to_analysis_page(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "modal.vna"
+            self._write_modal_vna(path)
+            window = DiagnosticMainWindow()
+
+            window.modal_page.load_paths([path])
+
+            self.assertEqual(len(window.analysis_page._datasets), 1)
+            self.assertEqual(window.analysis_page._datasets[0].path.name, "modal.vna")
+            self.assertGreater(window.analysis_page.series_list.count(), 0)
+
+    def test_vna_delete_selected_clears_shared_modal_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "modal.vna"
+            self._write_modal_vna(path)
+            window = DiagnosticMainWindow()
+
+            window.analysis_page._load_paths([path])
+            QtWidgets.QApplication.processEvents()
+            candidate_count = window.modal_page.candidate_list.count()
+            self.assertGreaterEqual(candidate_count, 1)
+            window.modal_page.preview_mode()
+            self.assertTrue(window.modal_page._preview_timer.isActive())
+            self.assertIsNotNone(window.modal_page.last_mode)
+            window.analysis_page.series_list.selectAll()
+            window.analysis_page.clear_button.click()
+            QtWidgets.QApplication.processEvents()
+            QtWidgets.QApplication.processEvents()
+
+        self.assertEqual(window.analysis_page._datasets, [])
+        self.assertEqual(window.modal_page.files, [])
+        self.assertEqual(window.modal_page.point_table.rowCount(), 0)
+        self.assertEqual(window.modal_page.line_table.rowCount(), 0)
+        self.assertEqual(window.modal_page.candidate_list.count(), 0)
+        self.assertGreaterEqual(len(window.modal_page._retired_candidate_items), candidate_count)
+        self.assertFalse(window.modal_page._preview_timer.isActive())
+        self.assertIsNone(window.modal_page.last_mode)
+
+    def test_vna_delete_selected_button_schedules_single_safe_delete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "modal.vna"
+            self._write_modal_vna(path)
+            window = DiagnosticMainWindow()
+
+            window.analysis_page._load_paths([path])
+            window.analysis_page.series_list.selectAll()
+            window.analysis_page.clear_button.click()
+            window.analysis_page.clear_button.click()
+            QtWidgets.QApplication.processEvents()
+            QtWidgets.QApplication.processEvents()
+
+        self.assertEqual(window.analysis_page._datasets, [])
+        self.assertTrue(window.analysis_page.clear_button.isEnabled())
+
+    def test_vna_delete_after_plotting_defers_safe_plot_cleanup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "modal.vna"
+            self._write_modal_vna(path)
+            window = DiagnosticMainWindow()
+
+            window.analysis_page._load_paths([path])
+            window.analysis_page.series_list.selectAll()
+            window.analysis_page.plot_current()
+            self.assertTrue(
+                any(window.analysis_page._plot_curves.get(plot) for plot in window.analysis_page._all_analysis_plots())
+            )
+
+            window.analysis_page.clear_button.click()
+            QtWidgets.QApplication.processEvents()
+            QtWidgets.QApplication.processEvents()
+
+        self.assertEqual(window.analysis_page._datasets, [])
+        self.assertFalse(window.analysis_page._clear_plots_pending)
+        self.assertTrue(window.analysis_page.clear_button.isEnabled())
+        self.assertEqual(window.analysis_page.series_list.count(), 0)
+        self.assertEqual(window.modal_page.files, [])
+        self.assertEqual(window.modal_page.point_table.rowCount(), 0)
 
     def test_numeric_table_parser_reads_matlab_style_curve_pairs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -151,6 +543,191 @@ class DiagnosticAppTests(unittest.TestCase):
         self.assertIn("ACC_1", page._plot_curves[page.ide_time_plot])
         self.assertIn("ACC_1", page._plot_curves[page.ide_psd_plot])
 
+    def test_trace_page_loads_sdm_and_plots_ide_trans_views(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Xt_ol.sdm"
+            _write_ide_trans_sdm_fixture(path)
+
+            parsed = load_trace_analysis_file(path)
+            page = TraceAnalysisPage()
+            page.load_paths([path])
+
+            self.assertEqual(parsed.trace_kind, "ide_trans")
+            self.assertAlmostEqual(parsed.sample_rate, 512.0)
+            self.assertEqual(parsed.time_s.size, 2048)
+            self.assertEqual(np.asarray(parsed.table.metadata["ide_trans_transfer"]).size, 1024)
+            np.testing.assert_allclose(parsed.table.metadata["ide_trans_coherence"], 0.8)
+            np.testing.assert_allclose(
+                parsed.channels["X trans, stage 6"],
+                2.0 * parsed.channels["Excit.sig.()"],
+                atol=1e-10,
+            )
+            self.assertIn("ide_trans_time_spectrum_input", parsed.table.metadata)
+            self.assertEqual(parsed.table.metadata["ide_trans_time_source"], "sdm_raw")
+            expected_excitation = np.sin(2.0 * np.pi * 8.0 * parsed.time_s)
+            expected_excitation += 0.05 * np.random.default_rng(7).standard_normal(parsed.time_s.size)
+            np.testing.assert_allclose(parsed.channels["Excit.sig.()"], expected_excitation)
+            self.assertIs(page.tabs.currentWidget(), page.ide_trans_tab)
+            self.assertEqual(page._plot_curves[page.ide_trans_time_plot], {})
+
+            page.plot_current()
+
+            self.assertEqual(len(page._plot_curves[page.ide_trans_time_plot]), 2)
+            self.assertEqual(len(page._plot_curves[page.ide_trans_power_plot]), 2)
+            self.assertEqual(len(page._plot_curves[page.ide_trans_magnitude_plot]), 1)
+            self.assertEqual(len(page._plot_curves[page.ide_trans_phase_plot]), 1)
+            self.assertEqual(len(page._plot_curves[page.ide_trans_coherence_plot]), 1)
+            magnitude = next(iter(page._plot_curves[page.ide_trans_magnitude_plot].values()))[1]
+            np.testing.assert_allclose(magnitude, 20.0 * np.log10(np.sqrt(8.0)))
+
+    def test_trace_page_falls_back_to_spectrum_time_when_sdm_has_no_sample_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "legacy.sdm"
+            _write_ide_trans_sdm_fixture(path, include_raw_time=False)
+
+            parsed = load_trace_analysis_file(path)
+
+            self.assertEqual(parsed.table.metadata["ide_trans_time_source"], "spectrum_ifft")
+            self.assertEqual(parsed.time_s.size, 2048)
+
+    def test_trace_page_uses_sdm_sample_frequency_and_update_rate_for_frequency_grid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "XT_CL.SDM"
+            _write_ide_trans_sdm_fixture(
+                path,
+                df_hz=0.05,
+                sample_frequency_hz=5000,
+                update_rate=7,
+            )
+
+            parsed = load_trace_analysis_file(path)
+            page = TraceAnalysisPage()
+            page.load_paths([path])
+            page.plot_current()
+
+            expected_rate = 5000.0 / 7.0
+            expected_df = expected_rate / 2048.0
+            frequency = next(iter(page._plot_curves[page.ide_trans_magnitude_plot].values()))[0]
+            self.assertAlmostEqual(parsed.sample_rate, expected_rate)
+            self.assertAlmostEqual(parsed.table.metadata["ide_trans_header_df_hz"], 0.05)
+            self.assertAlmostEqual(parsed.table.metadata["ide_trans_df_hz"], expected_df)
+            self.assertAlmostEqual(page.ide_trans_sample_frequency.value(), 5000.0)
+            self.assertAlmostEqual(page.ide_trans_update_rate.value(), 7.0)
+            self.assertAlmostEqual(frequency[1] - frequency[0], expected_df)
+            self.assertAlmostEqual(frequency[-1], 1023.0 * expected_df)
+
+    def test_trace_page_refreshes_ide_trans_grid_when_switching_sdm_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            slow_path = folder / "slow.sdm"
+            fast_path = folder / "fast.sdm"
+            _write_ide_trans_sdm_fixture(slow_path, df_hz=0.05)
+            _write_ide_trans_sdm_fixture(fast_path, df_hz=0.3)
+            page = TraceAnalysisPage()
+            page.load_paths([slow_path, fast_path])
+
+            page.file_list.setCurrentRow(0)
+            slow_x = next(iter(page._plot_curves[page.ide_trans_magnitude_plot].values()))[0]
+            self.assertAlmostEqual(page.ide_trans_frequency_max.value(), 51.15)
+            self.assertAlmostEqual(page.ide_trans_sample_frequency.value(), 102.4)
+            self.assertAlmostEqual(page.ide_trans_update_rate.value(), 1.0)
+            self.assertAlmostEqual(slow_x[-1], 51.15)
+
+            page.file_list.setCurrentRow(1)
+            fast_x = next(iter(page._plot_curves[page.ide_trans_magnitude_plot].values()))[0]
+            self.assertAlmostEqual(page.ide_trans_frequency_max.value(), 306.9)
+            self.assertAlmostEqual(page.ide_trans_sample_frequency.value(), 614.4)
+            self.assertAlmostEqual(page.ide_trans_update_rate.value(), 1.0)
+            self.assertAlmostEqual(fast_x[-1], 306.9)
+
+    def test_trace_page_reloads_changed_sdm_and_supports_time_update_rate_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Xt_ol.sdm"
+            _write_ide_trans_sdm_fixture(path, df_hz=0.25)
+            page = TraceAnalysisPage()
+            page.load_paths([path])
+            page.plot_current()
+
+            original_frequency = next(iter(page._plot_curves[page.ide_trans_magnitude_plot].values()))[0].copy()
+            page.ide_trans_sample_frequency.setValue(5000.0)
+            page.ide_trans_update_rate.setValue(7)
+            page.ide_trans_update_rate.editingFinished.emit()
+
+            effective_rate = 5000.0 / 7.0
+            self.assertAlmostEqual(page.current_file().sample_rate, effective_rate)
+            self.assertAlmostEqual(page.current_file().time_s[-1], 2047.0 / effective_rate)
+            updated_frequency = next(iter(page._plot_curves[page.ide_trans_magnitude_plot].values()))[0]
+            self.assertFalse(np.allclose(updated_frequency, original_frequency))
+            self.assertAlmostEqual(updated_frequency[-1], 1023.0 * effective_rate / 2048.0)
+            self.assertIn("手动", page.ide_trans_context_label.text())
+
+            _write_ide_trans_sdm_fixture(path, df_hz=0.125)
+            page.load_paths([path])
+
+            self.assertEqual(len(page.files), 1)
+            self.assertAlmostEqual(page.current_file().sample_rate, 256.0)
+            self.assertAlmostEqual(page.ide_trans_sample_frequency.value(), 256.0)
+            self.assertAlmostEqual(page.ide_trans_update_rate.value(), 1.0)
+            self.assertFalse(page.ide_trans_update_rate_reset.isEnabled())
+            refreshed_frequency = next(iter(page._plot_curves[page.ide_trans_magnitude_plot].values()))[0]
+            self.assertAlmostEqual(refreshed_frequency[-1], 127.875)
+            self.assertAlmostEqual(page.ide_trans_frequency_max.value(), 127.875)
+
+    def test_trace_page_loads_hac_transfer_csv_and_switches_transfer_tabs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            trace_path = folder / "trace.txt"
+            trace_path.write_text("Time\tACC_1\n0\t1\n0.01\t2\n", encoding="utf-8")
+            hac_path = folder / "X.csv"
+            sdm_path = folder / "Xt_ol.sdm"
+            _write_hac_trans_csv_fixture(hac_path)
+            _write_ide_trans_sdm_fixture(sdm_path)
+
+            parsed = load_trace_analysis_file(hac_path)
+            page = TraceAnalysisPage()
+            page.load_paths([trace_path])
+            page.load_paths([hac_path])
+
+            self.assertEqual(parsed.trace_kind, "hac_trans")
+            self.assertAlmostEqual(parsed.sample_rate, 100.0)
+            self.assertEqual(parsed.time_s.size, 17)
+            self.assertEqual(parsed.table.metadata["hac_trans_header"]["Average"], "5")
+            self.assertEqual(page.current_file().trace_kind, "hac_trans")
+            self.assertIs(page.tabs.currentWidget(), page.hac_trans_tab)
+            self.assertEqual(page._plot_curves[page.hac_trans_time_plot], {})
+
+            page.plot_current()
+
+            self.assertEqual(len(page._plot_curves[page.hac_trans_time_plot]), 2)
+            self.assertEqual(len(page._plot_curves[page.hac_trans_magnitude_plot]), 1)
+            self.assertEqual(len(page._plot_curves[page.hac_trans_phase_plot]), 1)
+            self.assertEqual(len(page._plot_curves[page.hac_trans_coherence_plot]), 1)
+            magnitude = next(iter(page._plot_curves[page.hac_trans_magnitude_plot].values()))[1]
+            np.testing.assert_allclose(magnitude, 6.020599913)
+
+            page.load_paths([sdm_path])
+
+            self.assertEqual(page.current_file().trace_kind, "ide_trans")
+            self.assertIs(page.tabs.currentWidget(), page.ide_trans_tab)
+
+    def test_trace_page_renames_current_data_without_renaming_source_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "trace.txt"
+            values = "\n".join(f"{i / 100.0:.3f}\t{np.sin(i / 4.0):.6f}" for i in range(64))
+            path.write_text("Time\tACC_1\n" + values + "\n", encoding="utf-8")
+            page = TraceAnalysisPage()
+
+            page.load_paths([path])
+            page.rename_edit.setText("工况 A")
+            page.rename_edit.returnPressed.emit()
+
+            self.assertEqual(page.files[0].table.name, "工况 A")
+            self.assertEqual(page.files[0].table.path, path)
+            self.assertEqual(page.file_list.item(0).text(), "工况 A (IDE Trace)")
+            self.assertIn("工况 A", page.current_file_edit.text())
+            self.assertIn("工况 A | ACC_1", page._plot_curves[page.ide_time_plot])
+            self.assertIn("工况 A | ACC_1", page._plot_curves[page.ide_psd_plot])
+
     def test_trace_ide_parser_matches_matlab_header_eu_and_psd(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "ide.txt"
@@ -194,6 +771,211 @@ class DiagnosticAppTests(unittest.TestCase):
         self.assertEqual(parsed.trace_kind, "hac_trace")
         self.assertAlmostEqual(parsed.sample_rate, 100.0)
         np.testing.assert_allclose(parsed.time_s, [0.0, 0.01])
+
+    def test_trace_cangfu_parser_reads_graphic_viewer_data_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Pos_1.dat"
+            path.write_text(
+                "Graphic_Viewer  LS_X[um] LS_Y[um]\n"
+                "20240429_142011\n"
+                "Pos( LS_X = 0.132, LS_Y = 0.106)\n"
+                "2\n"
+                "4\n"
+                "LS_X\n"
+                "[um]\n"
+                "LS_Y\n"
+                "[um]\n"
+                "0\t1.0\t2.0\n"
+                "1\t1.5\t2.5\n"
+                "2\t2.0\t3.0\n"
+                "3\t2.5\t3.5\n",
+                encoding="utf-8",
+            )
+
+            parsed = load_trace_analysis_file(path)
+
+        self.assertEqual(parsed.trace_kind, "cangfu_trace")
+        self.assertEqual(parsed.table.headers, ["LS_X[um]", "LS_Y[um]"])
+        self.assertAlmostEqual(parsed.sample_rate, 1.0)
+        np.testing.assert_allclose(parsed.channels["LS_X[um]"], [1.0, 1.5, 2.0, 2.5])
+
+    def test_trace_page_loads_and_plots_cangfu_trace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Pos_1.dat"
+            path.write_text(
+                "Graphic_Viewer  LS_X[um] LS_Y[um]\n"
+                "20240429_142011\n"
+                "Pos( LS_X = 0.132, LS_Y = 0.106)\n"
+                "2\n"
+                "8\n"
+                "LS_X\n"
+                "[um]\n"
+                "LS_Y\n"
+                "[um]\n"
+                + "\n".join(f"{index}\t{np.sin(index):.6f}\t{np.cos(index):.6f}" for index in range(8))
+                + "\n",
+                encoding="utf-8",
+            )
+            page = TraceAnalysisPage()
+
+            page.load_paths([path])
+            page.plot_current()
+
+        self.assertEqual(page.files[0].trace_kind, "cangfu_trace")
+        self.assertIs(page.tabs.currentWidget(), page.cangfu_tab)
+        self.assertIn("LS_X[um]", page._plot_curves[page.cangfu_time_plot])
+        self.assertIn("LS_X[um]", page._plot_curves[page.cangfu_psd_plot])
+
+    def test_trace_cangfu_parser_reads_independent_txt_sidecar_mat_pair(self):
+        from scipy.io import savemat
+
+        with tempfile.TemporaryDirectory() as tmp:
+            txt_path = Path(tmp) / "trace087.txt"
+            mat_path = Path(tmp) / "trace087.mat"
+            txt_path.write_text(
+                "Independent Tracing\n"
+                "trace01: Sensors - acc_sf_v1\n"
+                "trace02: Sensors - acc_sf_v2\n"
+                "trace03: undefined\n",
+                encoding="utf-8",
+            )
+            trace_data = np.empty((3, 1), dtype=object)
+            trace_data[0, 0] = {"fs": 250, "signal": "Sensors - acc_sf_v1", "samples": 4, "trace": np.array([1.0, 2.0, 3.0, 4.0])}
+            trace_data[1, 0] = {"fs": 250, "signal": "Sensors - acc_sf_v2", "samples": 4, "trace": np.array([4.0, 3.0, 2.0, 1.0])}
+            trace_data[2, 0] = {"signal": "undefined"}
+            savemat(mat_path, {"trace_data": trace_data, "trace_info": {"type": "independent"}})
+
+            parsed_from_txt = load_trace_analysis_file(txt_path)
+            parsed_from_mat = load_trace_analysis_file(mat_path)
+
+        self.assertEqual(parsed_from_txt.trace_kind, "cangfu_trace")
+        self.assertEqual(parsed_from_txt.sample_rate, 250.0)
+        self.assertEqual(parsed_from_txt.table.metadata["cangfu_source"], "mat_independent")
+        self.assertEqual(list(parsed_from_txt.channels), ["Sensors - acc_sf_v1", "Sensors - acc_sf_v2"])
+        np.testing.assert_allclose(parsed_from_txt.time_s, [0.0, 0.004, 0.008, 0.012])
+        self.assertEqual(list(parsed_from_mat.channels), ["Sensors - acc_sf_v1", "Sensors - acc_sf_v2"])
+
+    def test_trace_cangfu_parser_reads_loop_tf_txt_sidecar_mat_pair(self):
+        from scipy.io import savemat
+
+        with tempfile.TemporaryDirectory() as tmp:
+            txt_path = Path(tmp) / "trace084.txt"
+            mat_path = Path(tmp) / "trace084.mat"
+            txt_path.write_text(
+                "Open Loop Transfer Function Test\n"
+                "Acceleration: Z\n"
+                "Sampling Frequency: 2500.0 Hz\n",
+                encoding="utf-8",
+            )
+            t = np.arange(96, dtype=float)
+            excitation = np.column_stack(
+                [
+                    np.sin(2.0 * np.pi * t / 12.0),
+                    0.8 * np.sin(2.0 * np.pi * t / 12.0 + 0.1),
+                ]
+            )
+            response = 2.0 * excitation
+            trace_data = np.empty((2, 1), dtype=object)
+            trace_data[0, 0] = excitation
+            trace_data[1, 0] = response
+            savemat(
+                mat_path,
+                {
+                    "trace_data": trace_data,
+                    "trace_info": {
+                        "fs": 2500,
+                        "type": "looptf",
+                        "loopinfo": "Acceleration: Z",
+                        "loop": "Acceleration",
+                        "axis_str": "Z",
+                        "axis_id": 3,
+                    },
+                },
+            )
+
+            parsed = load_trace_analysis_file(txt_path)
+
+        self.assertEqual(parsed.trace_kind, "cangfu_trace")
+        self.assertEqual(parsed.sample_rate, 2500.0)
+        self.assertEqual(parsed.table.metadata["cangfu_source"], "mat_loop_tf")
+        self.assertEqual(parsed.table.metadata["cangfu_mode"], "transfer")
+        self.assertEqual(parsed.table.metadata["cangfu_transfer_algorithm"], "get_looptf")
+        self.assertEqual(parsed.table.metadata["cangfu_average_count"], 2)
+        self.assertEqual(parsed.channels, {})
+        transfer_pairs = parsed.table.metadata["cangfu_transfer_pairs"]
+        self.assertEqual(len(transfer_pairs), 1)
+        self.assertEqual(transfer_pairs[0].label, "Acceleration Z 传递函数")
+        self.assertEqual(parsed.table.row_count, 48)
+        self.assertIn("cangfu_phase_pairs", parsed.table.metadata)
+        self.assertIn("cangfu_coherence_pairs", parsed.table.metadata)
+        self.assertAlmostEqual(float(np.nanmedian(transfer_pairs[0].y)), 20.0 * np.log10(2.0), places=1)
+
+    def test_trace_page_plots_cangfu_loop_tf_as_single_transfer_curve(self):
+        from scipy.io import savemat
+
+        with tempfile.TemporaryDirectory() as tmp:
+            txt_path = Path(tmp) / "trace084.txt"
+            mat_path = Path(tmp) / "trace084.mat"
+            txt_path.write_text(
+                "Open Loop Transfer Function Test\n"
+                "Acceleration: Z\n"
+                "Sampling Frequency: 2500.0 Hz\n",
+                encoding="utf-8",
+            )
+            t = np.arange(96, dtype=float)
+            excitation = np.column_stack([np.sin(2.0 * np.pi * t / 12.0), np.sin(2.0 * np.pi * t / 10.0)])
+            response = 2.0 * excitation
+            trace_data = np.empty((2, 1), dtype=object)
+            trace_data[0, 0] = excitation
+            trace_data[1, 0] = response
+            savemat(
+                mat_path,
+                {
+                    "trace_data": trace_data,
+                    "trace_info": {"fs": 2500, "type": "looptf", "loopinfo": "Acceleration: Z"},
+                },
+            )
+            page = TraceAnalysisPage()
+
+            page.load_paths([txt_path])
+            page.plot_current()
+
+        self.assertEqual(page.files[0].table.metadata["cangfu_mode"], "transfer")
+        self.assertEqual(set(page._plot_curves[page.cangfu_time_plot]), {"Acceleration Z 传递函数"})
+        self.assertEqual(page._plot_curves[page.cangfu_psd_plot], {})
+
+    def test_trace_page_dedupes_cangfu_txt_mat_sidecar_pair(self):
+        from scipy.io import savemat
+
+        with tempfile.TemporaryDirectory() as tmp:
+            txt_path = Path(tmp) / "trace084.txt"
+            mat_path = Path(tmp) / "trace084.mat"
+            txt_path.write_text(
+                "Open Loop Transfer Function Test\n"
+                "Acceleration: Z\n"
+                "Sampling Frequency: 2500.0 Hz\n",
+                encoding="utf-8",
+            )
+            t = np.arange(96, dtype=float)
+            excitation = np.column_stack([np.sin(2.0 * np.pi * t / 12.0), np.sin(2.0 * np.pi * t / 10.0)])
+            trace_data = np.empty((2, 1), dtype=object)
+            trace_data[0, 0] = excitation
+            trace_data[1, 0] = 2.0 * excitation
+            savemat(
+                mat_path,
+                {
+                    "trace_data": trace_data,
+                    "trace_info": {"fs": 2500, "type": "looptf", "loopinfo": "Acceleration: Z"},
+                },
+            )
+            page = TraceAnalysisPage()
+
+            page.load_paths([mat_path, txt_path])
+            page.load_paths([txt_path])
+
+        self.assertEqual(len(page.files), 1)
+        self.assertEqual(page.file_list.count(), 1)
+        self.assertEqual(page.files[0].table.metadata["cangfu_mode"], "transfer")
 
     def test_vibration_frequency_parser_computes_matlab_tfestimate_magnitude(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -278,6 +1060,78 @@ class DiagnosticAppTests(unittest.TestCase):
         self.assertIn("OUT Force", parsed.log_groups)
         self.assertIn("TEMP", parsed.log_groups)
 
+    def test_vibration_log_groups_parse_mixed_tab_space_timestamp_header(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "floor_feedforward_geophone.dat"
+            path.write_text(
+                "2025-11-21 00:00:24+0ms    \t"
+                "ACC_BF_X(mm/s^2) ACC_BF_Y(mm/s^2) ACC_BF_Z(mm/s^2) "
+                "ACC_SF_V1(mm/s^2) ACC_SF_H1(mm/s^2) PROX_V1(um) "
+                "PROX_H1(um) PS_POS_X(mm) PS_ACC_X(m/s^2) "
+                "VALVE1_V1V2 VALVE1_X1X2 MT_AM1_V(N) MT_TM_AM1_V(C)\n"
+                "------------------------------------------------------------------------------------------------\n"
+                "2025-11-21 00:00:24+0ms     "
+                "-45.6 -9.8 45.8 -5.2 -1.7 3059 3184 0.0005 -0.0006 50.5 12.4 -0.016 24.4\n"
+                "2025-11-21 00:00:25+0ms     "
+                "-30.0 -4.6 -2.9 -6.4 -3.1 3061 3185 0.0003 -0.0019 50.5 12.9 -0.079 24.5\n",
+                encoding="utf-8",
+            )
+
+            parsed = load_vibration_analysis_file(path)
+
+        self.assertEqual(parsed.table.kind, "log")
+        self.assertEqual(parsed.table.headers[:3], ["ACC_BF_X(mm/s^2)", "ACC_BF_Y(mm/s^2)", "ACC_BF_Z(mm/s^2)"])
+        self.assertEqual(parsed.log_groups["BF Velocity"], [0, 1, 2])
+        self.assertEqual(parsed.log_groups["SF Velocity"], [3, 4])
+        self.assertEqual(parsed.log_groups["PROX Position"], [5, 6])
+        self.assertEqual(parsed.log_groups["PS Motion"], [7, 8])
+        self.assertEqual(parsed.log_groups["Valve Output 1"], [9, 10])
+        self.assertEqual(parsed.log_groups["MT Actuator Force"], [11])
+        self.assertEqual(parsed.log_groups["MT Temperature"], [12])
+
+    def test_vibration_log_groups_parse_tab_then_fixed_width_vi_header(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "VI_sensor_value_data.dat"
+            headers = [
+                "PS_H1(um)",
+                "PS_H2(um)",
+                "VS_H1(um/s)",
+                "VFS_H1(um/s)",
+                "TS_H1(C)",
+                "WS1_X(m)",
+                "RS_Y(m)",
+                "RESERVED1",
+                "AC_H1(N)",
+                "AC_V1(N)",
+            ]
+            header_line = "2025-11-25 14:30:32+0ms  \t" + "     ".join(headers)
+            row1 = " ".join(["2025-11-25", "14:30:32+0ms"] + [str(index) for index in range(1, 11)])
+            row2 = " ".join(["2025-11-25", "14:30:33+0ms"] + [str(index + 1) for index in range(1, 11)])
+            path.write_text(
+                header_line
+                + "\n"
+                + "-" * len(header_line)
+                + "\n"
+                + row1
+                + "\n"
+                + row2
+                + "\n",
+                encoding="utf-8",
+            )
+
+            parsed = load_vibration_analysis_file(path)
+
+        self.assertEqual(parsed.table.kind, "log")
+        self.assertEqual(parsed.table.headers[:3], ["PS_H1(um)", "PS_H2(um)", "VS_H1(um/s)"])
+        self.assertIn("PS Position", parsed.log_groups)
+        self.assertIn("VS Velocity", parsed.log_groups)
+        self.assertIn("VFS Filtered Velocity", parsed.log_groups)
+        self.assertIn("TS Temperature", parsed.log_groups)
+        self.assertIn("WS/RS Stage", parsed.log_groups)
+        self.assertIn("AC Actuator Force", parsed.log_groups)
+        self.assertIn("Reserved", parsed.log_groups)
+        self.assertEqual(parsed.log_group_labels["PS Position"], ["PS_H1(um)", "PS_H2(um)"])
+
     def test_vibration_log_groups_show_legacy_profiles_for_34_column_logs(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "legacy34.txt"
@@ -336,6 +1190,42 @@ class DiagnosticAppTests(unittest.TestCase):
         page.demean_check.setChecked(True)
         y = page._plot_curves[page.log_plot]["ACC_X"][1]
         self.assertAlmostEqual(float(np.nanmean(y)), 0.0)
+
+    def test_vibration_log_sample_range_matches_matlab_slice_behavior(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "log.csv"
+            log_path.write_text(
+                "Time,ACC_X,ACC_Y\n"
+                "0,10,100\n"
+                "1,20,200\n"
+                "2,30,300\n"
+                "3,40,400\n",
+                encoding="utf-8",
+            )
+            page = VibrationAnalysisPage()
+
+            page.load_paths([log_path])
+            self.assertEqual(page.log_range_start.text(), "1")
+            self.assertEqual(page.log_range_end.text(), "4")
+            page.plot_current()
+            page.log_range_start.setText("2")
+            page.log_range_end.setText("3")
+            self.assertEqual(page._plot_curves[page.log_plot]["ACC_X"][0].size, 4)
+            page.log_range_end.editingFinished.emit()
+            x, y = page._plot_curves[page.log_plot]["ACC_X"]
+            page.log_range_start.setText("")
+            page.log_range_end.setText("")
+            page.log_range_start.editingFinished.emit()
+            full_x, full_y = page._plot_curves[page.log_plot]["ACC_X"]
+            page.log_range_start.setText("4")
+            page.log_range_end.setText("2")
+            page.log_range_end.editingFinished.emit()
+
+        np.testing.assert_allclose(x, [2.0, 3.0])
+        np.testing.assert_allclose(y, [20.0, 30.0])
+        np.testing.assert_allclose(full_x, [1.0, 2.0, 3.0, 4.0])
+        np.testing.assert_allclose(full_y, [10.0, 20.0, 30.0, 40.0])
+        self.assertEqual((page.log_range_start.text(), page.log_range_end.text()), ("2", "4"))
 
     def test_vibration_operation_toggle_uses_button_style(self):
         page = VibrationAnalysisPage()
@@ -667,6 +1557,20 @@ class DiagnosticAppTests(unittest.TestCase):
             self.assertEqual(gif_data[:6], b"GIF89a")
             self.assertIn(b"NETSCAPE2.0", gif_data)
             self.assertGreaterEqual(gif_data.count(b"\x21\xF9\x04"), 24)
+            gif_buffer = QtCore.QBuffer()
+            gif_buffer.setData(QtCore.QByteArray(gif_data))
+            self.assertTrue(gif_buffer.open(QtCore.QIODevice.ReadOnly))
+            reader = QtGui.QImageReader(gif_buffer, b"gif")
+            self.assertTrue(reader.canRead(), reader.errorString())
+            self.assertEqual(reader.imageCount(), 24)
+            first_frame = reader.read().convertToFormat(QtGui.QImage.Format_RGBA8888)
+            self.assertFalse(first_frame.isNull())
+            pixels = np.frombuffer(first_frame.bits(), dtype=np.uint8).reshape(
+                first_frame.height(), first_frame.width(), 4
+            )
+            rgb = pixels[:, :, :3]
+            self.assertGreater(np.count_nonzero(np.all(rgb == [215, 38, 61], axis=2)), 0)
+            self.assertEqual(np.count_nonzero(np.all(rgb == [0, 0, 0], axis=2)), 0)
             page._preview_timer.stop()
 
     def test_modal_page_uses_true_opengl_3d_views(self):
@@ -691,6 +1595,25 @@ class DiagnosticAppTests(unittest.TestCase):
             any(getattr(item, "mode", None) == "line_strip" for item in page.mode_plot._render_items)
         )
 
+    def test_modal_page_can_disable_opengl_preview_for_compatibility(self):
+        previous = os.environ.get("PYTHON_VNA_DISABLE_MODAL_OPENGL")
+        os.environ["PYTHON_VNA_DISABLE_MODAL_OPENGL"] = "1"
+        try:
+            page = ModalShapePage()
+        finally:
+            if previous is None:
+                os.environ.pop("PYTHON_VNA_DISABLE_MODAL_OPENGL", None)
+            else:
+                os.environ["PYTHON_VNA_DISABLE_MODAL_OPENGL"] = previous
+
+        coords = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.5], [1.0, 1.0, 1.0]], dtype=float)
+        labels = ["P1", "P2", "P3"]
+
+        self.assertNotIsInstance(page.layout_plot, Modal3DView)
+        self.assertNotIsInstance(page.mode_plot, Modal3DView)
+        page._render_layout(coords, labels)
+        self.assertTrue(page.layout_plot.listDataItems())
+
     def test_modal_3d_preview_preserves_zoom_between_animation_frames(self):
         page = ModalShapePage()
         mode = {
@@ -707,6 +1630,31 @@ class DiagnosticAppTests(unittest.TestCase):
         page._render_mode(mode, phase=1.0)
 
         self.assertAlmostEqual(float(page.mode_plot.opts["distance"]), 42.0)
+
+    def test_modal_gif_projection_matches_opengl_camera_angles(self):
+        points = np.array(
+            [[-1.0, 0.2, 0.3], [0.4, 1.2, -0.5], [1.5, -0.7, 0.9]],
+            dtype=float,
+        )
+        for azimuth, elevation in ((35.0, 24.0), (-70.0, 55.0), (120.0, -20.0)):
+            matrix = QtGui.QMatrix4x4()
+            matrix.rotate(elevation - 90.0, 1.0, 0.0, 0.0)
+            matrix.rotate(azimuth + 90.0, 0.0, 0.0, -1.0)
+            expected = np.array(
+                [
+                    [mapped.x(), mapped.y()]
+                    for mapped in (matrix.map(QtGui.QVector3D(*point)) for point in points)
+                ],
+                dtype=float,
+            )
+
+            projected = project_points_3d(
+                points,
+                azimuth_deg=azimuth,
+                elevation_deg=elevation,
+            )
+
+            np.testing.assert_allclose(projected, expected, rtol=1e-6, atol=1e-7)
 
     def test_modal_3d_preview_only_shows_current_shape_without_arrows(self):
         page = ModalShapePage()
