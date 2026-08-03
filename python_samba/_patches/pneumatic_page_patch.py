@@ -1263,8 +1263,8 @@ def _on_pneu_dither_freq_changed(self) -> None:
     """User edited the dither frequency."""
     def work() -> None:
         s = self._require_session()
-        val = float(self.pneum_dither_freq.text())
-        s.set_pneumatic_dither_frequency(val)
+        val = _pneumatic_config_int(self.pneum_dither_freq.text())
+        s.set_dither_frequency(val)
         self.log_msg(f"Dither frequency set to {val}")
     self._run("Dither frequency write", work)
 
@@ -1340,7 +1340,11 @@ def _on_pneu_ramp_valve_offset_grad_changed(self) -> None:
 
 def _on_pneu_ramp_rms_hysteresis_changed(self) -> None:
     """User edited the RMS hysteresis factor ramp parameter."""
-    _on_pneu_ramp_param_changed(self, "rms_hysteresis_factor", float(self.pneum_ramp_rms_hysteresis.text()))
+    _on_pneu_ramp_param_changed(
+        self,
+        "rms_hysteresis_factor",
+        _pneumatic_config_int(self.pneum_ramp_rms_hysteresis.text()),
+    )
 
 
 def _on_pneu_ramp_param_changed(self, param_name: str, value: float) -> None:
@@ -1381,9 +1385,13 @@ def _on_pneu_read_all(self) -> None:
                 in_vals = values[:split]
                 out_vals = values[split:]
                 for row, value in enumerate(in_vals[:8]):
-                    self.pneum_input_matrix[(row, axis)].setText(f"{float(value):.5e}")
+                    self.pneum_input_matrix[(row, axis)].setText(
+                        format_ui_number(value)
+                    )
                 for row, value in enumerate(out_vals[:8]):
-                    self.pneum_output_matrix[(row, axis)].setText(f"{float(value):.5e}")
+                    self.pneum_output_matrix[(row, axis)].setText(
+                        format_ui_number(value)
+                    )
             except Exception as exc:
                 self.log_msg(f"Pneumatic steering matrix axis {axis}: {exc}")
 
@@ -1395,10 +1403,10 @@ def _on_pneu_read_all(self) -> None:
             dn_vals = offsets[split:]
             for i, ed in enumerate(self.pneum_valve_up_offsets):
                 if i < len(up_vals):
-                    ed.setText(f"{up_vals[i]:.5e}")
+                    ed.setText(format_ui_number(up_vals[i]))
             for i, ed in enumerate(self.pneum_valve_down_offsets):
                 if i < len(dn_vals):
-                    ed.setText(f"{dn_vals[i]:.5e}")
+                    ed.setText(format_ui_number(dn_vals[i]))
         except Exception:
             pass
 
@@ -1408,7 +1416,7 @@ def _on_pneu_read_all(self) -> None:
             iso_tail = iso_vals[-3:]
             for i, ed in enumerate(self.pneum_iso_offsets):
                 if i < len(iso_tail):
-                    ed.setText(f"{float(iso_tail[i]):.5e}")
+                    ed.setText(format_ui_number(iso_tail[i]))
         except Exception:
             pass
 
@@ -1417,20 +1425,23 @@ def _on_pneu_read_all(self) -> None:
             dith_val = s.get_dither_value()
             dith_freq = s.get_dither_frequency()
             dith_alpha = s.get_dither_alpha()
-            self.pneum_dither_amount.setText(f"{dith_val:.5e}")
-            self.pneum_dither_freq.setText(f"{dith_freq:.5e}")
-            self.pneum_dither_alpha.setText(f"{dith_alpha:.5e}")
+            self.pneum_dither_amount.setText(format_ui_number(dith_val))
+            self.pneum_dither_freq.setText(format_ui_number(dith_freq))
+            self.pneum_dither_alpha.setText(format_ui_number(dith_alpha))
         except Exception:
             pass
 
         # Read floatation
         try:
             cfg = s.get_pneumatic_config_parameters()
-            if len(cfg) >= 3:
-                # Original COM interface order: soft-up, setpoint, tolerance.
-                self.pneum_float_softup.setText(format_ui_number(cfg[0]))
-                self.pneum_float_setpoint.setText(format_ui_number(cfg[1]))
-                self.pneum_float_mode_tol.setText(format_ui_number(cfg[2]))
+            if len(cfg) != 3:
+                raise ValueError(
+                    f"PGPCP expected exactly 3 values, got {len(cfg)}: {cfg}"
+                )
+            # Original COM interface order: soft-up, setpoint, tolerance.
+            self.pneum_float_softup.setText(format_ui_number(cfg[0]))
+            self.pneum_float_setpoint.setText(format_ui_number(cfg[1]))
+            self.pneum_float_mode_tol.setText(format_ui_number(cfg[2]))
         except Exception as exc:
             self.log_msg(f"Pneumatic floatation config: {exc}")
 
@@ -1439,14 +1450,17 @@ def _on_pneu_read_all(self) -> None:
         if self._supports_controller_feature("pneumatic_ramp"):
             try:
                 ramp = s.get_pneumatic_ramp_parameters()
-                if len(ramp) >= 5:
-                    # PGPRP order: RMS hysteresis, setpoint, move-up, move-down,
-                    # valve-offset gradient.
-                    self.pneum_ramp_rms_hysteresis.setText(f"{float(ramp[0]):.5e}")
-                    self.pneum_ramp_setpoint_grad.setText(f"{float(ramp[1]):.5e}")
-                    self.pneum_ramp_move_up_grad.setText(f"{float(ramp[2]):.5e}")
-                    self.pneum_ramp_move_down_grad.setText(f"{float(ramp[3]):.5e}")
-                    self.pneum_ramp_valve_offset_grad.setText(f"{float(ramp[4]):.5e}")
+                if len(ramp) != 5:
+                    raise ValueError(
+                        f"PGPRP expected exactly 5 values, got {len(ramp)}: {ramp}"
+                    )
+                # PGPRP order: RMS hysteresis, setpoint, move-up, move-down,
+                # valve-offset gradient.
+                self.pneum_ramp_rms_hysteresis.setText(format_ui_number(ramp[0]))
+                self.pneum_ramp_setpoint_grad.setText(format_ui_number(ramp[1]))
+                self.pneum_ramp_move_up_grad.setText(format_ui_number(ramp[2]))
+                self.pneum_ramp_move_down_grad.setText(format_ui_number(ramp[3]))
+                self.pneum_ramp_valve_offset_grad.setText(format_ui_number(ramp[4]))
             except Exception as exc:
                 self.log_msg(f"Pneumatic ramp config: {exc}")
 
@@ -1505,14 +1519,16 @@ def _on_pneu_write_all(self) -> None:
             dn_vals = [float(ed.text()) for ed in self.pneum_valve_down_offsets]
             iso_vals = [float(ed.text()) for ed in self.pneum_iso_offsets]
             dith_val = float(self.pneum_dither_amount.text())
-            dith_freq = float(self.pneum_dither_freq.text())
+            dith_freq = _pneumatic_config_int(self.pneum_dither_freq.text())
             dith_alpha = float(self.pneum_dither_alpha.text())
             softup = _pneumatic_config_int(self.pneum_float_softup.text())
             setpoint = _pneumatic_config_int(self.pneum_float_setpoint.text())
             tolerance = _pneumatic_config_int(self.pneum_float_mode_tol.text())
             ramp = (
                 [
-                    float(self.pneum_ramp_rms_hysteresis.text()),
+                    _pneumatic_config_int(
+                        self.pneum_ramp_rms_hysteresis.text()
+                    ),
                     float(self.pneum_ramp_setpoint_grad.text()),
                     float(self.pneum_ramp_move_up_grad.text()),
                     float(self.pneum_ramp_move_down_grad.text()),
@@ -1716,11 +1732,15 @@ def _on_pneum_read_all(self) -> None:
                 if hasattr(self, 'pneum_input_matrix'):
                     for i, v in enumerate(row[:half]):
                         if (i, ax) in self.pneum_input_matrix:
-                            self.pneum_input_matrix[(i, ax)].setText(f"{v:.5e}")
+                            self.pneum_input_matrix[(i, ax)].setText(
+                                format_ui_number(v)
+                            )
                 if hasattr(self, 'pneum_output_matrix'):
                     for i, v in enumerate(row[half:], start=half):
                         if (i - half, ax) in self.pneum_output_matrix:
-                            self.pneum_output_matrix[(i - half, ax)].setText(f"{v:.5e}")
+                            self.pneum_output_matrix[(i - half, ax)].setText(
+                                format_ui_number(v)
+                            )
             except Exception:
                 pass
         # Read valve offsets
@@ -1729,26 +1749,26 @@ def _on_pneum_read_all(self) -> None:
             half = len(off) // 2
             if hasattr(self, 'pneu_valve_up'):
                 for i in range(min(half, len(self.pneu_valve_up))):
-                    self.pneu_valve_up[i].setText(f"{off[i]:.5e}")
+                    self.pneu_valve_up[i].setText(format_ui_number(off[i]))
             if hasattr(self, 'pneu_valve_down'):
                 for i in range(min(half, len(self.pneu_valve_down))):
-                    self.pneu_valve_down[i].setText(f"{off[i+half]:.5e}")
+                    self.pneu_valve_down[i].setText(format_ui_number(off[i + half]))
         except Exception:
             pass
         # Read dither
         try:
             val = s.get_pneumatic_dither_value()
-            self.pneum_dither_amount.setText(f"{val:.5e}")
+            self.pneum_dither_amount.setText(format_ui_number(val))
         except Exception:
             pass
         try:
-            freq = s.get_pneumatic_dither_frequency()
-            self.pneum_dither_freq.setText(f"{freq:.5e}")
+            freq = s.get_dither_frequency()
+            self.pneum_dither_freq.setText(format_ui_number(freq))
         except Exception:
             pass
         try:
             alpha = s.get_pneumatic_dither_compensation()
-            self.pneum_dither_alpha.setText(f"{alpha:.5e}")
+            self.pneum_dither_alpha.setText(format_ui_number(alpha))
         except Exception:
             pass
         self.log_msg("pneumatic all read")

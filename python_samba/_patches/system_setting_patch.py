@@ -597,12 +597,15 @@ def build_system_setting_reference(self) -> QtWidgets.QWidget:
     self._ec_sff_led = LedBtn("SFF Signal", 12)
     self._always_v_led = LedBtn("AlwaysV", 12)
     self._always_p_led = LedBtn("AlwaysP", 12)
-    self._autoswitch_led = LedBtn("AutoSwitch", 12)
+    self._auto_switch_led = LedBtn("AutoSwitch", 12)
+    # Keep the reference-layout spelling as a compatibility alias while all
+    # handlers use the canonical name from the original builder.
+    self._autoswitch_led = self._auto_switch_led
     self._running_v_led = LedIndicator(10)
     self._running_p_led = LedIndicator(10)
     for widget in (
         *self._fw_leds, self._ec_motor_led, self._ec_sff_led,
-        self._always_v_led, self._always_p_led, self._autoswitch_led,
+        self._always_v_led, self._always_p_led, self._auto_switch_led,
         self._running_v_led, self._running_p_led,
     ):
         widget.hide()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+import math
 
 from python_samba.protocol.codes import FilterType, status_name
 from python_samba.protocol.frame import (
@@ -34,6 +35,63 @@ class RciCommandError(RuntimeError):
 def _fmt_float(value: float) -> str:
     """Firmware expects C printf %e style floats."""
     return f"{float(value):.6e}"
+
+
+def _integral_param(mnemonic: str, index: int, value: object) -> int:
+    """Return one protocol integer without silently truncating a decimal."""
+
+    text = str(value).strip()
+    try:
+        if text.lower().startswith(("0x", "+0x", "-0x")):
+            return int(text, 0)
+        number = Decimal(text)
+    except (InvalidOperation, ValueError) as exc:
+        raise ProtocolError(
+            f"{mnemonic} parameter {index + 1} expects an integer, got {value!r}"
+        ) from exc
+    if not number.is_finite() or number != number.to_integral_value():
+        raise ProtocolError(
+            f"{mnemonic} parameter {index + 1} expects an integer, got {value!r}"
+        )
+    return int(number)
+
+
+def _floating_param(mnemonic: str, index: int, value: object) -> float:
+    """Return one finite protocol float with a command-specific error."""
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ProtocolError(
+            f"{mnemonic} parameter {index + 1} expects a float, got {value!r}"
+        ) from exc
+    if not math.isfinite(number):
+        raise ProtocolError(
+            f"{mnemonic} parameter {index + 1} expects a finite float, got {value!r}"
+        )
+    return number
+
+
+def _typed_params(
+    mnemonic: str,
+    params: tuple[object, ...],
+    schema: str,
+) -> tuple[int | float, ...]:
+    """Validate a fixed RCI parameter list (``I`` integer, ``F`` float)."""
+
+    if len(params) != len(schema):
+        raise ProtocolError(
+            f"{mnemonic} expects {len(schema)} parameters, got {len(params)}"
+        )
+    values: list[int | float] = []
+    for index, (value, kind) in enumerate(zip(params, schema)):
+        if kind == "I":
+            values.append(_integral_param(mnemonic, index, value))
+        elif kind == "F":
+            values.append(_floating_param(mnemonic, index, value))
+        else:  # pragma: no cover - schemas are constants next to each command
+            raise RuntimeError(f"unsupported protocol schema kind: {kind}")
+    return tuple(values)
 
 
 def _parse_floats(tokens: tuple[str, ...]) -> list[float]:
@@ -739,31 +797,16 @@ class CommandEncoder:
 
     def decode_pgpcp(self, response: RciResponse) -> list[str]:
         self.ensure_ok(response, "PGPCP")
-        return list(response.data_tokens)
+        tokens = response.data_tokens
+        _typed_params("PGPCP", tokens, "III")
+        return list(tokens)
 
     def pspcp(self, *params: str | int | float) -> bytes:
-        if len(params) != 3:
-            raise ProtocolError(
-                "PSPCP expects SoftupHeight, Setpoint, and ModeTolerance"
-            )
-
         # The legacy COM contract exposes all three values as Int32.  Keep
         # their wire representation integral as well: some controller builds
         # accept ordinary decimal tokens here but do not reliably apply the
         # generic scientific-notation float representation.
-        values: list[int] = []
-        for value in params:
-            try:
-                number = Decimal(str(value).strip())
-            except (InvalidOperation, ValueError) as exc:
-                raise ProtocolError(
-                    f"PSPCP expects integer parameters, got {value!r}"
-                ) from exc
-            if not number.is_finite() or number != number.to_integral_value():
-                raise ProtocolError(
-                    f"PSPCP expects integer parameters, got {value!r}"
-                )
-            values.append(int(number))
+        values = _typed_params("PSPCP", params, "III")
         return self._command("PSPCP", *values)
 
     def pgpvo(self) -> bytes:
@@ -834,12 +877,12 @@ class CommandEncoder:
             return float(ints[0])
         return vals[0]
 
-    def psdfr(self, freq: float) -> bytes:
+    def psdfr(self, freq: object) -> bytes:
         # PSDFR is one of the few pneumatic setters whose value is explicitly
         # an integer in the RCI.  Sending a float makes the generic encoder use
         # scientific notation (for example ``3.500000e+01``), which firmware
         # 3.3.122 rejects with OUT_OF_RANGE.
-        return self._command("PSDFR", 0, int(round(float(freq))))
+        return self._command("PSDFR", 0, _integral_param("PSDFR", 1, freq))
 
     def pgdca(self) -> bytes:
         return self._command("PGDCA")
@@ -887,7 +930,7 @@ class CommandEncoder:
         return list(response.data_tokens)
 
     def dsetp(self, *params: str | int | float) -> bytes:
-        return self._command("DSETP", *params)
+        return self._command("DSETP", *_typed_params("DSETP", params, "IIIIII"))
 
     def dgeti(self) -> bytes:
         return self._command("DGETI")
@@ -907,7 +950,7 @@ class CommandEncoder:
         return list(response.data_tokens)
 
     def dsets(self, *params: str | int | float) -> bytes:
-        return self._command("DSETS", *params)
+        return self._command("DSETS", *_typed_params("DSETS", params, "IIIFI"))
 
     # --- PFF (pneumatic feedforward) subset ---
 
@@ -942,7 +985,8 @@ class CommandEncoder:
         return list(response.data_tokens)
 
     def dsmos(self, sig_num: int, *monsig: str | int | float) -> bytes:
-        return self._command("DSMOS", int(sig_num), *monsig)
+        params = (sig_num, *monsig)
+        return self._command("DSMOS", *_typed_params("DSMOS", params, "IIII"))
 
     def dgldv(self, trace_num: int, sample_num: int) -> bytes:
         return self._command("DGLDV", int(trace_num), int(sample_num))
@@ -1106,7 +1150,14 @@ class CommandEncoder:
         return list(response.data_tokens)
 
     def fsffc(self, *params: str | int | float) -> bytes:
-        return self._command("FSFFC", *params)
+        if len(params) != 2:
+            raise ProtocolError(f"FSFFC expects 2 parameters, got {len(params)}")
+        # The second token is the firmware's OnOff character representation;
+        # preserve it because supported builds return both numeric and letter
+        # forms.  Only NoOfGains has an unambiguous integer contract.
+        return self._command(
+            "FSFFC", _integral_param("FSFFC", 0, params[0]), params[1]
+        )
 
     def fgffp(self, *params: str | int | float) -> bytes:
         return self._command("FGFFP", *params)
@@ -1153,7 +1204,13 @@ class CommandEncoder:
 
     # already have fgffi/fsffs; ensure fsffi exists
     def fsffi(self, *params: str | int | float) -> bytes:
-        return self._command("FSFFI", *params)
+        if not params:
+            raise ProtocolError("FSFFI expects at least 1 parameter")
+        values = tuple(
+            _integral_param("FSFFI", index, value)
+            for index, value in enumerate(params)
+        )
+        return self._command("FSFFI", *values)
 
     # --- Diagnostics deep ---
 
@@ -1165,7 +1222,7 @@ class CommandEncoder:
         return list(response.data_tokens)
 
     def dsesp(self, *params: str | int | float) -> bytes:
-        return self._command("DSESP", *params)
+        return self._command("DSESP", *_typed_params("DSESP", params, "IFFFF"))
 
     def dgnsf(self) -> bytes:
         return self._command("DGNSF")
@@ -1359,7 +1416,7 @@ class CommandEncoder:
         return list(response.data_tokens)
 
     def lsanp(self, *params: str | int | float) -> bytes:
-        return self._command("LSANP", *params)
+        return self._command("LSANP", *_typed_params("LSANP", params, "III"))
 
     def lgais(self) -> bytes:
         return self._command("LGAIS")
@@ -1369,7 +1426,7 @@ class CommandEncoder:
         return list(response.data_tokens)
 
     def lsais(self, *params: str | int | float) -> bytes:
-        return self._command("LSAIS", *params)
+        return self._command("LSAIS", *_typed_params("LSAIS", params, "IIII"))
 
     def lgafc(self, *params: str | int | float) -> bytes:
         return self._command("LGAFC", *params)
@@ -1379,7 +1436,7 @@ class CommandEncoder:
         return list(response.data_tokens)
 
     def lsafc(self, *params: str | int | float) -> bytes:
-        return self._command("LSAFC", *params)
+        return self._command("LSAFC", *_typed_params("LSAFC", params, "IIIFFFFF"))
 
     def lgafo(self) -> bytes:
         return self._command("LGAFO")
@@ -1410,7 +1467,16 @@ class CommandEncoder:
         return list(response.data_tokens)
 
     def lsafs(self, *params: str | int | float) -> bytes:
-        return self._command("LSAFS", *params)
+        if not params:
+            raise ProtocolError("LSAFS expects at least 1 parameter")
+        values: tuple[int | float, ...] = (
+            _integral_param("LSAFS", 0, params[0]),
+            *(
+                _floating_param("LSAFS", index, value)
+                for index, value in enumerate(params[1:], 1)
+            ),
+        )
+        return self._command("LSAFS", *values)
 
     # raw escape hatch
     def raw(self, mnemonic: str, *params: str | int | float) -> bytes:
@@ -1440,7 +1506,7 @@ class CommandEncoder:
         return list(response.data_tokens)
 
     def dsati(self, *params: str | int | float) -> bytes:
-        return self._command("DSATI", *params)
+        return self._command("DSATI", *_typed_params("DSATI", params, "IIII"))
 
     # Floor FF adaptive algorithm
     def fgfat(self) -> bytes:
@@ -1462,10 +1528,12 @@ class CommandEncoder:
 
     def decode_pgprp(self, response: RciResponse) -> list[str]:
         self.ensure_ok(response, "PGPRP")
-        return list(response.data_tokens)
+        tokens = response.data_tokens
+        _typed_params("PGPRP", tokens, "IFFFF")
+        return list(tokens)
 
     def psprp(self, *params: str | int | float) -> bytes:
-        return self._command("PSPRP", *params)
+        return self._command("PSPRP", *_typed_params("PSPRP", params, "IFFFF"))
 
     # Use pneumatic axis setpoint for all axes (PGPSS/PSPSS already exist)
 
@@ -1507,7 +1575,7 @@ class CommandEncoder:
         return list(response.data_tokens)
 
     def cspnp(self, *params: str | int | float) -> bytes:
-        return self._command("CSSFP", *params)
+        return self._command("CSSFP", *_typed_params("CSSFP", params, "IIFF"))
 
     # Firmware config info
     def bggsc(self) -> bytes:

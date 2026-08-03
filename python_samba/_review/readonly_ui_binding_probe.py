@@ -102,6 +102,14 @@ def main() -> int:
         assert hasattr(window, "_on_pneu_input_matrix_changed")
         assert hasattr(window, "_on_pneu_output_matrix_changed")
         print("PNEUMATIC_FLOATATION_CONFIG", pneumatic_ui)
+        dither_frequency = session.get_dither_frequency()
+        assert math.isclose(
+            float(window.pneum_dither_freq.text()),
+            dither_frequency,
+            rel_tol=0.0,
+            abs_tol=1e-7,
+        )
+        print("PNEUMATIC_DITHER_FREQUENCY", window.pneum_dither_freq.text())
 
         window._read_system_setting_reference()
         config_tokens = session.get_controller_config()

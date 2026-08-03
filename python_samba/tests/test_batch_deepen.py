@@ -89,9 +89,9 @@ def test_position_devices_and_setup_extras():
 
 def test_analysis_logging():
     with open_mock(readonly=False) as s:
-        s.set_analysis_params("1", "2")
-        assert s.get_analysis_params() == ["1", "2"]
-        s.set_analysis_input("0", "1", "0")
+        s.set_analysis_params("1", "2", "1")
+        assert s.get_analysis_params() == ["1", "2", "1"]
+        s.set_analysis_input("0", "1", "0", "0")
         assert s.get_analysis_input()[1] == "1"
         assert s.get_analysis_filter_outputs()
         assert s.get_analysis_events() is not None
@@ -133,10 +133,10 @@ def test_gui_deep_widgets(tmp_path):
     assert win.dig_trace_buf.toPlainText().splitlines()[0] == "0"
 
     win.on_analysis_read()
-    win.analysis_params.setText("4 5")
-    win.analysis_input.setText("1 2 3")
+    win.analysis_params.setText("4 5 1")
+    win.analysis_input.setText("0 1 2 3")
     win._confirm_write = lambda _summary: True
     win.on_analysis_write()
-    assert session.get_analysis_params() == ["4", "5"]
-    assert session.get_analysis_input() == ["1", "2", "3"]
+    assert session.get_analysis_params() == ["4", "5", "1"]
+    assert session.get_analysis_input() == ["0", "1", "2", "3"]
     win.close()

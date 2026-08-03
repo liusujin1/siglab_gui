@@ -32,15 +32,13 @@ def main(argv: list[str] | None = None) -> int:
     # so that patched _build_* methods are used during __init__
     try:
         from python_samba.ui.patches import apply_all_patches
-        report = apply_all_patches(MainWindow)
-        if not report.ok:
-            print(
-                "[patches] Warning: incomplete UI extensions: "
-                + ", ".join(report.failed),
-                file=sys.stderr,
-            )
+        apply_all_patches(MainWindow, strict=True)
     except Exception as exc:
-        print(f"[patches] Warning: patch application failed: {exc}")
+        # A partially patched window mixes builders and callbacks from
+        # different generations.  Refuse to start instead of exposing controls
+        # that can fail only after the operator clicks them.
+        print(f"[patches] Error: patch application failed: {exc}", file=sys.stderr)
+        return 2
 
     app = QtWidgets.QApplication(sys.argv if argv is None else argv)
     app.setStyle("Fusion")

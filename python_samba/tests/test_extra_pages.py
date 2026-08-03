@@ -176,9 +176,15 @@ def test_gui_builds_all_pages():
     pytest.importorskip("PySide6")
     from PySide6 import QtWidgets
     from python_samba.ui.main_window import MainWindow
+    from python_samba.ui.patches import apply_all_patches
+
+    class PatchedMainWindow(MainWindow):
+        pass
+
+    apply_all_patches(PatchedMainWindow, strict=True)
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    win = MainWindow()
+    win = PatchedMainWindow()
     # SAMBA19xUI-style: 10 main tabs with nested sub-tabs
     assert win.main_tabs.count() >= 8
     # Check that tab texts match expected
@@ -221,7 +227,9 @@ def test_gui_builds_all_pages():
     assert hasattr(win, "vel_stage_bar")
     assert hasattr(win, "vel_filter_panel")
     assert hasattr(win, "pos_filter_buttons")
-    assert hasattr(win, "ff_filter_buttons")
+    assert len(win.ff_ref_buttons) == 21
+    assert len(win.ff_sec_buttons) == 21
+    assert len(win.ff_err_buttons) == 12
     win.close()
 
 
@@ -250,8 +258,23 @@ def test_formal_gui_patch_contract_builds_extended_pages():
     assert not hasattr(win, "unlock")
     assert win.protection_led.text() == "ON"
     assert not win.protection_led.isEnabled()
+    assert win._auto_switch_led is win._autoswitch_led
     assert len(win.nav_buttons) == win.main_tabs.count() - 1
     win.close()
+
+
+def test_app_refuses_to_start_with_an_incomplete_patch_set(monkeypatch, capsys):
+    pytest.importorskip("PySide6")
+    import python_samba.app as app_module
+    import python_samba.ui.patches as patches
+
+    def fail_patch_load(_window_class, *, strict=False):
+        assert strict is True
+        raise RuntimeError("synthetic patch failure")
+
+    monkeypatch.setattr(patches, "apply_all_patches", fail_patch_load)
+    assert app_module.main([]) == 2
+    assert "synthetic patch failure" in capsys.readouterr().err
 
 
 def test_pneumatic_matrix_edits_and_floatation_config_follow_ui_contract(
@@ -283,12 +306,38 @@ def test_pneumatic_matrix_edits_and_floatation_config_follow_ui_contract(
     state = session.transport.state
     state.pneum_config = ["93", "12469", "56"]
     state.pneum_steering[0] = [float(value) for value in range(1, 17)]
+    state.dither_value = 12.5
+    state.dither_freq = 40
+    state.dither_alpha = 0.002
+    state.pneum_ramp = [1, 1.25, 2.5, 3.75, 4.5]
+    win._controller_capabilities_loaded = True
+    win._controller_features = frozenset({"PRAMP"})
 
     try:
         win._on_pneu_read_all()
         assert win.pneum_float_softup.text() == "93"
         assert win.pneum_float_setpoint.text() == "12469"
         assert win.pneum_float_mode_tol.text() == "56"
+        assert float(win.pneum_dither_amount.text()) == pytest.approx(12.5)
+        assert float(win.pneum_dither_freq.text()) == pytest.approx(40)
+        assert float(win.pneum_dither_alpha.text()) == pytest.approx(0.002)
+        assert float(win.pneum_ramp_move_up_grad.text()) == pytest.approx(2.5)
+        for editor in (
+            win.pneum_input_matrix[(0, 0)],
+            win.pneum_output_matrix[(0, 0)],
+            win.pneum_dither_amount,
+            win.pneum_dither_freq,
+            win.pneum_dither_alpha,
+            win.pneum_ramp_rms_hysteresis,
+            win.pneum_ramp_move_up_grad,
+        ):
+            assert "e" not in editor.text().lower()
+
+        # The reference page's compatibility Read-all button must use the
+        # canonical dither-frequency API too.
+        win.pneum_dither_freq.setText("0")
+        win._on_pneum_read_all()
+        assert float(win.pneum_dither_freq.text()) == pytest.approx(40)
 
         before = session.get_pneumatic_steering_matrix(0)
         win.pneum_output_matrix[(0, 0)].setText("81.25")
@@ -312,6 +361,23 @@ def test_pneumatic_matrix_edits_and_floatation_config_follow_ui_contract(
         win.pneum_float_mode_tol.setText("57")
         win.pneum_float_mode_tol.editingFinished.emit()
         assert session.get_pneumatic_config() == ["94", "12470", "57"]
+
+        win.pneum_dither_amount.setText("17.5")
+        win.pneum_dither_amount.editingFinished.emit()
+        win.pneum_dither_freq.setText("43")
+        win.pneum_dither_freq.editingFinished.emit()
+        win.pneum_dither_alpha.setText("0.0125")
+        win.pneum_dither_alpha.editingFinished.emit()
+        assert session.get_dither_value() == pytest.approx(17.5)
+        assert session.get_dither_frequency() == pytest.approx(43)
+        assert session.get_dither_alpha() == pytest.approx(0.0125)
+
+        win.pneum_ramp_rms_hysteresis.setText("2")
+        win.pneum_ramp_rms_hysteresis.editingFinished.emit()
+        win.pneum_ramp_move_up_grad.setText("9.5")
+        win.pneum_ramp_move_up_grad.editingFinished.emit()
+        ramp = [float(value) for value in session.get_pneumatic_ramp_parameters()]
+        assert ramp == pytest.approx([2, 1.25, 9.5, 3.75, 4.5])
     finally:
         win.close()
         session.close()

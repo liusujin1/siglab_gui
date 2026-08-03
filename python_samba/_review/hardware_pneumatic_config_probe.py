@@ -1,4 +1,4 @@
-"""Reversible COM probe for Pneumatic Floatation Config and steering matrices.
+"""Reversible COM probe for Floatation, dither frequency, and matrices.
 
 The probe never invokes PAMOV, PAUCO, or any loop-state command.  Every value
 it changes is restored from a complete preflight snapshot in ``finally``.
@@ -71,6 +71,7 @@ def main() -> int:
     original_matrices: list[list[float]] | None = None
     original_valve_offsets: list[float] | None = None
     original_setpoint_status: int | None = None
+    original_dither_frequency: float | None = None
     failure: Exception | None = None
     try:
         version = session.open()
@@ -88,11 +89,13 @@ def main() -> int:
             )
         original_valve_offsets = session.get_pneumatic_valve_offsets()
         original_setpoint_status = session.get_pneumatic_setpoint_status()
+        original_dither_frequency = session.get_dither_frequency()
         report["snapshot"] = {
             "config": original_config,
             "matrices": original_matrices,
             "valve_offsets": original_valve_offsets,
             "setpoint_status": original_setpoint_status,
+            "dither_frequency": original_dither_frequency,
         }
         record(
             "preflight snapshot",
@@ -102,6 +105,7 @@ def main() -> int:
                 "matrix_lengths": [len(row) for row in original_matrices],
                 "valve_offset_count": len(original_valve_offsets),
                 "setpoint_status": original_setpoint_status,
+                "dither_frequency": original_dither_frequency,
             },
         )
 
@@ -125,6 +129,35 @@ def main() -> int:
             "PSPCP one-field change/restore",
             "PASS",
             {"changed": changed_readback, "restored": restored_config},
+        )
+
+        session.set_dither_frequency(original_dither_frequency)
+        same_dither = session.get_dither_frequency()
+        if not math.isclose(
+            same_dither, original_dither_frequency, rel_tol=0.0, abs_tol=1e-7
+        ):
+            raise AssertionError(f"same-value PSDFR mismatch: {same_dither}")
+        changed_dither = int(round(original_dither_frequency)) + 1
+        session.set_dither_frequency(changed_dither)
+        if not math.isclose(
+            session.get_dither_frequency(), changed_dither,
+            rel_tol=0.0, abs_tol=1e-7,
+        ):
+            raise AssertionError("changed PSDFR did not read back")
+        session.set_dither_frequency(original_dither_frequency)
+        restored_dither = session.get_dither_frequency()
+        if not math.isclose(
+            restored_dither, original_dither_frequency,
+            rel_tol=0.0, abs_tol=1e-7,
+        ):
+            raise AssertionError(f"PSDFR restore mismatch: {restored_dither}")
+        record(
+            "PSDFR one-field change/restore",
+            "PASS",
+            {
+                "changed": changed_dither,
+                "restored": restored_dither,
+            },
         )
 
         axis = 0
@@ -177,6 +210,11 @@ def main() -> int:
                         session.set_pneumatic_steering_matrix(axis, values)
                     except Exception as exc:
                         restore_errors.append(f"matrix axis {axis}: {exc}")
+            if original_dither_frequency is not None:
+                try:
+                    session.set_dither_frequency(original_dither_frequency)
+                except Exception as exc:
+                    restore_errors.append(f"dither frequency: {exc}")
 
             try:
                 final_config = session.get_pneumatic_config()
@@ -186,11 +224,13 @@ def main() -> int:
                 ]
                 final_valve_offsets = session.get_pneumatic_valve_offsets()
                 final_setpoint_status = session.get_pneumatic_setpoint_status()
+                final_dither_frequency = session.get_dither_frequency()
                 report["final"] = {
                     "config": final_config,
                     "matrices": final_matrices,
                     "valve_offsets": final_valve_offsets,
                     "setpoint_status": final_setpoint_status,
+                    "dither_frequency": final_dither_frequency,
                 }
                 if original_config is not None and (
                     _config_ints(final_config) != _config_ints(original_config)
@@ -210,6 +250,16 @@ def main() -> int:
                     and final_setpoint_status != original_setpoint_status
                 ):
                     restore_errors.append("setpoint status changed")
+                if (
+                    original_dither_frequency is not None
+                    and not math.isclose(
+                        final_dither_frequency,
+                        original_dither_frequency,
+                        rel_tol=0.0,
+                        abs_tol=1e-7,
+                    )
+                ):
+                    restore_errors.append("dither frequency changed")
             except Exception as exc:
                 restore_errors.append(f"final verification: {exc}")
         session.close()

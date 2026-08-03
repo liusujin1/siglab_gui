@@ -7,6 +7,7 @@ import xml.etree.ElementTree as ET
 import pytest
 
 from python_samba.protocol.commands import FilterStage
+from python_samba.protocol.frame import ProtocolError
 from python_samba.services.session import open_mock
 from python_samba.services.config_reader import (
     SambaConfig,
@@ -42,6 +43,16 @@ def test_pneumatic_partial_writes_preserve_companion_values() -> None:
         ramp = [float(value) for value in session.get_pneumatic_ramp_parameters()]
         assert len(ramp) == 5
         assert ramp[2] == pytest.approx(9.5)
+
+        session.transport.state.pneum_config = ["10", "20"]
+        with pytest.raises(ProtocolError, match="PGPCP expect"):
+            session.set_pneumatic_config_setpoint(21)
+        assert session.transport.state.pneum_config == ["10", "20"]
+
+        session.transport.state.pneum_ramp = [1, 2.0, 3.0, 4.0]
+        with pytest.raises(ProtocolError, match="PGPRP expect"):
+            session.set_pneumatic_ramp_parameter("move_up_gradient", 3.5)
+        assert session.transport.state.pneum_ramp == [1, 2.0, 3.0, 4.0]
 
 
 def test_safety_source_commands_round_trip() -> None:

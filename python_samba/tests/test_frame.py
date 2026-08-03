@@ -167,5 +167,60 @@ def test_real_controller_integer_and_required_mode_frames():
         encoder.dgtbv(8192)
     with pytest.raises(ProtocolError, match="PSPCP expects"):
         encoder.pspcp(93, 12469)
-    with pytest.raises(ProtocolError, match="integer parameters"):
+    with pytest.raises(ProtocolError, match="expects an integer"):
         encoder.pspcp(93, 12469.5, 56)
+    with pytest.raises(ProtocolError, match="PSDFR.*expects an integer"):
+        encoder.psdfr(35.5)
+
+
+def test_mixed_integer_float_command_contracts_are_typed_before_framing():
+    encoder = CommandEncoder(bypass_length=True, bypass_crc=True)
+
+    frames = {
+        "event params": encoder.dsetp(2.0, 512.0, 4.0, 3.0, 8.0, 1.0),
+        "event signal": encoder.dsets(5.0, 2.0, 1.0, 0.75, 12.0),
+        "monitor signal": encoder.dsmos(7.0, 2.0, 4.0, 3.0),
+        "excitation": encoder.dsesp(2.0, 0.25, 12.5, 3.0, 4.0),
+        "ff config": encoder.fsffc(6.0, "50"),
+        "ff inputs": encoder.fsffi(0.0, 1.0, 2.0),
+        "analysis params": encoder.lsanp(1.0, 2.0, 1.0),
+        "analysis input": encoder.lsais(0.0, 1.0, 2.0, 3.0),
+        "analysis filter": encoder.lsafc(
+            0.0, 1.0, 4.0, 0.1, 0.2, 0.3, 0.4, 0.5
+        ),
+        "analysis thresholds": encoder.lsafs(0.0, 0.25, 0.5),
+        "actual time": encoder.dsati(1.0, 2.0, 3.0, 4.0),
+        "pneumatic ramp": encoder.psprp(1.0, 1.25, 2.5, 3.75, 4.5),
+        "nonlinear position": encoder.cspnp(2.0, 1.0, 0.125, 3.5),
+    }
+
+    assert b"DSETP 2 512 4 3 8 1" in frames["event params"]
+    assert b"DSETS 5 2 1 7.500000e-01 12" in frames["event signal"]
+    assert b"DSMOS 7 2 4 3" in frames["monitor signal"]
+    assert b"DSESP 2 2.500000e-01 1.250000e+01" in frames["excitation"]
+    assert b"FSFFC 6 50" in frames["ff config"]
+    assert b"FSFFI 0 1 2" in frames["ff inputs"]
+    assert b"LSANP 1 2 1" in frames["analysis params"]
+    assert b"LSAIS 0 1 2 3" in frames["analysis input"]
+    assert b"LSAFC 0 1 4 1.000000e-01" in frames["analysis filter"]
+    assert b"LSAFS 0 2.500000e-01 5.000000e-01" in frames[
+        "analysis thresholds"
+    ]
+    assert b"DSATI 1 2 3 4" in frames["actual time"]
+    assert b"PSPRP 1 1.250000e+00 2.500000e+00" in frames[
+        "pneumatic ramp"
+    ]
+    assert b"CSSFP 2 1 1.250000e-01 3.500000e+00" in frames[
+        "nonlinear position"
+    ]
+
+    with pytest.raises(ProtocolError, match="DSETP expects 6"):
+        encoder.dsetp(1, 2, 3, 4, 5)
+    with pytest.raises(ProtocolError, match="DSETS parameter 1 expects an integer"):
+        encoder.dsets(1.5, 2, 3, 0.25, 4)
+    with pytest.raises(ProtocolError, match="FSFFI expects at least"):
+        encoder.fsffi()
+    with pytest.raises(ProtocolError, match="PSPRP parameter 1 expects an integer"):
+        encoder.psprp(1.5, 1, 1, 1, 1)
+    with pytest.raises(ProtocolError, match="CSSFP expects 4"):
+        encoder.cspnp(1, 0, 0.25)

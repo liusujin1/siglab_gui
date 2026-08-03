@@ -187,8 +187,10 @@ class MockState:
     controller_cfg: list[str] = field(default_factory=lambda: ["247"])
     adc_set_num: int = 3
     temp_sensor_adc: list[int] = field(default_factory=lambda: list(range(12)))
-    analysis_params: list[str] = field(default_factory=lambda: ["0", "0"])
-    analysis_input: list[str] = field(default_factory=lambda: ["0", "0", "0"])
+    analysis_params: list[str] = field(default_factory=lambda: ["0", "0", "0"])
+    analysis_input: list[str] = field(
+        default_factory=lambda: ["0", "0", "0", "0"]
+    )
     analysis_filt: dict[str, list[str]] = field(default_factory=dict)
     analysis_out: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     analysis_enum: list[str] = field(default_factory=lambda: ["0"])
@@ -625,8 +627,8 @@ class MockTransport(Transport):
             return _accept(msg_id, crl, m)
         if m == "PGPCP":
             return _accept(msg_id, crl, m, *st.pneum_config)
-        if m == "PSPCP" and params:
-            st.pneum_config = list(params)
+        if m == "PSPCP" and len(params) == 3:
+            st.pneum_config = [str(int(value)) for value in params]
             return _accept(msg_id, crl, m)
         if m == "PGPVO":
             return _accept(msg_id, crl, m, *st.pneum_valve_off)
@@ -1029,8 +1031,8 @@ class MockTransport(Transport):
         # Actual time (DGATI/DSATI)
         if m == "DGATI":
             return _accept(msg_id, crl, m, *st.actual_time)
-        if m == "DSATI" and len(params) >= 4:
-            st.actual_time = [int(value) for value in params[:4]]
+        if m == "DSATI" and len(params) == 4:
+            st.actual_time = [int(value) for value in params]
             return _accept(msg_id, crl, m)
 
         # Floor FF adaptive algorithm (FGFAT/FSFAT)
@@ -1043,8 +1045,11 @@ class MockTransport(Transport):
         # Pneumatic ramp parameters (PGPRP/PSPRP)
         if m == "PGPRP":
             return _accept(msg_id, crl, m, *st.pneum_ramp)
-        if m == "PSPRP" and params:
-            st.pneum_ramp = [float(value) for value in params[:5]]
+        if m == "PSPRP" and len(params) == 5:
+            st.pneum_ramp = [
+                int(params[0]),
+                *(float(value) for value in params[1:]),
+            ]
             return _accept(msg_id, crl, m)
 
         if m == "BGTSA":

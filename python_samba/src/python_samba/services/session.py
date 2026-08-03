@@ -1274,8 +1274,10 @@ def _set_pneumatic_config_value(
     # Preserve the controller's integer tokens.  CommandEncoder.pspcp performs
     # the final integral validation and guarantees a non-scientific wire form.
     values: list[str | int | float] = list(self.get_pneumatic_config())
-    while len(values) < 3:
-        values.append(0)
+    if len(values) != 3:
+        raise ProtocolError(
+            f"PGPCP expected exactly 3 values before partial write, got {values}"
+        )
     values[index] = value
     # Protocol order from the original IIDETCMFD2 interface is:
     # SoftupHeight, Setpoint, ModeTolerance.
@@ -1368,7 +1370,9 @@ def set_pneumatic_ramp_parameters(self, *params: str | int | float) -> None:
     self.encoder.ensure_ok(self.transact(self.encoder.psprp(*params)), "PSPRP")
 
 
-def set_pneumatic_ramp_parameter(self, name: str, value: float) -> None:
+def set_pneumatic_ramp_parameter(
+    self, name: str, value: str | int | float
+) -> None:
     order = {
         "rms_hysteresis_factor": 0,
         "setpoint_gradient": 1,
@@ -1379,10 +1383,12 @@ def set_pneumatic_ramp_parameter(self, name: str, value: float) -> None:
     if name not in order:
         raise ValueError(f"unknown pneumatic ramp parameter: {name}")
     values: list[str | int | float] = list(self.get_pneumatic_ramp_parameters())
-    while len(values) < 5:
-        values.append(0.0)
-    values[order[name]] = float(value)
-    self.set_pneumatic_ramp_parameters(*values[:5])
+    if len(values) != 5:
+        raise ProtocolError(
+            f"PGPRP expected exactly 5 values before partial write, got {values}"
+        )
+    values[order[name]] = value
+    self.set_pneumatic_ramp_parameters(*values)
 
 
 def get_system_loop_status(self) -> dict[str, bool]:
