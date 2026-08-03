@@ -116,7 +116,7 @@ class MockState:
     dac_seq: list[int] = field(default_factory=lambda: list(range(20)))
     pneum_filters: dict[tuple[int, int], tuple[int, tuple[float, ...]]] = field(default_factory=dict)
     pneum_steering: dict[int, list[float]] = field(default_factory=dict)
-    pneum_config: list[str] = field(default_factory=lambda: ["100.0", "0.5", "1.0"])
+    pneum_config: list[str] = field(default_factory=lambda: ["100", "500", "1"])
     pneum_valve_off: list[float] = field(default_factory=lambda: [0.0] * 16)
     pneum_axes_status: list[str] = field(
         default_factory=lambda: ["7", "7", "1", "2", "3", "4", "5", "6"]

@@ -1268,25 +1268,29 @@ def get_pneumatic_config_parameters(self) -> list[str]:
     return self.get_pneumatic_config()
 
 
-def _set_pneumatic_config_value(self, index: int, value: float) -> None:
-    values = [float(item) for item in self.get_pneumatic_config()]
+def _set_pneumatic_config_value(
+    self, index: int, value: str | int | float
+) -> None:
+    # Preserve the controller's integer tokens.  CommandEncoder.pspcp performs
+    # the final integral validation and guarantees a non-scientific wire form.
+    values: list[str | int | float] = list(self.get_pneumatic_config())
     while len(values) < 3:
-        values.append(0.0)
-    values[index] = float(value)
+        values.append(0)
+    values[index] = value
     # Protocol order from the original IIDETCMFD2 interface is:
     # SoftupHeight, Setpoint, ModeTolerance.
     self.set_pneumatic_config(*values[:3])
 
 
-def set_pneumatic_config_setpoint(self, value: float) -> None:
+def set_pneumatic_config_setpoint(self, value: str | int | float) -> None:
     _set_pneumatic_config_value(self, 1, value)
 
 
-def set_pneumatic_config_softup_height(self, value: float) -> None:
+def set_pneumatic_config_softup_height(self, value: str | int | float) -> None:
     _set_pneumatic_config_value(self, 0, value)
 
 
-def set_pneumatic_position_tolerance(self, value: float) -> None:
+def set_pneumatic_position_tolerance(self, value: str | int | float) -> None:
     _set_pneumatic_config_value(self, 2, value)
 
 

@@ -10,6 +10,8 @@ matching the SAMBA19xUI PneuSystemPage C# code.
 # ---------------------------------------------------------------------------
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
+
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from python_samba.ui.classic_widgets import (
@@ -46,6 +48,18 @@ _PNEU_VERTICAL_STATUS_NAMES = (
     "Initialisation",
     "OK",
 )
+
+
+def _pneumatic_config_int(value: object) -> int:
+    """Parse one legacy Floatation Config Int32 field without truncation."""
+
+    try:
+        number = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"expected an integer, got {value!r}") from exc
+    if not number.is_finite() or number != number.to_integral_value():
+        raise ValueError(f"expected an integer, got {value!r}")
+    return int(number)
 
 
 def _build_pneumatic_tab(self) -> None:
@@ -344,7 +358,7 @@ def _build_pneumatic_tab_reference(self) -> None:
             edit = SciEdit("0")
             edit.setFixedSize(160, 31)
             edit.editingFinished.connect(
-                lambda _axis=axis: self._on_pneum_input_matrix_changed(_axis)
+                lambda _axis=axis: self._on_pneu_input_matrix_changed(_axis)
             )
             self.pneum_input_matrix[(row, axis)] = edit
             sg.addWidget(edit, row + 1, axis + 1)
@@ -374,7 +388,7 @@ def _build_pneumatic_tab_reference(self) -> None:
             edit = SciEdit("0")
             edit.setFixedSize(160, 31)
             edit.editingFinished.connect(
-                lambda _axis=axis: self._on_pneum_output_matrix_changed(_axis)
+                lambda _axis=axis: self._on_pneu_output_matrix_changed(_axis)
             )
             self.pneum_output_matrix[(row, axis)] = edit
             vg.addWidget(edit, row + 1, axis + 1)
@@ -682,7 +696,7 @@ def _build_pneum_input_matrix(self, grid: QtWidgets.QGridLayout) -> None:
             ed.setFixedWidth(_SCEDIT_WIDTH)
             ed.setAlignment(QtCore.Qt.AlignCenter)
             ed.editingFinished.connect(
-                lambda a=j, i=i: self._on_pneum_input_matrix_changed(a)
+                lambda a=j, i=i: self._on_pneu_input_matrix_changed(a)
             )
             self.pneum_input_matrix[(i, j)] = ed
             grid.addWidget(ed, i + 1, j + 1)
@@ -711,7 +725,7 @@ def _build_pneum_output_matrix(self, grid: QtWidgets.QGridLayout) -> None:
             ed.setFixedWidth(_SCEDIT_WIDTH)
             ed.setAlignment(QtCore.Qt.AlignCenter)
             ed.editingFinished.connect(
-                lambda a=j, i=i: self._on_pneum_output_matrix_changed(a)
+                lambda a=j, i=i: self._on_pneu_output_matrix_changed(a)
             )
             self.pneum_output_matrix[(i, j)] = ed
             grid.addWidget(ed, i + 1, j + 1)
@@ -1269,7 +1283,7 @@ def _on_pneu_float_setpoint_changed(self) -> None:
     """User edited the floatation setpoint."""
     def work() -> None:
         s = self._require_session()
-        val = float(self.pneum_float_setpoint.text())
+        val = _pneumatic_config_int(self.pneum_float_setpoint.text())
         s.set_pneumatic_config_setpoint(val)
         self.log_msg(f"Float setpoint set to {val}")
     self._run("Float setpoint write", work)
@@ -1279,7 +1293,7 @@ def _on_pneu_float_softup_changed(self) -> None:
     """User edited the soft-up height."""
     def work() -> None:
         s = self._require_session()
-        val = float(self.pneum_float_softup.text())
+        val = _pneumatic_config_int(self.pneum_float_softup.text())
         s.set_pneumatic_config_softup_height(val)
         self.log_msg(f"Soft-up height set to {val}")
     self._run("Soft-up height write", work)
@@ -1289,7 +1303,7 @@ def _on_pneu_float_mode_tol_changed(self) -> None:
     """User edited the mode tolerance."""
     def work() -> None:
         s = self._require_session()
-        val = float(self.pneum_float_mode_tol.text())
+        val = _pneumatic_config_int(self.pneum_float_mode_tol.text())
         s.set_pneumatic_position_tolerance(val)
         self.log_msg(f"Mode tolerance set to {val}")
     self._run("Mode tolerance write", work)
@@ -1414,9 +1428,9 @@ def _on_pneu_read_all(self) -> None:
             cfg = s.get_pneumatic_config_parameters()
             if len(cfg) >= 3:
                 # Original COM interface order: soft-up, setpoint, tolerance.
-                self.pneum_float_softup.setText(f"{float(cfg[0]):.5e}")
-                self.pneum_float_setpoint.setText(f"{float(cfg[1]):.5e}")
-                self.pneum_float_mode_tol.setText(f"{float(cfg[2]):.5e}")
+                self.pneum_float_softup.setText(format_ui_number(cfg[0]))
+                self.pneum_float_setpoint.setText(format_ui_number(cfg[1]))
+                self.pneum_float_mode_tol.setText(format_ui_number(cfg[2]))
         except Exception as exc:
             self.log_msg(f"Pneumatic floatation config: {exc}")
 
@@ -1493,9 +1507,9 @@ def _on_pneu_write_all(self) -> None:
             dith_val = float(self.pneum_dither_amount.text())
             dith_freq = float(self.pneum_dither_freq.text())
             dith_alpha = float(self.pneum_dither_alpha.text())
-            softup = float(self.pneum_float_softup.text())
-            setpoint = float(self.pneum_float_setpoint.text())
-            tolerance = float(self.pneum_float_mode_tol.text())
+            softup = _pneumatic_config_int(self.pneum_float_softup.text())
+            setpoint = _pneumatic_config_int(self.pneum_float_setpoint.text())
+            tolerance = _pneumatic_config_int(self.pneum_float_mode_tol.text())
             ramp = (
                 [
                     float(self.pneum_ramp_rms_hysteresis.text()),

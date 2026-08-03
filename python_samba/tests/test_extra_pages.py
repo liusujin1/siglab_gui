@@ -51,7 +51,7 @@ def test_floatation_dither_ramp():
     with open_mock(readonly=False) as s:
         cfg = s.get_pneumatic_config()
         assert cfg
-        s.set_pneumatic_config("120", "0.6", "1.1")
+        s.set_pneumatic_config("120", "600", "11")
         assert s.get_pneumatic_config()[0] == "120"
         s.set_pneumatic_valve_offsets([1, 2, 3, 4, 5, 6, 7, 8])
         assert s.get_pneumatic_valve_offsets()[0] == pytest.approx(1)
@@ -252,6 +252,70 @@ def test_formal_gui_patch_contract_builds_extended_pages():
     assert not win.protection_led.isEnabled()
     assert len(win.nav_buttons) == win.main_tabs.count() - 1
     win.close()
+
+
+def test_pneumatic_matrix_edits_and_floatation_config_follow_ui_contract(
+    monkeypatch,
+):
+    """Exercise the real patched editingFinished signal paths."""
+
+    pytest.importorskip("PySide6")
+    from PySide6 import QtWidgets
+    from python_samba.services.safety import SafetyGate
+    from python_samba.ui.main_window import MainWindow
+    from python_samba.ui.patches import apply_all_patches
+
+    class PatchedMainWindow(MainWindow):
+        pass
+
+    apply_all_patches(PatchedMainWindow, strict=True)
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    session = open_mock(readonly=False)
+    session.open()
+    win = PatchedMainWindow()
+    win.session = session
+    win.gate = SafetyGate(session)
+
+    def unexpected_dialog(_parent, title, text):
+        raise AssertionError(f"unexpected {title} dialog: {text}")
+
+    monkeypatch.setattr(QtWidgets.QMessageBox, "critical", unexpected_dialog)
+    state = session.transport.state
+    state.pneum_config = ["93", "12469", "56"]
+    state.pneum_steering[0] = [float(value) for value in range(1, 17)]
+
+    try:
+        win._on_pneu_read_all()
+        assert win.pneum_float_softup.text() == "93"
+        assert win.pneum_float_setpoint.text() == "12469"
+        assert win.pneum_float_mode_tol.text() == "56"
+
+        before = session.get_pneumatic_steering_matrix(0)
+        win.pneum_output_matrix[(0, 0)].setText("81.25")
+        win.pneum_output_matrix[(0, 0)].editingFinished.emit()
+        after_output = session.get_pneumatic_steering_matrix(0)
+        assert after_output[:8] == pytest.approx(before[:8])
+        assert after_output[8] == pytest.approx(81.25)
+        assert after_output[9:] == pytest.approx(before[9:])
+
+        win.pneum_input_matrix[(0, 0)].setText("17.5")
+        win.pneum_input_matrix[(0, 0)].editingFinished.emit()
+        after_input = session.get_pneumatic_steering_matrix(0)
+        assert after_input[0] == pytest.approx(17.5)
+        assert after_input[1:8] == pytest.approx(before[1:8])
+        assert after_input[8:] == pytest.approx(after_output[8:])
+
+        win.pneum_float_softup.setText("94")
+        win.pneum_float_softup.editingFinished.emit()
+        win.pneum_float_setpoint.setText("12470")
+        win.pneum_float_setpoint.editingFinished.emit()
+        win.pneum_float_mode_tol.setText("57")
+        win.pneum_float_mode_tol.editingFinished.emit()
+        assert session.get_pneumatic_config() == ["94", "12470", "57"]
+    finally:
+        win.close()
+        session.close()
+        app.processEvents()
 
 
 def test_saveload_protection_only_gates_nvram_save_and_clear(

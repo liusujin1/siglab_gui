@@ -86,6 +86,23 @@ def main() -> int:
         )
         print("CAPABILITY_UI", capability_visibility, special_visibility)
 
+        # Exercise the same full-page read path used when the operator opens
+        # Pneumatic.  In particular, verify the legacy command order is kept:
+        # Soft-Up Height, Setpoint, Mode Tolerance.
+        window._on_pneu_read_all()
+        pneumatic_config = session.get_pneumatic_config()
+        pneumatic_ui = [
+            window.pneum_float_softup.text(),
+            window.pneum_float_setpoint.text(),
+            window.pneum_float_mode_tol.text(),
+        ]
+        assert [int(float(value)) for value in pneumatic_ui] == [
+            int(float(value)) for value in pneumatic_config
+        ]
+        assert hasattr(window, "_on_pneu_input_matrix_changed")
+        assert hasattr(window, "_on_pneu_output_matrix_changed")
+        print("PNEUMATIC_FLOATATION_CONFIG", pneumatic_ui)
+
         window._read_system_setting_reference()
         config_tokens = session.get_controller_config()
         config_mask = _protocol_int(config_tokens[0]) if config_tokens else 0

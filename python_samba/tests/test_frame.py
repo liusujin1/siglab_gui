@@ -150,6 +150,7 @@ def test_real_controller_integer_and_required_mode_frames():
     pressure_up_frame = encoder.pauco(1)
     pressure_down_frame = encoder.pauco(2)
     trace_buffer_frame = encoder.dgtbv(0)
+    floatation_frame = encoder.pspcp("93.0", 12469, 56.0)
 
     assert b"NSSFR 5.000000e+03 0" in sample_frame
     assert b"PSDFR 0 35" in dither_frame
@@ -157,8 +158,14 @@ def test_real_controller_integer_and_required_mode_frames():
     assert b"PAUCO 1" in pressure_up_frame
     assert b"PAUCO 2" in pressure_down_frame
     assert b"DGTBV 0" in trace_buffer_frame
+    assert b"PSPCP 93 12469 56" in floatation_frame
+    assert b"e+" not in floatation_frame
 
     with pytest.raises(ProtocolError, match="PAUCO condition"):
         encoder.pauco(3)
     with pytest.raises(ProtocolError, match="DGTBV read offset"):
         encoder.dgtbv(8192)
+    with pytest.raises(ProtocolError, match="PSPCP expects"):
+        encoder.pspcp(93, 12469)
+    with pytest.raises(ProtocolError, match="integer parameters"):
+        encoder.pspcp(93, 12469.5, 56)

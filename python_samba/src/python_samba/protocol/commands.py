@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 
 from python_samba.protocol.codes import FilterType, status_name
 from python_samba.protocol.frame import (
@@ -741,7 +742,29 @@ class CommandEncoder:
         return list(response.data_tokens)
 
     def pspcp(self, *params: str | int | float) -> bytes:
-        return self._command("PSPCP", *params)
+        if len(params) != 3:
+            raise ProtocolError(
+                "PSPCP expects SoftupHeight, Setpoint, and ModeTolerance"
+            )
+
+        # The legacy COM contract exposes all three values as Int32.  Keep
+        # their wire representation integral as well: some controller builds
+        # accept ordinary decimal tokens here but do not reliably apply the
+        # generic scientific-notation float representation.
+        values: list[int] = []
+        for value in params:
+            try:
+                number = Decimal(str(value).strip())
+            except (InvalidOperation, ValueError) as exc:
+                raise ProtocolError(
+                    f"PSPCP expects integer parameters, got {value!r}"
+                ) from exc
+            if not number.is_finite() or number != number.to_integral_value():
+                raise ProtocolError(
+                    f"PSPCP expects integer parameters, got {value!r}"
+                )
+            values.append(int(number))
+        return self._command("PSPCP", *values)
 
     def pgpvo(self) -> bytes:
         return self._command("PGPVO")
