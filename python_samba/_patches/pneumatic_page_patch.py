@@ -1129,30 +1129,7 @@ def _on_pneu_individual_loop_clicked(self, axis: int) -> None:
     """Toggle one pneumatic individual-loop bit through BGSST/BSSST."""
     if not 0 <= axis < 3:
         raise ValueError(f"pneumatic individual-loop axis out of range: {axis}")
-    if not self.session or not self.session.connected:
-        return
-
-    def work() -> None:
-        session = self._require_session()
-        if not self._confirm_write(
-            f"BSSST pneumatic axis {axis + 1} bit 0x{1 << axis:X}"
-        ):
-            return
-        if self.gate is None:
-            raise RuntimeError("Safety gate is not initialized")
-        self.gate.take_snapshot()
-        self._set_writable(True)
-        try:
-            position, pneumatic, _digital_in, _digital_out = (
-                session.get_pos_pneum_digital_status()
-            )
-            pneumatic ^= 1 << axis
-            session.set_pos_pneum_individual_loop_status(position, pneumatic)
-        finally:
-            self._set_writable(True)
-        _set_pneum_individual_loop_buttons(self, pneumatic)
-
-    self._run("Toggle pneumatic individual loop", work)
+    self._on_axis_individual_loop_clicked("pneumatic", axis)
 
 
 def _on_pneu_status_led_clicked(self, key: str) -> None:

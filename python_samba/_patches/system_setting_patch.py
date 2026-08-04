@@ -564,6 +564,7 @@ def build_system_setting_reference(self) -> QtWidgets.QWidget:
     loop_switch = GroupPanel("Loop Switch Setting")
     ls = QtWidgets.QHBoxLayout(loop_switch)
     self.system_switch_lamps = []
+    self.system_switch_running_leds = []
     for switch_index, label in enumerate(("Velocity", "Position", "Auto")):
         column = QtWidgets.QVBoxLayout()
         column.addWidget(QtWidgets.QLabel(label), alignment=QtCore.Qt.AlignCenter)
@@ -574,6 +575,7 @@ def build_system_setting_reference(self) -> QtWidgets.QWidget:
         self.system_switch_lamps.append(lamp)
         column.addWidget(lamp, alignment=QtCore.Qt.AlignCenter)
         led = LedIndicator(28)
+        self.system_switch_running_leds.append(led)
         column.addWidget(led, alignment=QtCore.Qt.AlignCenter)
         ls.addLayout(column)
     switch_layout.addWidget(loop_switch)
@@ -674,9 +676,22 @@ def _read_system_setting_reference(self) -> None:
                 self.sw_fb.setText(str(status[1]))
             for lamp, enabled in zip(
                 self.system_switch_lamps,
-                (bool(status_word & 0x20), bool(status_word & 0x40), bool(self._switch_config & 0x01)),
+                (
+                    bool(status_word & 0x02),
+                    bool(status_word & 0x04),
+                    bool(status_word & 0x01),
+                ),
             ):
                 lamp.set_on(enabled)
+            for led, enabled in zip(
+                self.system_switch_running_leds,
+                (
+                    bool(status_word & 0x20),
+                    bool(status_word & 0x40),
+                    bool(status_word & 0x01),
+                ),
+            ):
+                led.set_on(enabled)
         except Exception as exc:
             self.log_msg(f"Switch criterion read: {exc}")
 
@@ -825,11 +840,24 @@ def _on_ethercat_visible_clicked(self, kind: str) -> None:
 
 
 def _on_visible_switch_clicked(self, index: int) -> None:
-    """Toggle RunningV/RunningP/AutoSwitch bits in SwitchConfig."""
+    """Apply the legacy Always-V/Always-P/Auto SwitchConfig values.
+
+    SwitchConfig is a four-state setting: 0=Auto, 1=Velocity, 2=Position,
+    3=Velocity+Position.  Bits 0x20/0x40 belong to the *status* word returned
+    by BGOCD/DGCSS and must never be sent from this Controller-page control.
+    """
     if getattr(self, "_updating_system_controls", False):
         return
-    bit = (0x20, 0x40, 0x01)[index]
-    self._send_switch_config(int(getattr(self, "_switch_config", 0)) ^ bit)
+    if index not in (0, 1, 2):
+        raise ValueError(f"switch control index out of range: {index}")
+    current = int(getattr(self, "_switch_config", 0)) & 0x03
+    if index == 0:
+        config = current ^ 0x01
+    elif index == 1:
+        config = current ^ 0x02
+    else:
+        config = 0 if current else 1
+    self._send_switch_config(config)
 
 
 def _on_switch_condition_changed(self) -> None:
@@ -1021,6 +1049,11 @@ def _send_switch_config(self, config: int) -> None:
             self._set_writable(True)
         self._switch_config = config
         self._switch_config_loaded = True
+        for lamp, enabled in zip(
+            self.system_switch_lamps,
+            (bool(config & 0x01), bool(config & 0x02), config == 0),
+        ):
+            lamp.set_on(enabled)
         self.log_msg(f"SetSwitchCondition config=0x{config:X}")
 
     self._run("Set switch condition", work)

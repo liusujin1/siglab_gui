@@ -352,6 +352,11 @@ def _build_pos_filter_page(self) -> QtWidgets.QWidget:
         from python_samba.ui.main_window import SidebarLoopButton
         led = SidebarLoopButton()
         led.set_on(True)
+        led.setToolTip(f"Toggle position individual loop {POS_AXES_NAMES[ax]}")
+        led.clicked.connect(
+            lambda _checked=False, axis=ax:
+                self._on_axis_individual_loop_clicked("position", axis)
+        )
         self.pos_filter_axis_leds.append(led)
 
         for st in range(n_pos_stages):

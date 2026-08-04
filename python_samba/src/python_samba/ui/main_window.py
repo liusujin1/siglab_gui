@@ -883,6 +883,43 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
             self._live_refresh_errors[key] = message
             self.log_msg(f"Live refresh {key}: {message}")
 
+    def _on_axis_individual_loop_clicked(self, kind: str, axis: int) -> None:
+        """Toggle one velocity, position, or pneumatic individual-loop bit."""
+        limits = {"velocity": 6, "position": 6, "pneumatic": 3}
+        if kind not in limits:
+            raise ValueError(f"unknown individual-loop kind: {kind!r}")
+        if not 0 <= axis < limits[kind]:
+            raise ValueError(
+                f"{kind} individual-loop axis out of range: {axis}"
+            )
+        if not self.session or not self.session.connected:
+            return
+
+        def work() -> None:
+            session = self._require_session()
+            if kind == "velocity":
+                loop = session.get_loop_status()
+                session.set_loop_status(
+                    loop.individual ^ (1 << axis), loop.system
+                )
+            else:
+                position, pneumatic, _digital_in, _digital_out = (
+                    session.get_pos_pneum_digital_status()
+                )
+                if kind == "position":
+                    position ^= 1 << axis
+                else:
+                    pneumatic ^= 1 << axis
+                session.set_pos_pneum_individual_loop_status(
+                    position, pneumatic
+                )
+            self._refresh_status_loop_state(include_axis_status=True)
+            self.log_msg(
+                f"Toggled {kind} individual loop axis {axis + 1}"
+            )
+
+        self._run(f"Toggle {kind} individual loop", work)
+
     def _update_status_loop_widgets(
         self,
         loop,
@@ -927,18 +964,35 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
                     else f"Click to toggle {name}"
                 )
 
-        def update_axis_lamps(lamps: list[QtWidgets.QLabel], word: int) -> None:
+        def update_axis_lamps(lamps, word: int) -> None:
             for index, lamp in enumerate(lamps):
                 enabled = bool(word & (1 << index))
-                lamp.setText("ON" if enabled else "OFF")
-                lamp.setProperty("active", enabled)
-                self._refresh_dynamic_style(lamp)
+                if hasattr(lamp, "set_on"):
+                    lamp.set_on(enabled)
+                else:
+                    lamp.setText("ON" if enabled else "OFF")
+                    lamp.setProperty("active", enabled)
+                    self._refresh_dynamic_style(lamp)
 
-        update_axis_lamps(self.status_velocity_axis_lamps, int(loop.individual))
+        for attribute in (
+            "status_velocity_axis_lamps",
+            "vel_filter_axis_leds",
+            "vel_individual_loop_buttons",
+        ):
+            update_axis_lamps(
+                getattr(self, attribute, ()), int(loop.individual)
+            )
         if status_words is not None:
             position, pneumatic = (list(status_words) + [0, 0])[:2]
-            update_axis_lamps(self.status_position_axis_lamps, int(position))
-            update_axis_lamps(self.status_pneumatic_axis_lamps, int(pneumatic))
+            for attribute in (
+                "status_position_axis_lamps",
+                "pos_filter_axis_leds",
+            ):
+                update_axis_lamps(getattr(self, attribute, ()), int(position))
+            update_axis_lamps(
+                getattr(self, "status_pneumatic_axis_lamps", ()),
+                int(pneumatic),
+            )
             pff_setter = getattr(self, "_set_pff_individual_loop_buttons", None)
             if callable(pff_setter):
                 pff_setter(int(pneumatic))
@@ -2128,20 +2182,26 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         axis_column = QtWidgets.QVBoxLayout()
 
         def axis_group(
-            title: str, names: list[str]
-        ) -> tuple[QtWidgets.QGroupBox, list[QtWidgets.QLabel]]:
+            title: str, names: list[str], kind: str
+        ) -> tuple[QtWidgets.QGroupBox, list[SidebarLoopButton]]:
             group = GroupPanel(title)
             group.setFixedSize(490 if len(names) == 6 else 403, 140)
             row = QtWidgets.QHBoxLayout(group)
-            lamps: list[QtWidgets.QLabel] = []
-            for name in names:
+            lamps: list[SidebarLoopButton] = []
+            for axis, name in enumerate(names):
                 col = QtWidgets.QVBoxLayout()
                 label = QtWidgets.QLabel(name)
                 label.setAlignment(QtCore.Qt.AlignCenter)
-                lamp = QtWidgets.QLabel("ON")
-                lamp.setObjectName("classicAxisLamp")
-                lamp.setAlignment(QtCore.Qt.AlignCenter)
+                lamp = SidebarLoopButton()
+                lamp.set_on(False)
                 lamp.setFixedSize(64, 58)
+                lamp.setToolTip(f"Toggle {kind} individual loop {name}")
+                lamp.clicked.connect(
+                    lambda _checked=False, loop_kind=kind, selected_axis=axis:
+                        self._on_axis_individual_loop_clicked(
+                            loop_kind, selected_axis
+                        )
+                )
                 lamps.append(lamp)
                 col.addWidget(label)
                 col.addWidget(lamp)
@@ -2149,19 +2209,25 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
             return group, lamps
 
         velocity_group, self.status_velocity_axis_lamps = axis_group(
-            "Velocity Individual Loop Status", ["Xtrans", "Zrot", "Ytrans", "Ztrans", "Yrot", "Xrot"]
+            "Velocity Individual Loop Status",
+            ["Xtrans", "Zrot", "Ytrans", "Ztrans", "Yrot", "Xrot"],
+            "velocity",
         )
         axis_column.addWidget(velocity_group)
         axis_column.addSpacing(28)
         position_group, self.status_position_axis_lamps = axis_group(
-            "Position Individual Loop Status", ["Xrot", "Yrot", "Xtrans", "Ytrans", "Zrot", "Ztrans"]
+            "Position Individual Loop Status",
+            ["Xrot", "Yrot", "Xtrans", "Ytrans", "Zrot", "Ztrans"],
+            "position",
         )
         axis_column.addWidget(position_group)
         axis_column.addStretch(1)
         top.addLayout(axis_column)
         top.addSpacing(140)
         pneumatic_group, self.status_pneumatic_axis_lamps = axis_group(
-            "Pneumatic Individual Loop Status", ["Ztpneu", "Yrpneu", "Xrpneu"]
+            "Pneumatic Individual Loop Status",
+            ["Ztpneu", "Yrpneu", "Xrpneu"],
+            "pneumatic",
         )
         top.addWidget(pneumatic_group, 0, QtCore.Qt.AlignTop)
         top.addStretch(1)
@@ -2285,6 +2351,13 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
             # original tuning page.
             led = SidebarLoopButton()
             led.set_on(True)
+            led.setToolTip(
+                f"Toggle velocity individual loop {VEL_AXES_NAMES[ax]}"
+            )
+            led.clicked.connect(
+                lambda _checked=False, axis=ax:
+                    self._on_axis_individual_loop_clicked("velocity", axis)
+            )
             self.vel_filter_axis_leds.append(led)
 
             for st in range(7):
@@ -2470,13 +2543,22 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
 
         loop_status = GroupPanel("Velocity Individual Loop Status")
         loop_row = QtWidgets.QHBoxLayout(loop_status)
-        for axis_name in VEL_AXES_NAMES:
+        self.vel_individual_loop_buttons = []
+        for axis, axis_name in enumerate(VEL_AXES_NAMES):
             col = QtWidgets.QVBoxLayout()
             label = QtWidgets.QLabel(axis_name)
             label.setAlignment(QtCore.Qt.AlignCenter)
             lamp = SidebarLoopButton()
             lamp.set_on(True)
             lamp.setFixedSize(48, 45)
+            lamp.setToolTip(f"Toggle velocity individual loop {axis_name}")
+            lamp.clicked.connect(
+                lambda _checked=False, selected_axis=axis:
+                    self._on_axis_individual_loop_clicked(
+                        "velocity", selected_axis
+                    )
+            )
+            self.vel_individual_loop_buttons.append(lamp)
             col.addWidget(label)
             col.addWidget(lamp)
             loop_row.addLayout(col)

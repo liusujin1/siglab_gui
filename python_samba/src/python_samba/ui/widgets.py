@@ -150,8 +150,12 @@ class FilterDlg(QtWidgets.QDialog):
         vbox.setSpacing(8)
         vbox.setContentsMargins(12, 12, 12, 12)
 
-        # Axis selector
-        ax_row = QtWidgets.QHBoxLayout()
+        # The caller already selected the matrix cell.  Keep the widgets as
+        # hidden state holders for compatibility, but do not expose duplicate
+        # Axis/Stage selectors that can change the wire address accidentally.
+        self.target_selector = QtWidgets.QWidget()
+        ax_row = QtWidgets.QHBoxLayout(self.target_selector)
+        ax_row.setContentsMargins(0, 0, 0, 0)
         ax_row.addWidget(QtWidgets.QLabel("Axis:"))
         self.axis_cbx = QtWidgets.QComboBox()
         for i, label in enumerate(axis_labels):
@@ -163,7 +167,8 @@ class FilterDlg(QtWidgets.QDialog):
         self.stage_spin.setRange(0, max_stage)
         self.stage_spin.valueChanged.connect(self._on_stage_changed)
         ax_row.addWidget(self.stage_spin)
-        vbox.addLayout(ax_row)
+        self.target_selector.hide()
+        vbox.addWidget(self.target_selector)
 
         # Filter type
         type_row = QtWidgets.QHBoxLayout()

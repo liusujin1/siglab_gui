@@ -475,7 +475,14 @@ class CommandEncoder:
 
     def fgpfs(self, axis: int, source: int, stage: int) -> bytes:
         """Get one FF filter stage using the documented wire address."""
-        return self._command("FGPFS", int(axis), int(source), int(stage))
+        values = _typed_params("FGPFS", (axis, source, stage), "III")
+        if not 0 <= values[0] <= 5:
+            raise ProtocolError(f"FGPFS axis out of range: {values[0]}")
+        if not 0 <= values[1] <= 6:
+            raise ProtocolError(f"FGPFS source out of range: {values[1]}")
+        if not 0 <= values[2] <= 7:
+            raise ProtocolError(f"FGPFS stage out of range: {values[2]}")
+        return self._command("FGPFS", *values)
 
     def decode_fgpfs(self, response: RciResponse, source: int, stage: int) -> FilterStage:
         self.ensure_ok(response, "FGPFS")
@@ -494,13 +501,24 @@ class CommandEncoder:
         )
 
     def fspfs(self, axis: int, source: int, stage: FilterStage) -> bytes:
+        address = _typed_params(
+            "FSPFS",
+            (axis, source, stage.stage, stage.filter_type),
+            "IIII",
+        )
+        if not 0 <= address[0] <= 5:
+            raise ProtocolError(f"FSPFS axis out of range: {address[0]}")
+        if not 0 <= address[1] <= 6:
+            raise ProtocolError(f"FSPFS source out of range: {address[1]}")
+        if not 0 <= address[2] <= 7:
+            raise ProtocolError(f"FSPFS stage out of range: {address[2]}")
         return self._command(
             "FSPFS",
-            int(axis),
-            int(source),
-            stage.stage,
-            stage.filter_type,
-            *stage.params,
+            *address,
+            *(
+                _floating_param("FSPFS", index + 4, value)
+                for index, value in enumerate(stage.params)
+            ),
         )
 
     def fgffi(self) -> bytes:
@@ -631,7 +649,13 @@ class CommandEncoder:
         return list(response.data_tokens)
 
     def bsocd(self, *params: str | int | float) -> bytes:
-        return self._command("BSOCD", *params)
+        values = _typed_params("BSOCD", params, "IFFI")
+        trigger_level = int(values[0])
+        if not 0 <= trigger_level <= 100:
+            raise ProtocolError(
+                f"BSOCD trigger level must be between 0 and 100, got {trigger_level}"
+            )
+        return self._command("BSOCD", *values)
 
     # --- Motor protection ---
 

@@ -105,8 +105,12 @@ def test_performance_switch_motor():
         assert s.get_performance_status()
         s.set_switch_signal("1", "2", "3")
         assert s.get_switch_signal() == ["1", "2", "3"]
-        s.set_switch_conditions("1.5", "3.0", "2")
-        assert s.get_switch_conditions()[0] == "1.5"
+        s.set_switch_conditions(70, 0.5, 15.0, 2)
+        switch = s.get_switch_conditions()
+        assert [int(switch[0]), int(switch[3])] == [70, 2]
+        assert [float(value) for value in switch[1:3]] == pytest.approx(
+            [0.5, 15.0]
+        )
         cfg = s.get_motor_overcurrent_config()
         assert cfg
         s.set_motor_overcurrent_config(*cfg)
@@ -1595,6 +1599,50 @@ def test_loop_matrix_and_protection_buttons_write_without_generic_confirmation(
     assert win.session.get_loop_status().system == before_ff ^ 0x04
     win.status_loop_badges["Feed Forward"].click()  # restore
 
+    # All three individual-loop groups on Status are real controls.
+    select_page("Status")
+    before_velocity = win.session.get_loop_status().individual
+    mouse_click(win.status_velocity_axis_lamps[0])
+    assert win.session.get_loop_status().individual == before_velocity ^ 0x01
+    mouse_click(win.status_velocity_axis_lamps[0])  # restore
+
+    before_position, before_pneumatic, _din, _dout = (
+        win.session.get_pos_pneum_digital_status()
+    )
+    mouse_click(win.status_position_axis_lamps[1])
+    after_position, after_pneumatic, _din, _dout = (
+        win.session.get_pos_pneum_digital_status()
+    )
+    assert after_position == before_position ^ 0x02
+    assert after_pneumatic == before_pneumatic
+    mouse_click(win.status_position_axis_lamps[1])  # restore
+
+    mouse_click(win.status_pneumatic_axis_lamps[2])
+    after_position, after_pneumatic, _din, _dout = (
+        win.session.get_pos_pneum_digital_status()
+    )
+    assert after_position == before_position
+    assert after_pneumatic == before_pneumatic ^ 0x04
+    mouse_click(win.status_pneumatic_axis_lamps[2])  # restore
+
+    # Controller Loop Switch Setting sends config values 0..3, not status
+    # bits 0x20/0x40.
+    select_page("Controller")
+    win._switch_config = 0
+    win._switch_config_loaded = True
+    mouse_click(win.system_switch_lamps[0])
+    assert int(win.session.get_switch_conditions()[3], 0) == 1
+    mouse_click(win.system_switch_lamps[0])
+    assert int(win.session.get_switch_conditions()[3], 0) == 0
+    mouse_click(win.system_switch_lamps[1])
+    assert int(win.session.get_switch_conditions()[3], 0) == 2
+    mouse_click(win.system_switch_lamps[1])
+    assert int(win.session.get_switch_conditions()[3], 0) == 0
+    mouse_click(win.system_switch_lamps[2])
+    assert int(win.session.get_switch_conditions()[3], 0) == 1
+    mouse_click(win.system_switch_lamps[2])
+    assert int(win.session.get_switch_conditions()[3], 0) == 0
+
     # The mock advertises automatic loop switching, so RunningV/RunningP are
     # status-only exactly as in the legacy UI.  NALS firmware enables them.
     assert not win.loop_states.loop_btns["velocity"].isEnabled()
@@ -1632,6 +1680,27 @@ def test_loop_matrix_and_protection_buttons_write_without_generic_confirmation(
     mouse_click(win.ff_individual_loop_leds[0])
     assert win.session.get_loop_status().individual == before_individual ^ 0x01
     mouse_click(win.ff_individual_loop_leds[0])  # restore
+
+    select_page("Velocity")
+    before_individual = win.session.get_loop_status().individual
+    mouse_click(win.vel_individual_loop_buttons[1])
+    assert win.session.get_loop_status().individual == before_individual ^ 0x02
+    assert win.vel_filter_axis_leds[1].text() == (
+        "OFF" if before_individual & 0x02 else "ON"
+    )
+    mouse_click(win.vel_individual_loop_buttons[1])  # restore
+
+    select_page("Position")
+    before_position, before_pneumatic, _din, _dout = (
+        win.session.get_pos_pneum_digital_status()
+    )
+    mouse_click(win.pos_filter_axis_leds[0])
+    after_position, after_pneumatic, _din, _dout = (
+        win.session.get_pos_pneum_digital_status()
+    )
+    assert after_position == before_position ^ 0x01
+    assert after_pneumatic == before_pneumatic
+    mouse_click(win.pos_filter_axis_leds[0])  # restore
 
     before_pff_outputs = int(win.session.get_pff_parameters(0)[0], 16)
     assert win.pff_status_rows[0][2]._clickable
@@ -1689,6 +1758,53 @@ def test_loop_matrix_and_protection_buttons_write_without_generic_confirmation(
     mouse_click(win.pneum_loop_leds["use_setpoint_all"])  # restore
     win.on_disconnect()
     win.close()
+
+
+def test_filter_dialog_hides_address_selectors_and_ff_error_stage_is_not_offset_twice(
+    monkeypatch,
+):
+    pytest.importorskip("PySide6")
+    from PySide6 import QtWidgets
+    from python_samba.protocol.commands import FilterStage
+    from python_samba.services.safety import SafetyGate
+    from python_samba.services.session import open_mock
+    from python_samba.ui.main_window import MainWindow
+    from python_samba.ui.patches import apply_all_patches
+    from python_samba.ui.widgets import FilterDlg
+
+    class PatchedMainWindow(MainWindow):
+        pass
+
+    apply_all_patches(PatchedMainWindow, strict=True)
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    session = open_mock(readonly=False)
+    session.open()
+    win = PatchedMainWindow()
+    win.session = session
+    win.gate = SafetyGate(session)
+    state = session.transport.state
+    state.ff_filters[(5, 6)] = (10, (1.2, 70.0, 1.0, 0.0, 0.0))
+
+    def update_without_modal(dialog):
+        assert dialog.target_selector.isHidden()
+        assert dialog._axis == 5
+        assert dialog._stage == 0
+        dialog._on_update()
+        return QtWidgets.QDialog.Accepted
+
+    monkeypatch.setattr(FilterDlg, "exec", update_without_modal)
+    try:
+        win._on_ff_err_cell_clicked(5, 0)
+        assert (5, 6) in state.ff_filters
+        assert (5, 12) not in state.ff_filters
+        stage = session.get_ff_filter(5, 6)
+        assert stage == FilterStage(
+            5, 6, 10, (1.2, 70.0, 1.0, 0.0, 0.0)
+        )
+    finally:
+        win.close()
+        session.close()
+        app.processEvents()
 
 
 def test_pneumatic_expanders_use_natural_height_without_overlap_caps():

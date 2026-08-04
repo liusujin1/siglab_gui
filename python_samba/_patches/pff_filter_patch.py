@@ -612,27 +612,7 @@ def _on_pff_individual_loop_clicked(self, axis: int) -> None:
     """Toggle one pneumatic individual-loop bit through BGSST/BSSST."""
     if not 0 <= axis < 3:
         raise ValueError(f"PFF individual-loop axis out of range: {axis}")
-    if not self.session or not self.session.connected:
-        return
-
-    def send() -> None:
-        session = self._require_session()
-        position, pneumatic, _digital_in, _digital_out = (
-            session.get_pos_pneum_digital_status()
-        )
-        pneumatic ^= 1 << axis
-        session.set_pos_pneum_individual_loop_status(position, pneumatic)
-        _set_pff_individual_loop_buttons(self, pneumatic)
-        pneu_setter = getattr(self, "_set_pneum_individual_loop_buttons", None)
-        if callable(pneu_setter):
-            pneu_setter(pneumatic)
-
-    _run_confirmed_pff_write(
-        self,
-        "Toggle pneumatic individual loop",
-        f"BSSST pneumatic axis {axis + 1} bit 0x{1 << axis:X}",
-        send,
-    )
+    self._on_axis_individual_loop_clicked("pneumatic", axis)
 
 
 def _on_pff_inputs_changed(self, _source: int) -> None:

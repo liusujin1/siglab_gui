@@ -699,23 +699,7 @@ def _on_ff_individual_loop_clicked(self, axis: int) -> None:
     """Toggle one velocity individual-loop bit through BGSTS/BSSTS."""
     if not 0 <= axis < 6:
         raise ValueError(f"FF individual-loop axis out of range: {axis}")
-    if not self.session or not self.session.connected:
-        return
-
-    def send() -> None:
-        session = self._require_session()
-        loop = session.get_loop_status()
-        individual = loop.individual ^ (1 << axis)
-        session.set_loop_status(individual, loop.system)
-        _set_ff_individual_loop_buttons(self, individual)
-        self._refresh_status_loop_state()
-
-    _run_confirmed_ff_write(
-        self,
-        "Toggle velocity individual loop",
-        f"BSSTS velocity axis {axis + 1} bit 0x{1 << axis:X}",
-        send,
-    )
+    self._on_axis_individual_loop_clicked("velocity", axis)
 
 
 def _on_ff_inputs_changed(self, _source: int) -> None:
@@ -908,7 +892,15 @@ def _ff_open_filter_dlg(
         show_all_axes=True, show_all_sources=False, parent=self,
     )
     dlg.setWindowTitle(dlg_title)
-    fs = self.ff_filter.to_stage()
+    loaded = self.ff_filter.to_stage()
+    # FilterDlg uses matrix-local coordinates.  The controller stage offset
+    # (Sec +3 / Err +6) is applied exactly once by the write helper below.
+    fs = FilterStage(
+        axis=source,
+        stage=stage,
+        filter_type=loaded.filter_type,
+        params=loaded.params,
+    )
     dlg.set_stage(fs)
     dlg.axis_cbx.setCurrentIndex(source)
     dlg.axis_cbx.setEnabled(False)
@@ -916,7 +908,15 @@ def _ff_open_filter_dlg(
     def on_dlg_changed(new_stage: object, all_axes: bool, all_sources: bool) -> None:
         if not isinstance(new_stage, FilterStage):
             return
-        self.ff_filter.set_stage(new_stage)
+        editor_stage = FilterStage(
+            axis=source,
+            stage=self._ff_grid_stage_to_proto(
+                self._ff_active_grid, source, new_stage.stage
+            ),
+            filter_type=new_stage.filter_type,
+            params=new_stage.params,
+        )
+        self.ff_filter.set_stage(editor_stage)
         self.ff_filter_panel.set_from_filter_editor(self.ff_filter)
         self._ff_update_current_cell_text()
         if all_axes:

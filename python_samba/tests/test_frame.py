@@ -192,6 +192,7 @@ def test_mixed_integer_float_command_contracts_are_typed_before_framing():
         "actual time": encoder.dsati(1.0, 2.0, 3.0, 4.0),
         "pneumatic ramp": encoder.psprp(1.0, 1.25, 2.5, 3.75, 4.5),
         "nonlinear position": encoder.cspnp(2.0, 1.0, 0.125, 3.5),
+        "switch conditions": encoder.bsocd(70.0, 0.5, 15.0, 2.0),
     }
 
     assert b"DSETP 2 512 4 3 8 1" in frames["event params"]
@@ -213,6 +214,9 @@ def test_mixed_integer_float_command_contracts_are_typed_before_framing():
     assert b"CSSFP 2 1 1.250000e-01 3.500000e+00" in frames[
         "nonlinear position"
     ]
+    assert b"BSOCD 70 5.000000e-01 1.500000e+01 2" in frames[
+        "switch conditions"
+    ]
 
     with pytest.raises(ProtocolError, match="DSETP expects 6"):
         encoder.dsetp(1, 2, 3, 4, 5)
@@ -224,3 +228,5 @@ def test_mixed_integer_float_command_contracts_are_typed_before_framing():
         encoder.psprp(1.5, 1, 1, 1, 1)
     with pytest.raises(ProtocolError, match="CSSFP expects 4"):
         encoder.cspnp(1, 0, 0.25)
+    with pytest.raises(ProtocolError, match="BSOCD trigger level"):
+        encoder.bsocd(101, 0.5, 15, 0)

@@ -91,6 +91,11 @@ class ControlSwitchProbe:
             "controller_config": self.session.get_controller_config(),
             "ff_source_0": self.session.get_ff_parameters(0),
             "pff_source_0": self.session.get_pff_parameters(0),
+            "ff_error_filters": [
+                asdict(self.session.get_ff_filter(axis, stage))
+                for axis in range(6)
+                for stage in (6, 7)
+            ],
         }
 
     def run(self, name: str, command: str, action: Callable[[], str]) -> None:
@@ -192,6 +197,84 @@ class ControlSwitchProbe:
             f"{name} bit 0x{bit:X}: 0x{pneumatic:X} -> "
             f"0x{changed[1]:X} -> 0x{restored[1]:X}"
         )
+
+    def toggle_position_individual(self, name: str, bit: int) -> str:
+        before = self.session.get_pos_pneum_digital_status()
+        position, pneumatic, _digital_in, _digital_out = before
+        target = position ^ bit
+        changed = None
+        try:
+            self.session.set_pos_pneum_individual_loop_status(
+                target, pneumatic
+            )
+            time.sleep(self.settle_seconds)
+            changed = self.session.get_pos_pneum_digital_status()
+            if changed[0] != target or changed[1] != pneumatic:
+                raise AssertionError(
+                    f"position individual bit 0x{bit:X} did not read back: "
+                    f"{changed}"
+                )
+        finally:
+            self.session.set_pos_pneum_individual_loop_status(
+                position, pneumatic
+            )
+        restored = self.session.get_pos_pneum_digital_status()
+        if restored[:2] != before[:2]:
+            raise AssertionError(
+                f"position individual status was not restored: "
+                f"{before} -> {restored}"
+            )
+        return (
+            f"{name} bit 0x{bit:X}: 0x{position:X} -> "
+            f"0x{changed[0]:X} -> 0x{restored[0]:X}"
+        )
+
+    def set_switch_mode(self, name: str, target: int) -> str:
+        before = self.session.get_switch_conditions()
+        if len(before) < 4:
+            raise AssertionError(f"BGOCD returned too few fields: {before}")
+        original = _decimal_int(before[3])
+        changed = None
+        try:
+            self.session.set_switch_conditions(
+                before[0], before[1], before[2], target
+            )
+            changed = self.session.get_switch_conditions()
+            if len(changed) < 4 or _decimal_int(changed[3]) != target:
+                raise AssertionError(
+                    f"SwitchConfig did not read back as {target}: {changed}"
+                )
+        finally:
+            self.session.set_switch_conditions(
+                before[0], before[1], before[2], original
+            )
+        restored = self.session.get_switch_conditions()
+        if len(restored) < 4 or any(
+            not _same_number(left, right)
+            for left, right in zip(before[:4], restored[:4])
+        ):
+            raise AssertionError(
+                f"switch conditions were not restored: {restored}"
+            )
+        return f"{name}: {original} -> {_decimal_int(changed[3])} -> {original}"
+
+    def same_write_ff_error_filters(self) -> str:
+        checked = 0
+        for axis in range(6):
+            for stage in (6, 7):
+                before = self.session.get_ff_filter(axis, stage)
+                self.session.set_ff_filter(before)
+                after = self.session.get_ff_filter(axis, stage)
+                if after.filter_type != before.filter_type or any(
+                    not _same_number(left, right)
+                    for left, right in zip(before.params, after.params)
+                ):
+                    raise AssertionError(
+                        f"FF error filter changed at axis={axis}, "
+                        f"stage={stage}: {before} -> {after}"
+                    )
+                checked += 1
+        return f"read/same-write/read passed for {checked} error filters"
 
     def toggle_pneumatic_setpoint(self) -> str:
         before = int(self.session.get_pneumatic_setpoint_status())
@@ -362,6 +445,8 @@ class ControlSwitchProbe:
             for a, b in zip(before["pff_source_0"][1:], after["pff_source_0"][1:])
         ):
             changed.append("pff_source_0.parameters")
+        if after["ff_error_filters"] != before["ff_error_filters"]:
+            changed.append("ff_error_filters")
         self.snapshots["restorable_changed"] = changed
         if changed:
             raise AssertionError(f"final configuration changed: {changed}")
@@ -432,6 +517,21 @@ def main() -> int:
                 ),
             )
         for name, bit in (
+            ("Xrot", 0x01),
+            ("Yrot", 0x02),
+            ("Xtrans", 0x04),
+            ("Ytrans", 0x08),
+            ("Zrot", 0x10),
+            ("Ztrans", 0x20),
+        ):
+            probe.run(
+                f"Toggle Position individual {name}",
+                f"BSSST POS 0x{bit:X}",
+                lambda name=name, bit=bit: probe.toggle_position_individual(
+                    name, bit
+                ),
+            )
+        for name, bit in (
             ("Ztpneu", 0x01),
             ("Yrpneu", 0x02),
             ("Xrpneu", 0x04),
@@ -461,6 +561,18 @@ def main() -> int:
                 f"Toggle {name}",
                 f"NSEXL 0x{bit:X}",
                 lambda name=name, bit=bit: probe.toggle_controller_config(name, bit),
+            )
+        for name, config in (
+            ("Always Velocity", 1),
+            ("Always Position", 2),
+            ("Always Velocity+Position", 3),
+        ):
+            probe.run(
+                f"Set Loop Switch {name}",
+                f"BSOCD {config}",
+                lambda name=name, config=config: probe.set_switch_mode(
+                    name, config
+                ),
             )
         if auto_loop_switch:
             for name, bit in (("Velocity", 0x20), ("Position", 0x40)):
@@ -494,6 +606,11 @@ def main() -> int:
         probe.run(
             "Toggle Pneumatic FF matrix lamp", "FSPPF",
             lambda: probe.toggle_pff_matrix(0, 0),
+        )
+        probe.run(
+            "Read and same-write FF Error Path filters",
+            "FGPFS/FSPFS",
+            probe.same_write_ff_error_filters,
         )
         probe.verify_final(before)
         probe.results.append(

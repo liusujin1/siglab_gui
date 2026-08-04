@@ -28,6 +28,9 @@ def test_ff_filter_wire_address_has_axis_source_and_stage():
     encoder = CommandEncoder()
 
     assert b"FGPFS 0 2 3" in encoder.fgpfs(0, 2, 3)
+    assert b"FGPFS 5 0 6" in encoder.fgpfs(5, 0, 6)
+    with pytest.raises(Exception, match="FGPFS stage out of range"):
+        encoder.fgpfs(0, 0, 12)
 
 
 def test_diagnostics_noise_roundtrip():
