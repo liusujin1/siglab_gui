@@ -472,6 +472,8 @@ def _on_timer_tick(win) -> None:
         try:
             if main == "Position" and sub in {"Tuning", "Proxy Adjustment"}:
                 win._refresh_position_live_state()
+            elif main == "Status" and sub == "DigIO Status":
+                win._on_digio_read()
             elif main == "Pneumatic" and hasattr(
                 win, "_refresh_pneumatic_live_state"
             ):

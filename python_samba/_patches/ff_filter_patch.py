@@ -391,7 +391,7 @@ def _build_ff_filter_page_reference(self) -> QtWidgets.QWidget:
         for stage in range(3):
             cell = FilterStageCell(stage, "----", width=90, height=78)
             cell.clicked.connect(
-                lambda _stage=stage, _source=source: self._on_ff_ref_cell_clicked(
+                lambda _clicked_stage, _stage=stage, _source=source: self._on_ff_ref_cell_clicked(
                     _source, _stage
                 )
             )
@@ -401,7 +401,7 @@ def _build_ff_filter_page_reference(self) -> QtWidgets.QWidget:
         for stage in range(3):
             cell = FilterStageCell(stage + 3, "----", width=90, height=78)
             cell.clicked.connect(
-                lambda _stage=stage, _source=source: self._on_ff_sec_cell_clicked(
+                lambda _clicked_stage, _stage=stage, _source=source: self._on_ff_sec_cell_clicked(
                     _source, _stage
                 )
             )
@@ -455,7 +455,7 @@ def _build_ff_filter_page_reference(self) -> QtWidgets.QWidget:
         for stage in range(2):
             cell = FilterStageCell(stage + 6, "----", width=90, height=78)
             cell.clicked.connect(
-                lambda _stage=stage, _axis=axis: self._on_ff_err_cell_clicked(
+                lambda _clicked_stage, _stage=stage, _axis=axis: self._on_ff_err_cell_clicked(
                     _axis, _stage
                 )
             )

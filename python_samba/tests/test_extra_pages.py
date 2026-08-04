@@ -1764,11 +1764,11 @@ def test_filter_dialog_hides_address_selectors_and_ff_error_stage_is_not_offset_
     monkeypatch,
 ):
     pytest.importorskip("PySide6")
-    from PySide6 import QtWidgets
+    from PySide6 import QtCore, QtTest, QtWidgets
     from python_samba.protocol.commands import FilterStage
     from python_samba.services.safety import SafetyGate
     from python_samba.services.session import open_mock
-    from python_samba.ui.main_window import MainWindow
+    from python_samba.ui.main_window import MainWindow, SamTabWidget
     from python_samba.ui.patches import apply_all_patches
     from python_samba.ui.widgets import FilterDlg
 
@@ -1782,6 +1782,19 @@ def test_filter_dialog_hides_address_selectors_and_ff_error_stage_is_not_offset_
     win = PatchedMainWindow()
     win.session = session
     win.gate = SafetyGate(session)
+    win.show()
+    ff_index = next(
+        index for index in range(win.main_tabs.count())
+        if win.main_tabs.tabText(index) == "Feed Forward"
+    )
+    win.main_tabs.setCurrentIndex(ff_index)
+    ff_tabs = win.main_tabs.widget(ff_index).findChild(SamTabWidget)
+    tuning_index = next(
+        index for index in range(ff_tabs.count())
+        if ff_tabs.tabText(index) == "FF Tuning"
+    )
+    ff_tabs.setCurrentIndex(tuning_index)
+    app.processEvents()
     state = session.transport.state
     state.ff_filters[(5, 6)] = (10, (1.2, 70.0, 1.0, 0.0, 0.0))
 
@@ -1794,7 +1807,15 @@ def test_filter_dialog_hides_address_selectors_and_ff_error_stage_is_not_offset_
 
     monkeypatch.setattr(FilterDlg, "exec", update_without_modal)
     try:
-        win._on_ff_err_cell_clicked(5, 0)
+        cell = win.ff_err_buttons[(5, 0)]
+        assert cell.isVisibleTo(win)
+        QtTest.QTest.mouseClick(
+            cell,
+            QtCore.Qt.LeftButton,
+            pos=cell.rect().center(),
+        )
+        app.processEvents()
+        assert win._ff_active_stage == 0
         assert (5, 6) in state.ff_filters
         assert (5, 12) not in state.ff_filters
         stage = session.get_ff_filter(5, 6)
@@ -1805,6 +1826,71 @@ def test_filter_dialog_hides_address_selectors_and_ff_error_stage_is_not_offset_
         win.close()
         session.close()
         app.processEvents()
+
+
+def test_digio_status_uses_legacy_bit_mapping_and_timer_refresh():
+    pytest.importorskip("PySide6")
+    from PySide6 import QtWidgets
+    from python_samba.ui.main_window import MainWindow, SamTabWidget
+    from python_samba.ui.patches import apply_all_patches
+
+    class PatchedMainWindow(MainWindow):
+        pass
+
+    apply_all_patches(PatchedMainWindow, strict=True)
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    win = PatchedMainWindow()
+    win.backend.setCurrentText("mock")
+    win.on_connect()
+    win._refresh_timer.stop()
+    state = win.session.transport.state
+
+    status_index = next(
+        index for index in range(win.main_tabs.count())
+        if win.main_tabs.tabText(index) == "Status"
+    )
+    win.main_tabs.setCurrentIndex(status_index)
+    status_tabs = win.main_tabs.widget(status_index).findChild(SamTabWidget)
+    digio_index = next(
+        index for index in range(status_tabs.count())
+        if status_tabs.tabText(index) == "DigIO Status"
+    )
+    status_tabs.setCurrentIndex(digio_index)
+    app.processEvents()
+
+    assert win._digio_input_names[-1] == "MBoardID"
+    assert win._digio_output_names[5] == "OCOUT6"
+    assert win._digio_output_names[-1] == "Reserve"
+
+    state.digital_input_word = (9 << 14) | 0x2105
+    state.digital_output_word = 0xC0000 | 0x3480
+    win._on_digio_read()
+    assert win._digio_input_leds[0]._is_on
+    assert not win._digio_input_leds[1]._is_on
+    assert win._digio_input_leds[2]._is_on
+    assert win._digio_input_leds[8]._is_on
+    assert win._digio_input_leds[13]._is_on
+    assert win._digio_input_leds[14].text() == "9"
+    assert win._digio_output_leds[5]._is_on is False
+    assert win._digio_output_leds[7]._is_on
+    assert win._digio_output_leds[10]._is_on
+    assert win._digio_output_leds[12]._is_on
+    assert win._digio_output_leds[13]._is_on
+    assert win._digio_output_leds[14].text() == str(0xC0000)
+
+    # The visible DigIO page must refresh from BGSST on the 1-second timer.
+    state.digital_input_word = 0x20
+    state.digital_output_word = 0x20
+    win._on_timer_tick()
+    assert not win._digio_input_leds[0]._is_on
+    assert win._digio_input_leds[5]._is_on
+    assert win._digio_input_leds[14].text() == "0"
+    assert win._digio_output_leds[5]._is_on
+    assert win._digio_output_leds[14].text() == "0"
+
+    win.on_disconnect()
+    win.close()
+    app.processEvents()
 
 
 def test_pneumatic_expanders_use_natural_height_without_overlap_caps():

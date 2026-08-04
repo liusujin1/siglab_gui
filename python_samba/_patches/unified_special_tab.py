@@ -609,20 +609,37 @@ def _build_digio_tab(self) -> QtWidgets.QWidget:
     return w
 
 
+def _apply_digio_words(self, input_word: int, output_word: int) -> None:
+    """Apply the legacy DigInputWordStates/DigOutputWordStates bit contract."""
+    input_leds = list(getattr(self, "_digio_input_leds", ()))
+    output_leds = list(getattr(self, "_digio_output_leds", ()))
+    for index, led in enumerate(input_leds[:14]):
+        led.set_on(bool(input_word & (1 << index)))
+    if len(input_leds) > 14:
+        input_leds[14].set_value(((input_word & 0xFC000) >> 14) & 0x1F)
+    for index, led in enumerate(output_leds[:14]):
+        led.set_on(bool(output_word & (1 << index)))
+    if len(output_leds) > 14:
+        output_leds[14].set_value(output_word & 0xFC000)
+
+
 def _on_digio_read(self) -> None:
     if not self.session or not self.session.connected:
+        return
+    supports = getattr(self, "_supports_controller_feature", None)
+    if supports is not None and not supports("pos_pneum_digio"):
         return
     try:
         _position, _pneumatic, input_word, output_word = (
             self.session.get_pos_pneum_digital_status()
         )
-        for index, led in enumerate(getattr(self, '_digio_input_leds', [])):
-            led.set_on(bool(input_word & (1 << index)))
-        for index, led in enumerate(getattr(self, '_digio_output_leds', [])):
-            led.set_on(bool(output_word & (1 << index)))
-        self.log_msg(
-            f"DigIO status read input=0x{input_word:X} output=0x{output_word:X}"
-        )
+        _apply_digio_words(self, input_word, output_word)
+        words = (int(input_word), int(output_word))
+        if words != getattr(self, "_digio_last_words", None):
+            self.log_msg(
+                f"DigIO status read input=0x{input_word:X} output=0x{output_word:X}"
+            )
+        self._digio_last_words = words
     except Exception as exc:
         self.log_msg(f"ERROR DigIO status read: {exc}")
 
@@ -822,7 +839,7 @@ def apply_patches(cls: type) -> None:
         "_build_polynom_tab",
         "_build_signal_display_page",
         "_build_digio_tab", "_build_view3d_tab",
-        "_on_digio_read", "_toggle_signal_monitoring",
+        "_apply_digio_words", "_on_digio_read", "_toggle_signal_monitoring",
         "on_safety_read", "on_safety_read_config", "on_safety_write_config",
         "on_zms_read", "on_zms_write",
         "on_signal_continue_read",

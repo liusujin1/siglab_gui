@@ -394,6 +394,8 @@ class _StatusOrb(QtWidgets.QLabel):
         self.set_on(on)
 
     def set_on(self, on: bool, _color: str | None = None) -> None:
+        self._is_on = bool(on)
+        self.setText("1" if self._is_on else "0")
         edge = "#24ae35" if on else "#a7a7a7"
         center = "#3bd34a" if on else "#e7e7e7"
         self.setStyleSheet(
@@ -403,6 +405,22 @@ class _StatusOrb(QtWidgets.QLabel):
 
     def set_color(self, color: str) -> None:
         self.set_on(str(color).lower() not in {"", "gray", "grey", "off", "black"})
+
+
+class _StatusValue(QtWidgets.QLabel):
+    """Numeric digital-word field used for legacy MBoardID/Reserve values."""
+
+    def __init__(self) -> None:
+        super().__init__("0")
+        self.setAlignment(QtCore.Qt.AlignCenter)
+        self.setFixedSize(82, 38)
+        self.setStyleSheet(
+            "QLabel{border:2px solid #999;border-radius:3px;background:#f7f7f7;"
+            "font-size:17px;font-weight:600;}"
+        )
+
+    def set_value(self, value: int) -> None:
+        self.setText(str(int(value)))
 
 
 class _ReferenceToggle(QtWidgets.QToolButton):
@@ -427,7 +445,7 @@ class _ReferenceToggle(QtWidgets.QToolButton):
         )
 
 
-def _status_item(name: str, orb: _StatusOrb) -> QtWidgets.QWidget:
+def _status_item(name: str, orb: QtWidgets.QLabel) -> QtWidgets.QWidget:
     widget = QtWidgets.QWidget()
     column = QtWidgets.QVBoxLayout(widget)
     column.setContentsMargins(2, 2, 2, 2)
@@ -452,9 +470,10 @@ def _build_digio_tab_reference(self) -> QtWidgets.QWidget:
     input_names = [
         "MonBtn", "ResBtn", "OPTOIN1", "OPTOIN2", "OPTOIN3", "OPTOIN4",
         "Amp1TempErr", "Amp1PwrErr", "Amp1Conn",
-        "Amp2TempErr", "Amp2PwrErr", "Amp2Conn", "24V", "15V", "MBoardRev",
+        "Amp2TempErr", "Amp2PwrErr", "Amp2Conn", "24V", "15V", "MBoardID",
     ]
-    input_orbs = [_StatusOrb(name in {"Amp1Conn", "Amp2Conn"}) for name in input_names]
+    input_orbs = [_StatusOrb(False) for _name in input_names[:-1]] + [_StatusValue()]
+    self._digio_input_names = tuple(input_names)
     self._digio_input_leds = input_orbs
     # Compatibility aliases retained for older page extensions.  These are
     # digital input indicators, not position/pneumatic loop indicators.
@@ -471,11 +490,14 @@ def _build_digio_tab_reference(self) -> QtWidgets.QWidget:
     output_grid = QtWidgets.QGridLayout(output_group)
     output_grid.setContentsMargins(10, 18, 10, 8)
     output_names = [
-        "OCOUT1", "OCOUT2", "OCOUT3", "OCOUT4", "OCOUT5", "SysErr",
+        "OCOUT1", "OCOUT2", "OCOUT3", "OCOUT4", "OCOUT5", "OCOUT6",
         "OPTOOUT1", "OPTOOUT2", "OPTOOUT3", "OPTOOUT4", "Amp1On", "Amp2On",
         "MonLed", "ResLed", "Reserve",
     ]
-    self._digio_output_leds = [_StatusOrb(False) for _ in output_names]
+    self._digio_output_names = tuple(output_names)
+    self._digio_output_leds = [
+        _StatusOrb(False) for _name in output_names[:-1]
+    ] + [_StatusValue()]
     for index, (name, orb) in enumerate(zip(output_names, self._digio_output_leds)):
         row = 0 if index < 9 else 1
         column = index if index < 9 else index - 9

@@ -849,6 +849,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
             "auto_loop_switch": lambda: "NALS" not in features,
             # NAF is the legacy firmware token for "no analysis filter".
             "analysis": lambda: "NAF" not in features,
+            "pos_pneum_digio": lambda: "PPILS" in features,
         }
         try:
             return checks[feature]()
@@ -1813,6 +1814,8 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
             try:
                 if main == "Position" and sub in {"Tuning", "Proxy Adjustment"}:
                     self._refresh_position_live_state()
+                elif main == "Status" and sub == "DigIO Status":
+                    self._on_digio_read()
                 elif main == "Pneumatic" and hasattr(
                     self, "_refresh_pneumatic_live_state"
                 ):
