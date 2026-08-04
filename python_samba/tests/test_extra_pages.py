@@ -1113,6 +1113,23 @@ def test_reference_refresh_populates_new_controller_and_velocity_fields():
     assert win.ps_current_limit.text() == "1000"
     assert win.ps_current_si_unit.text() == "1"
     assert [editor.text() for editor in win.ps_actual_values] == ["0"] * 5
+    state = win.session.transport.state
+    assert win.mot_disable.isChecked() is True  # BGOCV returns legacy "N"
+    assert win.mot_use_temperature.isChecked() is False
+
+    # The temperature-sensor rocker owns only the 0x10000 system-status bit;
+    # toggling it must preserve all unrelated loop bits.
+    system_before = state.system_status
+    win.mot_use_temperature.setChecked(True)
+    assert state.system_status == system_before | 0x10000
+    win.mot_use_temperature.setChecked(False)
+    assert state.system_status == system_before
+
+    # Disable-all is a separate BGOCV/BSOCV On/Off flag and is written as N/F.
+    win.mot_disable.setChecked(False)
+    assert state.motor_oc_config[0] == "F"
+    win.mot_disable.setChecked(True)
+    assert state.motor_oc_config[0] == "N"
 
     # BGMPS is an enum, not a boolean.  Match the legacy UI's Normal /
     # Overheated / Disabled presentation and keep unknown firmware states

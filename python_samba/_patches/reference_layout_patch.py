@@ -239,6 +239,8 @@ def _build_motor_protection_page_reference(self) -> QtWidgets.QWidget:
     form.addWidget(self.mot_use_temperature, 2, 1, QtCore.Qt.AlignLeft)
     form.addWidget(QtWidgets.QLabel("Disable all by Failure"), 3, 0)
     form.addWidget(self.mot_disable, 3, 1, QtCore.Qt.AlignLeft)
+    self.mot_use_temperature.toggled.connect(self.on_motor_use_temperature_toggled)
+    self.mot_disable.toggled.connect(self.on_motor_disable_toggled)
 
     self.motor_overheat_expander = ClassicExpander(
         "Motor Overheating Setting", settings, expanded=True

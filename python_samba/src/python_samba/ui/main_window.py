@@ -17,7 +17,7 @@ import math
 import os
 import time
 
-from python_samba.protocol.codes import FilterType, filter_small_name
+from python_samba.protocol.codes import FilterType, SystemStatus, filter_small_name
 from python_samba.protocol.commands import FilterStage
 from python_samba.services.safety import SafetyGate
 from python_samba.services.session import ControllerSession, open_mock, open_serial
@@ -219,6 +219,32 @@ def _motor_status_presentation(value: object) -> tuple[str, str]:
         1: ("Overheated", "#ff0000"),
         2: ("Disabled", "#ffffe0"),
     }.get(state, ("Unknown", "#e7ecef"))
+
+
+def _motor_disable_flag_enabled(value: object) -> bool:
+    """Normalize the legacy BGOCV DisableAllFlag token to a boolean.
+
+    The RCI documentation calls this an On/Off character.  SAMBA firmware
+    commonly returns ``N``/``F`` (the setup-file writer uses the same pair),
+    while mocks and newer builds may return 0/1 or ON/OFF words.  The legacy
+    UI treats every non-zero value as enabled.
+    """
+
+    text = str(value).strip().upper()
+    if text in {"N", "ON", "TRUE", "Y", "YES"}:
+        return True
+    if text in {"F", "OFF", "FALSE", "NO", "0", ""}:
+        return False
+    try:
+        return _parse_protocol_int(value, default=0) != 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _motor_disable_flag_token(enabled: bool) -> str:
+    """Encode DisableAllFlag using the legacy RCI On/Off characters."""
+
+    return "N" if bool(enabled) else "F"
 
 
 class SidebarLoopButton(QtWidgets.QToolButton):
@@ -5493,6 +5519,66 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
     # Motor protection
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _set_motor_toggle_silently(toggle: QtWidgets.QAbstractButton, checked: bool) -> None:
+        """Refresh a motor-protection rocker without issuing a write."""
+
+        previous = toggle.blockSignals(True)
+        try:
+            toggle.setChecked(bool(checked))
+        finally:
+            toggle.blockSignals(previous)
+
+    def on_motor_use_temperature_toggled(self, checked: bool) -> None:
+        """Update only the UseTempSensors bit in the system status word."""
+
+        def work() -> None:
+            s = self._require_session()
+            if self.gate is None:
+                raise RuntimeError("Safety gate is not initialized")
+            loop = s.get_loop_status()
+            bit = int(SystemStatus.USE_TEMP_SENSORS)
+            system = (loop.system | bit) if checked else (loop.system & ~bit)
+            if system == loop.system:
+                return
+            self.gate.take_snapshot()
+            self._set_writable(True)
+            try:
+                s.set_loop_status(loop.individual, system)
+            finally:
+                self._set_writable(True)
+            self.log_msg(
+                f"Use temperature sensors {'ON' if checked else 'OFF'} "
+                f"(BSSTS system=0x{system:X})"
+            )
+
+        self._run("Set motor temperature sensor mode", work)
+
+    def on_motor_disable_toggled(self, checked: bool) -> None:
+        """Write DisableAllFlag immediately, matching the legacy rocker."""
+
+        def work() -> None:
+            s = self._require_session()
+            if self.gate is None:
+                raise RuntimeError("Safety gate is not initialized")
+            cfg = list(s.get_motor_overcurrent_config())
+            if len(cfg) < 14:
+                raise RuntimeError(
+                    f"BGOCV returned {len(cfg)} values; expected flag, delay and 12 thresholds"
+                )
+            cfg[0] = _motor_disable_flag_token(checked)
+            self.gate.take_snapshot()
+            self._set_writable(True)
+            try:
+                s.set_motor_overcurrent_config(*cfg)
+            finally:
+                self._set_writable(True)
+            self.log_msg(
+                f"Disable all by failure {'ON' if checked else 'OFF'} (BSOCV)"
+            )
+
+        self._run("Set motor failure protection mode", work)
+
     def on_motor_prot_read(self) -> None:
         """Read motor overcurrent protection values."""
         def work() -> None:
@@ -5500,7 +5586,10 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
             cfg = s.get_motor_overcurrent_config()
             # cfg format: [DisableAllFlag, ResetDelay, thresh0, thresh1, ..., thresh11]
             if len(cfg) >= 2:
-                self.mot_disable.setChecked(cfg[0] in ("1", "True", "true"))
+                self._set_motor_toggle_silently(
+                    self.mot_disable,
+                    _motor_disable_flag_enabled(cfg[0]),
+                )
                 self.mot_delay.setText(cfg[1])
             if len(cfg) >= 14:
                 for i in range(12):
@@ -5512,6 +5601,14 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
                 )
             except Exception as exc:
                 self.log_msg(f"Motor cooling constant read: {exc}")
+            try:
+                loop = s.get_loop_status()
+                self._set_motor_toggle_silently(
+                    self.mot_use_temperature,
+                    bool(loop.system & int(SystemStatus.USE_TEMP_SENSORS)),
+                )
+            except Exception as exc:
+                self.log_msg(f"Motor temperature-sensor mode read: {exc}")
             try:
                 self._ensure_controller_capabilities()
                 linear_12 = bool(
@@ -5681,7 +5778,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         def work() -> None:
             s = self._require_session()
             assert self.gate
-            disable = "1" if self.mot_disable.isChecked() else "0"
+            disable = _motor_disable_flag_token(self.mot_disable.isChecked())
             delay = self.mot_delay.text()
             thresh = [ed.text() for ed in self.mot_thresholds]
             params = [disable, delay] + thresh
