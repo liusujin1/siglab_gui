@@ -11,12 +11,12 @@ except ImportError as exc:  # pragma: no cover
 
 
 # Screenshot-oriented SAMBA19xUI palette.
-BG = "#83c8ed"
-PANEL = "#83c8ed"
-TAB_BG = "#f7f6fb"
-TAB_ACTIVE = "#83c8ed"
-BORDER = "#ffffff"
-TEXT = "#111111"
+BG = "#e8f1f6"
+PANEL = "#f7fafc"
+TAB_BG = "#f2f7fb"
+TAB_ACTIVE = "#dbeef8"
+BORDER = "#b5c8d4"
+TEXT = "#203443"
 LED_OFF = "#3a3a3a"
 LED_GREEN = "#22c55e"
 LED_RED = "#ef4444"
@@ -130,21 +130,21 @@ class FlatPush(QtWidgets.QPushButton):
     def __init__(self, text: str = "", parent=None) -> None:
         super().__init__(text, parent)
         self.setCursor(QtCore.Qt.PointingHandCursor)
-        self.setMinimumHeight(28)
+        self.setMinimumHeight(30)
         self.setStyleSheet(
             """
             QPushButton {
-                background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
-                    stop:0 #29414a, stop:1 #667275);
-                border: 2px solid #ffffff;
+                background: #f8fbfd;
+                border: 1px solid #9db6c5;
                 border-radius: 5px;
                 padding: 5px 12px;
-                color: #ffffff;
-                font-size: 23px;
+                color: #28475b;
+                font-size: 14px;
+                font-weight: 600;
             }
-            QPushButton:hover { background: #3d5962; }
-            QPushButton:pressed { background: #23383f; }
-            QPushButton:disabled { color: #ffffff; background: #c5c1c2; }
+            QPushButton:hover { background: #eaf5fa; border-color: #5d9abb; }
+            QPushButton:pressed { background: #d7ebf3; }
+            QPushButton:disabled { color: #8c9ca6; background: #e3ebef; border-color:#c5d2d9; }
             """
         )
 
@@ -181,9 +181,9 @@ class ClassicExpander(QtWidgets.QWidget):
         self.arrow_button.setFixedSize(30, 30)
         self.arrow_button.setCursor(QtCore.Qt.PointingHandCursor)
         self.arrow_button.setStyleSheet(
-            "QToolButton { background:#f7f6fb; color:#333; border:2px solid #666;"
+            "QToolButton { background:#f2f7fb; color:#31566c; border:1px solid #9db6c5;"
             " border-radius:15px; padding:3px; }"
-            "QToolButton:hover { background:#ffffff; border-color:#333; }"
+            "QToolButton:hover { background:#ffffff; border-color:#4d8eaf; }"
         )
 
         self.title_button = QtWidgets.QPushButton(title, self.header)
@@ -191,9 +191,9 @@ class ClassicExpander(QtWidgets.QWidget):
         self.title_button.setCursor(QtCore.Qt.PointingHandCursor)
         self.title_button.setFlat(True)
         self.title_button.setStyleSheet(
-            "QPushButton { color:#111; background:transparent; border:none;"
-            " text-align:left; padding:0; font-size:20px; }"
-            "QPushButton:hover { color:#174d6d; }"
+            "QPushButton { color:#31566c; background:transparent; border:none;"
+            " text-align:left; padding:0; font-size:16px; font-weight:650; }"
+            "QPushButton:hover { color:#1f7199; }"
         )
         header_row.addWidget(self.arrow_button)
         header_row.addWidget(self.title_button, 1)
@@ -623,10 +623,11 @@ class SciSpin(QtWidgets.QDoubleSpinBox):
             """
             QDoubleSpinBox {
                 background: #ffffff;
-                color: #111111;
-                border: 2px solid #aaa9ad;
-                border-radius: 0;
-                padding: 3px 5px;
+                color: #203443;
+                border: 1px solid #9db6c5;
+                border-radius: 4px;
+                padding: 4px 7px;
+                font-size: 14px;
             }
             QDoubleSpinBox:focus { border-color:#4b82a2; }
             """
@@ -644,16 +645,17 @@ class SciEdit(QtWidgets.QLineEdit):
             """
             QLineEdit {
                 background: #ffffff;
-                color: #111111;
-                border: 2px solid #aaa9ad;
-                border-radius: 0;
-                padding: 3px 5px;
+                color: #203443;
+                border: 1px solid #9db6c5;
+                border-radius: 4px;
+                padding: 4px 7px;
+                font-size: 14px;
             }
             QLineEdit:read-only {
-                background: #cae5f5;
-                color: #495b65;
+                background: #eef5f8;
+                color: #5b7180;
             }
-            QLineEdit:focus { border-color:#4b82a2; }
+            QLineEdit:focus { border-color:#3d86ad; }
             """
         )
 
@@ -671,21 +673,21 @@ class GroupPanel(QtWidgets.QGroupBox):
         self.setStyleSheet(
             """
             QGroupBox {
-                background: #83c8ed;
-                border: 2px solid #ffffff;
-                border-radius: 7px;
-                margin-top: 14px;
+                background: #f7fafc;
+                border: 1px solid #b5c8d4;
+                border-radius: 8px;
+                margin-top: 12px;
                 padding: 10px 8px 8px 8px;
-                font-weight: 500;
-                font-size: 23px;
-                color: #111111;
+                font-weight: 650;
+                font-size: 15px;
+                color: #27485d;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
                 left: 10px;
-                padding: 0 4px;
-                color: #111111;
-                background: #83c8ed;
+                padding: 0 6px;
+                color: #315b72;
+                background: #f7fafc;
             }
             """
         )
@@ -727,20 +729,20 @@ class FilterStageCell(QtWidgets.QFrame):
         self._lab.setWordWrap(True)
         self._lab.setStyleSheet(
             "border:none; background:transparent; color:#f4f8fc; "
-            "font-weight:600; font-size:20px;"
+            "font-weight:650; font-size:13px;"
         )
         lay.addWidget(self._lab)
         self._apply_style()
 
     def _apply_style(self) -> None:
         if self._selected:
-            border = "#da8b45"
-            start = "#a9542f"
-            end = "#713722"
+            border = "#d18b45"
+            start = "#5d9abb"
+            end = "#376d8b"
         else:
-            border = "#7aa6d1"
-            start = "#3569b9"
-            end = "#214b91"
+            border = "#8bb4c8"
+            start = "#376d8b"
+            end = "#244b66"
         self.setStyleSheet(
             f"FilterStageCell {{"
             "  background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
@@ -854,21 +856,21 @@ class ClassicFilterPanel(QtWidgets.QGroupBox):
         self.setStyleSheet(
             """
             QGroupBox {
-                background: #83c8ed;
-                border: 2px solid #ffffff;
-                border-radius: 7px;
-                margin-top: 14px;
+                background: #f7fafc;
+                border: 1px solid #b5c8d4;
+                border-radius: 8px;
+                margin-top: 12px;
                 padding: 10px 8px 8px 8px;
-                font-weight: 500;
-                font-size: 23px;
-                color: #111111;
+                font-weight: 650;
+                font-size: 15px;
+                color: #27485d;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
                 left: 10px;
-                padding: 0 4px;
-                color: #111111;
-                background: #83c8ed;
+                padding: 0 6px;
+                color: #315b72;
+                background: #f7fafc;
             }
             """
         )
@@ -896,8 +898,8 @@ class ClassicFilterPanel(QtWidgets.QGroupBox):
             sp.setMinimumWidth(130)
             sp.setButtonSymbols(QtWidgets.QAbstractSpinBox.UpDownArrows)
             sp.setStyleSheet(
-                "QDoubleSpinBox { background:#fff; color:#111; font-size:23px; "
-                "border:2px solid #aaa9ad; border-radius:0; padding:3px 5px; }"
+                "QDoubleSpinBox { background:#fff; color:#203443; font-size:14px; "
+                "border:1px solid #9db6c5; border-radius:4px; padding:4px 7px; }"
             )
             form.addRow(f"P{i + 1}:", sp)
             self.params.append(sp)

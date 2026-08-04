@@ -32,16 +32,21 @@ POS_INPUTS = ["Input1", "Input2", "Input3", "Input4", "Input5", "Input6"]
 POS_OUTPUTS = [f"Output{i}" for i in range(1, 9)]
 
 REFERENCE_PAGE_STYLE = """
-    QLabel { font-size: 25px; }
-    QComboBox { font-size: 25px; min-height: 32px; }
+    QLabel { color:#28475b; font-size: 15px; }
+    QComboBox {
+        color:#203443; background:#ffffff; border:1px solid #9db6c5;
+        border-radius:4px; padding:4px 7px; font-size:15px; min-height:30px;
+    }
+    QComboBox:focus { border-color:#3d86ad; }
 """
 
 EDIT_STYLE = """
     QLineEdit {
-        background:#fbfbfb; color:#111; border:2px solid #aaa9ad;
-        border-radius:0; padding:1px 4px; font-size:25px;
+        background:#ffffff; color:#203443; border:1px solid #9db6c5;
+        border-radius:4px; padding:3px 6px; font-size:15px;
     }
-    QLineEdit:read-only { background:#cae5f5; color:#495b65; }
+    QLineEdit:focus { border-color:#3d86ad; }
+    QLineEdit:read-only { background:#eef5f8; color:#5b7180; }
 """
 
 
@@ -55,7 +60,7 @@ def _edit(text: str = "0", width: int = 90, height: int = 39) -> SciEdit:
 def _header(text: str) -> QtWidgets.QLabel:
     label = QtWidgets.QLabel(text)
     label.setAlignment(QtCore.Qt.AlignCenter)
-    label.setStyleSheet("font-size:25px;font-weight:500;")
+    label.setStyleSheet("color:#315b72;font-size:15px;font-weight:650;")
     return label
 
 
@@ -192,7 +197,10 @@ def _build_motor_protection_page_reference(self) -> QtWidgets.QWidget:
         actual.setReadOnly(True)
         status = QtWidgets.QLabel("Normal")
         status.setFixedSize(165, 47)
-        status.setStyleSheet("background:#89e88b;border:2px solid #aaa9ad;padding-left:5px;font-size:21px;")
+        status.setStyleSheet(
+            "background:#90ee90;color:#203443;border:1px solid #aebfca;"
+            "border-radius:4px;padding-left:7px;font-size:14px;"
+        )
         limit = _edit("0" if row == 1 else "", 165, 47)
         self.mot_thresholds.append(threshold)
         self.mot_offsets.append(offset)
@@ -249,7 +257,8 @@ def _build_motor_protection_page_reference(self) -> QtWidgets.QWidget:
     self.ps_overpowered.setAlignment(QtCore.Qt.AlignCenter)
     self.ps_overpowered.setFixedSize(170, 38)
     self.ps_overpowered.setStyleSheet(
-        "background:#89e88b;border:2px solid #aaa9ad;font-size:21px;"
+        "background:#90ee90;color:#203443;border:1px solid #aebfca;"
+        "border-radius:4px;font-size:14px;"
     )
     self.ps_actual_values = []
     power_rows = (
@@ -294,9 +303,9 @@ def _build_motor_protection_page_reference(self) -> QtWidgets.QWidget:
     ):
         expander.setFixedWidth(550)
         expander.title_button.setStyleSheet(
-            "QPushButton{color:#008318;background:transparent;border:none;"
-            "text-align:left;padding:0;font-size:28px;font-weight:800;"
-            "font-style:italic;}QPushButton:hover{color:#006b14;}"
+            "QPushButton{color:#315b72;background:transparent;border:none;"
+            "text-align:left;padding:0;font-size:15px;font-weight:650;}"
+            "QPushButton:hover{color:#1f7199;}"
         )
     right.addWidget(self.power_supply_expander)
     right.addStretch(1)

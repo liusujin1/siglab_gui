@@ -201,6 +201,26 @@ def _parse_protocol_int(value, default: int = 0) -> int:
         return int(float(text))
 
 
+def _motor_status_presentation(value: object) -> tuple[str, str]:
+    """Return the legacy SAMBA motor-protection status text and color.
+
+    BGMPS returns one numeric state per motor.  The old UI treats these as an
+    enum rather than a boolean: ``0`` is normal, ``1`` is overheated/overpower,
+    and ``2`` is disabled.  Other firmware values are deliberately shown as
+    unknown instead of being reported as a generic failure.
+    """
+
+    try:
+        state = _parse_protocol_int(value, default=-1)
+    except (TypeError, ValueError):
+        state = -1
+    return {
+        0: ("Normal", "#90ee90"),
+        1: ("Overheated", "#ff0000"),
+        2: ("Disabled", "#ffffe0"),
+    }.get(state, ("Unknown", "#e7ecef"))
+
+
 class SidebarLoopButton(QtWidgets.QToolButton):
     """Compact ON/OFF rocker used by the persistent classic sidebar."""
 
@@ -396,26 +416,26 @@ class SamTabBar(QtWidgets.QTabBar):
         self.setDrawBase(False)
         self.setStyleSheet("""
             QTabBar::tab {
-                background: #f7f6fb;
-                color: #111111;
-                border: 2px solid #ff6148;
+                background: #f2f7fb;
+                color: #31566c;
+                border: 1px solid #b5c8d4;
                 border-bottom: none;
-                border-top-left-radius: 7px;
-                border-top-right-radius: 7px;
-                padding: 10px 28px 9px 28px;
-                font-size: 25px;
-                min-width: 185px;
-                min-height: 42px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                padding: 7px 18px 6px 18px;
+                font-size: 15px;
+                min-width: 120px;
+                min-height: 30px;
             }
             QTabBar::tab:selected {
-                background: #83c8ed;
-                color: #101010;
-                border-color: #ff6148;
-                font-weight: 500;
+                background: #dbeef8;
+                color: #1c4056;
+                border-color: #73a9c1;
+                font-weight: 700;
             }
             QTabBar::tab:hover:!selected {
-                background: #d9edf8;
-                color: #111111;
+                background: #eaf5fa;
+                color: #1f7199;
             }
         """)
 
@@ -428,7 +448,7 @@ class SamTabWidget(QtWidgets.QTabWidget):
         self.setTabBar(SamTabBar())
         self.setStyleSheet("""
             QTabWidget::pane {
-                background: #83c8ed;
+                background: #e8f1f6;
                 border: none;
             }
             QTabWidget::tab-bar { left: 9px; }
@@ -1459,108 +1479,111 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         """Apply the screenshot-oriented SAMBA19xUI shell and control theme."""
         self.setStyleSheet("""
             QMainWindow, QWidget {
-                color: #111111;
-                font-family: "Arial";
-                font-size: 23px;
+                color: #203443;
+                font-family: "Segoe UI", "Microsoft YaHei UI", "Arial", sans-serif;
+                font-size: 16px;
             }
             QMainWindow, QWidget#applicationRoot, QWidget#workspaceBody,
             QTabWidget#mainPageStack, QTabWidget#mainPageStack > QWidget,
             QScrollArea#classicPageScroll,
             QScrollArea#classicPageScroll > QWidget > QWidget {
-                background: #83c8ed;
+                background: #e8f1f6;
             }
 
             QFrame#applicationHeader {
                 background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
-                    stop:0 #050505, stop:0.62 #292526, stop:1 #a8a3a4);
-                border: none;
+                    stop:0 #173047, stop:0.62 #244b66, stop:1 #376d8b);
+                border-bottom: 2px solid #78b5d2;
             }
             QLabel#brandMark {
                 background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
-                    stop:0 #090909, stop:1 #4b4748);
+                    stop:0 #102638, stop:1 #315b76);
                 color: white;
-                border: 2px solid #eeeeee;
-                border-radius: 0;
-                font-size: 15px;
+                border: 1px solid #a8d0e4;
+                border-radius: 5px;
+                font-size: 14px;
                 font-weight: 800;
                 font-style: italic;
-                line-height: 90%;
             }
             QLabel#applicationTitle {
                 color: white;
-                font-size: 31px;
+                font-size: 24px;
                 font-weight: 800;
                 background: transparent;
             }
             QToolButton#windowControlButton {
-                min-width: 58px;
-                max-width: 58px;
-                min-height: 48px;
-                max-height: 48px;
+                min-width: 42px;
+                max-width: 42px;
+                min-height: 36px;
+                max-height: 36px;
                 color: white;
-                background: rgba(20, 20, 20, 150);
-                border: 2px solid #eeeeee;
+                background: rgba(10, 30, 45, 150);
+                border: 1px solid #9cc7dc;
                 border-radius: 6px;
-                font-size: 30px;
+                font-size: 20px;
                 font-weight: 700;
             }
-            QToolButton#windowControlButton:hover { background: #4d4748; }
+            QToolButton#windowControlButton:hover { background: #3a7190; }
             QToolButton#windowControlButton[closeButton="true"]:hover {
                 background: #b83030;
             }
 
             QFrame#sidebar {
-                background: #aca7a8;
-                border: none;
+                background: #263c4c;
+                border-right: 1px solid #152936;
             }
             QFrame#mainNavigation { background: transparent; }
             QToolButton#mainNavButton {
-                background: #f7f6fb;
-                color: #101010;
-                border: 2px solid #ff6148;
-                border-left: 2px solid #ff6148;
-                border-right: 2px solid #ff6148;
-                border-radius: 7px;
-                margin-left: 5px;
-                margin-right: 12px;
-                padding: 0 8px;
+                background: #304d60;
+                color: #e9f3f8;
+                border: 1px solid #486a7d;
+                border-left: 3px solid transparent;
+                border-radius: 5px;
+                margin-left: 8px;
+                margin-right: 8px;
+                padding: 0 10px;
                 text-align: center;
-                font-size: 25px;
+                font-size: 15px;
+                font-weight: 650;
+            }
+            QToolButton#mainNavButton:hover {
+                background: #3b5d72;
+                border-left-color: #8ac4df;
+            }
+            QToolButton#mainNavButton:checked {
+                background: #e2f0f7;
+                color: #1c4056;
+                border-color: #9cc9dd;
+                border-left-color: #4f9ac0;
                 font-weight: 750;
             }
-            QToolButton#mainNavButton:hover { background: #d9edf8; }
-            QToolButton#mainNavButton:checked {
-                background: #83c8ed;
-                color: #101010;
-            }
             QPushButton#updatePageButton {
-                min-height: 50px;
-                margin: 0 9px;
+                min-height: 38px;
+                margin: 0 8px;
                 color: white;
-                background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
-                    stop:0 #263d45, stop:1 #626263);
-                border: 2px solid white;
+                background: #2f789e;
+                border: 1px solid #8fc4db;
                 border-radius: 5px;
-                font-size: 27px;
-                font-weight: 500;
+                font-size: 14px;
+                font-weight: 650;
             }
 
             QFrame#loopStatesPanel {
-                background: #83c8ed;
-                border: 2px solid white;
-                border-radius: 7px;
+                background: #f1f7fa;
+                border: 1px solid #b5cad6;
+                border-radius: 6px;
             }
             QFrame#loopStatesPanel QLabel#sidebarSectionTitle {
-                color: #111111;
-                background: #83c8ed;
-                font-size: 25px;
-                font-weight: 500;
-                padding-left: 4px;
+                color: #31576d;
+                background: transparent;
+                font-size: 15px;
+                font-weight: 700;
+                padding-left: 6px;
             }
             QFrame#loopStatesPanel QLabel#loopName {
-                color: #111111;
+                color: #345468;
                 background: transparent;
-                font-size: 24px;
+                font-size: 13px;
             }
             QToolButton#sidebarLoopButton {
                 color: #111111;
@@ -1568,7 +1591,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
                     stop:0 #f8f8f8, stop:0.55 #c5bfc0, stop:1 #8e898a);
                 border: 3px solid #a89fa0;
                 border-radius: 7px;
-                font-size: 16px;
+                font-size: 12px;
                 font-weight: 800;
             }
             QToolButton#sidebarLoopButton[active="true"] {
@@ -1580,68 +1603,92 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
             QLabel#connectionStateLabel {
                 color: white;
                 background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
-                    stop:0 #777273, stop:0.45 #181616, stop:1 #020202);
-                font-size: 28px;
-                padding-left: 6px;
+                    stop:0 #4f7185, stop:0.45 #294252, stop:1 #1b2e3b);
+                font-size: 14px;
+                padding: 4px 7px;
+                border: 1px solid #6b91a5;
+                border-radius: 4px;
+            }
+            QLabel#connectionStateLabel[connected="true"] { color: #b9f2cb; }
+
+            QScrollArea { border: none; background: #e8f1f6; }
+            QScrollBar:vertical, QScrollBar:horizontal {
+                background: #d8e5ec;
                 border: none;
             }
-            QLabel#connectionStateLabel[connected="true"] { color: #adff65; }
-
-            QScrollArea { border: none; background: #83c8ed; }
-            QScrollBar:vertical { width: 15px; background: #d2d2d2; }
-            QScrollBar::handle:vertical { background: #929292; min-height: 28px; }
+            QScrollBar:vertical { width: 12px; margin: 2px; }
+            QScrollBar:horizontal { height: 12px; margin: 2px; }
+            QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
+                background: #91afbf;
+                border-radius: 5px;
+                min-height: 28px;
+                min-width: 28px;
+            }
+            QScrollBar::handle:hover { background: #6e9bb1; }
+            QScrollBar::add-line, QScrollBar::sub-line,
+            QScrollBar::add-page, QScrollBar::sub-page { background: none; border: none; }
 
             QPushButton {
-                color: white;
-                background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
-                    stop:0 #29414a, stop:1 #657174);
-                border: 2px solid white;
+                color: #28475b;
+                background: #f8fbfd;
+                border: 1px solid #9db6c5;
                 border-radius: 5px;
                 padding: 5px 12px;
-                min-height: 28px;
-                font-size: 23px;
+                min-height: 30px;
+                font-size: 14px;
+                font-weight: 600;
             }
-            QPushButton:hover { background: #3d5962; }
-            QPushButton:pressed { background: #23383f; }
+            QPushButton:hover { background: #eaf5fa; border-color: #5d9abb; }
+            QPushButton:pressed { background: #d7ebf3; }
+            QPushButton:focus { border: 1px solid #3d86ad; }
             QPushButton:disabled {
-                color: #f5f5f5;
-                background: #c5c1c2;
-                border-color: white;
+                color: #8c9ca6;
+                background: #e3ebef;
+                border-color: #c5d2d9;
             }
             QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox,
             QPlainTextEdit, QTextEdit {
-                color: #111111;
-                background: #fbfbfb;
-                border: 2px solid #aaa9ad;
-                border-radius: 0;
-                padding: 2px 5px;
-                min-height: 24px;
-                selection-background-color: #83c8ed;
-                font-size: 23px;
+                color: #203443;
+                background: #ffffff;
+                border: 1px solid #9db6c5;
+                border-radius: 4px;
+                padding: 4px 7px;
+                min-height: 27px;
+                selection-background-color: #b9ddea;
+                font-size: 14px;
             }
             QLineEdit:read-only, QSpinBox:read-only, QDoubleSpinBox:read-only {
-                background: #cae5f5;
-                color: #495b65;
+                background: #eef5f8;
+                color: #5b7180;
             }
-            QComboBox { background: #83c8ed; }
+            QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus,
+            QComboBox:focus, QPlainTextEdit:focus, QTextEdit:focus {
+                border: 1px solid #3d86ad;
+            }
+            QComboBox { background: #ffffff; padding-right: 22px; }
+            QComboBox::drop-down {
+                width: 22px;
+                border-left: 1px solid #c3d2db;
+                background: #edf5f8;
+            }
             QGroupBox {
-                color: #111111;
-                background: #83c8ed;
-                border: 2px solid white;
-                border-radius: 7px;
-                margin-top: 14px;
-                padding: 10px 7px 7px 7px;
-                font-size: 23px;
-                font-weight: 500;
+                color: #27485d;
+                background: #f7fafc;
+                border: 1px solid #b5c8d4;
+                border-radius: 8px;
+                margin-top: 12px;
+                padding: 10px 8px 8px 8px;
+                font-size: 15px;
+                font-weight: 650;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
                 left: 10px;
-                padding: 0 5px;
-                color: #111111;
-                background: #83c8ed;
+                padding: 0 6px;
+                color: #315b72;
+                background: #f7fafc;
             }
-            QLabel { color: #111111; background: transparent; }
+            QLabel { color: #28475b; background: transparent; }
             QCheckBox { spacing: 6px; background: transparent; }
             QCheckBox::indicator {
                 width: 17px; height: 17px;
@@ -1650,20 +1697,20 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
             }
             QCheckBox::indicator:checked { background: #58ad2b; }
             QTableView, QTableWidget {
-                color: #111111;
+                color: #203443;
                 background: white;
-                alternate-background-color: #f5f5f5;
-                gridline-color: #a8a8ac;
-                border: 2px solid #9a9899;
-                font-size: 17px;
+                alternate-background-color: #f2f7fa;
+                gridline-color: #cfdee6;
+                border: 1px solid #aebfca;
+                font-size: 14px;
             }
             QHeaderView::section {
-                color: #111111;
-                background: #f7f7f7;
-                border: 1px solid #b3b3b3;
-                padding: 4px;
-                font-size: 17px;
-                font-weight: 500;
+                color: #31566c;
+                background: #e6f0f5;
+                border: 1px solid #c0d1db;
+                padding: 5px 6px;
+                font-size: 14px;
+                font-weight: 650;
             }
 
             QScrollArea#connectPortList,
@@ -1673,54 +1720,62 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
                 border: 1px solid #8b8b8b;
             }
             QScrollArea#connectPortList QRadioButton {
-                color: #111111;
+                color: #28475b;
                 background: white;
-                font-size: 27px;
+                font-size: 14px;
             }
             QPushButton#connectExpander {
-                color: #111111;
+                color: #315b72;
                 background: transparent;
                 border: none;
                 padding: 2px 0;
                 text-align: left;
-                font-size: 26px;
+                font-size: 15px;
+                font-weight: 650;
             }
             QPushButton#connectExpander:hover { color: #174d6d; }
-            QFrame#connectExpandedPanel { background: #83c8ed; border: none; }
+            QFrame#connectExpandedPanel {
+                background: #eef5f8;
+                border: 1px solid #b5c8d4;
+                border-radius: 5px;
+            }
 
             QLabel#classicStatusBadge {
-                color: #111111;
-                background: qradialgradient(cx:0.45,cy:0.45,radius:0.75,
-                    stop:0 #f8f8f8, stop:0.55 #c5bfc0, stop:1 #8e898a);
-                border: 3px solid #a89fa0;
-                border-radius: 7px;
-                font-size: 23px;
-                font-weight: 800;
-            }
-            QLabel#classicAxisLamp {
-                color: #111111;
-                background: qradialgradient(cx:0.5,cy:0.5,radius:0.62,
-                    stop:0 #efff15, stop:0.38 #bde514, stop:0.72 #3a8f15,
-                    stop:1 #0a5016);
-                border: 3px solid #40713f;
-                border-radius: 7px;
-                font-size: 24px;
+                color: #28475b;
+                background: #f0f4f6;
+                border: 1px solid #aebfca;
+                border-radius: 5px;
+                font-size: 14px;
                 font-weight: 700;
             }
-            QFrame#proxyReadoutCard { background: #83c8ed; border: none; }
+            QLabel#classicAxisLamp {
+                color: #173d26;
+                background: #b8efc4;
+                border: 1px solid #4f9b61;
+                border-radius: 5px;
+                font-size: 14px;
+                font-weight: 700;
+            }
+            QFrame#proxyReadoutCard {
+                background: #eef5f8;
+                border: 1px solid #b5c8d4;
+                border-radius: 6px;
+            }
             QLabel#proxyReadoutTitle {
-                color: #111111;
-                background: #cbbabb;
-                font-size: 31px;
-                padding: 8px;
+                color: #31566c;
+                background: #dbeef8;
+                font-size: 16px;
+                font-weight: 650;
+                padding: 6px;
             }
             QLabel#proxyReadoutValue {
-                color: white;
-                background: #55484e;
-                font-size: 62px;
-                font-weight: 300;
+                color: #203443;
+                background: #ffffff;
+                font-size: 32px;
+                font-weight: 600;
+                padding: 8px;
             }
-            QLabel#proxyReadoutValue[alternate="true"] { background: #314986; }
+            QLabel#proxyReadoutValue[alternate="true"] { background: #f2f7fb; }
 
             QFrame#consolePanel {
                 background: #1e1b1c;
@@ -5453,7 +5508,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
             # Read cooling constant
             try:
                 self.mot_cool.setText(
-                    f"{s.get_motor_overcurrent_cooling_constant():.5e}"
+                    format_ui_number(s.get_motor_overcurrent_cooling_constant())
                 )
             except Exception as exc:
                 self.log_msg(f"Motor cooling constant read: {exc}")
@@ -5483,17 +5538,18 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
             try:
                 power = s.get_motor_power_values()
                 for editor, value in zip(self.mot_actual_values, power):
-                    editor.setText(f"{float(value):.5e}")
+                    editor.setText(format_ui_number(value))
             except Exception as exc:
                 self.log_msg(f"Motor power values read: {exc}")
             try:
                 failsafe = s.get_motor_failsafe_status()
                 for label, value in zip(self.mot_status_labels, failsafe):
-                    failed = str(value).upper() not in {"0", "N", "NO", "FALSE"}
-                    label.setText("Failure" if failed else "Normal")
+                    text, color = _motor_status_presentation(value)
+                    label.setText(text)
                     label.setStyleSheet(
-                        "background:" + ("#f04444" if failed else "#89e88b") +
-                        ";border:2px solid #aaa9ad;padding-left:5px;font-size:21px;"
+                        f"background:{color};color:#203443;"
+                        "border:1px solid #aebfca;border-radius:4px;"
+                        "padding-left:7px;font-size:14px;"
                     )
             except Exception as exc:
                 self.log_msg(f"Motor failsafe status read: {exc}")
@@ -5514,16 +5570,14 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
                     overpowered = bool(status_word & 0x01)
                     self.ps_overpowered.setText("Yes" if overpowered else "No")
                     self.ps_overpowered.setStyleSheet(
-                        "background:" + ("#f04444" if overpowered else "#89e88b")
-                        + ";border:2px solid #aaa9ad;font-size:21px;"
+                        "background:" + ("#ffb4b4" if overpowered else "#90ee90")
+                        + ";color:#203443;border:1px solid #aebfca;"
+                        "border-radius:4px;font-size:14px;"
                     )
                     for editor, value in zip(
                         self.ps_actual_values, power_supply[3:8]
                     ):
-                        try:
-                            editor.setText(f"{float(value):g}")
-                        except (TypeError, ValueError):
-                            editor.setText(str(value))
+                        editor.setText(format_ui_number(value))
             except Exception as exc:
                 self.log_msg(f"Power supply current limit read: {exc}")
             self.log_msg("motor protection read")

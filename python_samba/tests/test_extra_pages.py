@@ -1114,6 +1114,19 @@ def test_reference_refresh_populates_new_controller_and_velocity_fields():
     assert win.ps_current_si_unit.text() == "1"
     assert [editor.text() for editor in win.ps_actual_values] == ["0"] * 5
 
+    # BGMPS is an enum, not a boolean.  Match the legacy UI's Normal /
+    # Overheated / Disabled presentation and keep unknown firmware states
+    # visibly distinct from a real failure.
+    win.session.transport.state.motor_failsafe = ["0", "1", "2", "3"] + ["0"] * 8
+    win.on_motor_prot_read()
+    assert [label.text() for label in win.mot_status_labels[:4]] == [
+        "Normal", "Overheated", "Disabled", "Unknown",
+    ]
+    assert "background:#90ee90" in win.mot_status_labels[0].styleSheet()
+    assert "background:#ff0000" in win.mot_status_labels[1].styleSheet()
+    assert "background:#ffffe0" in win.mot_status_labels[2].styleSheet()
+    assert "background:#e7ecef" in win.mot_status_labels[3].styleSheet()
+
     win.on_vel_read_all_filters()
     assert [editor.text() for editor in win.vel_axis_limiters] == ["1000"] * 6
     win.on_diag_read()
