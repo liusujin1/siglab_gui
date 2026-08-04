@@ -94,12 +94,23 @@ def run_probe(port: str, baudrate: int) -> dict[str, object]:
         expected_outputs = [bool(output_word & (1 << bit)) for bit in range(14)]
         actual_inputs = [bool(led._is_on) for led in win._digio_input_leds[:14]]
         actual_outputs = [bool(led._is_on) for led in win._digio_output_leds[:14]]
+        input_colors = [led._status_color for led in win._digio_input_leds[:14]]
         board_id = ((input_word & 0xFC000) >> 14) & 0x1F
         reserve = output_word & 0xFC000
         if actual_inputs != expected_inputs:
             raise RuntimeError("DigIO input lamp mapping mismatch")
         if actual_outputs != expected_outputs:
             raise RuntimeError("DigIO output lamp mapping mismatch")
+        error_indices = (6, 7, 9, 10)
+        for index in range(14):
+            expected_color = "red" if index in error_indices and expected_inputs[index] else (
+                "green" if expected_inputs[index] else "off"
+            )
+            if input_colors[index] != expected_color:
+                raise RuntimeError(
+                    f"DigIO input color mismatch at bit {index}: "
+                    f"{input_colors[index]} != {expected_color}"
+                )
         if win._digio_input_leds[14].text() != str(board_id):
             raise RuntimeError("MBoardID mapping mismatch")
         if win._digio_output_leds[14].text() != str(reserve):
@@ -115,6 +126,7 @@ def run_probe(port: str, baudrate: int) -> dict[str, object]:
             "digio": {
                 "input_names": list(win._digio_input_names),
                 "input_states": [int(value) for value in actual_inputs],
+                "input_colors": input_colors,
                 "mboard_id": board_id,
                 "output_names": list(win._digio_output_names),
                 "output_states": [int(value) for value in actual_outputs],

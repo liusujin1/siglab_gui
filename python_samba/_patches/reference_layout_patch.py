@@ -396,15 +396,28 @@ class _StatusOrb(QtWidgets.QLabel):
     def set_on(self, on: bool, _color: str | None = None) -> None:
         self._is_on = bool(on)
         self.setText("1" if self._is_on else "0")
-        edge = "#24ae35" if on else "#a7a7a7"
-        center = "#3bd34a" if on else "#e7e7e7"
+        color_name = str(_color or "").strip().lower()
+        is_red = color_name in {"red", "#ff0000", "#ef4444"} or "red" in color_name
+        if not self._is_on:
+            self._status_color = "off"
+            edge, center = "#a7a7a7", "#e7e7e7"
+        elif is_red:
+            self._status_color = "red"
+            edge, center = "#b91c1c", "#ef4444"
+        else:
+            self._status_color = "green"
+            edge, center = "#24ae35", "#3bd34a"
         self.setStyleSheet(
             "QLabel{border:4px solid " + edge + ";border-radius:19px;"
             "background:" + center + ";font-size:17px;font-weight:600;}"
         )
 
     def set_color(self, color: str) -> None:
-        self.set_on(str(color).lower() not in {"", "gray", "grey", "off", "black"})
+        color_name = str(color).strip().lower()
+        self.set_on(
+            color_name not in {"", "gray", "grey", "off", "black"},
+            color_name,
+        )
 
 
 class _StatusValue(QtWidgets.QLabel):

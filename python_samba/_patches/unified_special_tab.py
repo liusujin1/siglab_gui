@@ -613,8 +613,14 @@ def _apply_digio_words(self, input_word: int, output_word: int) -> None:
     """Apply the legacy DigInputWordStates/DigOutputWordStates bit contract."""
     input_leds = list(getattr(self, "_digio_input_leds", ()))
     output_leds = list(getattr(self, "_digio_output_leds", ()))
+    input_names = tuple(getattr(self, "_digio_input_names", ()))
+    error_names = {
+        "Amp1TempErr", "Amp1PwrErr", "Amp2TempErr", "Amp2PwrErr",
+    }
     for index, led in enumerate(input_leds[:14]):
-        led.set_on(bool(input_word & (1 << index)))
+        is_on = bool(input_word & (1 << index))
+        color = "red" if index < len(input_names) and input_names[index] in error_names else None
+        led.set_on(is_on, color)
     if len(input_leds) > 14:
         input_leds[14].set_value(((input_word & 0xFC000) >> 14) & 0x1F)
     for index, led in enumerate(output_leds[:14]):

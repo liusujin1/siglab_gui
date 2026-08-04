@@ -1862,7 +1862,7 @@ def test_digio_status_uses_legacy_bit_mapping_and_timer_refresh():
     assert win._digio_output_names[5] == "OCOUT6"
     assert win._digio_output_names[-1] == "Reserve"
 
-    state.digital_input_word = (9 << 14) | 0x2105
+    state.digital_input_word = (9 << 14) | 0x2105 | 0x20 | 0x6C0
     state.digital_output_word = 0xC0000 | 0x3480
     win._on_digio_read()
     assert win._digio_input_leds[0]._is_on
@@ -1871,6 +1871,9 @@ def test_digio_status_uses_legacy_bit_mapping_and_timer_refresh():
     assert win._digio_input_leds[8]._is_on
     assert win._digio_input_leds[13]._is_on
     assert win._digio_input_leds[14].text() == "9"
+    for index in (6, 7, 9, 10):
+        assert win._digio_input_leds[index]._status_color == "red"
+    assert win._digio_input_leds[5]._status_color == "green"
     assert win._digio_output_leds[5]._is_on is False
     assert win._digio_output_leds[7]._is_on
     assert win._digio_output_leds[10]._is_on
@@ -1887,6 +1890,9 @@ def test_digio_status_uses_legacy_bit_mapping_and_timer_refresh():
     assert win._digio_input_leds[14].text() == "0"
     assert win._digio_output_leds[5]._is_on
     assert win._digio_output_leds[14].text() == "0"
+    for index in (6, 7, 9, 10):
+        assert win._digio_input_leds[index]._status_color == "off"
+    assert win._digio_input_leds[5]._status_color == "green"
 
     win.on_disconnect()
     win.close()
