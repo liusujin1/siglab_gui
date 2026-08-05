@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 import os
+import sys
 import time
 
 from python_samba.protocol.codes import FilterType, SystemStatus, filter_small_name
@@ -545,13 +546,114 @@ class MainNavigation(QtWidgets.QFrame):
 class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
     """Main window matching SAMBA19xUI tab structure."""
 
+    _DESIGN_WINDOW_SIZE = (1840, 1240)
+    _DESIGN_MINIMUM_SIZE = (1180, 760)
+
+    @staticmethod
+    def _screen_scale_factor(screen) -> float:
+        """Return the monitor scale used for the initial window geometry.
+
+        The application intentionally keeps Qt's automatic high-DPI scaling
+        disabled because the reference layout uses pixel-authored controls.
+        On Windows, ``GetScaleFactorForDevice`` therefore provides the real
+        user zoom (100/125/150/200%).  Qt's DPI/device-ratio values are useful
+        fallbacks on other platforms and in headless test environments.
+        """
+
+        candidates: list[float] = []
+        for value in (
+            getattr(screen, "devicePixelRatio", lambda: 1.0)(),
+            getattr(screen, "logicalDotsPerInch", lambda: 96.0)() / 96.0,
+        ):
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                continue
+            if number > 0:
+                candidates.append(number)
+
+        if sys.platform.startswith("win"):
+            try:
+                import ctypes
+
+                get_scale = ctypes.windll.shcore.GetScaleFactorForDevice
+                get_scale.argtypes = [ctypes.c_int]
+                get_scale.restype = ctypes.c_int
+                windows_scale = float(get_scale(0)) / 100.0
+                if windows_scale > 0:
+                    candidates.append(windows_scale)
+            except (AttributeError, OSError, TypeError, ValueError):
+                pass
+
+        return min(max(max(candidates, default=1.0), 0.75), 3.0)
+
+    @classmethod
+    def _initial_window_metrics(cls) -> tuple[QtCore.QRect, QtCore.QSize, QtCore.QSize, float]:
+        """Calculate an initial size/minimum from the primary screen.
+
+        ``availableGeometry`` is used instead of the full screen so the taskbar
+        and desktop panels are never covered.  The design size is retained on
+        large monitors, while smaller displays get a 94% fit-to-screen size.
+        The minimum is reduced only when the display cannot accommodate the
+        legacy minimum; content-heavy pages remain scrollable in their tab
+        scroll areas.
+        """
+
+        screen = QtGui.QGuiApplication.primaryScreen()
+        if screen is None:
+            available = QtCore.QRect(0, 0, *cls._DESIGN_WINDOW_SIZE)
+            scale = 1.0
+        else:
+            available = screen.availableGeometry()
+            scale = cls._screen_scale_factor(screen)
+
+        # The process uses physical-pixel widgets.  Scale the desktop margin
+        # so a 150%/200% display keeps a comfortable border around the window.
+        margin = max(18, int(round(24.0 * scale)))
+        usable_width = max(1, available.width() - margin * 2)
+        usable_height = max(1, available.height() - margin * 2)
+
+        minimum_width = min(
+            cls._DESIGN_MINIMUM_SIZE[0], max(760, usable_width)
+        )
+        minimum_height = min(
+            cls._DESIGN_MINIMUM_SIZE[1], max(540, usable_height)
+        )
+        initial_width = max(
+            minimum_width,
+            min(cls._DESIGN_WINDOW_SIZE[0], int(round(usable_width * 0.94))),
+        )
+        initial_height = max(
+            minimum_height,
+            min(cls._DESIGN_WINDOW_SIZE[1], int(round(usable_height * 0.94))),
+        )
+
+        # A very small virtual screen can be narrower than the fallback
+        # minimum; never request a geometry outside the available work area.
+        initial_width = min(initial_width, usable_width)
+        initial_height = min(initial_height, usable_height)
+        minimum_width = min(minimum_width, initial_width)
+        minimum_height = min(minimum_height, initial_height)
+        return (
+            available,
+            QtCore.QSize(initial_width, initial_height),
+            QtCore.QSize(minimum_width, minimum_height),
+            scale,
+        )
+
     def __init__(self) -> None:
         super().__init__()
         self._label_load_warnings = _load_saved_runtime_labels()
         self.setWindowTitle("SAMBA19xUI RC06-Alpha02 V1.9.0.14 — python_samba")
         self.setWindowFlag(QtCore.Qt.FramelessWindowHint, True)
-        self.resize(1840, 1240)
-        self.setMinimumSize(1180, 760)
+        available, initial_size, minimum_size, self._display_scale = (
+            self._initial_window_metrics()
+        )
+        self.setMinimumSize(minimum_size)
+        self.resize(initial_size)
+        frame = self.frameGeometry()
+        frame.moveCenter(available.center())
+        self.move(frame.topLeft())
         self.session: ControllerSession | None = None
         self.gate: SafetyGate | None = None
         self._last_firmware_version = None
@@ -652,6 +754,15 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
             lambda: self.console_toggle.setChecked(not self.console_toggle.isChecked())
         )
 
+        # Frameless windows do not receive the native resize border.  A
+        # standard QSizeGrip keeps the custom title bar while allowing the
+        # operator to resize the interface from the lower-right corner.
+        self._size_grip = QtWidgets.QSizeGrip(self)
+        self._size_grip.setObjectName("windowSizeGrip")
+        self._size_grip.setToolTip("Drag to resize window")
+        self._size_grip.setFixedSize(18, 18)
+        self._position_size_grip()
+
         # Refresh timer (1 second, like SAMBA19xUI)
         self._refresh_timer = QtCore.QTimer(self)
         self._refresh_timer.setInterval(1000)
@@ -682,6 +793,20 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         self.loop_ctype.setVisible(False)
         for warning in self._label_load_warnings:
             self.log_msg(f"WARNING loading labels: {warning}")
+
+    def _position_size_grip(self) -> None:
+        grip = getattr(self, "_size_grip", None)
+        if grip is None:
+            return
+        grip.move(
+            max(0, self.width() - grip.width()),
+            max(0, self.height() - grip.height()),
+        )
+        grip.raise_()
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._position_size_grip()
 
     def eventFilter(self, watched, event):  # noqa: N802
         """Provide native dragging for the frameless SAMBA title bar."""

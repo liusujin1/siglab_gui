@@ -237,6 +237,31 @@ def test_gui_builds_all_pages():
     win.close()
 
 
+def test_window_initial_geometry_is_screen_aware_and_resizable():
+    pytest.importorskip("PySide6")
+    from PySide6 import QtWidgets
+    from python_samba.ui.main_window import MainWindow
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    win = MainWindow()
+
+    assert 0.75 <= win._display_scale <= 3.0
+    assert win.minimumWidth() <= win.width()
+    assert win.minimumHeight() <= win.height()
+    assert win._size_grip.parent() is win
+
+    win.show()
+    app.processEvents()
+    old_size = win.size()
+    win.resize(old_size.width() + 24, old_size.height() + 18)
+    app.processEvents()
+    assert win.width() == old_size.width() + 24
+    assert win.height() == old_size.height() + 18
+    assert win._size_grip.x() == win.width() - win._size_grip.width()
+    assert win._size_grip.y() == win.height() - win._size_grip.height()
+    win.close()
+
+
 def test_formal_gui_patch_contract_builds_extended_pages():
     pytest.importorskip("PySide6")
     from PySide6 import QtWidgets
