@@ -1895,6 +1895,13 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
             try:
                 if main == "Position" and sub in {"Tuning", "Proxy Adjustment"}:
                     self._refresh_position_live_state()
+                elif main == "Controller" and sub == "Motor Protection":
+                    # SAMBA19xUI's MotorProtectionPage.UpdateStates() runs on
+                    # every dispatcher-timer tick.  Keep this path limited to
+                    # live values (actual motor power, failsafe state and the
+                    # optional power-supply monitor); configuration fields are
+                    # still loaded once by UpdatePage/on_motor_prot_read().
+                    self._refresh_motor_protection_live_state(loop)
                 elif main == "Status" and sub == "DigIO Status":
                     self._on_digio_read()
                 elif main == "Pneumatic" and hasattr(
@@ -5518,6 +5525,70 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
     # ------------------------------------------------------------------
     # Motor protection
     # ------------------------------------------------------------------
+
+    def _refresh_motor_protection_live_state(self, loop=None) -> None:
+        """Refresh the dynamic Motor Threshold Setting values.
+
+        The legacy page separates ``UpdatePage`` (configuration reads) from
+        ``UpdateStates`` (one-second live reads).  Calling the full
+        :meth:`on_motor_prot_read` method from the timer would reread all
+        thresholds, offsets and limits and would make the serial UI sluggish.
+        This method therefore mirrors only the commands issued by the legacy
+        ``UpdateStates`` implementation: BGMPV, BGMPS and, when advertised,
+        LGPSL.
+        """
+
+        session = self._require_session()
+        if loop is not None and hasattr(self, "mot_use_temperature"):
+            self._set_motor_toggle_silently(
+                self.mot_use_temperature,
+                bool(loop.system & int(SystemStatus.USE_TEMP_SENSORS)),
+            )
+
+        power = session.get_motor_power_values()
+        for editor, value in zip(
+            getattr(self, "mot_actual_values", ()), power
+        ):
+            editor.setText(format_ui_number(value))
+
+        failsafe = session.get_motor_failsafe_status()
+        for label, value in zip(
+            getattr(self, "mot_status_labels", ()), failsafe
+        ):
+            text, color = _motor_status_presentation(value)
+            label.setText(text)
+            label.setStyleSheet(
+                f"background:{color};color:#203443;"
+                "border:1px solid #aebfca;border-radius:4px;"
+                "padding-left:7px;font-size:14px;"
+            )
+
+        # The legacy page queries LGPSL only when the firmware advertises the
+        # power-supply-current-limit feature.  Unknown capabilities keep the
+        # controls visible, so retain the conservative read in that case.
+        if not hasattr(self, "ps_current_limit"):
+            return
+        features = self._controller_features
+        if features is not None and "PSUCL" not in features:
+            return
+        power_supply = session.get_power_supply_parameters()
+        if len(power_supply) < 8:
+            return
+        self.ps_current_limit.setText(str(power_supply[0]))
+        self.ps_current_si_unit.setText(str(power_supply[1]))
+        try:
+            status_word = int(str(power_supply[2]), 0)
+        except ValueError:
+            status_word = int(float(power_supply[2]))
+        overpowered = bool(status_word & 0x01)
+        self.ps_overpowered.setText("Yes" if overpowered else "No")
+        self.ps_overpowered.setStyleSheet(
+            "background:" + ("#ffb4b4" if overpowered else "#90ee90")
+            + ";color:#203443;border:1px solid #aebfca;"
+            "border-radius:4px;font-size:14px;"
+        )
+        for editor, value in zip(self.ps_actual_values, power_supply[3:8]):
+            editor.setText(format_ui_number(value))
 
     @staticmethod
     def _set_motor_toggle_silently(toggle: QtWidgets.QAbstractButton, checked: bool) -> None:

@@ -1144,6 +1144,37 @@ def test_reference_refresh_populates_new_controller_and_velocity_fields():
     assert "background:#ffffe0" in win.mot_status_labels[2].styleSheet()
     assert "background:#e7ecef" in win.mot_status_labels[3].styleSheet()
 
+    # The legacy Motor Threshold Setting page refreshes its live actual-value
+    # and status columns once per second.  Verify the timer path, rather than
+    # only the manual page-read path, so an external controller change appears
+    # without leaving/re-entering the page.
+    controller_index = next(
+        index
+        for index in range(win.main_tabs.count())
+        if win.main_tabs.tabText(index) == "Controller"
+    )
+    win.main_tabs.setCurrentIndex(controller_index)
+    controller_tabs = win.main_tabs.widget(controller_index).findChild(
+        QtWidgets.QTabWidget
+    )
+    assert controller_tabs is not None
+    motor_index = next(
+        index
+        for index in range(controller_tabs.count())
+        if controller_tabs.tabText(index) == "Motor Protection"
+    )
+    controller_tabs.setCurrentIndex(motor_index)
+    state.motor_power = [100.5 + index for index in range(12)]
+    state.motor_failsafe = ["1", "0"] + ["2"] * 10
+    state.system_status |= 0x10000
+    win._on_timer_tick()
+    assert win.mot_actual_values[0].text() == "100.5"
+    assert win.mot_actual_values[11].text() == "111.5"
+    assert win.mot_status_labels[0].text() == "Overheated"
+    assert win.mot_status_labels[1].text() == "Normal"
+    assert win.mot_status_labels[2].text() == "Disabled"
+    assert win.mot_use_temperature.isChecked() is True
+
     win.on_vel_read_all_filters()
     assert [editor.text() for editor in win.vel_axis_limiters] == ["1000"] * 6
     win.on_diag_read()

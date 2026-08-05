@@ -472,6 +472,12 @@ def _on_timer_tick(win) -> None:
         try:
             if main == "Position" and sub in {"Tuning", "Proxy Adjustment"}:
                 win._refresh_position_live_state()
+            elif main == "Controller" and sub == "Motor Protection":
+                # MotorProtectionPage.UpdateStates() in the legacy UI polls
+                # BGMPV/BGMPS (and optional LGPSL) once per second.  Keep the
+                # same lightweight live path here; the full threshold/offset
+                # configuration remains a page-entry/manual read.
+                win._refresh_motor_protection_live_state(loop)
             elif main == "Status" and sub == "DigIO Status":
                 win._on_digio_read()
             elif main == "Pneumatic" and hasattr(
