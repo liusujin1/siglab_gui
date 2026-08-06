@@ -36,7 +36,7 @@ from python_vna.diagnostic.shell import DiagnosticMainWindow
 from python_vna.models import ChannelConfig, MeasurementSet, SavedSession
 from python_vna.storage import default_session_config, save_legacy_vna
 from python_vna.ui.analysis_viewer import AnalysisWorkbench, AnalysisViewer
-from python_vna.ui.main_window import DataTipPoint, VnaViewBox
+from python_vna.ui.main_window import DataTipPoint, VnaViewBox, copy_widget_image_to_clipboard
 
 
 def _write_ide_trans_sdm_fixture(
@@ -508,6 +508,34 @@ class DiagnosticAppTests(unittest.TestCase):
         for plot in plots:
             self.assertIsInstance(plot.getPlotItem().vb, VnaViewBox)
             self.assertIn(plot, vibration._cursor_items | trace._cursor_items | modal._cursor_items)
+
+    def test_detached_diagnostic_plot_context_menu_can_copy_image(self):
+        page = TraceAnalysisPage()
+        page._plot_curves_on_widget(
+            page.ide_time_plot,
+            [CurvePair("FRF_Z", np.array([1.0, 2.0, 3.0]), np.array([2.0, 6.0, 4.0]))],
+            title="测试独立图窗",
+            x_label="频率 (Hz)",
+            y_label="幅值",
+        )
+        page._open_plot_window(page.ide_time_plot, "测试独立图窗")
+        self.assertEqual(len(page._plot_windows), 1)
+        dialog = page._plot_windows[0]
+        try:
+            dialog.show()
+            QtWidgets.QApplication.processEvents()
+            detached_plot = dialog.findChildren(type(page.ide_time_plot))[0]
+            menu, actions = page._build_plot_context_menu(detached_plot)
+            try:
+                self.assertEqual(actions["copy_image"].text(), "复制图像")
+                self.assertTrue(actions["copy_image"].isEnabled())
+            finally:
+                menu.close()
+            self.assertTrue(copy_widget_image_to_clipboard(detached_plot))
+            self.assertFalse(QtWidgets.QApplication.clipboard().image().isNull())
+        finally:
+            dialog.close()
+            page.close()
 
     def test_diagnostic_plot_cursor_and_data_tip_snap_to_curve_points(self):
         page = VibrationAnalysisPage()

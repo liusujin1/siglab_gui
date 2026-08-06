@@ -44,6 +44,21 @@ function Get-ReleaseVersion {
     throw "Could not determine release version from $Path"
 }
 
+function Get-FileHashString {
+    param([Parameter(Mandatory=$true)][string]$Path)
+
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $digest = $sha256.ComputeHash($stream)
+    }
+    finally {
+        $stream.Dispose()
+        $sha256.Dispose()
+    }
+    return ([System.BitConverter]::ToString($digest)).Replace('-', '').ToLowerInvariant()
+}
+
 function Get-ArchiveInfo {
     param(
         [Parameter(Mandatory=$true)][string]$Path,
@@ -57,7 +72,7 @@ function Get-ArchiveInfo {
     $extension = $item.Extension.TrimStart('.').ToLowerInvariant()
     [ordered]@{
         url = $Url
-        sha256 = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+        sha256 = Get-FileHashString -Path $Path
         size = $item.Length
         archive_type = $extension
     }

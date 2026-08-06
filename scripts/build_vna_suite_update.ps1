@@ -147,7 +147,16 @@ function Get-FileMap {
 function Get-FileHashString {
     param([Parameter(Mandatory=$true)][string]$Path)
 
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $digest = $sha256.ComputeHash($stream)
+    }
+    finally {
+        $stream.Dispose()
+        $sha256.Dispose()
+    }
+    return ([System.BitConverter]::ToString($digest)).Replace('-', '').ToLowerInvariant()
 }
 
 function New-CleanDirectory {

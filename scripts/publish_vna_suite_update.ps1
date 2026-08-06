@@ -317,6 +317,21 @@ function Read-PublishToken {
     throw "Unsupported HTTPS publisher token format: $tokenPath"
 }
 
+function Get-FileHashString {
+    param([Parameter(Mandatory=$true)][string]$Path)
+
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $digest = $sha256.ComputeHash($stream)
+    }
+    finally {
+        $stream.Dispose()
+        $sha256.Dispose()
+    }
+    return ([System.BitConverter]::ToString($digest)).Replace('-', '').ToLowerInvariant()
+}
+
 function Invoke-HttpsPublish {
     param(
         [Parameter(Mandatory=$true)][string[]]$Files,
@@ -348,7 +363,7 @@ function Invoke-HttpsPublish {
             $name = $file.Name
             $escapedName = [Uri]::EscapeDataString($name)
             $targetUrl = "$apiRoot/files/$escapedName"
-            $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            $hash = Get-FileHashString -Path $file.FullName
 
             $metadata = $client.GetAsync($targetUrl).GetAwaiter().GetResult()
             try {

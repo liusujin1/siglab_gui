@@ -31,6 +31,7 @@ from python_vna.ui.main_window import (
     _apply_text_item_style,
     _cursor_palette_for_background,
     _data_tip_anchor_for_label_drag,
+    copy_widget_image_to_clipboard,
 )
 from python_vna.ui.legend_placement import place_legend_away_from_curves
 from python_vna.ui.diagnostic_theme import (
@@ -761,6 +762,11 @@ class DiagnosticPage(QtWidgets.QWidget):
             self._toggle_cursor_readout(not self._cursor_enabled)
         elif action is actions["clear_tips"]:
             self._clear_data_tips(plot)
+        elif action is actions["copy_image"]:
+            if copy_widget_image_to_clipboard(plot):
+                self._show_status("已复制图像到剪贴板")
+            else:
+                self._show_status("复制图像失败")
 
     def _build_plot_context_menu(self, plot: pg.PlotWidget) -> tuple[QtWidgets.QMenu, dict[str, object]]:
         menu = QtWidgets.QMenu(plot)
@@ -775,6 +781,9 @@ class DiagnosticPage(QtWidgets.QWidget):
         actions["cursor"].setCheckable(True)
         actions["cursor"].setChecked(self._cursor_enabled)
         actions["clear_tips"] = menu.addAction("清除数据提示")
+        menu.addSeparator()
+        actions["copy_image"] = menu.addAction("复制图像")
+        actions["copy_image"].setEnabled(bool(self._plot_curves.get(plot)))
         return menu, actions
 
     def _move_cursor_from_scene_pos(self, plot: pg.PlotWidget | None, scene_pos) -> bool:
@@ -3736,14 +3745,12 @@ class TraceAnalysisPage(DiagnosticPage):
         dialog.setWindowTitle(title)
         dialog.resize(920, 620)
         layout = QtWidgets.QVBoxLayout(dialog)
-        plot = pg.PlotWidget()
-        plot.addLegend(offset=(4, 2), labelTextSize="8pt")
-        plot.showGrid(x=True, y=True, alpha=0.22)
-        plot.setTitle(title)
+        plot = self._create_plot_widget(title)
         plot.setLabel("bottom", source_plot.getAxis("bottom").labelText)
         plot.setLabel("left", source_plot.getAxis("left").labelText)
         log_x, log_y = self._log_modes.get(source_plot, (False, False))
         plot.setLogMode(x=log_x, y=log_y)
+        self._log_modes[plot] = (log_x, log_y)
         if self._theme:
             apply_plot_theme(plot, self._theme)
         for index, (label, (x, y)) in enumerate(curves.items()):
@@ -3753,7 +3760,14 @@ class TraceAnalysisPage(DiagnosticPage):
                 pen=pg.mkPen(self._color_for_label(label), width=1.5),
                 name=label,
             )
+            self._plot_curves[plot][label] = (
+                np.asarray(x, dtype=float).copy(),
+                np.asarray(y, dtype=float).copy(),
+            )
+            if self._active_trace.get(plot) is None:
+                self._active_trace[plot] = label
         layout.addWidget(plot)
+        self._auto_scale_current_plot(plot)
         dialog.finished.connect(lambda _result, item=dialog: self._forget_plot_window(item))
         self._plot_windows.append(dialog)
         dialog.show()
@@ -3762,6 +3776,20 @@ class TraceAnalysisPage(DiagnosticPage):
     def _forget_plot_window(self, dialog: QtWidgets.QDialog) -> None:
         if dialog in self._plot_windows:
             self._plot_windows.remove(dialog)
+        try:
+            plots = dialog.findChildren(pg.PlotWidget)
+        except RuntimeError:
+            return
+        for plot in plots:
+            if self._active_plot is plot:
+                self._active_plot = None
+            self._plot_curves.pop(plot, None)
+            self._active_trace.pop(plot, None)
+            self._data_tip_items.pop(plot, None)
+            self._cursor_items.pop(plot, None)
+            self._cursor_positions.pop(plot, None)
+            self._axis_history.pop(plot, None)
+            self._log_modes.pop(plot, None)
 
     def _close_plot_windows(self) -> None:
         for dialog in list(self._plot_windows):

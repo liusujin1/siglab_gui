@@ -1410,6 +1410,7 @@ class AnalysisViewerUiTests(unittest.TestCase):
                             "清除数据提示",
                             "删除当前曲线",
                             "管理当前图窗曲线",
+                            "复制图像",
                         ],
                     )
                     self.assertTrue(actions["data_tip"].isCheckable())

@@ -70,6 +70,7 @@ from python_vna.ui.main_window import (
     _apply_text_item_style,
     _cursor_palette_for_background,
     _data_tip_anchor_for_label_drag,
+    copy_widget_image_to_clipboard,
 )
 from python_vna.ui.legend_placement import place_legend_away_from_curves
 from python_vna.ui.diagnostic_theme import (
@@ -7061,6 +7062,11 @@ class AnalysisWorkbench(QtWidgets.QWidget):
                 self._remove_plot_curves(plot, {trace})
         elif action is actions["manage_curves"]:
             self._show_curve_manager(plot)
+        elif action is actions["copy_image"]:
+            if copy_widget_image_to_clipboard(plot):
+                self.statusBar().showMessage("已复制图像到剪贴板")
+            else:
+                self.statusBar().showMessage("复制图像失败")
 
     @staticmethod
     def _legend_trace_at_scene_pos(plot: pg.PlotWidget, scene_pos) -> str | None:
@@ -7205,6 +7211,9 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             trace is not None and self._curve_info_for(plot, trace).removable
         )
         actions["manage_curves"].setEnabled(bool(self._plot_curves.get(plot)))
+        menu.addSeparator()
+        actions["copy_image"] = menu.addAction("复制图像")
+        actions["copy_image"].setEnabled(bool(self._plot_curves.get(plot)))
         return menu, actions
 
     def _move_cursor_from_scene_pos(self, plot: pg.PlotWidget | None, scene_pos) -> bool:

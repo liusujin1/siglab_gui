@@ -79,6 +79,20 @@ QtGui = require("PySide6.QtGui", "python -m pip install -e .[gui]")
 QtWidgets = require("PySide6.QtWidgets", "python -m pip install -e .[gui]")
 pg = require("pyqtgraph", "python -m pip install -e .[gui]")
 
+def copy_widget_image_to_clipboard(widget: QtWidgets.QWidget) -> bool:
+    """Copy the rendered widget image to the system clipboard."""
+    if widget is None:
+        return False
+    try:
+        pixmap = widget.grab()
+    except (RuntimeError, TypeError):
+        return False
+    if pixmap.isNull():
+        return False
+    clipboard = QtWidgets.QApplication.clipboard()
+    clipboard.setPixmap(pixmap, QtGui.QClipboard.Clipboard)
+    return True
+
 CURVE_Z = 0
 LEGEND_Z = 10
 MARKER_Z = 20
