@@ -130,6 +130,31 @@ def test_logging_page_is_primary_and_exposes_40_channels():
         app.processEvents()
 
 
+def test_logging_monitor_refresh_does_not_reinsert_owned_table_items():
+    pytest.importorskip("PySide6")
+    from PySide6 import QtCore, QtWidgets
+    from python_samba.ui.main_window import MainWindow
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow()
+    messages: list[str] = []
+
+    def capture_message(_kind, _context, message):
+        messages.append(message)
+
+    previous_handler = QtCore.qInstallMessageHandler(capture_message)
+    try:
+        page = window.logging_page_widget
+        page._set_monitor_row(0, (0, 0, 0), 1.0)
+        page._set_monitor_row(0, (1, 2, 3), 2.0)
+        assert page.monitor_table.item(0, 1).text()
+        assert not any("already owned by another QTableWidget" in msg for msg in messages)
+    finally:
+        QtCore.qInstallMessageHandler(previous_handler)
+        window.close()
+        app.processEvents()
+
+
 def test_logging_page_starts_and_stops_background_file_acquisition(tmp_path: Path):
     pytest.importorskip("PySide6")
     from PySide6 import QtWidgets

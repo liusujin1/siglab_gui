@@ -631,13 +631,17 @@ class LoggingPage(QtWidgets.QWidget):
         name = IOSignalButton.format_io_signal(tokens)
         values = (str(row), name, str(tokens[0]), str(tokens[1]), str(tokens[2]))
         for column, value in enumerate(values):
-            item = self.monitor_table.item(row, column) or QtWidgets.QTableWidgetItem()
+            item = self.monitor_table.item(row, column)
+            if item is None:
+                item = QtWidgets.QTableWidgetItem()
+                self.monitor_table.setItem(row, column, item)
             item.setText(value)
-            self.monitor_table.setItem(row, column, item)
         if live is not None:
-            item = self.monitor_table.item(row, 5) or QtWidgets.QTableWidgetItem()
+            item = self.monitor_table.item(row, 5)
+            if item is None:
+                item = QtWidgets.QTableWidgetItem()
+                self.monitor_table.setItem(row, 5, item)
             item.setText(format_ui_number(live))
-            self.monitor_table.setItem(row, 5, item)
 
     def _monitor_row_changed(self, row: int, _column: int, *_args) -> None:
         if not 0 <= row < 40:
