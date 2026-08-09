@@ -905,14 +905,13 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         entries = [
             (i, display_names.get(self.main_tabs.tabText(i), self.main_tabs.tabText(i)))
             for i in range(self.main_tabs.count())
-            if self.main_tabs.tabText(i) != "Logging"
         ]
         self.main_navigation = MainNavigation(entries)
         self.nav_buttons = self.main_navigation.buttons
         layout.addWidget(self.main_navigation)
 
-        # Logging remains feature-complete but is intentionally not a primary
-        # navigation item because it is absent from the supplied SAMBA shell.
+        # Keep the index for context-menu/backward compatibility.  Logging is
+        # also exposed as a normal first-level workspace.
         self.logging_tab_index = next(
             (i for i in range(self.main_tabs.count()) if self.main_tabs.tabText(i) == "Logging"),
             -1,
@@ -1327,6 +1326,10 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
                 self.on_pff_read_all_filters()
             else:
                 self.on_pff_read_gains()
+        elif main == "Logging":
+            logging_page = getattr(self, "logging_page_widget", None)
+            if logging_page is not None:
+                logging_page.refresh()
         elif main == "Special":
             if sub == "Safety" and self._supports_controller_feature("safety"):
                 self.on_safety_read_config()
@@ -4255,6 +4258,9 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
                         readonly=False,
                     )
                 version = self.session.open()
+                logging_page = getattr(self, "logging_page_widget", None)
+                if logging_page is not None:
+                    logging_page.on_connected()
                 self._last_firmware_version = version
                 self._switch_config = 0
                 self._switch_config_loaded = False
@@ -4391,6 +4397,9 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
 
     def on_disconnect(self) -> None:
         self._refresh_timer.stop()
+        logging_page = getattr(self, "logging_page_widget", None)
+        if logging_page is not None:
+            logging_page.shutdown()
         if self.session:
             self.session.close()
         self.session = None
@@ -6427,6 +6436,9 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
     # ------------------------------------------------------------------
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # noqa: N802
+        logging_page = getattr(self, "logging_page_widget", None)
+        if logging_page is not None:
+            logging_page.shutdown()
         if self.session:
             self.session.close()
         super().closeEvent(event)

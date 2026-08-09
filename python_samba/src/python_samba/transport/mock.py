@@ -158,7 +158,7 @@ class MockState:
     dither_alpha: float = 1e-3
     pneum_setpoint_all: int = 0
     event_trace_params: list[str] = field(default_factory=lambda: ["2", "1024", "4", "1", "0", "0"])
-    event_trace_info: list[str] = field(default_factory=lambda: ["0", "1", "0", "0"])
+    event_trace_info: list[str] = field(default_factory=lambda: ["0", "1", "0", "0", "0"])
     event_signal: list[str] = field(default_factory=lambda: ["0", "0", "0", "100.0", "10"])
     pff_config: list[str] = field(default_factory=lambda: ["5", "10"])
     pff_gains: list[float] = field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5])
@@ -167,7 +167,7 @@ class MockState:
     monitor_signals: dict[int, list[str]] = field(default_factory=dict)
     # logged_traces[trace_num] = list of samples; each sample is list[float] channels
     logged_traces: dict[int, list[list[float]]] = field(default_factory=dict)
-    monitor_live: list[float] = field(default_factory=lambda: [0.1 * i for i in range(8)])
+    monitor_live: list[float] = field(default_factory=lambda: [0.1 * i for i in range(40)])
     event_times: dict[int, list[str]] = field(default_factory=dict)
     pff_filters: dict[tuple[int, int, int], tuple[int, tuple[float, ...]]] = field(
         default_factory=dict
@@ -291,7 +291,8 @@ class MockState:
             self.pff_gains_map[(0, 0)] = [0.1, 0.2, 0.3, 0.4, 0.5]
         # keep event_trace_params consistent with mock buffer: UsedEvent MaxBuff MonSig ...
         self.event_trace_params = ["2", "8", "2", "1", "0", "0"]
-        self.event_trace_info = ["0", "1", "1", "0"]  # stopped, max1, saved1, err0
+        # stopped, max1, saved1, err0, eight samples actually logged
+        self.event_trace_info = ["0", "1", "1", "0", "8"]
 
         if not self.ff_gains_map:
             self.ff_gains_map["0"] = [0.1, 0.2, 0.3, 0.4, 0.5]
@@ -771,6 +772,8 @@ class MockTransport(Transport):
                 # starting invalidates previous (doc); keep a demo buffer after stop cycle
                 st.logged_traces = {}
                 st.event_trace_info[2] = "0"
+                if len(st.event_trace_info) > 4:
+                    st.event_trace_info[4] = "0"
             else:
                 # stop -> save one demo trace
                 n = 8
@@ -788,6 +791,8 @@ class MockTransport(Transport):
                 ]
                 st.event_times[0] = ["2", "8", "15", "30"]
                 st.event_trace_info[2] = "1"
+                if len(st.event_trace_info) > 4:
+                    st.event_trace_info[4] = str(max(1, n))
             return _accept(msg_id, crl, m)
         # PFF deep
         if m == "FGFSP" and len(params) >= 3:

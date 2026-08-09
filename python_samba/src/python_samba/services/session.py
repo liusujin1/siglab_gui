@@ -544,26 +544,45 @@ class ControllerSession:
         return self.encoder.decode_dglda(self.transact(self.encoder.dglda(trace_num)))
 
     def download_logged_trace(
-        self, trace_num: int, max_samples: int | None = None
+        self,
+        trace_num: int,
+        max_samples: int | None = None,
+        *,
+        progress_callback=None,
+        cancel_event: threading.Event | None = None,
     ) -> list[list[float]]:
         """Download a saved trace sample-by-sample via DGLDV.
 
-        Returns rows[sample][channel]. Uses MaxBuffLen/MonSigNum from DGETP when possible.
+        Returns ``rows[sample][channel]``.  Newer firmware reports the actual
+        number of logged samples as the fifth DGETI value; using it avoids both
+        thousands of needless requests and an OUT_OF_RANGE at the partial end
+        of a trace.  Older firmware falls back to DGETP.MaxBuffLen.
         """
         params = self.get_event_trace_params()
+        info = self.get_event_trace_info()
         try:
             buff_len = int(params[1]) if len(params) > 1 else 16
             mon_n = int(params[2]) if len(params) > 2 else 1
         except ValueError:
             buff_len, mon_n = 16, 1
+        try:
+            actual_samples = int(info[4]) if len(info) > 4 else 0
+        except ValueError:
+            actual_samples = 0
+        if actual_samples > 0:
+            buff_len = min(buff_len, actual_samples)
         if max_samples is not None:
             buff_len = min(buff_len, max_samples)
         rows: list[list[float]] = []
         for sample in range(buff_len):
+            if cancel_event is not None and cancel_event.is_set():
+                break
             vals = self.get_logged_sample(trace_num, sample)
             if mon_n and len(vals) > mon_n:
                 vals = vals[:mon_n]
             rows.append(vals)
+            if progress_callback is not None:
+                progress_callback(sample + 1, buff_len)
         return rows
 
     def get_monitor_values(self, index1: int = 0, index2: int = 3) -> list[float]:

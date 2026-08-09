@@ -198,10 +198,9 @@ def test_gui_builds_all_pages():
     # The primary tab API is preserved, while the user-facing navigation is
     # the fixed left sidebar used by the original SAMBA UI hierarchy.
     assert win.main_tabs.tabBar().isHidden()
-    # Logging remains available internally/contextually, but the supplied
-    # SAMBA19xUI reference has no visible Logging navigation button.  The
+    # LoggingTool functionality is integrated as a first-level workspace. The
     # sidebar also uses the reference labels (Pneum. FF / Save/Load Setup).
-    visible_tabs = [text for text in tab_texts if text != "Logging"]
+    visible_tabs = list(tab_texts)
     display_names = {
         "Pneum. SFF": "Pneum. FF",
         "Save/Load": "Save/Load Setup",
@@ -288,7 +287,7 @@ def test_formal_gui_patch_contract_builds_extended_pages():
     assert win.protection_led.text() == "ON"
     assert not win.protection_led.isEnabled()
     assert win._auto_switch_led is win._autoswitch_led
-    assert len(win.nav_buttons) == win.main_tabs.count() - 1
+    assert len(win.nav_buttons) == win.main_tabs.count()
     win.close()
 
 

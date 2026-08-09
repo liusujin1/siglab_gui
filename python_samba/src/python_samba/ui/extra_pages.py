@@ -16,6 +16,7 @@ from python_samba.ui.classic_widgets import (
     format_ui_number,
 )
 from python_samba.ui.widgets import FilterEditor, MatrixEditor
+from python_samba.ui.logging_page import LoggingPage
 
 try:
     from PySide6 import QtCore, QtWidgets
@@ -463,91 +464,9 @@ class ExtraPagesMixin:
             self.log_msg(f"DACADC save path: {path}")
 
     def _page_logging(self) -> QtWidgets.QWidget:
-        """Classic Logging page (SAMBA_UI §2.9, fw ≥ 3.3.2)."""
-        w = QtWidgets.QWidget()
-        root = QtWidgets.QVBoxLayout(w)
-        root.setSpacing(6)
-
-        g_p = GroupPanel("Event logging parameters")
-        form = QtWidgets.QFormLayout(g_p)
-        self.log_params = SciEdit()
-        self.log_info = SciEdit()
-        self.log_event = SciEdit()
-        self.log_info.setReadOnly(True)
-        self.log_mon_num = QtWidgets.QSpinBox()
-        self.log_mon_num.setRange(0, 39)
-        self.log_mon_sig = SciEdit()
-        self.log_live = SciEdit()
-        self.log_live.setReadOnly(True)
-        self.log_trace_num = QtWidgets.QSpinBox()
-        self.log_trace_num.setRange(0, 100)
-        self.log_event_time = SciEdit()
-        self.log_event_time.setReadOnly(True)
-        form.addRow("Trace params (DGETP)", self.log_params)
-        form.addRow("Trace info (DGETI)", self.log_info)
-        form.addRow("Event signal (DGETS)", self.log_event)
-        form.addRow("Monitor # (DGMOS)", self.log_mon_num)
-        form.addRow("Monitor signal type/main/sub", self.log_mon_sig)
-        form.addRow("Live monitor values (DGMSV 0..3)", self.log_live)
-        form.addRow("Trace #", self.log_trace_num)
-        form.addRow("Event time (DGEVT)", self.log_event_time)
-        root.addWidget(g_p)
-
-        row = QtWidgets.QHBoxLayout()
-        for text, slot in (
-            ("Read", self.on_logging_read),
-            ("Write params...", self.on_logging_write_params),
-            ("Write event...", self.on_logging_write_event),
-            ("Write monitor...", self.on_logging_write_monitor),
-        ):
-            b = FlatPush(text)
-            b.clicked.connect(slot)
-            row.addWidget(b)
-        btn_start = FlatPush("Start...")
-        btn_stop = FlatPush("Stop...")
-        btn_dl = FlatPush("Download trace...")
-        btn_start.clicked.connect(lambda: self.on_logging_startstop(1))
-        btn_stop.clicked.connect(lambda: self.on_logging_startstop(0))
-        btn_dl.clicked.connect(self.on_logging_download)
-        row.addWidget(btn_start)
-        row.addWidget(btn_stop)
-        row.addWidget(btn_dl)
-        row.addStretch(1)
-        root.addLayout(row)
-
-        g_d = GroupPanel("Downloaded trace")
-        dl = QtWidgets.QVBoxLayout(g_d)
-        self.log_data = QtWidgets.QPlainTextEdit()
-        self.log_data.setReadOnly(True)
-        self.log_data.setPlaceholderText("Downloaded trace samples appear here (CSV rows).")
-        self.log_data.setMinimumHeight(120)
-        dl.addWidget(self.log_data)
-        root.addWidget(g_d, 1)
-
-        g_a = GroupPanel("Analysis filter logging (L*)")
-        self.analysis_logging_group = g_a
-        aform = QtWidgets.QFormLayout(g_a)
-        self.analysis_params = SciEdit()
-        self.analysis_input = SciEdit()
-        self.analysis_out = SciEdit()
-        self.analysis_out.setReadOnly(True)
-        self.analysis_events = SciEdit()
-        self.analysis_events.setReadOnly(True)
-        aform.addRow("Params (LGANP)", self.analysis_params)
-        aform.addRow("Input (LGAIS)", self.analysis_input)
-        aform.addRow("Filter outputs (LGAFO)", self.analysis_out)
-        aform.addRow("Events (LGAEV)", self.analysis_events)
-        arow = QtWidgets.QHBoxLayout()
-        btn_ar = FlatPush("Read analysis")
-        btn_aw = FlatPush("Write analysis...")
-        btn_ar.clicked.connect(self.on_analysis_read)
-        btn_aw.clicked.connect(self.on_analysis_write)
-        arow.addWidget(btn_ar)
-        arow.addWidget(btn_aw)
-        arow.addStretch(1)
-        aform.addRow(arow)
-        root.addWidget(g_a)
-        return w
+        """Full LoggingTool-style workspace (controller + host acquisition)."""
+        self.logging_page_widget = LoggingPage(self)
+        return self.logging_page_widget
 
     # ---- handlers (kept compatible with session API) -------------------
 
@@ -1043,7 +962,8 @@ class ExtraPagesMixin:
             self.log_live.setText(
                 " ".join(format_ui_number(x) for x in s.get_monitor_values())
             )
-            self.log_event_time.setText(" ".join(s.get_event_time()))
+            trace_num = int(self.log_trace_num.value())
+            self.log_event_time.setText(" ".join(s.get_event_time(trace_num)))
             self.log_msg("logging read")
 
         self._run("Logging read", work)
@@ -1130,7 +1050,7 @@ class ExtraPagesMixin:
         def work() -> None:
             s = self._require_session()
             n = int(self.log_trace_num.value())
-            data = s.download_event_trace(n)
+            data = s.download_logged_trace(n)
             lines = [" ".join(str(x) for x in row) for row in data]
             self.log_data.setPlainText("\n".join(lines))
             self.log_msg(f"downloaded {len(lines)} trace rows")
