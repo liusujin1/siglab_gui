@@ -21,7 +21,13 @@ import time
 from python_samba.protocol.codes import FilterType, SystemStatus, filter_small_name
 from python_samba.protocol.commands import FilterStage
 from python_samba.services.safety import SafetyGate
-from python_samba.services.session import ControllerSession, open_mock, open_serial
+from python_samba.services.session import (
+    ControllerSession,
+    open_comm_server,
+    open_mock,
+    open_serial,
+)
+from python_samba.transport.comm_server import CommServerConfig, CommServerTransport
 from python_samba.transport.serial_port import TransportError
 from python_samba.ui.classic_widgets import (
     ClassicExpander,
@@ -1353,13 +1359,38 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         title.setObjectName("sidebarSectionTitle")
         conn.addWidget(title, 0, 0, 1, 2)
 
+        self._connection_settings = QtCore.QSettings("python_samba", "SAMBA19xUI")
         self.backend = QtWidgets.QComboBox()
-        self.backend.addItems(["mock", "serial"])
-        self.port = QtWidgets.QLineEdit("COM3")
+        self.backend.addItems(["server", "serial", "mock"])
+        saved_backend = str(
+            self._connection_settings.value("Connection/Backend", "server")
+        )
+        if saved_backend not in {"server", "serial", "mock"}:
+            saved_backend = "server"
+        self.backend.setCurrentText(saved_backend)
+        self.port = QtWidgets.QLineEdit(
+            str(self._connection_settings.value("Connection/Port", "COM1"))
+        )
         self.baud = QtWidgets.QComboBox()
         for b in (19200, 38400, 57600, 115200, 230400):
             self.baud.addItem(str(b), b)
-        self.baud.setCurrentText("57600")
+        saved_baud = str(
+            self._connection_settings.value("Connection/Baudrate", "57600")
+        )
+        self.baud.setCurrentText(
+            saved_baud if self.baud.findText(saved_baud) >= 0 else "57600"
+        )
+        self.server_endpoint = QtWidgets.QLineEdit(
+            str(
+                self._connection_settings.value(
+                    "Connection/Server", "127.0.0.1:47619"
+                )
+            )
+        )
+        self.server_endpoint.setToolTip(
+            "Shared Communication Server address. Remote Tailscale servers "
+            "require the copied access-token file."
+        )
         self.btn_connect = FlatPush("Connect")
         self.btn_disconnect = FlatPush("Disconnect")
         self.btn_disconnect.setEnabled(False)
@@ -1373,9 +1404,11 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         conn.addWidget(self.port, 2, 1)
         conn.addWidget(QtWidgets.QLabel("Baud"), 3, 0)
         conn.addWidget(self.baud, 3, 1)
-        conn.addWidget(self.btn_connect, 4, 0)
-        conn.addWidget(self.btn_disconnect, 4, 1)
-        conn.addWidget(self.status_lbl, 5, 0, 1, 2)
+        conn.addWidget(QtWidgets.QLabel("Server"), 4, 0)
+        conn.addWidget(self.server_endpoint, 4, 1)
+        conn.addWidget(self.btn_connect, 5, 0)
+        conn.addWidget(self.btn_disconnect, 5, 1)
+        conn.addWidget(self.status_lbl, 6, 0, 1, 2)
         return panel
 
     # ------------------------------------------------------------------
@@ -1966,7 +1999,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         if chosen is act_about:
             QtWidgets.QMessageBox.about(self, "About python_samba",
                 "<b>python_samba</b> — vendor-free SAMBA-compatible host<br>"
-                "Pure RCI serial (no Rci32.dll / CommServer)<br>"
+                "Pure RCI with a shared Communication Server (no Rci32.dll)<br>"
                 "Tab structure matches SAMBA19xUI<br><br>"
                 "Phase: TC-MFD tuning")
         elif chosen is act_console:
@@ -2037,9 +2070,18 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
                 self._report_live_refresh_error(f"{main}/{sub}", exc)
 
     def _sync_port_enabled(self, backend: str) -> None:
-        serial = backend == "serial"
-        self.port.setEnabled(serial)
-        self.baud.setEnabled(serial)
+        physical = backend in {"server", "serial"}
+        self.port.setEnabled(physical)
+        self.baud.setEnabled(physical)
+        self.server_endpoint.setEnabled(backend == "server")
+        connect_backend = getattr(self, "_backend_connect", None)
+        if connect_backend is not None and connect_backend.currentText() != backend:
+            previous = connect_backend.blockSignals(True)
+            connect_backend.setCurrentText(backend)
+            connect_backend.blockSignals(previous)
+        connect_endpoint = getattr(self, "_server_endpoint_connect", None)
+        if connect_endpoint is not None:
+            connect_endpoint.setEnabled(backend == "server")
 
     # ------------------------------------------------------------------
     # Page builders
@@ -4197,6 +4239,15 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
                 backend = self.backend.currentText()
                 if backend == "mock":
                     self.session = open_mock(readonly=False)
+                elif backend == "server":
+                    self.session = open_comm_server(
+                        self.port.text().strip(),
+                        int(self.baud.currentData()),
+                        server=self.server_endpoint.text().strip(),
+                        auto_start=True,
+                        client_name="python_samba-gui",
+                        readonly=False,
+                    )
                 else:
                     self.session = open_serial(
                         self.port.text().strip(),
@@ -4211,17 +4262,39 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
                 self.btn_connect.setEnabled(False)
                 self.btn_disconnect.setEnabled(True)
                 self.status_lbl.setText(f"Connected — {version}")
-                endpoint = (
-                    "Mock controller"
-                    if backend == "mock"
-                    else f"{self.session.info.port or self.port.text()} @ "
-                         f"{self.session.info.baudrate or self.baud.currentData()}"
-                )
+                if backend == "mock":
+                    endpoint = "Mock controller"
+                elif backend == "server":
+                    server_state = self.session.transport.status()
+                    endpoint = (
+                        f"Server {self.server_endpoint.text().strip()} · "
+                        f"{self.session.info.port or self.port.text()} @ "
+                        f"{self.session.info.baudrate or self.baud.currentData()} · "
+                        f"{server_state.get('client_count', 1)} client(s)"
+                    )
+                else:
+                    endpoint = (
+                        f"{self.session.info.port or self.port.text()} @ "
+                        f"{self.session.info.baudrate or self.baud.currentData()}"
+                    )
                 self.loop_states.conn_lbl.setText(f"Connected  ·  {endpoint}")
                 self._set_connection_display(True, f"{endpoint} — {version}")
                 self.conn_info.setText(f"backend={backend}  fw={version}")
                 self.fw_version.setText(f"Firmware Version: {version}")
                 self.log_msg(f"connected backend={backend} fw={version}")
+                self._connection_settings.setValue("Connection/Backend", backend)
+                self._connection_settings.setValue(
+                    "Connection/Port", self.port.text().strip()
+                )
+                self._connection_settings.setValue(
+                    "Connection/Baudrate", int(self.baud.currentData())
+                )
+                self._connection_settings.setValue(
+                    "Connection/Server", self.server_endpoint.text().strip()
+                )
+                connect_endpoint = getattr(self, "_server_endpoint_connect", None)
+                if connect_endpoint is not None:
+                    connect_endpoint.setText(self.server_endpoint.text())
                 self._ensure_controller_capabilities()
                 if self._auto_refresh:
                     self._refresh_timer.start()
@@ -4238,6 +4311,83 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
                 raise
 
         self._run("Connect", work)
+
+    def _temporary_comm_server_transport(self) -> CommServerTransport:
+        transport = CommServerTransport(
+            CommServerConfig(
+                port=self.port.text().strip(),
+                baudrate=int(self.baud.currentData()),
+                endpoint=self.server_endpoint.text().strip(),
+                auto_start=True,
+                client_name="python_samba-server-admin",
+            )
+        )
+        transport.open()
+        return transport
+
+    @staticmethod
+    def _format_comm_server_status(state: dict[str, object]) -> str:
+        serial = state.get("serial")
+        serial = serial if isinstance(serial, dict) else {}
+        clients = state.get("clients")
+        clients = clients if isinstance(clients, list) else []
+        lines = [
+            f"Serial: {serial.get('port') or '—'} @ "
+            f"{serial.get('baudrate') or '—'} "
+            f"({'open' if serial.get('open') else 'closed'})",
+            f"Clients: {state.get('client_count', len(clients))} "
+            f"(attached {state.get('attached_count', 0)})",
+            f"Queue: {state.get('queue_length', 0)}",
+            f"Last command: {state.get('last_command') or '—'}",
+            f"Last duration: {float(state.get('last_duration_ms') or 0):.1f} ms",
+            f"Last error: {state.get('last_error') or '—'}",
+        ]
+        if clients:
+            lines.append("")
+            lines.extend(
+                f"{item.get('name', 'client')} · PID {item.get('pid', '—')} · "
+                f"{item.get('peer', '—')}"
+                for item in clients
+                if isinstance(item, dict)
+            )
+        return "\n".join(lines)
+
+    def on_comm_server_status(self) -> None:
+        """Show shared-server state and offer a controlled serial reopen."""
+        temporary: CommServerTransport | None = None
+        try:
+            if (
+                self.session
+                and self.session.connected
+                and isinstance(self.session.transport, CommServerTransport)
+            ):
+                transport = self.session.transport
+            else:
+                temporary = self._temporary_comm_server_transport()
+                transport = temporary
+            state = transport.status()
+            box = QtWidgets.QMessageBox(self)
+            box.setWindowTitle("Communication Server")
+            box.setIcon(QtWidgets.QMessageBox.Information)
+            box.setText(self._format_comm_server_status(state))
+            restart = box.addButton(
+                "Reopen Serial Port", QtWidgets.QMessageBox.ActionRole
+            )
+            box.addButton(QtWidgets.QMessageBox.Close)
+            box.exec()
+            if box.clickedButton() is restart:
+                state = transport.restart_serial()
+                self.log_msg("Communication Server serial port reopened")
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Communication Server",
+                    self._format_comm_server_status(state),
+                )
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Communication Server", str(exc))
+        finally:
+            if temporary is not None:
+                temporary.close()
 
     def on_disconnect(self) -> None:
         self._refresh_timer.stop()

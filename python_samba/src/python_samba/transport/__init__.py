@@ -1,9 +1,12 @@
 from python_samba.transport.mock import MockState, MockTransport
+from python_samba.transport.comm_server import CommServerConfig, CommServerTransport
 from python_samba.transport.serial_port import SerialConfig, SerialTransport, Transport, TransportError
 
 __all__ = [
     "MockState",
     "MockTransport",
+    "CommServerConfig",
+    "CommServerTransport",
     "SerialConfig",
     "SerialTransport",
     "Transport",

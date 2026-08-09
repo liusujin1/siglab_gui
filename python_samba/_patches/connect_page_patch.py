@@ -493,10 +493,32 @@ def build_connect_page_reference(self) -> None:
     first.addLayout(baud_col)
     controls.addLayout(first)
 
-    self._kill_comm_server_btn = FlatPush("Terminate Comm Server and Connect")
+    self._kill_comm_server_btn = FlatPush("Communication Server Status / Restart")
     self._kill_comm_server_btn.setMinimumWidth(360)
     self._kill_comm_server_btn.clicked.connect(self.kill_comm_server_and_connect)
     controls.addWidget(self._kill_comm_server_btn, 0, QtCore.Qt.AlignLeft)
+
+    connection_form = QtWidgets.QFormLayout()
+    connection_form.setContentsMargins(0, 2, 0, 2)
+    self._backend_connect = QtWidgets.QComboBox()
+    self._backend_connect.addItems(["server", "serial", "mock"])
+    self._backend_connect.setCurrentText(self.backend.currentText())
+    self._server_endpoint_connect = QtWidgets.QLineEdit(self.server_endpoint.text())
+    self._server_endpoint_connect.setMinimumWidth(220)
+    connection_form.addRow("Backend:", self._backend_connect)
+    connection_form.addRow("Server:", self._server_endpoint_connect)
+    controls.addLayout(connection_form)
+
+    def sync_backend(value: str) -> None:
+        self.backend.setCurrentText(value)
+        self._sync_port_enabled(value)
+
+    def sync_server(value: str) -> None:
+        if self.server_endpoint.text() != value:
+            self.server_endpoint.setText(value)
+
+    self._backend_connect.currentTextChanged.connect(sync_backend)
+    self._server_endpoint_connect.textChanged.connect(sync_server)
 
     self._refresh_ports_btn = FlatPush("Update Comm Ports List")
     self._refresh_ports_btn.clicked.connect(self.on_refresh_comm_ports)
@@ -528,24 +550,22 @@ def build_connect_page_reference(self) -> None:
         root.addWidget(content)
         return button
 
-    # CommServer port registry content.
+    # New shared Communication Server content.  The old registry checkboxes
+    # controlled a vendor process and are deliberately replaced by observable
+    # state from python_samba's own singleton server.
     cs_content = QtWidgets.QFrame()
     cs_content.setObjectName("connectExpandedPanel")
     cs_layout = QtWidgets.QVBoxLayout(cs_content)
     cs_layout.setContentsMargins(14, 4, 14, 8)
-    self._cs_port_box = QtWidgets.QScrollArea()
-    self._cs_port_box.setWidgetResizable(True)
-    self._cs_port_box.setFixedHeight(120)
-    self._cs_port_inner = QtWidgets.QWidget()
-    self._cs_port_layout = QtWidgets.QVBoxLayout(self._cs_port_inner)
+    self._cs_port_layout = QtWidgets.QVBoxLayout()
     self._cs_port_layout.setContentsMargins(2, 2, 2, 2)
     self._cs_port_layout.setSpacing(2)
-    self._cs_port_box.setWidget(self._cs_port_inner)
-    cs_layout.addWidget(self._cs_port_box)
+    cs_layout.addLayout(self._cs_port_layout)
     cs_layout.addWidget(QtWidgets.QLabel(
-        "Changes require a CommServer restart."
+        "The server is the only process that owns the physical COM port.\n"
+        "SAMBA and SIDMAT requests share one global FIFO queue; the last write wins."
     ))
-    expander("Comm Server Ports", cs_content)
+    expander("Communication Server", cs_content)
 
     fw_content = QtWidgets.QFrame()
     fw_form = QtWidgets.QFormLayout(fw_content)
@@ -596,6 +616,7 @@ def build_connect_page_reference(self) -> None:
     root.addStretch(1)
     self.main_tabs.addTab(w, "Connect")
     self._populate_port_lists()
+    self._sync_port_enabled(self.backend.currentText())
 
 
 # ---------------------------------------------------------------------------
@@ -624,21 +645,14 @@ def _populate_port_lists(self) -> None:
 
     self._port_list_layout.addStretch(1)
 
-    # --- Checkbox list (ComServerPortListe) ---
+    # --- Shared-server summary (replaces obsolete vendor registry toggles) ---
     self._clear_layout(self._cs_port_layout)
-
-    if not ports:
-        lbl = QtWidgets.QLabel("No COM ports detected")
-        lbl.setStyleSheet("color:#888; font-style:italic; padding:4px;")
-        self._cs_port_layout.addWidget(lbl)
-    else:
-        for port_name in ports:
-            cb = QtWidgets.QCheckBox(port_name)
-            cb.setChecked(_check_com_port_registry(port_name))
-            cb.toggled.connect(self.on_com_server_cb_clicked)
-            self._cs_port_layout.addWidget(cb)
-
-    self._cs_port_layout.addStretch(1)
+    endpoint = getattr(self, "server_endpoint", None)
+    endpoint_text = endpoint.text().strip() if endpoint is not None else "127.0.0.1:47619"
+    self._cs_port_layout.addWidget(QtWidgets.QLabel(f"Endpoint: {endpoint_text}"))
+    self._cs_port_layout.addWidget(
+        QtWidgets.QLabel("Status is available from the button above or the tray icon.")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -727,8 +741,11 @@ def on_connect_page_connect(self) -> None:
     if idx >= 0:
         self.baud.setCurrentIndex(idx)
 
-    # Also ensure the toolbar backend is set to "serial".
-    self.backend.setCurrentText("serial")
+    backend = getattr(self, "_backend_connect", None)
+    self.backend.setCurrentText(backend.currentText() if backend is not None else "server")
+    endpoint = getattr(self, "_server_endpoint_connect", None)
+    if endpoint is not None:
+        self.server_endpoint.setText(endpoint.text().strip())
 
     self.on_connect()
 
@@ -736,7 +753,7 @@ def on_connect_page_connect(self) -> None:
     if self.session and self.session.connected:
         self._conn_page_connect_btn.setEnabled(False)
         self._conn_page_disconnect_btn.setEnabled(True)
-        self._kill_comm_server_btn.setVisible(False)
+        self._kill_comm_server_btn.setVisible(True)
         self._refresh_ports_btn.setEnabled(False)
         self._update_fw_version_display()
     else:
@@ -764,15 +781,8 @@ def on_connect_page_disconnect(self) -> None:
 # ---------------------------------------------------------------------------
 
 def kill_comm_server_and_connect(self) -> None:
-    """Kill all CommServer processes, then connect.
-
-    Mirrors C# ``KillCommServerConnectBtn_Click``.
-    """
-    self.log_msg("Killing CommServer processes...")
-    kill_comm_server_processes()
-    self.log_msg("CommServer processes terminated")
-    # Now connect using the toolbar's connect logic
-    self.on_connect_page_connect()
+    """Open the new shared server's status/reopen dialog."""
+    self.on_comm_server_status()
 
 
 # ---------------------------------------------------------------------------
@@ -780,19 +790,8 @@ def kill_comm_server_and_connect(self) -> None:
 # ---------------------------------------------------------------------------
 
 def _sync_kill_btn_visibility(self) -> None:
-    """Show the kill button if any CommServer process is running."""
-    try:
-        import psutil
-        for proc in psutil.process_iter(["name"]):
-            try:
-                if "commserver" in (proc.info["name"] or "").lower():
-                    self._kill_comm_server_btn.setVisible(True)
-                    return
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
-        self._kill_comm_server_btn.setVisible(False)
-    except ImportError:
-        self._kill_comm_server_btn.setVisible(False)
+    """The shared-server status entry is always available."""
+    self._kill_comm_server_btn.setVisible(True)
 
 
 # ---------------------------------------------------------------------------

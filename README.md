@@ -40,3 +40,14 @@ Simulated backend:
 ```powershell
 python -m unittest discover -s tests
 ```
+
+## SAMBA / SIDMAT controller tools
+
+The `codex/samba` branch also contains the controller applications:
+
+- [`python_samba`](python_samba/README.md) — controller configuration and status UI.
+- [`python_sidmat`](python_sidmat/README.md) — trace acquisition and transfer-function analysis.
+
+Both applications default to the shared Communication Server, so only one
+process owns the physical serial port while complete RCI exchanges from both
+clients are executed through a global FIFO.

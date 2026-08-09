@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+env/
+build/
+dist/
+*.egg-info/
+
+# Local measurement outputs and visual QA captures.
+*.png
+*.csv
+*.mat
+*.sidimat19x
+*.idefigure
+
+# Local reverse-engineered reference sources and live-controller reports.
+/yuanma/
+/hardware_probe_results/

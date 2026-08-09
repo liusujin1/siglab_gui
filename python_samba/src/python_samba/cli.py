@@ -9,7 +9,12 @@ from python_samba import __version__
 from python_samba.protocol.codes import status_name
 from python_samba.protocol.commands import RciCommandError
 from python_samba.protocol.frame import ProtocolError
-from python_samba.services.session import ControllerSession, open_mock, open_serial
+from python_samba.services.session import (
+    ControllerSession,
+    open_comm_server,
+    open_mock,
+    open_serial,
+)
 from python_samba.transport.serial_port import TransportError
 
 
@@ -23,9 +28,9 @@ def _build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument(
         "--backend",
-        choices=["serial", "mock"],
-        default="serial",
-        help="Transport backend (default: serial). Use mock for offline demo.",
+        choices=["server", "serial", "mock"],
+        default="server",
+        help="Transport backend (default: shared communication server).",
     )
     common.add_argument("--port", default=None, help="Serial port, e.g. COM3 or /dev/ttyUSB0")
     common.add_argument(
@@ -35,6 +40,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Baud rate (firmware default after reset: 57600)",
     )
     common.add_argument("--timeout", type=float, default=2.0, help="Response timeout seconds")
+    common.add_argument("--server", default="127.0.0.1:47619", help="Communication Server HOST:PORT")
+    common.add_argument("--token-file", default=None, help="Access-token file for remote servers")
+    common.add_argument("--no-auto-start", action="store_true", help="Do not auto-start a local server")
     common.add_argument(
         "--write",
         action="store_true",
@@ -99,7 +107,18 @@ def _open_session(args: argparse.Namespace) -> ControllerSession:
     if args.backend == "mock":
         return open_mock(readonly=readonly)
     if not args.port:
-        raise SystemExit("serial backend requires --port (or use --backend mock)")
+        raise SystemExit(f"{args.backend} backend requires --port (or use --backend mock)")
+    if args.backend == "server":
+        return open_comm_server(
+            args.port,
+            args.baud,
+            server=args.server,
+            token_file=args.token_file,
+            auto_start=not args.no_auto_start,
+            client_name="python-samba-cli",
+            readonly=readonly,
+            timeout=args.timeout,
+        )
     return open_serial(args.port, args.baud, readonly=readonly, timeout=args.timeout)
 
 
@@ -108,6 +127,8 @@ def cmd_connect(args: argparse.Namespace) -> int:
     try:
         version = session.open()
         print(f"backend : {session.info.backend}")
+        if session.info.server_endpoint:
+            print(f"server  : {session.info.server_endpoint}")
         if session.info.port:
             print(f"port    : {session.info.port} @ {session.info.baudrate}")
         print(f"firmware: {version}")

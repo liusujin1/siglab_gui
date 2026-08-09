@@ -28,6 +28,31 @@ class Transport(ABC):
     @abstractmethod
     def is_open(self) -> bool: ...
 
+    def exchange(
+        self,
+        request: bytes,
+        terminator: bytes = b"\r",
+        timeout: float = 2.0,
+    ) -> bytes:
+        """Atomically write one request and return its non-empty response.
+
+        Concrete transports may override this method when the request/response
+        pair has to cross another process boundary.  The default keeps legacy
+        serial and mock transports compatible while filtering the controller's
+        trailing ``\n\r\r`` separators under one timeout deadline.
+        """
+        if not terminator:
+            raise ValueError("terminator must not be empty")
+        self.write(request)
+        deadline = time.monotonic() + float(timeout)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TransportError("timeout waiting for response")
+            response = self.read_until(terminator, timeout=remaining)
+            if response.strip(b" \t\r\n"):
+                return response
+
 
 @dataclass
 class SerialConfig:

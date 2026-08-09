@@ -1365,6 +1365,28 @@ class CommandEncoder:
         # leading count is protocol metadata, not a displayed sample.
         return values[1:expected]
 
+    def dgtbb(self, read_offset: int, sample_count: int = 40) -> bytes:
+        """Read trace samples using the legacy binary ``DGTBB`` command."""
+        read_offset = _integral_param("DGTBB", 0, read_offset)
+        sample_count = _integral_param("DGTBB", 1, sample_count)
+        if not 0 <= read_offset <= 8191:
+            raise ProtocolError(f"DGTBB read offset must be 0..8191, got {read_offset}")
+        if not 1 <= sample_count <= 40:
+            raise ProtocolError(
+                f"DGTBB sample count must be 1..40, got {sample_count}"
+            )
+        # DGTBB uses the firmware's escape framing: both the length and CRC
+        # fields are ##, while the request itself remains ASCII.
+        crl = next_crl(self._crl)
+        self._crl = (self._crl + 1) & 0xFF
+        cmd = RciCommand(
+            crl=crl,
+            mnemonic="DGTBB",
+            params=(str(read_offset), str(sample_count)),
+            msg_id=self.msg_id,
+        )
+        return build_frame(cmd, bypass_length=True, bypass_crc=True)
+
     # --- Position devices / motor offsets ---
 
     def cgpsd(self, axis: int | None = None) -> bytes:

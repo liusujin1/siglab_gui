@@ -422,7 +422,10 @@ def test_setup_writer_matches_vendor_v8_schema_and_lexical_format(tmp_path) -> N
 
 
 def test_effective_ui_handlers_are_functional_implementations() -> None:
-    report = apply_all_patches(MainWindow, strict=True)
+    class PatchedMainWindow(MainWindow):
+        pass
+
+    report = apply_all_patches(PatchedMainWindow, strict=True)
     assert report.ok
     expected_modules = {
         "on_poly_read": "polynom_patch",
@@ -437,4 +440,4 @@ def test_effective_ui_handlers_are_functional_implementations() -> None:
         "_on_digio_read": "unified_special_tab",
     }
     for name, module in expected_modules.items():
-        assert getattr(MainWindow, name).__module__ == module
+        assert getattr(PatchedMainWindow, name).__module__ == module

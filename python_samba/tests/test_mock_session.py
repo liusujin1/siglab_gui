@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import threading
+import time
+
 import pytest
 
 from python_samba.protocol.commands import FilterStage, RciCommandError
@@ -67,3 +70,76 @@ def test_mock_unknown_command_status():
         resp = session.raw_command("ZZZZZ")
         assert not resp.ok
         assert resp.status_code == 0x03
+
+
+def test_mock_binary_trace_and_excitation_offset():
+    with open_mock(readonly=False) as session:
+        values = session.get_digital_trace_buffer_binary(0, 4)
+        assert len(values) == 8
+        assert values[0] == pytest.approx(0.0)
+        assert values[1] == pytest.approx(8.0)
+        session.set_excitation_offset(0.25)
+        assert session.get_excitation_offset() == pytest.approx(0.25)
+
+
+def test_binary_trace_accepts_real_ascii_crc_after_last_value():
+    """Real firmware appends two CRC characters instead of the ``##`` token."""
+    with open_mock(readonly=False) as session:
+        original_read_until = session.transport.read_until
+
+        def read_until_with_crc(terminator=b"\r", timeout=2.0):
+            raw = original_read_until(terminator, timeout)
+            if b" DGTBB " in raw:
+                assert raw.endswith(b"##\r")
+                raw = raw[:-3] + b"2D\r"
+            return raw
+
+        session.transport.read_until = read_until_with_crc  # type: ignore[method-assign]
+        values = session.get_digital_trace_buffer_binary(0, 4)
+        assert len(values) == 8
+        assert values[-1] == pytest.approx(11.0)
+
+
+def test_serialized_request_response_transactions():
+    """Concurrent callers must not overlap one transport request/response."""
+    with open_mock() as session:
+        original_write = session.transport.write
+        original_read = session.transport.read_until
+        counter_lock = threading.Lock()
+        active = 0
+        max_active = 0
+
+        def write(data: bytes) -> None:
+            nonlocal active, max_active
+            with counter_lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.002)
+            original_write(data)
+
+        def read_until(terminator=b"\r", timeout=2.0):
+            nonlocal active
+            try:
+                time.sleep(0.002)
+                return original_read(terminator, timeout)
+            finally:
+                with counter_lock:
+                    active -= 1
+
+        session.transport.write = write  # type: ignore[method-assign]
+        session.transport.read_until = read_until  # type: ignore[method-assign]
+        errors: list[BaseException] = []
+
+        def worker() -> None:
+            try:
+                session.get_loop_status()
+            except BaseException as exc:  # pragma: no cover - assertion below reports it
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert not errors
+        assert max_active == 1

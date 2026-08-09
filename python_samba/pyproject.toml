@@ -21,6 +21,7 @@ dev = ["pytest>=8.0"]
 [project.scripts]
 python-samba = "python_samba.cli:main"
 python-samba-gui = "python_samba.app:main"
+python-samba-comm-server = "python_samba.commserver.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

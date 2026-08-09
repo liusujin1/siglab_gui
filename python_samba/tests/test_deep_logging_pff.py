@@ -61,12 +61,19 @@ def test_gui_logging_pff_widgets_exist():
     pytest.importorskip("PySide6")
     from PySide6 import QtWidgets
     from python_samba.ui.main_window import MainWindow
+    from python_samba.ui.patches import apply_all_patches
 
+    class PatchedMainWindow(MainWindow):
+        pass
+
+    apply_all_patches(PatchedMainWindow, strict=True)
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    win = MainWindow()
+    win = PatchedMainWindow()
     assert hasattr(win, "pff_filter")
     assert hasattr(win, "pff_filter_panel")
-    assert len(win.pff_filter_buttons) == 32
+    assert len(win.pff_ref_buttons) == 12
+    assert len(win.pff_sec_buttons) == 12
+    assert len(win.pff_err_buttons) == 6
     assert win.pff_filter.stage.maximum() == 7
     assert hasattr(win, "on_pff_reset")
     assert hasattr(win, "on_setup_load_file")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import struct
 
 from python_samba.protocol.frame import format_crc, xor_checksum
 from python_samba.transport.serial_port import Transport, TransportError
@@ -39,6 +40,33 @@ def _accept(
     mid = f"{len_field}{body_core}"
     crc = format_crc(xor_checksum(mid))
     return f":{mid}{crc}\r".encode("ascii")
+
+
+def _encode_opticon_float(value: float) -> bytes:
+    """Encode an IEEE float into the controller's six-byte wire field."""
+    bits = struct.unpack("<I", struct.pack("<f", float(value)))[0]
+    chunks = [(bits >> (6 * i)) & 0x3F for i in range(5)]
+    chunks.append((bits >> 30) & 0x03)
+    # Use printable bytes so the mock's CR-delimited transport can carry the
+    # binary payload without confusing a field byte for the terminator.
+    return bytes(value + 0x40 for value in chunks)
+
+
+def _accept_binary_trace(
+    msg_id: str,
+    crl: str,
+    sample_pairs: list[tuple[float, float]],
+) -> bytes:
+    fields = [
+        _encode_opticon_float(value)
+        for pair in sample_pairs
+        for value in pair
+    ]
+    return (
+        f":##{msg_id}{crl} 0 DGTBB ".encode("ascii")
+        + b" ".join(fields)
+        + b"##\r"
+    )
 
 
 @dataclass
@@ -166,6 +194,7 @@ class MockState:
     ff_algo: int = 0
     ff_zrot: list[str] = field(default_factory=lambda: ["10000", "32000", "0", "0"])
     excitation: list[str] = field(default_factory=lambda: ["0", "0.1", "10", "0", "0"])
+    excitation_offset: float = 0.0
     noise_freq: float = 10.0
     noise_filt_usage: str = "F"
     noise_filters: dict[int, tuple[int, tuple[float, ...]]] = field(default_factory=dict)
@@ -893,6 +922,11 @@ class MockTransport(Transport):
                 except Exception:
                     pass
             return _accept(msg_id, crl, m)
+        if m == "DGEOV":
+            return _accept(msg_id, crl, m, st.excitation_offset)
+        if m == "DSEOV" and params:
+            st.excitation_offset = float(params[0])
+            return _accept(msg_id, crl, m)
         if m == "DGNSF":
             return _accept(msg_id, crl, m, st.noise_freq)
         if m == "DSNSF" and params:
@@ -941,6 +975,22 @@ class MockTransport(Transport):
                 msg_id, crl, m, sample_count,
                 *st.dig_trace_buf[:2 * sample_count],
             )
+        if m == "DGTBB" and len(params) >= 2:
+            st.dig_trace_status = ["0"]
+            offset = max(0, int(params[0]))
+            sample_count = min(40, max(1, int(params[1])))
+            pairs: list[tuple[float, float]] = []
+            base_pairs = len(st.dig_trace_buf) // 2
+            for index in range(sample_count):
+                absolute = offset + index
+                if absolute < base_pairs:
+                    ch1 = st.dig_trace_buf[absolute]
+                    ch2 = st.dig_trace_buf[base_pairs + absolute]
+                else:
+                    ch1 = float(absolute)
+                    ch2 = float(absolute) + 0.5
+                pairs.append((ch1, ch2))
+            return _accept_binary_trace(msg_id, crl, pairs)
         if m == "CGPSD":
             axis = int(params[0]) if params else 0
             return _accept(msg_id, crl, m, *st.pos_sensor_dev_axes.get(axis, st.pos_sensor_dev))

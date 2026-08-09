@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import time
+import struct
+import threading
 from dataclasses import dataclass
 
 from python_samba.protocol.commands import (
@@ -21,6 +22,7 @@ class ConnectionInfo:
     backend: str
     port: str | None = None
     baudrate: int | None = None
+    server_endpoint: str | None = None
 
 
 def _request_identity(frame: bytes) -> tuple[str, str, str]:
@@ -55,14 +57,25 @@ class ControllerSession:
         backend_name: str = "serial",
         port: str | None = None,
         baudrate: int | None = None,
+        server_endpoint: str | None = None,
         timeout: float = 5.0,
         readonly: bool = True,
     ) -> None:
         self.transport = transport
-        self.info = ConnectionInfo(backend=backend_name, port=port, baudrate=baudrate)
+        self.info = ConnectionInfo(
+            backend=backend_name,
+            port=port,
+            baudrate=baudrate,
+            server_endpoint=server_endpoint,
+        )
         self.timeout = timeout
         self.readonly = readonly
         self.encoder = CommandEncoder()
+        # A Sidmat measurement worker and the Qt refresh timer can use the
+        # same controller session concurrently.  Keep each request/response
+        # pair atomic so bytes from BGSTS/DGTAS/DASTA cannot interleave on the
+        # serial link.
+        self._io_lock = threading.RLock()
         self._connected = False
         self.last_response: RciResponse | None = None
 
@@ -93,26 +106,16 @@ class ControllerSession:
         self.close()
 
     def transact(self, frame: bytes) -> RciResponse:
+        """Execute one serialized request/response transaction."""
+        with self._io_lock:
+            return self._transact_unlocked(frame)
+
+    def _transact_unlocked(self, frame: bytes) -> RciResponse:
         if not self.transport.is_open:
             raise TransportError("session transport is not open")
         expected_msg_id, expected_crl, expected_mnemonic = _request_identity(frame)
         try:
-            self.transport.write(frame)
-            # The physical SAMBA controller appends ``\n\r\r`` after the
-            # framed response's terminating CR.  Those empty separators can
-            # arrive just after read_until() returns and therefore remain for
-            # the next transaction.  Skip whitespace-only records while
-            # preserving one deadline for the real response.
-            deadline = time.monotonic() + self.timeout
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TransportError(
-                        f"timeout waiting for {expected_mnemonic} response"
-                    )
-                raw = self.transport.read_until(b"\r", timeout=remaining)
-                if raw.strip(b" \t\r\n"):
-                    break
+            raw = self.transport.exchange(frame, b"\r", self.timeout)
         except TransportError as exc:
             # A Windows WriteFile/ReadFile failure means this handle can no
             # longer be trusted (device reset, unplug, or driver revocation).
@@ -673,6 +676,76 @@ class ControllerSession:
             self.transact(self.encoder.dgtbv(read_offset))
         )
 
+    def get_digital_trace_buffer_binary(
+        self, read_offset: int, sample_count: int = 40
+    ) -> list[float]:
+        """Read one binary trace response without allowing interleaving."""
+        with self._io_lock:
+            return self._get_digital_trace_buffer_binary_unlocked(
+                read_offset, sample_count
+            )
+
+    def _get_digital_trace_buffer_binary_unlocked(
+        self, read_offset: int, sample_count: int = 40
+    ) -> list[float]:
+        """Read interleaved Ch1/Ch2 values from legacy binary ``DGTBB``.
+
+        The binary payload is intentionally parsed here instead of passing it
+        through ``parse_frame``: six-byte Opticon floats are not ASCII RCI
+        tokens.  The controller sends two six-byte values per sample, in
+        Ch1/Ch2 order.
+        """
+        frame = self.encoder.dgtbb(read_offset, sample_count)
+        if not self.transport.is_open:
+            raise TransportError("session transport is not open")
+        expected_msg_id, expected_crl, expected_mnemonic = _request_identity(frame)
+        try:
+            raw = self.transport.exchange(frame, b"\r", self.timeout)
+        except TransportError as exc:
+            self._connected = False
+            try:
+                self.transport.close()
+            except Exception:
+                pass
+            raise TransportError(f"{expected_mnemonic}: {exc}") from exc
+
+        marker = b" DGTBB "
+        marker_pos = raw.upper().find(marker)
+        if marker_pos < 0:
+            raise ProtocolError(f"DGTBB response missing mnemonic: {raw!r}")
+        # The compact binary response normally ends with ``##`` plus the
+        # terminator, but real controllers may append their two ASCII CRC
+        # characters instead.  In the latter form the CRC is immediately
+        # adjacent to the last six-byte value, so stripping it before splitting
+        # is essential: otherwise a complete 80-value response is reported as
+        # 79 values plus one invalid eight-byte field.
+        payload = raw[marker_pos + len(marker):]
+        payload = payload.rstrip(b"\r\n")
+        expected_values = int(sample_count) * 2
+        if payload.endswith(b"##"):
+            payload = payload[:-2]
+        else:
+            crc = payload[-2:]
+            candidate = payload[:-2]
+            crc_is_ascii = len(crc) == 2 and all(
+                byte in b"0123456789abcdefABCDEF" for byte in crc
+            )
+            candidate_fields = [
+                field for field in candidate.split(b" ") if len(field) == 6
+            ]
+            if crc_is_ascii and len(candidate_fields) >= expected_values:
+                payload = candidate
+        fields = [field for field in payload.split(b" ") if len(field) == 6]
+        if len(fields) < expected_values:
+            raise ProtocolError(
+                f"DGTBB short payload: expected {expected_values} six-byte values, "
+                f"got {len(fields)}"
+            )
+        fields = fields[-expected_values:]
+        values = [_decode_opticon_float(field) for field in fields]
+        self.last_response = None
+        return values
+
     # --- Position devices / offsets ---
 
     def get_position_sensor_devices(self) -> list[str]:
@@ -973,6 +1046,26 @@ class ControllerSession:
         self._ensure_writable()
         self.encoder.ensure_ok(self.transact(self.encoder.dsesp(*params)), "DSESP")
 
+    def get_excitation_offset(self) -> float:
+        """Read the extended-excitation DC offset (DGEOV).
+
+        Older firmware may not implement this optional command.  Callers in
+        measurement-only applications should treat a command error as
+        "offset unsupported" while keeping the rest of excitation usable.
+        """
+        response = self.raw_command("DGEOV")
+        self.encoder.ensure_ok(response, "DGEOV")
+        if not response.data_tokens:
+            raise ValueError("empty DGEOV response")
+        return float(response.data_tokens[0])
+
+    def set_excitation_offset(self, value: float) -> None:
+        """Write the extended-excitation DC offset (DSEOV)."""
+        self._ensure_writable()
+        self.encoder.ensure_ok(
+            self.raw_command("DSEOV", float(value)), "DSEOV"
+        )
+
     # --- Event signal ---
 
     def get_event_signal(self) -> list[str]:
@@ -1196,6 +1289,18 @@ class ControllerSession:
             )
 
 
+def _decode_opticon_float(field: bytes) -> float:
+    """Decode one six-byte Opticon float field used by DGTBB."""
+    if len(field) != 6:
+        raise ProtocolError(f"DGTBB float field must be 6 bytes, got {len(field)}")
+    chunks = [byte & 0x3F for byte in field[:5]]
+    chunks.append(field[5] & 0x03)
+    bits = 0
+    for index, value in enumerate(chunks):
+        bits |= int(value) << (6 * index)
+    return float(struct.unpack("<f", struct.pack("<I", bits & 0xFFFFFFFF))[0])
+
+
 def open_mock(readonly: bool = True) -> ControllerSession:
     from python_samba.transport.mock import MockTransport
 
@@ -1217,6 +1322,46 @@ def open_serial(
         backend_name="serial",
         port=port,
         baudrate=baudrate,
+        timeout=timeout,
+        readonly=readonly,
+    )
+
+
+def open_comm_server(
+    port: str,
+    baudrate: int = 57600,
+    *,
+    server: str = "127.0.0.1:47619",
+    token_file: str | None = None,
+    token: str | None = None,
+    auto_start: bool = True,
+    client_name: str = "python_samba",
+    readonly: bool = True,
+    timeout: float = 5.0,
+) -> ControllerSession:
+    from python_samba.transport.comm_server import (
+        CommServerConfig,
+        CommServerTransport,
+    )
+
+    transport = CommServerTransport(
+        CommServerConfig(
+            port=port,
+            baudrate=baudrate,
+            endpoint=server,
+            timeout=timeout,
+            token_file=token_file,
+            token=token,
+            auto_start=auto_start,
+            client_name=client_name,
+        )
+    )
+    return ControllerSession(
+        transport,
+        backend_name="server",
+        port=port,
+        baudrate=baudrate,
+        server_endpoint=server,
         timeout=timeout,
         readonly=readonly,
     )

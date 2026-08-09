@@ -21,3 +21,12 @@ _review/*
 _review2/
 *.png
 .tmp_rg.txt
+
+# One-off reverse-engineering/code-generation helpers and extracted indexes.
+/_decompile_asm.ps1
+/_decompile_dialogs.py
+/_extract_resources.py
+/_gen_pages.py
+/_generated_pages.py
+/_patch_*.py
+/_samba_*.txt
