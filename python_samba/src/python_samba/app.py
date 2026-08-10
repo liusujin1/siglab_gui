@@ -42,10 +42,9 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QtWidgets.QApplication(sys.argv if argv is None else argv)
     app.setStyle("Fusion")
-    # The supplied SAMBA19xUI captures use Arial metrics.  Several pages are
-    # pixel-oriented, so using Segoe UI here changes label widths enough to
-    # move controls and makes the interface look noticeably more compact.
-    font = QtGui.QFont("Arial", 12)
+    # Use a readable fallback before MainWindow applies its monitor-aware font
+    # scale.  Arial keeps the metrics close to the supplied SAMBA19xUI captures.
+    font = QtGui.QFont("Arial", 14)
     app.setFont(font)
     window = MainWindow()
     window.show()

@@ -237,6 +237,8 @@ def test_gui_builds_all_pages():
 
 
 def test_window_initial_geometry_is_screen_aware_and_resizable():
+    import re
+
     pytest.importorskip("PySide6")
     from PySide6 import QtWidgets
     from python_samba.ui.main_window import MainWindow
@@ -245,6 +247,8 @@ def test_window_initial_geometry_is_screen_aware_and_resizable():
     win = MainWindow()
 
     assert 0.75 <= win._display_scale <= 3.0
+    assert 1.15 <= win._font_scale <= 1.40
+    assert app.font().pointSizeF() >= 13.5
     assert win.minimumWidth() <= win.width()
     assert win.minimumHeight() <= win.height()
     assert win._size_grip.parent() is win
@@ -258,6 +262,19 @@ def test_window_initial_geometry_is_screen_aware_and_resizable():
     assert win.height() == old_size.height() + 18
     assert win._size_grip.x() == win.width() - win._size_grip.width()
     assert win._size_grip.y() == win.height() - win._size_grip.height()
+
+    font_sizes = []
+    for widget in (win, *win.findChildren(QtWidgets.QWidget)):
+        font_sizes.extend(
+            float(value)
+            for value in re.findall(
+                r"font-size\s*:\s*(\d+(?:\.\d+)?)px",
+                widget.styleSheet(),
+                flags=re.IGNORECASE,
+            )
+        )
+    assert font_sizes
+    assert min(font_sizes) >= 12
     win.close()
 
 

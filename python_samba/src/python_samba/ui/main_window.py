@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import sys
 import time
 
@@ -554,6 +555,9 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
 
     _DESIGN_WINDOW_SIZE = (1840, 1240)
     _DESIGN_MINIMUM_SIZE = (1180, 760)
+    _FONT_SIZE_PATTERN = re.compile(
+        r"(font-size\s*:\s*)(\d+(?:\.\d+)?)px", re.IGNORECASE
+    )
 
     @staticmethod
     def _screen_scale_factor(screen) -> float:
@@ -592,6 +596,61 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
                 pass
 
         return min(max(max(candidates, default=1.0), 0.75), 3.0)
+
+    @staticmethod
+    def _font_scale_for_display(display_scale: float) -> float:
+        """Return a readable font scale while retaining the pixel layout.
+
+        Qt high-DPI geometry scaling is intentionally disabled for the legacy
+        pixel-authored pages.  Compensate the text separately: use a modest
+        15% accessibility increase at 100%, follow Windows scaling above that,
+        and cap the result before dense filter matrices become impractical.
+        """
+
+        try:
+            scale = float(display_scale)
+        except (TypeError, ValueError):
+            scale = 1.0
+        return min(1.40, max(1.15, scale))
+
+    def _font_pixel_size(self, original: float) -> int:
+        """Scale normal UI text and enforce a legible matrix-label floor."""
+
+        value = float(original)
+        if value > 22:
+            # Large titles/readouts are already legible and often live in
+            # tightly sized cards; leave those display fonts unchanged.
+            return int(round(value))
+        return min(24, max(12, int(round(value * self._font_scale))))
+
+    def _scale_font_stylesheet(self, stylesheet: str) -> str:
+        if not stylesheet:
+            return stylesheet
+
+        def replace(match: re.Match[str]) -> str:
+            return f"{match.group(1)}{self._font_pixel_size(float(match.group(2)))}px"
+
+        return self._FONT_SIZE_PATTERN.sub(replace, stylesheet)
+
+    def _apply_application_font_scale(self) -> None:
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            return
+        app.setProperty("python_samba_font_scale", self._font_scale)
+        font = QtGui.QFont("Arial")
+        font.setPointSizeF(12.0 * self._font_scale)
+        app.setFont(font)
+
+    def _scale_existing_inline_fonts(self) -> None:
+        """Scale styles supplied by page patches and classic child widgets."""
+
+        for widget in self.findChildren(QtWidgets.QWidget):
+            stylesheet = widget.styleSheet()
+            if not stylesheet:
+                continue
+            scaled = self._scale_font_stylesheet(stylesheet)
+            if scaled != stylesheet:
+                widget.setStyleSheet(scaled)
 
     @classmethod
     def _initial_window_metrics(cls) -> tuple[QtCore.QRect, QtCore.QSize, QtCore.QSize, float]:
@@ -655,6 +714,8 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         available, initial_size, minimum_size, self._display_scale = (
             self._initial_window_metrics()
         )
+        self._font_scale = self._font_scale_for_display(self._display_scale)
+        self._apply_application_font_scale()
         self.setMinimumSize(minimum_size)
         self.resize(initial_size)
         frame = self.frameGeometry()
@@ -1664,7 +1725,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
 
     def _apply_theme(self) -> None:
         """Apply the screenshot-oriented SAMBA19xUI shell and control theme."""
-        self.setStyleSheet("""
+        theme = """
             QMainWindow, QWidget {
                 color: #203443;
                 font-family: "Segoe UI", "Microsoft YaHei UI", "Arial", sans-serif;
@@ -1976,7 +2037,9 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
                 font-family: Consolas;
                 font-size: 12px;
             }
-        """)
+        """
+        self.setStyleSheet(self._scale_font_stylesheet(theme))
+        self._scale_existing_inline_fonts()
 
     def _build_context_menu(self) -> None:
         self.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
@@ -5844,7 +5907,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
             label.setStyleSheet(
                 f"background:{color};color:#203443;"
                 "border:1px solid #aebfca;border-radius:4px;"
-                "padding-left:7px;font-size:14px;"
+                f"padding-left:7px;font-size:{self._font_pixel_size(14)}px;"
             )
 
         # The legacy page queries LGPSL only when the firmware advertises the
@@ -5869,7 +5932,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         self.ps_overpowered.setStyleSheet(
             "background:" + ("#ffb4b4" if overpowered else "#90ee90")
             + ";color:#203443;border:1px solid #aebfca;"
-            "border-radius:4px;font-size:14px;"
+            f"border-radius:4px;font-size:{self._font_pixel_size(14)}px;"
         )
         for editor, value in zip(self.ps_actual_values, power_supply[3:8]):
             editor.setText(format_ui_number(value))
@@ -6001,7 +6064,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
                     label.setStyleSheet(
                         f"background:{color};color:#203443;"
                         "border:1px solid #aebfca;border-radius:4px;"
-                        "padding-left:7px;font-size:14px;"
+                        f"padding-left:7px;font-size:{self._font_pixel_size(14)}px;"
                     )
             except Exception as exc:
                 self.log_msg(f"Motor failsafe status read: {exc}")
@@ -6024,7 +6087,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
                     self.ps_overpowered.setStyleSheet(
                         "background:" + ("#ffb4b4" if overpowered else "#90ee90")
                         + ";color:#203443;border:1px solid #aebfca;"
-                        "border-radius:4px;font-size:14px;"
+                        f"border-radius:4px;font-size:{self._font_pixel_size(14)}px;"
                     )
                     for editor, value in zip(
                         self.ps_actual_values, power_supply[3:8]
