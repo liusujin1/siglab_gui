@@ -139,6 +139,17 @@ def test_logging_page_is_primary_and_exposes_40_channels():
         assert not page._toolbar_compact
         assert page.file_signal_count.maximum() == 40
         assert page.trace_progress.maximum() == 100
+        assert [
+            page.logging_type_combo.itemText(index)
+            for index in range(page.logging_type_combo.count())
+        ] == ["OverCurrent Event", "Event Signal Event", "Standard"]
+        assert [
+            page.logging_type_combo.itemData(index)
+            for index in range(page.logging_type_combo.count())
+        ] == [0, 1, 2]
+        assert page.monitor_number.isHidden()
+        assert page.monitor_selector.isHidden()
+        assert page.btn_monitor_write.isHidden()
     finally:
         window.close()
         app.processEvents()
@@ -246,6 +257,94 @@ def test_logging_workspace_update_populates_all_three_columns():
         app.processEvents()
 
 
+def test_logging_monitor_button_selection_writes_and_reads_back_directly():
+    pytest.importorskip("PySide6")
+    from PySide6 import QtWidgets
+    from python_samba.services.safety import SafetyGate
+    from python_samba.ui.main_window import MainWindow
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    session = open_mock(readonly=False)
+    session.open()
+    window = MainWindow()
+    window.session = session
+    window.gate = SafetyGate(session)
+    page = window.logging_page_widget
+    page.on_connected()
+    try:
+        page._select_monitor_channel(7)
+        page._monitor_selector_changed((0, 11, 0))
+        deadline = time.monotonic() + 3.0
+        while page.serial_worker_active and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        app.processEvents()
+        assert session.get_monitor_signal(7)[:3] == ["0", "11", "0"]
+        assert page.monitor_definitions[7] == (0, 11, 0)
+        assert page.monitor_signal_buttons[7].text() == page.monitor_names[7]
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_logging_internal_and_event_controls_follow_protocol_field_order():
+    pytest.importorskip("PySide6")
+    from PySide6 import QtWidgets
+    from python_samba.services.safety import SafetyGate
+    from python_samba.ui.main_window import MainWindow
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    session = open_mock(readonly=False)
+    session.open()
+    window = MainWindow()
+    window.session = session
+    window.gate = SafetyGate(session)
+    page = window.logging_page_widget
+    page.on_connected()
+
+    def wait_for_page() -> None:
+        deadline = time.monotonic() + 3.0
+        while page.serial_worker_active and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        app.processEvents()
+        assert not page.serial_worker_active
+
+    try:
+        page.logging_type_combo.setCurrentIndex(
+            page.logging_type_combo.findData(2)
+        )
+        page.internal_samples.setValue(2048)
+        page.internal_signal_count.setValue(6)
+        page.internal_undersample.setValue(4)
+        page.internal_delay_samples.setValue(20)
+        page.internal_average.setChecked(True)
+        original_event = session.get_event_signal()
+        page.apply_internal()
+        wait_for_page()
+        assert session.get_event_trace_params() == ["2", "2048", "6", "4", "20", "1"]
+        assert session.get_event_signal() == original_event
+
+        page.event_selector.set_io_signal((0, 9, 0))
+        page.event_threshold.setValue(12.5)
+        page.event_trigger_samples.setValue(17)
+        page._write_event_signal()
+        wait_for_page()
+        event = session.get_event_signal()
+        assert event[:3] == ["0", "9", "0"]
+        assert float(event[3]) == pytest.approx(12.5)
+        assert event[4] == "17"
+
+        page._apply_internal_readback(
+            (["2", "100", "4", "5", "10", "1"], ["0"] * 5, event, [], 1000)
+        )
+        assert page.trace_status_labels["trace_time"].text() == "0.5"
+        assert page.trace_status_labels["delay_time"].text() == "0.01"
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_hardware_logging_probe_is_read_only_on_mock(tmp_path: Path, monkeypatch):
     import sys
     from _review import hardware_logging_probe as probe
@@ -268,4 +367,30 @@ def test_hardware_logging_probe_is_read_only_on_mock(tmp_path: Path, monkeypatch
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["status"] == "PASS"
     assert report["controller_writes"] == 0
+    assert all(check["status"] != "FAIL" for check in report["checks"])
+
+
+def test_hardware_logging_interface_probe_restores_mock_state(tmp_path: Path, monkeypatch):
+    import sys
+    from _review import hardware_logging_interface_probe as probe
+
+    monkeypatch.setattr(
+        probe, "open_serial", lambda *_args, **_kwargs: open_mock(readonly=False)
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "hardware_logging_interface_probe.py",
+            "--output-dir", str(tmp_path),
+        ],
+    )
+    assert probe.main() == 0
+    report_path = next(
+        tmp_path.glob("logging_interface_*/logging_interface_report.json")
+    )
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["status"] == "PASS"
+    assert report["writes_restored"] is True
+    assert report["restorable_changed"] == []
     assert all(check["status"] != "FAIL" for check in report["checks"])

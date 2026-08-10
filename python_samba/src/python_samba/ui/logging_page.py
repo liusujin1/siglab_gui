@@ -402,24 +402,24 @@ class LoggingPage(QtWidgets.QWidget):
         self.monitor_table.setCurrentCell(0, 1)
         root.addWidget(self.monitor_table, 1)
 
-        editor = GroupPanel("Selected Signal")
-        edit_layout = QtWidgets.QGridLayout(editor)
-        edit_layout.setContentsMargins(8, 8, 8, 8)
-        self.monitor_number = QtWidgets.QSpinBox()
+        # The legacy UI edits each of the forty signal buttons directly.  Keep
+        # one hidden IOSignalButton as the shared popup/menu owner so the table
+        # stays lightweight, but do not expose the redundant "Selected Signal"
+        # editor that used to require a second Apply click.
+        self.monitor_number = QtWidgets.QSpinBox(page)
         self.monitor_number.setRange(1, 40)
         self.monitor_number.setValue(1)
-        self.monitor_selector = IOSignalButton(tokens=self.monitor_definitions[0])
-        self.monitor_selector.setMinimumWidth(150)
-        self.monitor_raw = QtWidgets.QLabel("Type 0 · Main 0 · Sub 0")
-        self.monitor_raw.setStyleSheet("color:#607785;")
-        self.btn_monitor_write = FlatPush("Apply")
-        edit_layout.addWidget(QtWidgets.QLabel("Signal"), 0, 0)
-        edit_layout.addWidget(self.monitor_number, 0, 1)
-        edit_layout.addWidget(self.monitor_selector, 0, 2)
-        edit_layout.addWidget(self.btn_monitor_write, 0, 3)
-        edit_layout.addWidget(self.monitor_raw, 1, 0, 1, 4)
-        edit_layout.setColumnStretch(2, 1)
-        root.addWidget(editor)
+        self.monitor_number.hide()
+        self.monitor_selector = IOSignalButton(
+            tokens=self.monitor_definitions[0], parent=page
+        )
+        self.monitor_selector.hide()
+        self.monitor_raw = QtWidgets.QLabel(
+            "Type 0 · Main 0 · Sub 0", parent=page
+        )
+        self.monitor_raw.hide()
+        self.btn_monitor_write = FlatPush("Apply", parent=page)
+        self.btn_monitor_write.hide()
         self.monitor_table.currentCellChanged.connect(self._monitor_row_changed)
         self.monitor_number.valueChanged.connect(self._monitor_number_changed)
         self.monitor_selector.ioSignalChanged.connect(self._monitor_selector_changed)
@@ -436,23 +436,44 @@ class LoggingPage(QtWidgets.QWidget):
 
         params_group = GroupPanel("Parameter Setting")
         params_form = QtWidgets.QFormLayout(params_group)
+        self.logging_type_combo = QtWidgets.QComboBox()
+        for label, protocol_value in (
+            ("OverCurrent Event", 0),
+            ("Event Signal Event", 1),
+            ("Standard", 2),
+        ):
+            self.logging_type_combo.addItem(label, protocol_value)
+
         specs = (
-            ("Logging type", 0, 3, 0),
             ("Samples Num", 1, 0x20000, 1024),
             ("Signals Num", 1, 40, 3),
-            ("Undersample", 1, 100000, 1),
-            ("Delay Sample", 0, 0x7FFFFFFF, 1),
-            ("Average", 0, 1, 0),
+            ("Undersample", 1, 0xFFFF, 1),
+            ("Delay Sample", 1, 0x7FFFFFFF, 1),
         )
-        self.internal_param_spins: list[QtWidgets.QSpinBox] = []
-        for label, minimum, maximum, value in specs:
+        parameter_spins: list[QtWidgets.QSpinBox] = []
+        for _label, minimum, maximum, value in specs:
             spin = QtWidgets.QSpinBox()
             spin.setRange(minimum, maximum)
             spin.setValue(value)
             spin.setGroupSeparatorShown(True)
-            self.internal_param_spins.append(spin)
-        for index in (0, 2, 1, 3, 4, 5):
-            params_form.addRow(specs[index][0], self.internal_param_spins[index])
+            parameter_spins.append(spin)
+        (
+            self.internal_samples,
+            self.internal_signal_count,
+            self.internal_undersample,
+            self.internal_delay_samples,
+        ) = parameter_spins
+        self.internal_average = QtWidgets.QCheckBox()
+        self.internal_average.setToolTip("Average samples before storing the trace")
+        # Compatibility for code that iterates over the numeric parameter
+        # editors; protocol type and average now use their proper controls.
+        self.internal_param_spins = parameter_spins
+        params_form.addRow("Logging Type", self.logging_type_combo)
+        params_form.addRow("Signals Num", self.internal_signal_count)
+        params_form.addRow("Samples Num", self.internal_samples)
+        params_form.addRow("Undersample", self.internal_undersample)
+        params_form.addRow("Delay Sample", self.internal_delay_samples)
+        params_form.addRow("Average", self.internal_average)
         parameter_actions = QtWidgets.QHBoxLayout()
         self.btn_internal_apply = FlatPush("Set Parameters")
         self.btn_internal_read = FlatPush("Get Parameters")
@@ -538,6 +559,9 @@ class LoggingPage(QtWidgets.QWidget):
         self.btn_internal_read.clicked.connect(self.read_internal)
         self.btn_internal_apply.clicked.connect(self.apply_internal)
         self.btn_internal_stop.clicked.connect(self.stop_internal)
+        self.event_selector.ioSignalChanged.connect(self._event_signal_changed)
+        self.event_threshold.editingFinished.connect(self._write_event_signal)
+        self.event_trigger_samples.editingFinished.connect(self._write_event_signal)
         self.btn_trace_browse.clicked.connect(self.browse_trace_output)
         self.btn_trace_download.clicked.connect(self.download_trace)
         self.btn_trace_cancel.clicked.connect(self.cancel_trace_download)
@@ -724,6 +748,10 @@ class LoggingPage(QtWidgets.QWidget):
     def _session(self):
         return self.host._require_session()
 
+    def _is_connected(self) -> bool:
+        session = getattr(self.host, "session", None)
+        return bool(session is not None and getattr(session, "connected", False))
+
     def _submit(
         self,
         label: str,
@@ -846,6 +874,7 @@ class LoggingPage(QtWidgets.QWidget):
         self._set_monitor_row(row, values, None)
         self.monitor_raw.setText(f"Type {values[0]} · Main {values[1]} · Sub {values[2]}")
         self.log_mon_sig.setText(" ".join(str(value) for value in values))
+        self._write_monitor_channel(row, values)
 
     def read_monitor_definitions(self) -> None:
         def work():
@@ -886,21 +915,37 @@ class LoggingPage(QtWidgets.QWidget):
 
     def write_selected_monitor(self) -> None:
         row = self.monitor_number.value() - 1
-        tokens = self.monitor_selector.io_tokens()
+        self._write_monitor_channel(row, self.monitor_selector.io_tokens())
+
+    def _write_monitor_channel(
+        self, row: int, tokens: tuple[int, int, int]
+    ) -> None:
+        """Write one DSMOS definition immediately, as the legacy buttons do."""
+
+        if not 0 <= row < 40:
+            return
+        values = tuple(int(value) for value in tokens[:3])
+        if not self._is_connected():
+            return
 
         def work():
             self.host._set_writable(True)
-            self._session().set_monitor_signal(row, *tokens)
+            self._session().set_monitor_signal(row, *values)
             return tuple(int(value) for value in self._session().get_monitor_signal(row)[:3])
 
         def done(readback):
             self.monitor_definitions[row] = readback
             self.monitor_names[row] = IOSignalButton.format_io_signal(readback)
             self._set_monitor_row(row, readback, None)
+            if self.monitor_number.value() - 1 == row:
+                self.monitor_selector.set_io_signal(readback)
+                self.monitor_raw.setText(
+                    f"Type {readback[0]} · Main {readback[1]} · Sub {readback[2]}"
+                )
             self.log_mon_num.setValue(row)
             self.log_mon_sig.setText(" ".join(str(value) for value in readback))
 
-        self._submit(f"Apply monitor channel {row}", work, done)
+        self._submit(f"Apply monitor signal {row + 1}", work, done)
 
     def update_workspace(self) -> None:
         """Refresh the three visible logging columns in one serialized task."""
@@ -973,8 +1018,20 @@ class LoggingPage(QtWidgets.QWidget):
     def _apply_internal_readback(self, payload) -> None:
         params, info, event, event_time = payload[:4]
         sample_frequency = float(payload[4]) if len(payload) > 4 else 0.0
-        for spin, value in zip(self.internal_param_spins, params):
-            spin.setValue(_protocol_int(value, spin.value()))
+        if params:
+            mode_index = self.logging_type_combo.findData(_protocol_int(params[0]))
+            if mode_index >= 0:
+                self.logging_type_combo.setCurrentIndex(mode_index)
+        for spin, param_index in (
+            (self.internal_samples, 1),
+            (self.internal_signal_count, 2),
+            (self.internal_undersample, 3),
+            (self.internal_delay_samples, 4),
+        ):
+            if len(params) > param_index:
+                spin.setValue(_protocol_int(params[param_index], spin.value()))
+        if len(params) > 5:
+            self.internal_average.setChecked(bool(_protocol_int(params[5])))
         if len(params) > 2:
             self.monitor_used.setValue(max(1, min(40, _protocol_int(params[2], 1))))
         if len(event) >= 3:
@@ -999,7 +1056,7 @@ class LoggingPage(QtWidgets.QWidget):
                 format_ui_number(sample_count * under_sample / sample_frequency)
             )
             self.trace_status_labels["delay_time"].setText(
-                format_ui_number(delay_samples * under_sample / sample_frequency)
+                format_ui_number(delay_samples / sample_frequency)
             )
         else:
             self.trace_status_labels["trace_time"].setText("—")
@@ -1031,15 +1088,19 @@ class LoggingPage(QtWidgets.QWidget):
         self.trace_selector.blockSignals(False)
 
     def apply_internal(self) -> None:
-        params = tuple(spin.value() for spin in self.internal_param_spins)
-        event_tokens = self.event_selector.io_tokens()
-        event = (*event_tokens, self.event_threshold.value(), self.event_trigger_samples.value())
+        params = (
+            int(self.logging_type_combo.currentData()),
+            self.internal_samples.value(),
+            self.internal_signal_count.value(),
+            self.internal_undersample.value(),
+            self.internal_delay_samples.value(),
+            int(self.internal_average.isChecked()),
+        )
 
         def work():
             self.host._set_writable(True)
             session = self._session()
             session.set_event_trace_params(*params)
-            session.set_event_signal(*event)
             return (
                 session.get_event_trace_params(),
                 session.get_event_trace_info(),
@@ -1049,6 +1110,46 @@ class LoggingPage(QtWidgets.QWidget):
             )
 
         self._submit("Apply internal trace configuration", work, self._apply_internal_readback)
+
+    def _event_values(self) -> tuple[int, int, int, float, int]:
+        tokens = tuple(int(value) for value in self.event_selector.io_tokens())
+        return (
+            tokens[0],
+            tokens[1],
+            tokens[2],
+            float(self.event_threshold.value()),
+            int(self.event_trigger_samples.value()),
+        )
+
+    def _event_signal_changed(self, _tokens: Any) -> None:
+        self._write_event_signal()
+
+    def _write_event_signal(self) -> None:
+        """Apply DSETS immediately when an Event Setting field is committed."""
+
+        values = self._event_values()
+        self.log_event.setText(" ".join(format_ui_number(value) for value in values))
+        if not self._is_connected():
+            return
+
+        def work():
+            self.host._set_writable(True)
+            session = self._session()
+            session.set_event_signal(*values)
+            return session.get_event_signal()
+
+        def done(readback):
+            if len(readback) >= 3:
+                self.event_selector.set_io_signal(
+                    tuple(_protocol_int(value) for value in readback[:3])
+                )
+            if len(readback) > 3:
+                self.event_threshold.setValue(float(readback[3]))
+            if len(readback) > 4:
+                self.event_trigger_samples.setValue(_protocol_int(readback[4]))
+            self.log_event.setText(" ".join(str(value) for value in readback))
+
+        self._submit("Apply event signal", work, done)
 
     def start_internal(self) -> None:
         def checked(info):
