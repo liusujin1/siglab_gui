@@ -22,6 +22,7 @@ import numpy as np
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from python_samba.transport.comm_server import CommServerConfig, CommServerTransport
+from python_samba.ui.server_discovery import choose_communication_server
 
 from python_sidmat.analysis.pwelch import pwelch
 from python_sidmat.analysis.types import MeasurementRawData
@@ -435,6 +436,13 @@ class MainWindow(QtWidgets.QMainWindow):
         server_row.addWidget(self.server_endpoint_edit, 1)
         conn.addLayout(server_row)
 
+        self.discover_server_btn = QtWidgets.QPushButton("Discover Server")
+        self.discover_server_btn.setToolTip(
+            "Find Communication Servers on the local network and Tailscale"
+        )
+        self.discover_server_btn.clicked.connect(self._discover_server)
+        conn.addWidget(self.discover_server_btn)
+
         self.update_ports_btn = QtWidgets.QPushButton("Update Comm Ports List")
         self.update_ports_btn.clicked.connect(self._update_ports)
         self.terminate_btn = QtWidgets.QPushButton(
@@ -497,6 +505,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.port_cbx.setEnabled(physical and not connected)
         self.baud_cbx.setEnabled(physical and not connected)
         self.server_endpoint_edit.setEnabled(backend == "server" and not connected)
+        self.discover_server_btn.setEnabled(backend == "server" and not connected)
         self.update_ports_btn.setEnabled(physical and not connected)
         self.terminate_btn.setEnabled(backend == "server")
 
@@ -831,6 +840,27 @@ class MainWindow(QtWidgets.QMainWindow):
     # ====================================================================
     # Connection
     # ====================================================================
+
+    def _discover_server(self) -> None:
+        last_server_id = str(
+            self._connection_settings.value("Connection/ServerId", "")
+        )
+        selected = choose_communication_server(
+            self, last_server_id=last_server_id
+        )
+        if selected is None:
+            return
+        self.backend_cbx.setCurrentText("server")
+        self.server_endpoint_edit.setText(selected.endpoint)
+        self.port_cbx.setEditText(str(selected.serial_port or ""))
+        baud_text = str(selected.baudrate or 57600)
+        if self.baud_cbx.findText(baud_text) >= 0:
+            self.baud_cbx.setCurrentText(baud_text)
+        self._connection_settings.setValue("Connection/ServerId", selected.server_id)
+        self._connection_settings.setValue("Connection/Server", selected.endpoint)
+        self._connection_settings.setValue("Connection/Port", selected.serial_port or "")
+        self._connection_settings.setValue("Connection/Baudrate", baud_text)
+        self.connect_btn.setChecked(True)
 
     def _on_connect_toggled(self, checked: bool) -> None:
         if checked:

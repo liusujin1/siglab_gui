@@ -8,6 +8,7 @@ env/
 build/
 dist/
 *.egg-info/
+!PythonSambaCommServer.spec
 
 # Local reverse-engineering/reference material and QA captures are not needed
 # to build or run python_samba.
@@ -19,6 +20,7 @@ _docs_extract/
 _review/*
 !_review/*.py
 _review2/
+/yuanma/
 *.png
 .tmp_rg.txt
 

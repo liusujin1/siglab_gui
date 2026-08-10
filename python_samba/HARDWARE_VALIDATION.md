@@ -7,7 +7,9 @@ of the repository.
 
 ## Final results
 
-- Local and remote automated suites: **95 passed**; `compileall` passed.
+- Current automated suites: **148 Samba tests** and **131 SIDMAT tests** passed
+  (the 39-test Qt-heavy Samba page file was run in bounded groups); remote
+  `compileall`, 107 non-page Samba tests, and all 131 SIDMAT tests passed.
 - Supported read-only endpoint inventory: **315 passed** before and after
   writable/action tests.
 - Same-value write/readback coverage: **297 writable UI parameter keys**;
@@ -38,3 +40,19 @@ operation:
 Firmware capability discovery excluded 20 endpoints that this controller does
 not advertise (including Cascaded Position, Pneumatic Ramp, Safety/ZMS, and
 Analysis).  These are capability skips rather than test failures.
+
+## Discoverable shared Communication Server
+
+- LAN UDP discovery and Tailscale peer discovery returned the same stable
+  service UUID through their respective source addresses, without a copied
+  token or fixed client endpoint.
+- SAMBA and SIDMAT attached together through the server. SIDMAT captured 1024
+  fast-data samples while SAMBA completed seven status refresh cycles.
+- A temporary cross-client output-limit write was visible to both clients and
+  restored. Direct COM1 access was denied while clients were attached and was
+  available immediately after the final detach.
+- Read-only probes before and after the shared-server test each passed 315
+  endpoints; the 297-key writable comparison reported zero missing and zero
+  changed values.
+- The portable `PythonSambaCommServer.exe` was launched and connected on the
+  hardware host without invoking its Python environment.

@@ -50,4 +50,6 @@ The `codex/samba` branch also contains the controller applications:
 
 Both applications default to the shared Communication Server, so only one
 process owns the physical serial port while complete RCI exchanges from both
-clients are executed through a global FIFO.
+clients are executed through a global FIFO. A standalone Windows server and
+LAN/Tailscale discovery let both GUIs find and connect to the controller host
+without entering a fixed IP address; see the SAMBA README for setup details.

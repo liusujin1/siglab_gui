@@ -17,6 +17,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Callable
 
+from python_samba.commserver.discovery import is_trusted_peer_host
 from python_samba.commserver.protocol import (
     MAX_MESSAGE_BYTES,
     PROTOCOL_VERSION,
@@ -122,6 +123,7 @@ class CommunicationServer:
         token: str | None = None,
         token_file: str | Path | None = None,
         force_token: bool = False,
+        auth_mode: str = "auto",
         transport_factory: TransportFactory = _new_transport,
         max_message_bytes: int = MAX_MESSAGE_BYTES,
         log_file: str | Path | None = None,
@@ -129,6 +131,13 @@ class CommunicationServer:
         preferred_port: str | None = None,
         preferred_baudrate: int = 57600,
     ) -> None:
+        auth_mode = str(auth_mode).strip().lower().replace("_", "-")
+        if auth_mode not in {"auto", "token", "trusted-network"}:
+            raise ServerConfigError(
+                "auth_mode must be 'auto', 'token', or 'trusted-network'"
+            )
+        if force_token:
+            auth_mode = "token"
         if isinstance(listen, tuple):
             listen = [listen]
         if not listen:
@@ -136,21 +145,31 @@ class CommunicationServer:
         endpoints: list[tuple[str, int]] = []
         for host, port in listen:
             host, port = str(host).strip(), int(port)
-            if not is_allowed_listen_host(host):
+            wildcard = host == "0.0.0.0"
+            if wildcard and auth_mode not in {"token", "trusted-network"}:
                 raise ServerConfigError(
-                    f"refusing to listen on {host!r}; use loopback or a concrete "
-                    "Tailscale 100.64.0.0/10 address"
+                    "0.0.0.0 requires token or trusted-network authentication mode"
+                )
+            if not wildcard and not is_allowed_listen_host(host):
+                raise ServerConfigError(
+                    f"refusing to listen on {host!r}; use loopback, a concrete "
+                    "RFC1918 LAN address, or a Tailscale 100.64.0.0/10 address"
                 )
             if not 0 <= port <= 65535:
                 raise ServerConfigError(f"invalid listen port: {port}")
             endpoints.append((host, port))
         self._requested_endpoints = endpoints
         self._force_token = bool(force_token)
+        self._auth_mode = auth_mode
         self._remote_enabled = any(not is_loopback_host(host) for host, _ in endpoints)
         self._token_file = Path(token_file) if token_file else default_token_file()
         self._token = token or (
             _load_or_create_token(self._token_file)
-            if self._remote_enabled or self._force_token
+            if (
+                self._auth_mode == "token"
+                or (self._auth_mode == "auto" and self._remote_enabled)
+                or self._force_token
+            )
             else None
         )
         self._transport_factory = transport_factory
@@ -192,6 +211,12 @@ class CommunicationServer:
     def token_file(self) -> Path:
         return self._token_file
 
+    @property
+    def auth_mode(self) -> str:
+        if self._auth_mode == "auto":
+            return "token" if self._remote_enabled else "local"
+        return self._auth_mode
+
     def start(self) -> "CommunicationServer":
         with self._lock:
             if self._started:
@@ -229,7 +254,14 @@ class CommunicationServer:
             self._worker.start()
             for listener in listeners:
                 host = str(listener.getsockname()[0])
-                require_token = self._force_token or not is_loopback_host(host)
+                require_token = bool(
+                    self._force_token
+                    or self._auth_mode == "token"
+                    or (
+                        self._auth_mode == "auto"
+                        and not is_loopback_host(host)
+                    )
+                )
                 thread = threading.Thread(
                     target=self._accept_loop,
                     args=(listener, require_token),
@@ -241,7 +273,7 @@ class CommunicationServer:
             self._logger.info(
                 "server started listeners=%s token_required=%s",
                 [format_endpoint(*address) for address in self.addresses],
-                self._remote_enabled or self._force_token,
+                self.auth_mode == "token",
             )
         return self
 
@@ -310,6 +342,7 @@ class CommunicationServer:
             serial_open = bool(self._serial and self._serial.is_open)
             return {
                 "protocol": PROTOCOL_VERSION,
+                "auth_mode": self.auth_mode,
                 "listeners": [format_endpoint(*address) for address in self.addresses],
                 "serial": {
                     "open": serial_open,
@@ -343,12 +376,22 @@ class CommunicationServer:
                 continue
             except OSError:
                 break
+            peer_host = str(peer[0])
+            if self._auth_mode == "trusted-network" and not is_trusted_peer_host(
+                peer_host
+            ):
+                self._logger.warning("rejected untrusted network peer %s", peer_host)
+                try:
+                    client_sock.close()
+                except OSError:
+                    pass
+                continue
             client_sock.settimeout(10.0)
             with self._lock:
                 self._client_sockets.add(client_sock)
             thread = threading.Thread(
                 target=self._client_loop,
-                args=(client_sock, str(peer[0]), require_token),
+                args=(client_sock, peer_host, require_token),
                 name=f"CommServer-Client-{peer[0]}",
                 daemon=True,
             )

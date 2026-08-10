@@ -6,6 +6,7 @@ import argparse
 import sys
 
 from python_samba import __version__
+from python_samba.commserver.discovery import DiscoveryClient
 from python_samba.protocol.codes import status_name
 from python_samba.protocol.commands import RciCommandError
 from python_samba.protocol.frame import ProtocolError
@@ -81,6 +82,20 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_gui = sub.add_parser("gui", help="Launch PySide6 tuning UI")
     p_gui.set_defaults(func=cmd_gui)
+
+    p_discover = sub.add_parser(
+        "discover", help="Find Communication Servers on LAN and Tailscale"
+    )
+    p_discover.add_argument("--timeout", type=float, default=1.5)
+    p_discover.add_argument("--no-tailscale", action="store_true")
+    p_discover.add_argument("--discovery-port", type=int, default=47620)
+    p_discover.add_argument(
+        "--direct-host",
+        action="append",
+        default=[],
+        help="also probe an explicit host; may be repeated",
+    )
+    p_discover.set_defaults(func=cmd_discover)
 
     p_ff = sub.add_parser("ff", parents=[common], help="Read feedforward status / one filter stage")
     p_ff.add_argument("--source", type=int, default=0, help="FF source index")
@@ -293,6 +308,29 @@ def cmd_raw(args: argparse.Namespace) -> int:
         return 0 if resp.ok else 2
     finally:
         session.close()
+
+
+def cmd_discover(args: argparse.Namespace) -> int:
+    servers = DiscoveryClient(
+        discovery_port=args.discovery_port,
+        include_tailscale=not args.no_tailscale,
+        direct_hosts=args.direct_host,
+    ).scan(timeout=args.timeout)
+    if not servers:
+        print("No Communication Server found.")
+        return 1
+    for server in servers:
+        controller = (
+            f"{server.serial_port} @ {server.baudrate}"
+            if server.serial_port and server.baudrate
+            else "no controller port"
+        )
+        print(
+            f"{server.name} | {server.hostname} | {server.network} | "
+            f"{server.endpoint} | {controller} | {server.state} | "
+            f"{server.client_count} client(s)"
+        )
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:

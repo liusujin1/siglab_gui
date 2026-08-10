@@ -61,15 +61,22 @@ def is_loopback_host(host: str) -> bool:
 
 
 def is_allowed_listen_host(host: str) -> bool:
-    """Allow loopback or a concrete Tailscale CGNAT address only."""
+    """Allow loopback, concrete RFC1918 LAN, or Tailscale IPv4 addresses."""
     if is_loopback_host(host):
         return True
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
         return False
-    tailscale = ipaddress.ip_network("100.64.0.0/10")
-    return isinstance(address, ipaddress.IPv4Address) and address in tailscale
+    if not isinstance(address, ipaddress.IPv4Address):
+        return False
+    allowed = (
+        ipaddress.ip_network("10.0.0.0/8"),
+        ipaddress.ip_network("172.16.0.0/12"),
+        ipaddress.ip_network("192.168.0.0/16"),
+        ipaddress.ip_network("100.64.0.0/10"),
+    )
+    return any(address in network for network in allowed)
 
 
 def encode_bytes(value: bytes) -> str:

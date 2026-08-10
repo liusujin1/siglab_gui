@@ -12,16 +12,19 @@ license = { text = "Proprietary" }
 authors = [{ name = "python_samba" }]
 dependencies = [
   "pyserial>=3.5",
+  "psutil>=5.9",
 ]
 
 [project.optional-dependencies]
 gui = ["PySide6>=6.6"]
 dev = ["pytest>=8.0"]
+build = ["PySide6>=6.6", "pyinstaller>=6.0"]
 
 [project.scripts]
 python-samba = "python_samba.cli:main"
 python-samba-gui = "python_samba.app:main"
 python-samba-comm-server = "python_samba.commserver.cli:main"
+python-samba-comm-server-gui = "python_samba.commserver.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

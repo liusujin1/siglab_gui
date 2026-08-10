@@ -178,7 +178,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         if not trace_triggered.wait(10.0):
             raise AssertionError("Sidmat did not issue DASTA within 10 seconds")
 
-        if args.host_server:
+        if args.host_server or args.exercise_write:
             requested_limit = _alternate_limit(original_limit)
             samba.set_output_limit(requested_limit)
             samba_read = samba.get_output_limit()
@@ -324,6 +324,11 @@ def main() -> int:
     parser.add_argument("--server", default="127.0.0.1:47619")
     parser.add_argument("--token-file", default=None)
     parser.add_argument("--host-server", action="store_true")
+    parser.add_argument(
+        "--exercise-write",
+        action="store_true",
+        help="temporarily change BSOPL through both clients and restore it",
+    )
     parser.add_argument("--samples", type=int, default=1024)
     parser.add_argument("--fast", action="store_true")
     parser.add_argument("--log-file", default=None)

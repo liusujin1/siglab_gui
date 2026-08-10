@@ -68,6 +68,9 @@ single-instance tray server. SAMBA status reads and SIDMAT DASTA/DGTAS/DGTBB
 measurement requests share one global FIFO. There is intentionally no measurement
 lease: another client may update parameters during acquisition, and the last write
 wins. Use `--server`, `--token-file`, and `--no-auto-start` for a Tailscale server.
+The GUI also provides **Discover Server**: it scans UDP `47620` on the local network
+and probes online Tailscale peers, then fills the advertised COM/baud/endpoint and
+connects the selected server without requiring a fixed IP.
 
 * **Measurement engine** ports `SAMBA19xUI.UserControls.TraceInfo`
   `StartTracing`/`LookForTraceStatus`/`GetTraceData`: per average

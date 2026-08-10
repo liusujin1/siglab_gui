@@ -50,6 +50,7 @@ from python_samba.ui.label_files import (
     parse_label_file,
     runtime_label_warnings,
 )
+from python_samba.ui.server_discovery import choose_communication_server
 from python_samba.ui.widgets import (
     POS_AXIS_LABELS,
     VEL_AXIS_LABELS,
@@ -803,6 +804,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         # Connections
         self.btn_connect.clicked.connect(self.on_connect)
         self.btn_disconnect.clicked.connect(self.on_disconnect)
+        self.btn_discover_server.clicked.connect(self.on_discover_server)
         self.main_navigation.currentChanged.connect(
             self._on_main_navigation_changed
         )
@@ -1457,6 +1459,10 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         )
         self.btn_connect = FlatPush("Connect")
         self.btn_disconnect = FlatPush("Disconnect")
+        self.btn_discover_server = FlatPush("Discover Server")
+        self.btn_discover_server.setToolTip(
+            "Find Communication Servers on the local network and Tailscale"
+        )
         self.btn_disconnect.setEnabled(False)
         self.status_lbl = QtWidgets.QLabel("Disconnected")
         self.status_lbl.setObjectName("quickConnectionStatus")
@@ -1470,9 +1476,10 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         conn.addWidget(self.baud, 3, 1)
         conn.addWidget(QtWidgets.QLabel("Server"), 4, 0)
         conn.addWidget(self.server_endpoint, 4, 1)
-        conn.addWidget(self.btn_connect, 5, 0)
-        conn.addWidget(self.btn_disconnect, 5, 1)
-        conn.addWidget(self.status_lbl, 6, 0, 1, 2)
+        conn.addWidget(self.btn_discover_server, 5, 0, 1, 2)
+        conn.addWidget(self.btn_connect, 6, 0)
+        conn.addWidget(self.btn_disconnect, 6, 1)
+        conn.addWidget(self.status_lbl, 7, 0, 1, 2)
         return panel
 
     # ------------------------------------------------------------------
@@ -2140,6 +2147,9 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         self.port.setEnabled(physical)
         self.baud.setEnabled(physical)
         self.server_endpoint.setEnabled(backend == "server")
+        self.btn_discover_server.setEnabled(
+            backend == "server" and not bool(self.session and self.session.connected)
+        )
         connect_backend = getattr(self, "_backend_connect", None)
         if connect_backend is not None and connect_backend.currentText() != backend:
             previous = connect_backend.blockSignals(True)
@@ -4297,6 +4307,27 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
     # Connection
     # ------------------------------------------------------------------
 
+    def on_discover_server(self) -> None:
+        last_server_id = str(
+            self._connection_settings.value("Connection/ServerId", "")
+        )
+        selected = choose_communication_server(
+            self, last_server_id=last_server_id
+        )
+        if selected is None:
+            return
+        self.backend.setCurrentText("server")
+        self.server_endpoint.setText(selected.endpoint)
+        self.port.setText(str(selected.serial_port or ""))
+        baud_text = str(selected.baudrate or 57600)
+        if self.baud.findText(baud_text) >= 0:
+            self.baud.setCurrentText(baud_text)
+        self._connection_settings.setValue("Connection/ServerId", selected.server_id)
+        self._connection_settings.setValue("Connection/Server", selected.endpoint)
+        self._connection_settings.setValue("Connection/Port", selected.serial_port or "")
+        self._connection_settings.setValue("Connection/Baudrate", int(selected.baudrate or 57600))
+        self.on_connect()
+
     def on_connect(self) -> None:
         def work() -> None:
             try:
@@ -4330,6 +4361,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
                 self.gate = SafetyGate(self.session)
                 self.btn_connect.setEnabled(False)
                 self.btn_disconnect.setEnabled(True)
+                self.btn_discover_server.setEnabled(False)
                 self.status_lbl.setText(f"Connected — {version}")
                 if backend == "mock":
                     endpoint = "Mock controller"
@@ -4480,6 +4512,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         self._apply_controller_capabilities()
         self.btn_connect.setEnabled(True)
         self.btn_disconnect.setEnabled(False)
+        self.btn_discover_server.setEnabled(self.backend.currentText() == "server")
         self.status_lbl.setText("Disconnected")
         self.loop_states.conn_lbl.setText("Not Connected")
         self._set_connection_display(False)

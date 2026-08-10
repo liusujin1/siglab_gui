@@ -41,6 +41,9 @@ py -3 -m python_samba.cli diag --backend mock
 py -3 -m python_samba.cli connect --port COM1 --baud 57600
 py -3 -m python_samba.cli status --port COM1
 
+# 自动发现局域网和 Tailscale 中的独立服务端
+py -3 -m python_samba.cli discover
+
 # 仅诊断时绕过服务器、独占直连
 py -3 -m python_samba.cli connect --backend serial --port COM1 --baud 57600
 
@@ -63,11 +66,29 @@ py -3 -m pytest -q
 - 共享模式不缓存参数、不虚拟化状态、也不设测量独占锁；两个软件看到的都是真机
   当前值，冲突写入遵循“后写生效”。
 - 手动启动：`python-samba-comm-server --port COM1 --baud 57600 --tray`。
+- 可发现可信网络服务：
+  `python-samba-comm-server --auth trusted-network --discover --port COM1 --baud 57600 --tray`。
+  服务使用 TCP `47619`，每两秒通过 UDP `47620` 广播并响应发现请求；客户端通过
+  **Discover Server** 选择后直接连接，不需要填写 IP。Tailscale 不转发广播，客户端会
+  从 `tailscale status --json` 获取在线节点并进行单播发现。
 - Tailscale：同时传入回环和 Tailscale 地址，例如
   `python-samba-comm-server --listen 127.0.0.1:47619 --listen 100.x.y.z:47619 --tray`。
   非回环连接强制使用 `%LOCALAPPDATA%\python_samba\communication_server.token`；
   客户端通过 `--token-file` 指定安全复制后的令牌。服务器拒绝普通局域网/公网监听地址。
 - 轮转日志位于 `%LOCALAPPDATA%\python_samba\communication_server.log`。
+
+### 独立服务端程序
+
+运行 `build_comm_server.bat` 可生成单文件
+`dist\PythonSambaCommServer.exe`。把该文件复制到连接控制器的任意 Windows 电脑并
+双击运行即可；程序会按 USB 硬件身份恢复串口、自动启动共享服务、广播自身并缩入系统
+托盘。配置保存在 `%LOCALAPPDATA%\python_samba\communication_server.json`。
+
+独立程序默认使用 **Trusted LAN / Tailscale** 模式：只接受回环、RFC1918 局域网和
+Tailscale `100.64.0.0/10` 来源，但不校验用户身份。同一局域网中的其他用户也能控制
+真机，因此只应在可信实验室网络中启用；需要鉴权时可在服务端切换为 Access token。
+首次运行可安装仅允许 `LocalSubnet` 和 Tailscale 来源访问 TCP `47619`、UDP `47620`
+的 Windows 防火墙规则。
 
 ## GUI 导航（对照 SAMBA19xUI）
 

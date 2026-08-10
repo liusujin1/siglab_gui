@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import socket
 import sys
 import threading
 from pathlib import Path
@@ -12,6 +13,10 @@ from python_samba.commserver.protocol import (
     DEFAULT_ENDPOINT,
     default_log_file,
     parse_endpoint,
+)
+from python_samba.commserver.discovery import (
+    DiscoveryAnnouncer,
+    load_or_create_server_id,
 )
 from python_samba.commserver.server import CommunicationServer, ServerAlreadyRunning
 
@@ -23,7 +28,7 @@ def _parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="HOST:PORT",
-        help="listen endpoint; repeat for loopback plus a Tailscale address",
+        help="listen endpoint; repeat for loopback/LAN/Tailscale as needed",
     )
     parser.add_argument("--port", default=None, help="preferred physical COM port")
     parser.add_argument("--baud", type=int, default=57600)
@@ -32,6 +37,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--log-file", default=None)
     parser.add_argument("--log-level", default="INFO")
     parser.add_argument("--tray", action="store_true")
+    parser.add_argument(
+        "--auth",
+        choices=["auto", "token", "trusted-network"],
+        default="auto",
+        help="remote authentication policy (trusted-network is intentionally unauthenticated)",
+    )
+    parser.add_argument("--discover", action="store_true", help="advertise on LAN/Tailscale UDP discovery")
+    parser.add_argument("--name", default=None, help="name shown in discovery results")
     return parser
 
 
@@ -134,15 +147,20 @@ def _run_tray(server: CommunicationServer, log_file: Path) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     log_file = Path(args.log_file) if args.log_file else default_log_file()
+    listeners = _listen_endpoints(args.listen)
+    if args.discover and args.auth == "trusted-network" and not args.listen:
+        listeners = [("0.0.0.0", listeners[0][1])]
     server = CommunicationServer(
-        _listen_endpoints(args.listen),
+        listeners,
         token=args.token,
         token_file=args.token_file,
+        auth_mode=args.auth,
         log_file=log_file,
         log_level=args.log_level,
         preferred_port=args.port,
         preferred_baudrate=args.baud,
     )
+    announcer: DiscoveryAnnouncer | None = None
     try:
         server.start()
     except ServerAlreadyRunning:
@@ -150,6 +168,20 @@ def main(argv: list[str] | None = None) -> int:
         # the singleton and every losing helper exits quietly.
         return 0
     try:
+        if args.discover:
+            announcer = DiscoveryAnnouncer(
+                server.status,
+                server_id=load_or_create_server_id(),
+                name=args.name or f"{socket.gethostname()} – SAMBA Controller",
+                tcp_port=server.addresses[0][1],
+                auth_mode=server.auth_mode,
+            )
+            announcer.start()
+            if announcer.last_error:
+                raise RuntimeError(
+                    f"UDP discovery failed on port {announcer.discovery_port}: "
+                    f"{announcer.last_error}"
+                )
         if args.tray:
             return _run_tray(server, log_file)
         server.serve_forever()
@@ -157,6 +189,8 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         return 130
     finally:
+        if announcer is not None:
+            announcer.stop()
         server.stop()
 
 
