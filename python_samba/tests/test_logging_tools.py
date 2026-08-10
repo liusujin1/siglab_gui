@@ -122,7 +122,21 @@ def test_logging_page_is_primary_and_exposes_40_channels():
         labels = [button.text() for button in window.nav_buttons]
         assert "Logging" in labels
         page = window.logging_page_widget
-        assert page.monitor_table.rowCount() == 40
+        assert page.workspace_splitter.count() == 3
+        assert page.monitor_table.rowCount() == 20
+        assert len(page.monitor_signal_buttons) == 40
+        assert page.monitor_signal_buttons[0].text()
+        assert page.monitor_signal_buttons[20].text()
+        assert page.auxiliary_panel.isHidden()
+        page._show_auxiliary(0)
+        assert not page.auxiliary_panel.isHidden()
+        assert page.auxiliary_tabs.currentIndex() == 0
+        page._show_auxiliary(1)
+        assert page.auxiliary_tabs.currentIndex() == 1
+        page._arrange_logging_toolbar(True)
+        assert page._toolbar_compact
+        page._arrange_logging_toolbar(False)
+        assert not page._toolbar_compact
         assert page.file_signal_count.maximum() == 40
         assert page.trace_progress.maximum() == 100
     finally:
@@ -147,7 +161,10 @@ def test_logging_monitor_refresh_does_not_reinsert_owned_table_items():
         page = window.logging_page_widget
         page._set_monitor_row(0, (0, 0, 0), 1.0)
         page._set_monitor_row(0, (1, 2, 3), 2.0)
-        assert page.monitor_table.item(0, 1).text()
+        page._set_monitor_row(20, (0, 3, 0), 3.0)
+        assert page.monitor_signal_buttons[0].text()
+        assert page.monitor_table.item(0, 2).text() == "2"
+        assert page.monitor_table.item(0, 5).text() == "3"
         assert not any("already owned by another QTableWidget" in msg for msg in messages)
     finally:
         QtCore.qInstallMessageHandler(previous_handler)
@@ -193,6 +210,37 @@ def test_logging_page_starts_and_stops_background_file_acquisition(tmp_path: Pat
         assert len(record.rows) >= 3
         assert len(record.rows[0]) == 42
         assert page.btn_file_start.isEnabled()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_logging_workspace_update_populates_all_three_columns():
+    pytest.importorskip("PySide6")
+    from PySide6 import QtWidgets
+    from python_samba.services.safety import SafetyGate
+    from python_samba.ui.main_window import MainWindow
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    session = open_mock(readonly=False)
+    session.open()
+    window = MainWindow()
+    window.session = session
+    window.gate = SafetyGate(session)
+    page = window.logging_page_widget
+    page.on_connected()
+    try:
+        page.update_workspace()
+        deadline = time.monotonic() + 3.0
+        while page.serial_worker_active and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        app.processEvents()
+        assert not page.serial_worker_active
+        assert page._definitions_loaded
+        assert page.monitor_table.item(0, 2).text() != "—"
+        assert page.trace_status_labels["frequency"].text().endswith("Hz")
+        assert page.file_state.text() == "Idle"
     finally:
         window.close()
         app.processEvents()

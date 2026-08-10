@@ -143,6 +143,7 @@ class LoggingPage(QtWidgets.QWidget):
         self._shutdown = False
         self._download_cancel = threading.Event()
         self.file_service: FileLoggingService | None = None
+        self._active_file_duration_s: float | None = None
         self.monitor_definitions: list[tuple[int, int, int]] = [(0, index, 0) for index in range(40)]
         self.monitor_names: list[str] = [
             IOSignalButton.format_io_signal(tokens) for tokens in self.monitor_definitions
@@ -164,99 +165,260 @@ class LoggingPage(QtWidgets.QWidget):
         return bool(self.file_service and self.file_service.running)
 
     def _build_ui(self) -> None:
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Expanding
+        )
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(12, 8, 12, 12)
         root.setSpacing(8)
-        banner = QtWidgets.QFrame()
-        banner.setObjectName("loggingBanner")
-        banner.setStyleSheet(
-            "QFrame#loggingBanner { background:#e7f3f9; border:1px solid #a9c7d7;"
+        toolbar = QtWidgets.QFrame()
+        toolbar.setObjectName("loggingToolbar")
+        toolbar.setSizePolicy(
+            QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed
+        )
+        toolbar.setStyleSheet(
+            "QFrame#loggingToolbar { background:#e7f3f9; border:1px solid #a9c7d7;"
             " border-radius:8px; }"
         )
-        banner_layout = QtWidgets.QHBoxLayout(banner)
-        title = QtWidgets.QLabel("Controller Logging & Trace Acquisition")
-        title.setStyleSheet("font-size:18px; font-weight:700; color:#234c64;")
-        subtitle = QtWidgets.QLabel(
-            "40 monitor channels · internal event traces · streamed host files"
+        toolbar_layout = QtWidgets.QGridLayout(toolbar)
+        toolbar_layout.setContentsMargins(8, 6, 8, 6)
+        toolbar_layout.setSpacing(6)
+        self.logging_toolbar_layout = toolbar_layout
+        self.btn_internal_start = FlatPush("Start Internal Log")
+        self.btn_file_start = FlatPush("Start File Log")
+        self.btn_show_records = FlatPush("Records / Plot")
+        self.btn_show_analysis = FlatPush("Analysis")
+        self.btn_logging_update = FlatPush("Update")
+        for button in (
+            self.btn_internal_start,
+            self.btn_file_start,
+            self.btn_show_records,
+            self.btn_show_analysis,
+            self.btn_logging_update,
+        ):
+            button.setMinimumHeight(34)
+        self.file_toolbar_progress = QtWidgets.QProgressBar()
+        self.file_toolbar_progress.setRange(0, 100)
+        self.file_toolbar_progress.setValue(0)
+        self.file_toolbar_progress.setTextVisible(False)
+        self.file_toolbar_progress.setMinimumWidth(120)
+        self.file_toolbar_progress.setMaximumWidth(300)
+        self.file_toolbar_progress.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed
         )
-        subtitle.setStyleSheet("color:#5c7483;")
-        subtitle.setWordWrap(False)
-        subtitle.setMinimumWidth(240)
-        subtitle.setMaximumWidth(650)
-        subtitle.setSizePolicy(
-            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred
-        )
+        self.file_toolbar_elapsed = QtWidgets.QLabel("0 s elapsed")
+        self.file_toolbar_elapsed.setMinimumWidth(90)
+        self.file_toolbar_elapsed.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
         self.page_status = QtWidgets.QLabel("Ready")
         self.page_status.setStyleSheet(
             "background:#ffffff; border:1px solid #aac0cc; border-radius:10px;"
             " padding:4px 12px; color:#31566c;"
         )
-        banner_layout.addWidget(title)
-        banner_layout.addSpacing(12)
-        banner_layout.addWidget(subtitle)
-        banner_layout.addStretch(1)
-        banner_layout.addWidget(self.page_status)
-        root.addWidget(banner)
+        self._logging_toolbar_buttons = (
+            self.btn_internal_start,
+            self.btn_file_start,
+            self.btn_show_records,
+            self.btn_show_analysis,
+            self.btn_logging_update,
+        )
+        self._toolbar_compact: bool | None = None
+        self._arrange_logging_toolbar(True)
+        root.addWidget(toolbar)
 
-        self.tabs = QtWidgets.QTabWidget()
-        self.tabs.setObjectName("loggingWorkspaceTabs")
-        self.tabs.addTab(self._build_monitor_tab(), "Monitor Signals")
-        self.tabs.addTab(self._build_internal_tab(), "Internal Trace")
-        self.tabs.addTab(self._build_file_tab(), "File Logging")
-        self.tabs.addTab(self._build_records_tab(), "Records / Plot")
-        self.tabs.addTab(self._build_analysis_tab(), "Analysis Filter")
-        root.addWidget(self.tabs, 1)
+        self.workspace_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self.workspace_splitter.setObjectName("loggingWorkspaceSplitter")
+        self.workspace_splitter.setChildrenCollapsible(False)
+        self.workspace_splitter.setSizePolicy(
+            QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Expanding
+        )
+        self.workspace_splitter.addWidget(
+            self._wrap_workspace_column(self._build_monitor_tab(), 340, 270)
+        )
+        self.workspace_splitter.addWidget(
+            self._wrap_workspace_column(self._build_internal_tab(), 410, 310)
+        )
+        self.workspace_splitter.addWidget(
+            self._wrap_workspace_column(self._build_file_tab(), 270, 230)
+        )
+        self.workspace_splitter.setStretchFactor(0, 34)
+        self.workspace_splitter.setStretchFactor(1, 41)
+        self.workspace_splitter.setStretchFactor(2, 25)
+        self.workspace_splitter.setSizes([430, 520, 340])
+        root.addWidget(self.workspace_splitter, 3)
+
+        self.auxiliary_panel = QtWidgets.QFrame()
+        self.auxiliary_panel.setObjectName("loggingAuxiliaryPanel")
+        self.auxiliary_panel.setStyleSheet(
+            "QFrame#loggingAuxiliaryPanel { background:#f6fafc;"
+            " border:1px solid #afc8d5; border-radius:8px; }"
+        )
+        auxiliary_layout = QtWidgets.QVBoxLayout(self.auxiliary_panel)
+        auxiliary_layout.setContentsMargins(6, 6, 6, 6)
+        auxiliary_header = QtWidgets.QHBoxLayout()
+        self.auxiliary_title = QtWidgets.QLabel("Records / Plot")
+        self.auxiliary_title.setStyleSheet("font-weight:700; color:#31566c;")
+        self.btn_auxiliary_close = FlatPush("Close")
+        auxiliary_header.addWidget(self.auxiliary_title)
+        auxiliary_header.addStretch(1)
+        auxiliary_header.addWidget(self.btn_auxiliary_close)
+        auxiliary_layout.addLayout(auxiliary_header)
+        self.auxiliary_tabs = QtWidgets.QTabWidget()
+        self.auxiliary_tabs.addTab(self._build_records_tab(), "Records / Plot")
+        self.auxiliary_tabs.addTab(self._build_analysis_tab(), "Analysis Filter")
+        auxiliary_layout.addWidget(self.auxiliary_tabs, 1)
+        self.auxiliary_panel.hide()
+        root.addWidget(self.auxiliary_panel, 2)
+
+        self.btn_internal_start.clicked.connect(self.start_internal)
+        self.btn_file_start.clicked.connect(self.start_file_logging)
+        self.btn_show_records.clicked.connect(lambda: self._show_auxiliary(0))
+        self.btn_show_analysis.clicked.connect(lambda: self._show_auxiliary(1))
+        self.btn_logging_update.clicked.connect(self.update_workspace)
+        self.btn_auxiliary_close.clicked.connect(self.auxiliary_panel.hide)
+
+    def _arrange_logging_toolbar(self, compact: bool) -> None:
+        compact = bool(compact)
+        if self._toolbar_compact == compact:
+            return
+        self._toolbar_compact = compact
+        layout = self.logging_toolbar_layout
+        while layout.count():
+            layout.takeAt(0)
+        for column in range(8):
+            layout.setColumnStretch(column, 0)
+        for column, button in enumerate(self._logging_toolbar_buttons):
+            layout.addWidget(button, 0, column)
+        if compact:
+            layout.addWidget(self.file_toolbar_progress, 1, 0, 1, 4)
+            layout.addWidget(self.file_toolbar_elapsed, 1, 4)
+            layout.addWidget(self.page_status, 1, 5)
+            layout.setColumnStretch(3, 1)
+        else:
+            layout.addWidget(self.file_toolbar_progress, 0, 5)
+            layout.addWidget(self.file_toolbar_elapsed, 0, 6)
+            layout.addWidget(self.page_status, 0, 7)
+            layout.setColumnStretch(5, 1)
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if hasattr(self, "logging_toolbar_layout"):
+            self._arrange_logging_toolbar(event.size().width() < 1320)
+
+    @staticmethod
+    def _wrap_workspace_column(
+        content: QtWidgets.QWidget, content_width: int, viewport_width: int
+    ) -> QtWidgets.QScrollArea:
+        content.setMinimumWidth(content_width)
+        area = QtWidgets.QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QtWidgets.QFrame.NoFrame)
+        area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        area.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        area.setMinimumWidth(viewport_width)
+        area.setSizePolicy(
+            QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Expanding
+        )
+        area.setWidget(content)
+        return area
+
+    def _show_auxiliary(self, index: int) -> None:
+        index = max(0, min(index, self.auxiliary_tabs.count() - 1))
+        if self.auxiliary_panel.isVisible() and self.auxiliary_tabs.currentIndex() == index:
+            self.auxiliary_panel.hide()
+            return
+        self.auxiliary_tabs.setCurrentIndex(index)
+        self.auxiliary_title.setText(self.auxiliary_tabs.tabText(index))
+        self.auxiliary_panel.show()
 
     def _build_monitor_tab(self) -> QtWidgets.QWidget:
-        page = QtWidgets.QWidget()
+        page = GroupPanel("Monitor Signals Definition")
         root = QtWidgets.QVBoxLayout(page)
+        root.setContentsMargins(8, 10, 8, 8)
+        root.setSpacing(6)
         controls = QtWidgets.QHBoxLayout()
         self.monitor_used = QtWidgets.QSpinBox()
         self.monitor_used.setRange(1, 40)
         self.monitor_used.setValue(3)
         self.monitor_used.setSuffix(" channels")
-        self.btn_monitor_defs = FlatPush("Read all definitions")
-        self.btn_monitor_live = FlatPush("Read live values")
-        controls.addWidget(QtWidgets.QLabel("Signals used"))
+        self.btn_monitor_defs = FlatPush("Definitions")
+        self.btn_monitor_live = FlatPush("Live values")
+        controls.addWidget(QtWidgets.QLabel("Signals"))
         controls.addWidget(self.monitor_used)
-        controls.addSpacing(18)
+        controls.addStretch(1)
         controls.addWidget(self.btn_monitor_defs)
         controls.addWidget(self.btn_monitor_live)
-        controls.addStretch(1)
         root.addLayout(controls)
 
-        self.monitor_table = QtWidgets.QTableWidget(40, 6)
+        self.monitor_table = QtWidgets.QTableWidget(20, 6)
         self.monitor_table.setHorizontalHeaderLabels(
-            ["#", "Signal", "Type", "Main", "Sub", "Live value"]
+            ["#", "Signal", "Live", "#", "Signal", "Live"]
         )
         self.monitor_table.setAlternatingRowColors(True)
-        self.monitor_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.monitor_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectItems)
         self.monitor_table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.monitor_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.monitor_table.verticalHeader().setVisible(False)
-        self.monitor_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
-        for column in (0, 2, 3, 4, 5):
+        self.monitor_table.horizontalHeader().setStretchLastSection(False)
+        for column in (1, 4):
             self.monitor_table.horizontalHeader().setSectionResizeMode(
-                column, QtWidgets.QHeaderView.ResizeToContents
+                column, QtWidgets.QHeaderView.Stretch
             )
-        for row in range(40):
-            self._set_monitor_row(row, self.monitor_definitions[row], None)
-        self.monitor_table.selectRow(0)
+        for column in (0, 2, 3, 5):
+            self.monitor_table.horizontalHeader().setSectionResizeMode(
+                column, QtWidgets.QHeaderView.Fixed
+            )
+        for column, width in ((0, 46), (2, 58), (3, 46), (5, 58)):
+            self.monitor_table.setColumnWidth(column, width)
+        self.monitor_table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        self.monitor_signal_buttons: list[FlatPush] = []
+        for channel in range(40):
+            visual_row = channel % 20
+            base_column = 0 if channel < 20 else 3
+            index_item = QtWidgets.QTableWidgetItem(f"Sig{channel + 1}")
+            index_item.setTextAlignment(QtCore.Qt.AlignCenter)
+            self.monitor_table.setItem(visual_row, base_column, index_item)
+            signal_button = FlatPush(
+                IOSignalButton.format_io_signal(self.monitor_definitions[channel])
+            )
+            signal_button.setMinimumWidth(48)
+            signal_button.setSizePolicy(
+                QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed
+            )
+            signal_button.clicked.connect(
+                lambda _checked=False, selected=channel, source=signal_button: (
+                    self._open_monitor_signal_menu(selected, source)
+                )
+            )
+            self.monitor_signal_buttons.append(signal_button)
+            self.monitor_table.setCellWidget(
+                visual_row, base_column + 1, signal_button
+            )
+            live_item = QtWidgets.QTableWidgetItem("—")
+            live_item.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            self.monitor_table.setItem(visual_row, base_column + 2, live_item)
+            self.monitor_table.setRowHeight(visual_row, 31)
+        for channel in range(40):
+            self._set_monitor_row(channel, self.monitor_definitions[channel], None)
+        self.monitor_table.setCurrentCell(0, 1)
         root.addWidget(self.monitor_table, 1)
 
-        editor = GroupPanel("Selected monitor channel")
-        edit_layout = QtWidgets.QHBoxLayout(editor)
+        editor = GroupPanel("Selected Signal")
+        edit_layout = QtWidgets.QGridLayout(editor)
+        edit_layout.setContentsMargins(8, 8, 8, 8)
         self.monitor_number = QtWidgets.QSpinBox()
-        self.monitor_number.setRange(0, 39)
+        self.monitor_number.setRange(1, 40)
+        self.monitor_number.setValue(1)
         self.monitor_selector = IOSignalButton(tokens=self.monitor_definitions[0])
-        self.monitor_selector.setMinimumWidth(260)
+        self.monitor_selector.setMinimumWidth(150)
         self.monitor_raw = QtWidgets.QLabel("Type 0 · Main 0 · Sub 0")
-        self.btn_monitor_write = FlatPush("Apply selected channel")
-        edit_layout.addWidget(QtWidgets.QLabel("Channel"))
-        edit_layout.addWidget(self.monitor_number)
-        edit_layout.addWidget(self.monitor_selector, 1)
-        edit_layout.addWidget(self.monitor_raw)
-        edit_layout.addWidget(self.btn_monitor_write)
+        self.monitor_raw.setStyleSheet("color:#607785;")
+        self.btn_monitor_write = FlatPush("Apply")
+        edit_layout.addWidget(QtWidgets.QLabel("Signal"), 0, 0)
+        edit_layout.addWidget(self.monitor_number, 0, 1)
+        edit_layout.addWidget(self.monitor_selector, 0, 2)
+        edit_layout.addWidget(self.btn_monitor_write, 0, 3)
+        edit_layout.addWidget(self.monitor_raw, 1, 0, 1, 4)
+        edit_layout.setColumnStretch(2, 1)
         root.addWidget(editor)
         self.monitor_table.currentCellChanged.connect(self._monitor_row_changed)
         self.monitor_number.valueChanged.connect(self._monitor_number_changed)
@@ -267,19 +429,19 @@ class LoggingPage(QtWidgets.QWidget):
         return page
 
     def _build_internal_tab(self) -> QtWidgets.QWidget:
-        page = QtWidgets.QWidget()
+        page = GroupPanel("Internal Logging Setting")
         root = QtWidgets.QVBoxLayout(page)
-        top = QtWidgets.QGridLayout()
-        top.setColumnStretch(0, 1)
-        top.setColumnStretch(1, 1)
-        params_group = GroupPanel("Internal trace parameters (DGETP / DSETP)")
+        root.setContentsMargins(8, 10, 8, 8)
+        root.setSpacing(6)
+
+        params_group = GroupPanel("Parameter Setting")
         params_form = QtWidgets.QFormLayout(params_group)
         specs = (
-            ("Trace mode", 0, 3, 0),
-            ("Samples", 1, 0x20000, 1024),
-            ("Monitor signals", 1, 40, 3),
-            ("Under-sampling", 1, 100000, 1),
-            ("Delay samples", 0, 0x7FFFFFFF, 1),
+            ("Logging type", 0, 3, 0),
+            ("Samples Num", 1, 0x20000, 1024),
+            ("Signals Num", 1, 40, 3),
+            ("Undersample", 1, 100000, 1),
+            ("Delay Sample", 0, 0x7FFFFFFF, 1),
             ("Average", 0, 1, 0),
         )
         self.internal_param_spins: list[QtWidgets.QSpinBox] = []
@@ -289,13 +451,20 @@ class LoggingPage(QtWidgets.QWidget):
             spin.setValue(value)
             spin.setGroupSeparatorShown(True)
             self.internal_param_spins.append(spin)
-            params_form.addRow(label, spin)
-        top.addWidget(params_group, 0, 0)
+        for index in (0, 2, 1, 3, 4, 5):
+            params_form.addRow(specs[index][0], self.internal_param_spins[index])
+        parameter_actions = QtWidgets.QHBoxLayout()
+        self.btn_internal_apply = FlatPush("Set Parameters")
+        self.btn_internal_read = FlatPush("Get Parameters")
+        parameter_actions.addWidget(self.btn_internal_apply)
+        parameter_actions.addWidget(self.btn_internal_read)
+        params_form.addRow(parameter_actions)
+        root.addWidget(params_group)
 
-        event_group = GroupPanel("Event signal (DGETS / DSETS)")
+        event_group = GroupPanel("Event Setting")
         event_form = QtWidgets.QFormLayout(event_group)
         self.event_selector = IOSignalButton(tokens=(0, 0, 0))
-        self.event_selector.setMinimumWidth(260)
+        self.event_selector.setMinimumWidth(180)
         self.event_threshold = QtWidgets.QDoubleSpinBox()
         self.event_threshold.setRange(-1e12, 1e12)
         self.event_threshold.setDecimals(8)
@@ -305,44 +474,9 @@ class LoggingPage(QtWidgets.QWidget):
         event_form.addRow("Signal", self.event_selector)
         event_form.addRow("Threshold", self.event_threshold)
         event_form.addRow("Trigger samples", self.event_trigger_samples)
-        top.addWidget(event_group, 0, 1)
+        root.addWidget(event_group)
 
-        status_group = GroupPanel("Trace status (DGETI)")
-        status_form = QtWidgets.QHBoxLayout(status_group)
-        self.trace_status_labels: dict[str, QtWidgets.QLabel] = {}
-        for key, label in (
-            ("status", "Status"),
-            ("maximum", "Maximum traces"),
-            ("saved", "Saved traces"),
-            ("error", "Error"),
-            ("logged", "Samples logged"),
-        ):
-            value = QtWidgets.QLabel("—")
-            value.setStyleSheet("font-weight:700; color:#254f68;")
-            self.trace_status_labels[key] = value
-            metric = QtWidgets.QWidget()
-            metric_layout = QtWidgets.QVBoxLayout(metric)
-            metric_layout.setContentsMargins(8, 2, 8, 2)
-            metric_layout.addWidget(QtWidgets.QLabel(label))
-            metric_layout.addWidget(value)
-            status_form.addWidget(metric, 1)
-        top.addWidget(status_group, 1, 0, 1, 2)
-        root.addLayout(top)
-
-        action = QtWidgets.QHBoxLayout()
-        self.btn_internal_read = FlatPush("Read controller")
-        self.btn_internal_apply = FlatPush("Apply configuration")
-        self.btn_internal_start = FlatPush("Start internal trace")
-        self.btn_internal_stop = FlatPush("Stop trace")
-        action.addWidget(self.btn_internal_read)
-        action.addWidget(self.btn_internal_apply)
-        action.addSpacing(18)
-        action.addWidget(self.btn_internal_start)
-        action.addWidget(self.btn_internal_stop)
-        action.addStretch(1)
-        root.addLayout(action)
-
-        download = GroupPanel("Saved controller traces")
+        download = GroupPanel("Logged Traces")
         download_layout = QtWidgets.QGridLayout(download)
         self.trace_selector = QtWidgets.QComboBox()
         self.trace_selector.addItem("Trace 0", 0)
@@ -363,22 +497,46 @@ class LoggingPage(QtWidgets.QWidget):
         self.trace_download_summary.setPlaceholderText(
             "Downloaded samples and output path will appear here."
         )
-        download_layout.addWidget(QtWidgets.QLabel("Saved trace"), 0, 0)
+        download_layout.addWidget(QtWidgets.QLabel("Logged trace"), 0, 0)
         download_layout.addWidget(self.trace_selector, 0, 1)
-        download_layout.addWidget(self.trace_event_time, 0, 2, 1, 2)
+        download_layout.addWidget(self.trace_event_time, 0, 2)
         download_layout.addWidget(QtWidgets.QLabel("Output file"), 1, 0)
-        download_layout.addWidget(self.trace_output, 1, 1, 1, 2)
-        download_layout.addWidget(self.btn_trace_browse, 1, 3)
-        download_layout.addWidget(self.btn_trace_download, 2, 1)
+        download_layout.addWidget(self.trace_output, 1, 1)
+        download_layout.addWidget(self.btn_trace_browse, 1, 2)
+        download_layout.addWidget(self.btn_trace_download, 2, 0, 1, 2)
         download_layout.addWidget(self.btn_trace_cancel, 2, 2)
-        download_layout.addWidget(self.trace_progress, 2, 3)
-        download_layout.addWidget(self.trace_download_summary, 3, 0, 1, 4)
+        download_layout.addWidget(self.trace_progress, 3, 0, 1, 3)
+        download_layout.addWidget(self.trace_download_summary, 4, 0, 1, 3)
+        download_layout.setColumnStretch(1, 1)
         root.addWidget(download)
+
+        status_group = GroupPanel("Info")
+        status_form = QtWidgets.QFormLayout(status_group)
+        self.trace_status_labels: dict[str, QtWidgets.QLabel] = {}
+        for key, label in (
+            ("frequency", "Sample Frequency"),
+            ("status", "Status"),
+            ("maximum", "Max Trace Number"),
+            ("saved", "Saved Trace Num"),
+            ("logged", "Traced Sample Num"),
+            ("error", "Traced Error"),
+            ("trace_time", "Trace Time [sec]"),
+            ("delay_time", "Delay Time [sec]"),
+        ):
+            value = QtWidgets.QLabel("—")
+            value.setStyleSheet(
+                "font-weight:700; color:#254f68; background:#ffffff;"
+                " border:1px solid #bdced7; padding:2px 6px;"
+            )
+            self.trace_status_labels[key] = value
+            status_form.addRow(label, value)
+        self.btn_internal_stop = FlatPush("Stop internal trace")
+        status_form.addRow(self.btn_internal_stop)
+        root.addWidget(status_group)
         root.addStretch(1)
 
         self.btn_internal_read.clicked.connect(self.read_internal)
         self.btn_internal_apply.clicked.connect(self.apply_internal)
-        self.btn_internal_start.clicked.connect(self.start_internal)
         self.btn_internal_stop.clicked.connect(self.stop_internal)
         self.btn_trace_browse.clicked.connect(self.browse_trace_output)
         self.btn_trace_download.clicked.connect(self.download_trace)
@@ -387,27 +545,27 @@ class LoggingPage(QtWidgets.QWidget):
         return page
 
     def _build_file_tab(self) -> QtWidgets.QWidget:
-        page = QtWidgets.QWidget()
+        page = GroupPanel("File Logging Setting")
         root = QtWidgets.QVBoxLayout(page)
-        config = GroupPanel("Host file logging")
-        grid = QtWidgets.QGridLayout(config)
+        root.setContentsMargins(8, 10, 8, 8)
+        root.setSpacing(8)
+        settings = QtWidgets.QWidget()
+        form = QtWidgets.QFormLayout(settings)
+        form.setContentsMargins(0, 0, 0, 0)
         self.file_signal_count = QtWidgets.QSpinBox()
         self.file_signal_count.setRange(1, 40)
         self.file_signal_count.setValue(3)
         self.file_interval = QtWidgets.QSpinBox()
         self.file_interval.setRange(10, 3_600_000)
         self.file_interval.setValue(500)
-        self.file_interval.setSuffix(" ms")
         self.file_start_after = QtWidgets.QDoubleSpinBox()
         self.file_start_after.setRange(0, 100000)
         self.file_start_after.setDecimals(4)
         self.file_start_after.setValue(0.01)
-        self.file_start_after.setSuffix(" h")
         self.file_duration = QtWidgets.QDoubleSpinBox()
         self.file_duration.setRange(0.0001, 100000)
         self.file_duration.setDecimals(4)
         self.file_duration.setValue(1.0)
-        self.file_duration.setSuffix(" h")
         self.file_continuous = QtWidgets.QCheckBox("Continuous until Stop")
         self.file_delimiter = QtWidgets.QComboBox()
         self.file_delimiter.addItem("Comma (CSV)", ",")
@@ -421,38 +579,35 @@ class LoggingPage(QtWidgets.QWidget):
             QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed
         )
         self.btn_file_browse = FlatPush("Browse…")
-        grid.addWidget(QtWidgets.QLabel("Monitor signals"), 0, 0)
-        grid.addWidget(self.file_signal_count, 0, 1)
-        grid.addWidget(QtWidgets.QLabel("Polling interval"), 0, 2)
-        grid.addWidget(self.file_interval, 0, 3)
-        grid.addWidget(QtWidgets.QLabel("Start after"), 1, 0)
-        grid.addWidget(self.file_start_after, 1, 1)
-        grid.addWidget(QtWidgets.QLabel("Duration"), 1, 2)
-        grid.addWidget(self.file_duration, 1, 3)
-        grid.addWidget(QtWidgets.QLabel("Delimiter"), 2, 0)
-        grid.addWidget(self.file_delimiter, 2, 1)
-        grid.addWidget(self.file_continuous, 2, 2, 1, 2)
-        grid.addWidget(QtWidgets.QLabel("Output file"), 3, 0)
-        grid.addWidget(self.file_output, 3, 1, 1, 2)
-        grid.addWidget(self.btn_file_browse, 3, 3)
-        root.addWidget(config)
+        output_row = QtWidgets.QWidget()
+        output_layout = QtWidgets.QHBoxLayout(output_row)
+        output_layout.setContentsMargins(0, 0, 0, 0)
+        output_layout.setSpacing(4)
+        output_layout.addWidget(self.file_output, 1)
+        output_layout.addWidget(self.btn_file_browse)
+        form.addRow("Signal Num", self.file_signal_count)
+        form.addRow("Log Duration [h]", self.file_duration)
+        form.addRow("Start after [h]", self.file_start_after)
+        form.addRow("Update Rate [ms]", self.file_interval)
+        form.addRow("Delimiter", self.file_delimiter)
+        form.addRow("Mode", self.file_continuous)
+        form.addRow("Output file", output_row)
+        root.addWidget(settings)
 
         controls = QtWidgets.QHBoxLayout()
-        self.btn_file_check = FlatPush("Check serial rate")
-        self.btn_file_start = FlatPush("Start logging")
+        self.btn_file_check = FlatPush("Check rate")
         self.btn_file_stop = FlatPush("Stop")
         self.btn_file_stop.setEnabled(False)
         self.file_rate_result = QtWidgets.QLabel("Serial rate not checked")
         controls.addWidget(self.btn_file_check)
-        controls.addWidget(self.btn_file_start)
         controls.addWidget(self.btn_file_stop)
-        controls.addSpacing(18)
-        controls.addWidget(self.file_rate_result)
-        controls.addStretch(1)
         root.addLayout(controls)
+        self.file_rate_result.setWordWrap(True)
+        self.file_rate_result.setStyleSheet("color:#607785;")
+        root.addWidget(self.file_rate_result)
 
-        status = GroupPanel("Acquisition status")
-        status_grid = QtWidgets.QGridLayout(status)
+        status = GroupPanel("Acquisition Status")
+        status_form = QtWidgets.QFormLayout(status)
         self.file_state = QtWidgets.QLabel("Idle")
         self.file_samples = QtWidgets.QLabel("0")
         self.file_elapsed = QtWidgets.QLabel("0 s")
@@ -460,24 +615,20 @@ class LoggingPage(QtWidgets.QWidget):
         self.file_late = QtWidgets.QLabel("0")
         self.file_message = QtWidgets.QLabel("—")
         self.file_message.setWordWrap(True)
-        for column, (caption, widget) in enumerate(
-            (
-                ("State", self.file_state),
-                ("Samples", self.file_samples),
-                ("Elapsed", self.file_elapsed),
-                ("Actual interval", self.file_actual_interval),
-                ("Late samples", self.file_late),
-            )
+        for caption, widget in (
+            ("State", self.file_state),
+            ("Samples", self.file_samples),
+            ("Elapsed", self.file_elapsed),
+            ("Actual interval", self.file_actual_interval),
+            ("Late samples", self.file_late),
         ):
-            status_grid.addWidget(QtWidgets.QLabel(caption), 0, column)
-            widget.setStyleSheet("font-size:17px; font-weight:700; color:#25516a;")
-            status_grid.addWidget(widget, 1, column)
-        status_grid.addWidget(QtWidgets.QLabel("Message"), 2, 0)
-        status_grid.addWidget(self.file_message, 2, 1, 1, 4)
+            widget.setStyleSheet("font-size:16px; font-weight:700; color:#25516a;")
+            status_form.addRow(caption, widget)
+        status_form.addRow("Message", self.file_message)
         root.addWidget(status)
         note = QtWidgets.QLabel(
-            "Rows are flushed as they arrive. A .meta.json sidecar records completion, "
-            "cancellation, timing and errors. Other pages remain usable while acquisition runs."
+            "Samples are flushed to disk immediately. Completion, timing and errors are "
+            "recorded in the matching .meta.json file."
         )
         note.setWordWrap(True)
         note.setStyleSheet("color:#607785; padding:8px;")
@@ -486,7 +637,6 @@ class LoggingPage(QtWidgets.QWidget):
         self.file_continuous.toggled.connect(lambda checked: self.file_duration.setEnabled(not checked))
         self.btn_file_browse.clicked.connect(self.browse_file_output)
         self.btn_file_check.clicked.connect(self.check_file_rate)
-        self.btn_file_start.clicked.connect(self.start_file_logging)
         self.btn_file_stop.clicked.connect(self.stop_file_logging)
         return page
 
@@ -626,40 +776,70 @@ class LoggingPage(QtWidgets.QWidget):
             callback(result)
 
     def _set_monitor_row(
-        self, row: int, tokens: tuple[int, int, int], live: float | None
+        self, channel: int, tokens: tuple[int, int, int], live: float | None
     ) -> None:
+        if not 0 <= channel < 40:
+            return
+        visual_row = channel % 20
+        base_column = 0 if channel < 20 else 3
         name = IOSignalButton.format_io_signal(tokens)
-        values = (str(row), name, str(tokens[0]), str(tokens[1]), str(tokens[2]))
-        for column, value in enumerate(values):
-            item = self.monitor_table.item(row, column)
-            if item is None:
-                item = QtWidgets.QTableWidgetItem()
-                self.monitor_table.setItem(row, column, item)
-            item.setText(value)
+        signal_button = self.monitor_signal_buttons[channel]
+        signal_button.setText(name)
+        signal_button.setToolTip(
+            f"IOSignal Type={tokens[0]}, MainIndex={tokens[1]}, SubIndex={tokens[2]}"
+        )
         if live is not None:
-            item = self.monitor_table.item(row, 5)
+            item = self.monitor_table.item(visual_row, base_column + 2)
             if item is None:
                 item = QtWidgets.QTableWidgetItem()
-                self.monitor_table.setItem(row, 5, item)
+                item.setTextAlignment(
+                    QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter
+                )
+                self.monitor_table.setItem(visual_row, base_column + 2, item)
             item.setText(format_ui_number(live))
 
-    def _monitor_row_changed(self, row: int, _column: int, *_args) -> None:
-        if not 0 <= row < 40:
+    def _select_monitor_channel(self, channel: int) -> None:
+        if not 0 <= channel < 40:
             return
         self.monitor_number.blockSignals(True)
-        self.monitor_number.setValue(row)
+        self.monitor_number.setValue(channel + 1)
         self.monitor_number.blockSignals(False)
-        tokens = self.monitor_definitions[row]
+        tokens = self.monitor_definitions[channel]
         self.monitor_selector.set_io_signal(tokens)
         self.monitor_raw.setText(f"Type {tokens[0]} · Main {tokens[1]} · Sub {tokens[2]}")
-        self.log_mon_num.setValue(row)
+        self.log_mon_num.setValue(channel)
         self.log_mon_sig.setText(" ".join(str(value) for value in tokens))
 
-    def _monitor_number_changed(self, row: int) -> None:
-        self.monitor_table.selectRow(row)
+    def _monitor_row_changed(self, row: int, column: int, *_args) -> None:
+        if not 0 <= row < 20 or column < 0:
+            return
+        channel = row + (20 if column >= 3 else 0)
+        self._select_monitor_channel(channel)
+
+    def _monitor_number_changed(self, number: int) -> None:
+        channel = number - 1
+        if not 0 <= channel < 40:
+            return
+        visual_row = channel % 20
+        signal_column = 1 if channel < 20 else 4
+        self.monitor_table.setCurrentCell(visual_row, signal_column)
+        self._select_monitor_channel(channel)
+
+    def _open_monitor_signal_menu(
+        self, channel: int, source: QtWidgets.QWidget
+    ) -> None:
+        if not 0 <= channel < 40:
+            return
+        visual_row = channel % 20
+        signal_column = 1 if channel < 20 else 4
+        self.monitor_table.setCurrentCell(visual_row, signal_column)
+        self._select_monitor_channel(channel)
+        menu = self.monitor_selector.menu()
+        if menu is not None:
+            menu.popup(source.mapToGlobal(QtCore.QPoint(0, source.height())))
 
     def _monitor_selector_changed(self, tokens: Any) -> None:
-        row = self.monitor_number.value()
+        row = self.monitor_number.value() - 1
         values = tuple(int(value) for value in tokens[:3])
         self.monitor_definitions[row] = values
         self.monitor_names[row] = IOSignalButton.format_io_signal(values)
@@ -683,7 +863,7 @@ class LoggingPage(QtWidgets.QWidget):
                 self.monitor_names[row] = IOSignalButton.format_io_signal(tokens)
                 self._set_monitor_row(row, tokens, None)
             self._definitions_loaded = True
-            self._monitor_row_changed(self.monitor_number.value(), 0)
+            self._select_monitor_channel(self.monitor_number.value() - 1)
             if self._pending_file_start:
                 self._pending_file_start = False
                 self.start_file_logging()
@@ -705,7 +885,7 @@ class LoggingPage(QtWidgets.QWidget):
         )
 
     def write_selected_monitor(self) -> None:
-        row = self.monitor_number.value()
+        row = self.monitor_number.value() - 1
         tokens = self.monitor_selector.io_tokens()
 
         def work():
@@ -722,6 +902,60 @@ class LoggingPage(QtWidgets.QWidget):
 
         self._submit(f"Apply monitor channel {row}", work, done)
 
+    def update_workspace(self) -> None:
+        """Refresh the three visible logging columns in one serialized task."""
+
+        trace_number = int(self.trace_selector.currentData() or 0)
+        monitor_count = max(self.monitor_used.value(), self.file_signal_count.value())
+
+        def work():
+            session = self._session()
+            definitions: list[tuple[int, int, int]] = []
+            for index in range(40):
+                values = [int(value) for value in session.get_monitor_signal(index)[:3]]
+                values.extend([0] * (3 - len(values)))
+                definitions.append(tuple(values[:3]))
+            live_values = session.get_monitor_values(0, monitor_count - 1)
+            params = session.get_event_trace_params()
+            info = session.get_event_trace_info()
+            event = session.get_event_signal()
+            event_time = (
+                session.get_event_time(trace_number)
+                if len(info) > 2 and _protocol_int(info[2]) > trace_number
+                else []
+            )
+            sample_frequency = session.get_sample_frequency()
+            return (
+                definitions,
+                live_values,
+                params,
+                info,
+                event,
+                event_time,
+                sample_frequency,
+            )
+
+        def done(payload):
+            definitions, live_values, params, info, event, event_time, frequency = payload
+            for channel, tokens in enumerate(definitions):
+                self.monitor_definitions[channel] = tokens
+                self.monitor_names[channel] = IOSignalButton.format_io_signal(tokens)
+                self._set_monitor_row(channel, tokens, None)
+            for channel, value in enumerate(live_values[:40]):
+                self._set_monitor_row(
+                    channel, self.monitor_definitions[channel], float(value)
+                )
+            self.log_live.setText(
+                " ".join(format_ui_number(value) for value in live_values)
+            )
+            self._definitions_loaded = True
+            self._select_monitor_channel(self.monitor_number.value() - 1)
+            self._apply_internal_readback(
+                (params, info, event, event_time, frequency)
+            )
+
+        self._submit("Update logging workspace", work, done)
+
     def read_internal(self) -> None:
         trace_number = int(self.trace_selector.currentData() or 0)
 
@@ -731,12 +965,14 @@ class LoggingPage(QtWidgets.QWidget):
             info = session.get_event_trace_info()
             event = session.get_event_signal()
             event_time = session.get_event_time(trace_number) if len(info) > 2 and _protocol_int(info[2]) > trace_number else []
-            return params, info, event, event_time
+            sample_frequency = session.get_sample_frequency()
+            return params, info, event, event_time, sample_frequency
 
         self._submit("Read internal trace", work, self._apply_internal_readback)
 
     def _apply_internal_readback(self, payload) -> None:
-        params, info, event, event_time = payload
+        params, info, event, event_time = payload[:4]
+        sample_frequency = float(payload[4]) if len(payload) > 4 else 0.0
         for spin, value in zip(self.internal_param_spins, params):
             spin.setValue(_protocol_int(value, spin.value()))
         if len(params) > 2:
@@ -752,6 +988,22 @@ class LoggingPage(QtWidgets.QWidget):
         self.trace_event_time.setText(
             "Event time: " + (" ".join(str(value) for value in event_time) if event_time else "—")
         )
+        self.trace_status_labels["frequency"].setText(
+            f"{format_ui_number(sample_frequency)} Hz" if sample_frequency else "—"
+        )
+        sample_count = max(0, _protocol_int(params[1])) if len(params) > 1 else 0
+        under_sample = max(1, _protocol_int(params[3], 1)) if len(params) > 3 else 1
+        delay_samples = max(0, _protocol_int(params[4])) if len(params) > 4 else 0
+        if sample_frequency:
+            self.trace_status_labels["trace_time"].setText(
+                format_ui_number(sample_count * under_sample / sample_frequency)
+            )
+            self.trace_status_labels["delay_time"].setText(
+                format_ui_number(delay_samples * under_sample / sample_frequency)
+            )
+        else:
+            self.trace_status_labels["trace_time"].setText("—")
+            self.trace_status_labels["delay_time"].setText("—")
         self.log_params.setText(" ".join(str(value) for value in params))
         self.log_info.setText(" ".join(str(value) for value in info))
         self.log_event.setText(" ".join(str(value) for value in event))
@@ -793,6 +1045,7 @@ class LoggingPage(QtWidgets.QWidget):
                 session.get_event_trace_info(),
                 session.get_event_signal(),
                 [],
+                session.get_sample_frequency(),
             )
 
         self._submit("Apply internal trace configuration", work, self._apply_internal_readback)
@@ -951,9 +1204,16 @@ class LoggingPage(QtWidgets.QWidget):
             QtWidgets.QMessageBox.critical(self, "Start file logging", str(exc))
             return
         self.file_service = service
+        self._active_file_duration_s = config.duration_s
         self.btn_file_start.setEnabled(False)
         self.btn_file_stop.setEnabled(True)
         self.file_state.setText("Waiting" if config.start_after_s else "Running")
+        self.file_toolbar_elapsed.setText("0 s elapsed")
+        if config.duration_s is None:
+            self.file_toolbar_progress.setRange(0, 0)
+        else:
+            self.file_toolbar_progress.setRange(0, 100)
+            self.file_toolbar_progress.setValue(0)
         self.page_status.setText("File logging active")
         self.host.log_msg(f"File logging scheduled: {config.path}")
 
@@ -969,6 +1229,12 @@ class LoggingPage(QtWidgets.QWidget):
         self.file_state.setText("Running")
         self.file_samples.setText(str(stats.samples))
         self.file_elapsed.setText(f"{stats.elapsed_s:.2f} s")
+        self.file_toolbar_elapsed.setText(f"{stats.elapsed_s:.1f} s elapsed")
+        if self._active_file_duration_s:
+            progress = min(
+                100, int(round(stats.elapsed_s * 100.0 / self._active_file_duration_s))
+            )
+            self.file_toolbar_progress.setValue(progress)
         self.file_actual_interval.setText(
             f"{stats.actual_interval_ms:.2f} ms" if stats.actual_interval_ms else "—"
         )
@@ -986,6 +1252,20 @@ class LoggingPage(QtWidgets.QWidget):
         self.file_state.setText(stats.state.title())
         self.file_samples.setText(str(stats.samples))
         self.file_elapsed.setText(f"{stats.elapsed_s:.2f} s")
+        self.file_toolbar_progress.setRange(0, 100)
+        if stats.state == "complete":
+            self.file_toolbar_progress.setValue(100)
+        elif self._active_file_duration_s:
+            self.file_toolbar_progress.setValue(
+                min(
+                    100,
+                    int(round(stats.elapsed_s * 100.0 / self._active_file_duration_s)),
+                )
+            )
+        else:
+            self.file_toolbar_progress.setValue(0)
+        self.file_toolbar_elapsed.setText(f"{stats.elapsed_s:.1f} s elapsed")
+        self._active_file_duration_s = None
         self.file_actual_interval.setText(
             f"{stats.actual_interval_ms:.2f} ms" if stats.actual_interval_ms else "—"
         )
@@ -1064,12 +1344,16 @@ class LoggingPage(QtWidgets.QWidget):
         self._shutdown = False
         self._download_cancel.clear()
         self.file_service = None
+        self._active_file_duration_s = None
         self._definitions_loaded = False
         self._pending_file_start = False
         self.btn_file_start.setEnabled(True)
         self.btn_file_stop.setEnabled(False)
         self.btn_trace_download.setEnabled(True)
         self.btn_trace_cancel.setEnabled(False)
+        self.file_toolbar_progress.setRange(0, 100)
+        self.file_toolbar_progress.setValue(0)
+        self.file_toolbar_elapsed.setText("0 s elapsed")
         self.page_status.setText("Ready")
 
     def shutdown(self) -> None:
