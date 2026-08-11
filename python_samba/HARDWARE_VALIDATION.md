@@ -7,9 +7,10 @@ of the repository.
 
 ## Final results
 
-- Current automated suites: **148 Samba tests** and **131 SIDMAT tests** passed
-  (the 39-test Qt-heavy Samba page file was run in bounded groups); remote
-  `compileall`, 107 non-page Samba tests, and all 131 SIDMAT tests passed.
+- Current local Samba suite: **157 tests passed** (118 regular tests plus the
+  39-test Qt-heavy page file run in isolated processes).  The shared-server
+  hardware run also passed remote `compileall`, 107 non-page Samba tests, and
+  all 131 SIDMAT tests available at that validation point.
 - Supported read-only endpoint inventory: **315 passed** before and after
   writable/action tests.
 - Same-value write/readback coverage: **297 writable UI parameter keys**;

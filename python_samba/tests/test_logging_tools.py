@@ -127,12 +127,25 @@ def test_logging_page_is_primary_and_exposes_40_channels():
         assert len(page.monitor_signal_buttons) == 40
         assert page.monitor_signal_buttons[0].text()
         assert page.monitor_signal_buttons[20].text()
+        assert page.monitor_table.item(0, 0).text() == "1"
+        assert page.monitor_table.item(0, 3).text() == "21"
+        assert page.monitor_table.columnWidth(0) == 34
+        assert page.monitor_table.columnWidth(3) == 34
+        assert page.monitor_table.columnWidth(1) > page.monitor_table.columnWidth(0)
+        assert page.monitor_table.columnWidth(4) > page.monitor_table.columnWidth(3)
+        assert page.records_window.isHidden()
+        page.btn_show_records.click()
+        app.processEvents()
+        assert not page.records_window.isHidden()
+        assert page.records_window.isWindow()
+        assert page.record_plot.window() is page.records_window
+        page.records_window.hide()
         assert page.auxiliary_panel.isHidden()
         page._show_auxiliary(0)
         assert not page.auxiliary_panel.isHidden()
         assert page.auxiliary_tabs.currentIndex() == 0
-        page._show_auxiliary(1)
-        assert page.auxiliary_tabs.currentIndex() == 1
+        assert page.auxiliary_tabs.count() == 1
+        assert page.auxiliary_tabs.tabText(0) == "Analysis Filter"
         page._arrange_logging_toolbar(True)
         assert page._toolbar_compact
         page._arrange_logging_toolbar(False)
@@ -150,7 +163,12 @@ def test_logging_page_is_primary_and_exposes_40_channels():
         assert page.monitor_number.isHidden()
         assert page.monitor_selector.isHidden()
         assert page.btn_monitor_write.isHidden()
+        page._show_records_window()
+        page.shutdown()
+        app.processEvents()
+        assert page.records_window.isHidden()
     finally:
+        page.records_window.close()
         window.close()
         app.processEvents()
 

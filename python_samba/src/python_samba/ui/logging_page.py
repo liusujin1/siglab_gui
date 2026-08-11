@@ -256,7 +256,7 @@ class LoggingPage(QtWidgets.QWidget):
         auxiliary_layout = QtWidgets.QVBoxLayout(self.auxiliary_panel)
         auxiliary_layout.setContentsMargins(6, 6, 6, 6)
         auxiliary_header = QtWidgets.QHBoxLayout()
-        self.auxiliary_title = QtWidgets.QLabel("Records / Plot")
+        self.auxiliary_title = QtWidgets.QLabel("Analysis Filter")
         self.auxiliary_title.setStyleSheet("font-weight:700; color:#31566c;")
         self.btn_auxiliary_close = FlatPush("Close")
         auxiliary_header.addWidget(self.auxiliary_title)
@@ -264,16 +264,26 @@ class LoggingPage(QtWidgets.QWidget):
         auxiliary_header.addWidget(self.btn_auxiliary_close)
         auxiliary_layout.addLayout(auxiliary_header)
         self.auxiliary_tabs = QtWidgets.QTabWidget()
-        self.auxiliary_tabs.addTab(self._build_records_tab(), "Records / Plot")
         self.auxiliary_tabs.addTab(self._build_analysis_tab(), "Analysis Filter")
         auxiliary_layout.addWidget(self.auxiliary_tabs, 1)
         self.auxiliary_panel.hide()
         root.addWidget(self.auxiliary_panel, 2)
 
+        self.records_window = QtWidgets.QDialog(self.host)
+        self.records_window.setObjectName("loggingRecordsWindow")
+        self.records_window.setWindowTitle("Logging Records / Plot")
+        self.records_window.setWindowModality(QtCore.Qt.NonModal)
+        self.records_window.setAttribute(QtCore.Qt.WA_DeleteOnClose, False)
+        self.records_window.setMinimumSize(760, 520)
+        self.records_window.resize(1100, 720)
+        records_layout = QtWidgets.QVBoxLayout(self.records_window)
+        records_layout.setContentsMargins(10, 10, 10, 10)
+        records_layout.addWidget(self._build_records_tab())
+
         self.btn_internal_start.clicked.connect(self.start_internal)
         self.btn_file_start.clicked.connect(self.start_file_logging)
-        self.btn_show_records.clicked.connect(lambda: self._show_auxiliary(0))
-        self.btn_show_analysis.clicked.connect(lambda: self._show_auxiliary(1))
+        self.btn_show_records.clicked.connect(self._show_records_window)
+        self.btn_show_analysis.clicked.connect(lambda: self._show_auxiliary(0))
         self.btn_logging_update.clicked.connect(self.update_workspace)
         self.btn_auxiliary_close.clicked.connect(self.auxiliary_panel.hide)
 
@@ -331,6 +341,14 @@ class LoggingPage(QtWidgets.QWidget):
         self.auxiliary_title.setText(self.auxiliary_tabs.tabText(index))
         self.auxiliary_panel.show()
 
+    def _show_records_window(self) -> None:
+        if self.records_window.isMinimized():
+            self.records_window.showNormal()
+        else:
+            self.records_window.show()
+        self.records_window.raise_()
+        self.records_window.activateWindow()
+
     def _build_monitor_tab(self) -> QtWidgets.QWidget:
         page = GroupPanel("Monitor Signals Definition")
         root = QtWidgets.QVBoxLayout(page)
@@ -368,14 +386,14 @@ class LoggingPage(QtWidgets.QWidget):
             self.monitor_table.horizontalHeader().setSectionResizeMode(
                 column, QtWidgets.QHeaderView.Fixed
             )
-        for column, width in ((0, 46), (2, 58), (3, 46), (5, 58)):
+        for column, width in ((0, 34), (2, 54), (3, 34), (5, 54)):
             self.monitor_table.setColumnWidth(column, width)
         self.monitor_table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
         self.monitor_signal_buttons: list[FlatPush] = []
         for channel in range(40):
             visual_row = channel % 20
             base_column = 0 if channel < 20 else 3
-            index_item = QtWidgets.QTableWidgetItem(f"Sig{channel + 1}")
+            index_item = QtWidgets.QTableWidgetItem(str(channel + 1))
             index_item.setTextAlignment(QtCore.Qt.AlignCenter)
             self.monitor_table.setItem(visual_row, base_column, index_item)
             signal_button = FlatPush(
@@ -1284,6 +1302,7 @@ class LoggingPage(QtWidgets.QWidget):
             )
             self.log_event_time.setText(" ".join(event_time))
             self._show_record(record)
+            self._show_records_window()
 
         self._submit("Download controller trace", work, done)
 
@@ -1448,7 +1467,7 @@ class LoggingPage(QtWidgets.QWidget):
 
     def open_record_dialog(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self,
+            self.records_window,
             "Open logging record",
             self.record_path.text(),
             "Logging records (*.csv *.tsv *.txt *.LoggRecJson *.LoggRecXml *.LoggRecTxt *.ILogRecJson *.ILogRecXml *.ILogRecTxt *.json *.xml);;All files (*.*)",
@@ -1458,7 +1477,9 @@ class LoggingPage(QtWidgets.QWidget):
         try:
             record = load_logging_record(path)
         except Exception as exc:
-            QtWidgets.QMessageBox.critical(self, "Open logging record", str(exc))
+            QtWidgets.QMessageBox.critical(
+                self.records_window, "Open logging record", str(exc)
+            )
             return
         self.record_path.setText(path)
         self._show_record(record)
@@ -1515,5 +1536,6 @@ class LoggingPage(QtWidgets.QWidget):
         self._definitions_loading = False
         self._pending_file_start = False
         self._download_cancel.set()
+        self.records_window.hide()
         if self.file_service:
             self.file_service.stop(wait=True, timeout=1.0)
