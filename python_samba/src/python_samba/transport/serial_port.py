@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 
@@ -52,6 +53,22 @@ class Transport(ABC):
             response = self.read_until(terminator, timeout=remaining)
             if response.strip(b" \t\r\n"):
                 return response
+
+    def exchange_many(
+        self,
+        requests: Sequence[tuple[bytes, bytes, float]],
+    ) -> list[bytes]:
+        """Execute several exchanges in order.
+
+        Direct serial and mock transports deliberately keep the simple
+        sequential implementation.  A process-boundary transport can override
+        this method to carry the whole group in one network RPC while the
+        communication server still executes the physical exchanges in order.
+        """
+        return [
+            self.exchange(request, terminator, timeout)
+            for request, terminator, timeout in requests
+        ]
 
 
 @dataclass

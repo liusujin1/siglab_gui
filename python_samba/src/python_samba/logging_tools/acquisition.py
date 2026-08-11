@@ -60,6 +60,9 @@ class FileLoggingService:
 
     def stop(self, *, wait: bool = False, timeout: float | None = None) -> None:
         self._stop.set()
+        if self.running:
+            self.stats.state = "stopping"
+            self.stats.message = "stopping after the current controller read"
         thread = self._thread
         if wait and thread and thread is not threading.current_thread():
             thread.join(timeout)
@@ -74,9 +77,20 @@ class FileLoggingService:
         on_finished: FinishedCallback | None,
     ) -> None:
         writer: DelimitedStreamWriter | None = None
+        read_session = self.session
+        owned_session = None
         error: BaseException | None = None
         terminal_state = "cancelled"
         try:
+            open_reader = getattr(self.session, "open_background_reader", None)
+            if callable(open_reader):
+                owned_session = open_reader("python_samba-file-logging")
+                if owned_session is not None:
+                    read_session = owned_session
+            if self._stop.is_set():
+                self.stats.state = "cancelled"
+                self.stats.message = "stopped before acquisition started"
+                return
             writer = DelimitedStreamWriter(config)
             self.stats.output_path = str(writer.path)
             if config.start_after_s and self._stop.wait(config.start_after_s):
@@ -102,8 +116,13 @@ class FileLoggingService:
                 request_started = time.monotonic()
                 if request_started - deadline > max(interval_s * 0.25, 0.010):
                     self.stats.late_samples += 1
-                values = list(self.session.get_monitor_values(0, config.signal_count - 1))
+                values = list(
+                    read_session.get_monitor_values(0, config.signal_count - 1)
+                )
                 sampled = time.monotonic()
+                if self._stop.is_set():
+                    terminal_state = "cancelled"
+                    break
                 if len(values) != config.signal_count:
                     raise RuntimeError(
                         f"DGMSV returned {len(values)} values; expected {config.signal_count}"
@@ -152,5 +171,12 @@ class FileLoggingService:
                         "late_samples": self.stats.late_samples,
                     },
                 )
+            if owned_session is not None:
+                try:
+                    owned_session.close()
+                except Exception:
+                    pass
+            with self._lock:
+                self._thread = None
             if on_finished:
                 on_finished(self._snapshot(), error)

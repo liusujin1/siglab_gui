@@ -19,8 +19,11 @@ from typing import Callable
 
 from python_samba.commserver.discovery import is_trusted_peer_host
 from python_samba.commserver.protocol import (
+    MAX_BATCH_ITEMS,
     MAX_MESSAGE_BYTES,
     PROTOCOL_VERSION,
+    SERVER_FEATURES,
+    configure_low_latency_socket,
     ProtocolMessageError,
     decode_bytes,
     default_log_file,
@@ -74,6 +77,7 @@ class _ExchangeTask:
     done: threading.Event = field(default_factory=threading.Event)
     response: bytes | None = None
     error: BaseException | None = None
+    batch_abort: threading.Event | None = None
 
 
 def _new_transport(config: SerialConfig) -> Transport:
@@ -185,6 +189,10 @@ class CommunicationServer:
 
         self._lock = threading.RLock()
         self._serial_lock = threading.RLock()
+        # Queue a batch as one contiguous FIFO group.  Without this lock a
+        # second client could insert a request between two items while the
+        # first client's handler is still filling the queue.
+        self._enqueue_lock = threading.Lock()
         self._stop = threading.Event()
         self._started = False
         self._listeners: list[socket.socket] = []
@@ -304,19 +312,22 @@ class CommunicationServer:
                 client_sock.close()
             except OSError:
                 pass
-        # Wake every handler already waiting on a queued request.  The task
-        # currently executing is completed by the worker; tasks not yet taken
-        # must fail explicitly instead of leaving daemon client threads stuck.
-        while True:
-            try:
-                pending = self._tasks.get_nowait()
-            except queue.Empty:
-                break
-            if pending is not None:
-                pending.error = TransportError("communication server is stopping")
-                pending.done.set()
-            self._tasks.task_done()
-        self._tasks.put(None)
+        # Wake every handler already waiting on a queued request.  Serialize
+        # this drain with producers so no request can be inserted behind the
+        # worker sentinel and wait forever during shutdown.
+        with self._enqueue_lock:
+            while True:
+                try:
+                    pending = self._tasks.get_nowait()
+                except queue.Empty:
+                    break
+                if pending is not None:
+                    pending.error = TransportError(
+                        "communication server is stopping"
+                    )
+                    pending.done.set()
+                self._tasks.task_done()
+            self._tasks.put(None)
         self._close_serial(clear_config=True)
         worker = self._worker
         if worker and worker is not threading.current_thread():
@@ -342,6 +353,7 @@ class CommunicationServer:
             serial_open = bool(self._serial and self._serial.is_open)
             return {
                 "protocol": PROTOCOL_VERSION,
+                "features": list(SERVER_FEATURES),
                 "auth_mode": self.auth_mode,
                 "listeners": [format_endpoint(*address) for address in self.addresses],
                 "serial": {
@@ -386,6 +398,7 @@ class CommunicationServer:
                 except OSError:
                     pass
                 continue
+            configure_low_latency_socket(client_sock)
             client_sock.settimeout(10.0)
             with self._lock:
                 self._client_sockets.add(client_sock)
@@ -439,6 +452,7 @@ class CommunicationServer:
                     "ok": True,
                     "result": {
                         "protocol": PROTOCOL_VERSION,
+                        "features": list(SERVER_FEATURES),
                         "client_id": client_id,
                         "status": self.status(),
                     },
@@ -511,41 +525,98 @@ class CommunicationServer:
             return self.restart_serial(), False
         if op == "shutdown":
             return {"shutting_down": True}, True
-        if op != "exchange":
+        if op not in {"exchange", "exchange_batch"}:
             raise ProtocolMessageError(f"unknown operation: {op!r}")
 
         client = self._client(client_id)
         if not client.attached:
             raise ServerConfigError("client is not attached to a serial controller")
-        request = decode_bytes(message.get("request"), field="request")
-        terminator = decode_bytes(message.get("terminator"), field="terminator")
+
+        if op == "exchange":
+            specs = [self._parse_exchange_item(message, field_prefix="")]
+        else:
+            raw_items = message.get("items")
+            if not isinstance(raw_items, list):
+                raise ProtocolMessageError("exchange_batch items must be a list")
+            if not raw_items:
+                raise ProtocolMessageError("exchange_batch items must not be empty")
+            if len(raw_items) > MAX_BATCH_ITEMS:
+                raise ProtocolMessageError(
+                    f"exchange_batch has {len(raw_items)} items; limit is {MAX_BATCH_ITEMS}"
+                )
+            specs = []
+            # Validate the complete message before enqueuing anything.  A bad
+            # later item must not cause a partial batch to reach the controller.
+            for index, raw_item in enumerate(raw_items):
+                if not isinstance(raw_item, dict):
+                    raise ProtocolMessageError(
+                        f"exchange_batch item {index} must be an object"
+                    )
+                specs.append(
+                    self._parse_exchange_item(
+                        raw_item, field_prefix=f"items[{index}]."
+                    )
+                )
+
+        tasks: list[_ExchangeTask] = []
+        batch_abort = threading.Event() if len(specs) > 1 else None
+        with self._enqueue_lock:
+            if self._stop.is_set():
+                raise TransportError("communication server is stopping")
+            for request, terminator, timeout in specs:
+                task = _ExchangeTask(
+                    sequence=next(self._sequence),
+                    client_id=client_id,
+                    request=request,
+                    terminator=terminator,
+                    timeout=timeout,
+                    batch_abort=batch_abort,
+                )
+                tasks.append(task)
+                self._tasks.put(task)
+
+        # Wait for the whole group before reporting an error.  Every item is
+        # already in the global FIFO, so returning early would leave the client
+        # unable to know whether later commands ran.
+        for task in tasks:
+            task.done.wait()
+        for task in tasks:
+            if task.error is not None:
+                raise task.error
+            if task.response is None:
+                raise TransportError("communication server returned no response")
+
+        results = [
+            {"sequence": task.sequence, "response": encode_bytes(task.response or b"")}
+            for task in tasks
+        ]
+        if op == "exchange":
+            return results[0], False
+        return {"items": results}, False
+
+    @staticmethod
+    def _parse_exchange_item(
+        message: dict[str, object], *, field_prefix: str
+    ) -> tuple[bytes, bytes, float]:
+        request = decode_bytes(
+            message.get("request"), field=f"{field_prefix}request"
+        )
+        terminator = decode_bytes(
+            message.get("terminator"), field=f"{field_prefix}terminator"
+        )
         if not request:
-            raise ProtocolMessageError("request must not be empty")
+            raise ProtocolMessageError(f"{field_prefix}request must not be empty")
         if not terminator:
-            raise ProtocolMessageError("terminator must not be empty")
+            raise ProtocolMessageError(f"{field_prefix}terminator must not be empty")
         try:
             timeout = float(message.get("timeout") or 0)
         except (TypeError, ValueError) as exc:
-            raise ProtocolMessageError("timeout must be numeric") from exc
+            raise ProtocolMessageError(f"{field_prefix}timeout must be numeric") from exc
         if not 0 < timeout <= 300.0:
-            raise ProtocolMessageError("timeout must be in (0, 300] seconds")
-        task = _ExchangeTask(
-            sequence=next(self._sequence),
-            client_id=client_id,
-            request=request,
-            terminator=terminator,
-            timeout=timeout,
-        )
-        self._tasks.put(task)
-        task.done.wait()
-        if task.error is not None:
-            raise task.error
-        if task.response is None:
-            raise TransportError("communication server returned no response")
-        return {
-            "sequence": task.sequence,
-            "response": encode_bytes(task.response),
-        }, False
+            raise ProtocolMessageError(
+                f"{field_prefix}timeout must be in (0, 300] seconds"
+            )
+        return request, terminator, timeout
 
     def _client(self, client_id: str) -> _Client:
         with self._lock:
@@ -647,6 +718,10 @@ class CommunicationServer:
             started = time.monotonic()
             command = self._command_name(task.request)
             try:
+                if task.batch_abort is not None and task.batch_abort.is_set():
+                    raise TransportError(
+                        "batch aborted after an earlier physical exchange failed"
+                    )
                 with self._lock:
                     config = self._serial_config
                 if config is None:
@@ -660,6 +735,8 @@ class CommunicationServer:
                     )
             except BaseException as exc:
                 task.error = exc
+                if task.batch_abort is not None:
+                    task.batch_abort.set()
                 with self._lock:
                     self._last_error = str(exc)
                 if isinstance(exc, (TransportError, OSError)):

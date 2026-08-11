@@ -297,6 +297,13 @@ def test_formal_gui_patch_contract_builds_extended_pages():
     # base fallbacks and catch a loaded-but-not-bound patch immediately.
     assert hasattr(win, "_port_group")
     assert hasattr(win, "_conn_page_connect_btn")
+    assert win.main_tabs.widget(0).isAncestorOf(win.btn_discover_server)
+    win._sync_port_enabled("serial")
+    assert win.btn_discover_server.isHidden()
+    win._sync_port_enabled("mock")
+    assert win.btn_discover_server.isHidden()
+    win._sync_port_enabled("server")
+    assert not win.btn_discover_server.isHidden()
     assert hasattr(win, "_fw_leds")
     assert hasattr(win, "loop_opl_slider")
     assert not hasattr(win, "write_protection_switch")

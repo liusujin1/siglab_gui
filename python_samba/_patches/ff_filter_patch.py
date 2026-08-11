@@ -1104,33 +1104,32 @@ def on_ff_read_all_filters(self) -> None:
 
     def work() -> None:
         s = self._require_session()
-
-        # Ref filters: 7 sources × 3 stages (protocol 0..2)
-        for src in range(7):
-            for st in range(3):
-                try:
-                    fs = s.get_ff_filter(src, st)
-                    self.ff_ref_buttons[(src, st)].set_info(fs.type_name[:5])
-                except Exception:
-                    self.ff_ref_buttons[(src, st)].set_info("?")
-
-        # Sec filters: 7 sources × 3 stages (protocol 3..5)
-        for src in range(7):
-            for st in range(3):
-                try:
-                    fs = s.get_ff_filter(src, st + 3)
-                    self.ff_sec_buttons[(src, st)].set_info(fs.type_name[:5])
-                except Exception:
-                    self.ff_sec_buttons[(src, st)].set_info("?")
-
-        # Err filters: 6 axes × 2 stages (protocol 6..7)
-        for ax in range(6):
-            for st in range(2):
-                try:
-                    fs = s.get_ff_filter(ax, st + 6)
-                    self.ff_err_buttons[(ax, st)].set_info(fs.type_name[:5])
-                except Exception:
-                    self.ff_err_buttons[(ax, st)].set_info("?")
+        entries = (
+            [("ref", (src, st), (src, st)) for src in range(7) for st in range(3)]
+            + [
+                ("sec", (src, st), (src, st + 3))
+                for src in range(7)
+                for st in range(3)
+            ]
+            + [
+                ("err", (ax, st), (ax, st + 6))
+                for ax in range(6)
+                for st in range(2)
+            ]
+        )
+        try:
+            filters = s.get_ff_filters([address for _, _, address in entries])
+            button_groups = {
+                "ref": self.ff_ref_buttons,
+                "sec": self.ff_sec_buttons,
+                "err": self.ff_err_buttons,
+            }
+            for (group, button_key, _), fs in zip(entries, filters):
+                button_groups[group][button_key].set_info(fs.type_name[:5])
+        except Exception as exc:
+            for group, button_key, _ in entries:
+                getattr(self, f"ff_{group}_buttons")[button_key].set_info("?")
+            self.log_msg(f"FF filter batch read: {exc}")
 
         self.log_msg("FF filters all 54 read (21 ref + 21 sec + 12 err)")
 
@@ -1147,7 +1146,18 @@ def on_ff_status_read_classic(self) -> None:
     def work() -> None:
         s = self._require_session()
         self._init_ff_source_combos()
-        self.on_ff_status_read()
+        snapshot = s.get_ff_runtime_snapshot(7)
+        self.ff_status.setText(" ".join(snapshot["status"]))
+        self.ff_inputs.setText(" ".join(snapshot["inputs"]))
+        self.ff_cfg.setText(" ".join(snapshot["config"]))
+        parameters = snapshot["parameters"]
+        self.ff_params.setText(" ".join(parameters[0]) if parameters else "")
+        self.ff_gains.setText(
+            " ".join(f"{float(value):g}" for value in snapshot["gains"])
+        )
+        self.ff_mult.setText(
+            " ".join(f"{float(value):g}" for value in snapshot["multipliers"])
+        )
         parts = self.ff_gains.text().split()
         # Update hidden gain edits (for write gains button)
         for ed, p in zip(self.ff_gain_edits if hasattr(self, 'ff_gain_edits') else [], parts):
@@ -1156,7 +1166,7 @@ def on_ff_status_read_classic(self) -> None:
             except Exception:
                 ed.setText(p)
         # Source mapping
-        inputs = s.get_ff_inputs()
+        inputs = snapshot["inputs"]
         for index, combo in enumerate(self.ff_source_cbx):
             if index < len(inputs):
                 try:
@@ -1169,9 +1179,8 @@ def on_ff_status_read_classic(self) -> None:
                     combo.blockSignals(False)
 
         # Per-source output matrix and adaptation rate.
-        for source in range(7):
+        for source, params in enumerate(parameters):
             try:
-                params = s.get_ff_parameters(source)
                 outputs = _parse_ff_output_mask(params[0]) if params else 0
                 if len(params) > 2:
                     self.ff_adaptive_rate[source].setText(str(params[2]))
@@ -1180,26 +1189,26 @@ def on_ff_status_read_classic(self) -> None:
             except Exception as exc:
                 self.log_msg(f"FF source {source + 1} parameters: {exc}")
 
-        config = s.get_ff_config()
+        config = snapshot["config"]
         if config:
             self.ff_used_gains.setText(str(config[0]))
-        self.ff_threshold.setText(str(s.get_ff_output_limit()))
+        self.ff_threshold.setText(str(snapshot["output_limit"]))
 
-        multipliers = s.get_stage_ff_multipliers()
+        multipliers = snapshot["multipliers"]
         for editor, value in zip((
             self.ff_xpos_mult, self.ff_xacc_mult,
             self.ff_ypos_mult, self.ff_yacc_mult,
         ), multipliers):
             editor.setText(str(value))
 
-        zrot = s.get_ff_zrot_parameters()
+        zrot = snapshot["zrot"]
         for editor, value in zip((
             self.ff_xpos_maxima, self.ff_ypos_maxima,
             self.ff_xpos_offset, self.ff_ypos_offset,
         ), zrot):
             editor.setText(str(value))
 
-        loop = s.get_loop_status()
+        loop = snapshot["loop"]
         _set_ff_status_buttons_from_system(self, loop.system)
         _set_ff_individual_loop_buttons(self, loop.individual)
 

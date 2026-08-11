@@ -509,6 +509,12 @@ def build_connect_page_reference(self) -> None:
     connection_form.addRow("Server:", self._server_endpoint_connect)
     controls.addLayout(connection_form)
 
+    # ``btn_discover_server`` is created by MainWindow before this patched
+    # page is built.  It previously remained inside an unattached compatibility
+    # panel, so the action existed but could never be seen in the real GUI.
+    self.btn_discover_server.setMinimumWidth(360)
+    controls.addWidget(self.btn_discover_server, 0, QtCore.Qt.AlignLeft)
+
     def sync_backend(value: str) -> None:
         self.backend.setCurrentText(value)
         self._sync_port_enabled(value)

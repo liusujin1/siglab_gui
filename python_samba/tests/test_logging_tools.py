@@ -226,6 +226,38 @@ def test_logging_page_starts_and_stops_background_file_acquisition(tmp_path: Pat
         app.processEvents()
 
 
+def test_logging_page_can_cancel_while_monitor_definitions_are_preparing():
+    pytest.importorskip("PySide6")
+    from PySide6 import QtWidgets
+    from python_samba.services.safety import SafetyGate
+    from python_samba.ui.main_window import MainWindow
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    session = open_mock(readonly=False)
+    session.open()
+    window = MainWindow()
+    window.session = session
+    window.gate = SafetyGate(session)
+    page = window.logging_page_widget
+    page.on_connected()
+    original_read = page.read_monitor_definitions
+    page.read_monitor_definitions = lambda: None
+    try:
+        page.start_file_logging()
+        assert page._pending_file_start
+        assert page.btn_file_stop.isEnabled()
+        assert page.file_state.text() == "Preparing"
+        page.stop_file_logging()
+        assert not page._pending_file_start
+        assert page.btn_file_start.isEnabled()
+        assert not page.btn_file_stop.isEnabled()
+        assert page.file_state.text() == "Cancelled"
+    finally:
+        page.read_monitor_definitions = original_read
+        window.close()
+        app.processEvents()
+
+
 def test_logging_workspace_update_populates_all_three_columns():
     pytest.importorskip("PySide6")
     from PySide6 import QtWidgets

@@ -32,6 +32,7 @@ from python_sidmat.measurement.trace import TraceParameters
 __all__ = ["MeasurementEngine", "MeasurementCancelled"]
 
 _POLL_INTERVAL = 0.25  # seconds between DGTAS polls (original slept ~1 s)
+_REMOTE_READ_BATCH_CHUNKS = 64
 
 
 def _token_int(token: str) -> int:
@@ -157,6 +158,9 @@ class MeasurementEngine:
 
     def _read_trace_data(self) -> tuple[list[float], list[float]]:
         """Read one full trace using text DGTBV or legacy binary DGTBB."""
+        info = getattr(getattr(self.controller, "session", None), "info", None)
+        if getattr(info, "backend", "") == "server":
+            return self._read_trace_data_remote_batched()
         trace = self.trace
         ch1: list[float] = []
         ch2: list[float] = []
@@ -181,4 +185,61 @@ class MeasurementEngine:
             # actually decoded also handles a short-but-valid controller chunk
             # without skipping data on the next request.
             offset += count
+        return ch1, ch2
+
+    def _read_trace_data_remote_batched(self) -> tuple[list[float], list[float]]:
+        """Download remote trace data in bounded, cancellation-friendly batches."""
+        trace = self.trace
+        requested = int(trace.no_samples)
+        pair_count = int(trace.data_pairs_per_read)
+        ch1: list[float] = []
+        ch2: list[float] = []
+        offset = 0
+        while len(ch1) < requested:
+            self._check_stop()
+            remaining = requested - len(ch1)
+            chunk_total = min(
+                _REMOTE_READ_BATCH_CHUNKS,
+                (remaining + pair_count - 1) // pair_count,
+            )
+            requests: list[tuple[int, int]] = []
+            next_offset = offset
+            left = remaining
+            for _ in range(chunk_total):
+                want = min(pair_count, left)
+                requests.append((next_offset, want))
+                next_offset += want
+                left -= want
+            if trace.is_fast_data_loading:
+                chunks = self.controller.get_trace_buffers_binary(requests)
+            else:
+                chunks = self.controller.get_trace_buffers(
+                    [read_offset for read_offset, _want in requests]
+                )
+            if len(chunks) != len(requests):
+                raise ControllerError(
+                    f"trace batch returned {len(chunks)} chunks; "
+                    f"expected {len(requests)}"
+                )
+            short_chunk = False
+            for (read_offset, want), (part1, part2) in zip(requests, chunks):
+                self._check_stop()
+                count = min(len(part1), len(part2), requested - len(ch1), want)
+                if count <= 0:
+                    raise ControllerError(
+                        f"trace buffer returned no complete samples at offset "
+                        f"{read_offset} ({len(ch1)}/{requested} read)"
+                    )
+                ch1.extend(part1[:count])
+                ch2.extend(part2[:count])
+                offset += count
+                if count < want:
+                    pair_count = count
+                    short_chunk = True
+                    break
+            if short_chunk:
+                # A short controller chunk changes all following offsets.  The
+                # already-issued reads are harmless; rebuild the next batch from
+                # the number of samples actually decoded.
+                continue
         return ch1, ch2

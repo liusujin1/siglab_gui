@@ -11,6 +11,8 @@ import struct
 from pathlib import Path
 
 PROTOCOL_VERSION = 1
+SERVER_FEATURES = ("exchange_batch",)
+MAX_BATCH_ITEMS = 256
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 47619
 DEFAULT_ENDPOINT = f"{DEFAULT_HOST}:{DEFAULT_PORT}"
@@ -20,6 +22,26 @@ _HEADER = struct.Struct("!I")
 
 class ProtocolMessageError(RuntimeError):
     """Invalid or incomplete communication-server message."""
+
+
+def configure_low_latency_socket(sock: socket.socket) -> None:
+    """Apply safe latency/health options to a connected TCP socket.
+
+    Communication-server messages are deliberately small and synchronous.
+    Disabling Nagle avoids an avoidable delayed-ACK pause on fast LAN links;
+    keepalive lets Windows eventually notice a vanished remote host instead of
+    leaving a GUI request blocked on a half-open connection indefinitely.
+    Unsupported socket options are intentionally best-effort.
+    """
+
+    for level, option, value in (
+        (socket.IPPROTO_TCP, socket.TCP_NODELAY, 1),
+        (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
+    ):
+        try:
+            sock.setsockopt(level, option, value)
+        except (AttributeError, OSError):
+            pass
 
 
 def parse_endpoint(value: str) -> tuple[str, int]:

@@ -1240,32 +1240,87 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
             if callable(pneu_setter):
                 pneu_setter(int(pneumatic))
 
-    def _refresh_status_loop_state(self, loop=None, *, include_axis_status: bool = False) -> None:
+    def _refresh_status_loop_state(self, loop=None, *, include_axis_status: bool = False):
         """Lightweight one-second refresh for the Status/Loops Status panel."""
         session = self._require_session()
-        if loop is None:
-            loop = session.get_loop_status()
-        switch = session.get_switch_status()
+        batch_reader = getattr(session, "get_status_page_snapshot", None)
+        if callable(batch_reader):
+            snapshot = batch_reader(
+                include_loop=loop is None,
+                include_switch_conditions=not self._switch_config_loaded,
+                include_axis_status=include_axis_status,
+                include_events=False,
+            )
+            if loop is None:
+                loop = snapshot["loop"]
+            switch = snapshot["switch_status"]
+            conditions = snapshot.get("switch_conditions", [])
+            status_words = (
+                snapshot.get("axis_status") if include_axis_status else None
+            )
+        else:
+            if loop is None:
+                loop = session.get_loop_status()
+            switch = session.get_switch_status()
+            conditions = (
+                session.get_switch_conditions()
+                if not self._switch_config_loaded
+                else []
+            )
+            status_words = (
+                session.get_pos_pneum_digital_status()
+                if include_axis_status
+                else None
+            )
         switch_word = _parse_protocol_int(switch[0]) if switch else 0
         if not self._switch_config_loaded:
-            conditions = session.get_switch_conditions()
             if len(conditions) > 3:
                 self._switch_config = _parse_protocol_int(conditions[3])
                 self._switch_config_loaded = True
-        status_words = (
-            session.get_pos_pneum_digital_status() if include_axis_status else None
-        )
         self._update_status_loop_widgets(
             loop, switch_word, status_words, self._switch_config
         )
+        return loop
 
     def _refresh_status_reference(self) -> None:
         """Apply loop words to the visible status badges and axis lamps."""
         s = self._require_session()
-        loop = s.get_loop_status()
-        self._refresh_status_loop_state(loop, include_axis_status=True)
+        batch_reader = getattr(s, "get_status_page_snapshot", None)
+        if callable(batch_reader):
+            snapshot = batch_reader(
+                include_switch_conditions=not self._switch_config_loaded
+            )
+        else:
+            snapshot = {
+                "loop": s.get_loop_status(),
+                "switch_status": s.get_switch_status(),
+                "axis_status": s.get_pos_pneum_digital_status(),
+                "events": s.get_amplifier_disable_events(),
+            }
+            if not self._switch_config_loaded:
+                snapshot["switch_conditions"] = s.get_switch_conditions()
+        loop = snapshot["loop"]
+        switch = snapshot["switch_status"]
+        switch_word = _parse_protocol_int(switch[0]) if switch else 0
+        if not self._switch_config_loaded:
+            conditions = snapshot.get("switch_conditions", [])
+            if len(conditions) > 3:
+                self._switch_config = _parse_protocol_int(conditions[3])
+                self._switch_config_loaded = True
+        self._update_status_loop_widgets(
+            loop,
+            switch_word,
+            snapshot["axis_status"],
+            self._switch_config,
+        )
 
-        events = s.get_amplifier_disable_events()
+        # Preserve injectable/test-double getter behaviour while real sessions
+        # use the batched event response.
+        events = (
+            s.get_amplifier_disable_events()
+            if "get_amplifier_disable_events" in vars(s)
+            else snapshot["events"]
+        )
         rows: list[tuple[str, ...]] = []
         for index, raw_value in enumerate(events[:10]):
             try:
@@ -1302,9 +1357,12 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
     def _refresh_signal_display_reference(self) -> None:
         """Refresh monitor definitions and live values for all visible cards."""
         s = self._require_session()
-        for signal_number, selector in enumerate(self.sig_selectors):
+        snapshot = s.get_monitor_page_snapshot(len(self.sig_selectors))
+        definitions = snapshot["signals"]
+        for signal_number, (selector, definition) in enumerate(
+            zip(self.sig_selectors, definitions)
+        ):
             try:
-                definition = s.get_monitor_signal(signal_number)
                 if len(definition) >= 3:
                     tokens = tuple(int(value) for value in definition[:3])
                     if isinstance(selector, IOSignalButton):
@@ -1324,7 +1382,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
             except Exception as exc:
                 self.log_msg(f"Monitor signal {signal_number} read: {exc}")
         try:
-            values = s.get_monitor_values(0, len(self.sig_values) - 1)
+            values = snapshot["values"]
             for index, value in enumerate(values[:len(self.sig_values)]):
                 self.sig_values[index].setText(format_ui_number(value))
         except Exception as exc:
@@ -1365,11 +1423,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
                 self.on_vel_mat_read()
         elif main == "Position":
             if sub == "Tuning":
-                self.on_pos_read_all_filters()
-                self.on_prox_read_classic()
-                if self._supports_controller_feature("cascaded_position"):
-                    self.on_cascaded_read()
-                self.on_nlp_read()
+                self.on_pos_read_tuning_snapshot()
             elif sub == "Sensor Matrix":
                 self.on_pos_mat_read("sensor")
             elif sub == "Motor Matrix":
@@ -2147,6 +2201,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         self.port.setEnabled(physical)
         self.baud.setEnabled(physical)
         self.server_endpoint.setEnabled(backend == "server")
+        self.btn_discover_server.setVisible(backend == "server")
         self.btn_discover_server.setEnabled(
             backend == "server" and not bool(self.session and self.session.connected)
         )
@@ -3273,20 +3328,79 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         def work() -> None:
             s = self._require_session()
             first_stage = None
-            for ax in range(6):
-                for st in range(4):
-                    try:
-                        fs = s.get_proximity_filter(ax, st)
-                        if ax == 0 and st == 0:
-                            first_stage = fs
-                        self.pos_filter_buttons[(ax, st)].set_info(fs.type_name[:5])
-                    except Exception:
-                        self.pos_filter_buttons[(ax, st)].set_info("?")
+            keys = [(ax, st) for ax in range(6) for st in range(4)]
+            try:
+                filters = s.get_proximity_filters(keys)
+                for key, fs in zip(keys, filters):
+                    if key == (0, 0):
+                        first_stage = fs
+                    self.pos_filter_buttons[key].set_info(fs.type_name[:5])
+            except Exception as exc:
+                for key in keys:
+                    self.pos_filter_buttons[key].set_info("?")
+                self.log_msg(f"Position filter batch read: {exc}")
             if first_stage is not None:
                 self.pos_filter.set_stage(first_stage)
                 self.pos_filter_panel.set_from_filter_editor(self.pos_filter)
             self.log_msg("position filters all 24 read")
         self._run("Read all position filters", work)
+
+    def on_pos_read_tuning_snapshot(self) -> None:
+        """Read all Position Tuning groups with one server batch RPC."""
+        def work() -> None:
+            s = self._require_session()
+            self._ensure_controller_capabilities()
+            keys = [(axis, stage) for axis in range(6) for stage in range(4)]
+            include_cascaded = self._supports_controller_feature(
+                "cascaded_position"
+            )
+            snapshot = s.get_position_tuning_snapshot(
+                keys,
+                proximity_count=self._proximity_count,
+                include_cascaded=include_cascaded,
+            )
+
+            first_stage = None
+            for key, stage_value in zip(keys, snapshot["filters"]):
+                if key == (0, 0):
+                    first_stage = stage_value
+                self.pos_filter_buttons[key].set_info(stage_value.type_name[:5])
+            if first_stage is not None:
+                self.pos_filter.set_stage(first_stage)
+                self.pos_filter_panel.set_from_filter_editor(self.pos_filter)
+
+            self._update_proximity_offset_widgets(
+                snapshot["offsets"], self._proximity_count
+            )
+
+            if include_cascaded:
+                for index, stage_value in enumerate(snapshot["cascaded_filters"]):
+                    key = (0, index)
+                    if key in self.cascaded_filter_buttons:
+                        self.cascaded_filter_buttons[key].set_info(
+                            stage_value.type_name[:5]
+                        )
+                parameters = snapshot.get("cascaded_parameter", [])
+                if len(parameters) >= 2:
+                    self._updating_position_controls = True
+                    try:
+                        self.cascaded_hysteresis.setText(str(parameters[1]))
+                    finally:
+                        self._updating_position_controls = False
+
+            nonlinear = snapshot["nonlinear"]
+            if len(nonlinear) >= 4:
+                self._updating_position_controls = True
+                try:
+                    self.nlp_type.setCurrentIndex(int(nonlinear[0]))
+                    self.nlp_reset_pid.setChecked(bool(int(nonlinear[1])))
+                    self.nlp_deadband.setText(str(nonlinear[2]))
+                    self.nlp_rise_range.setText(str(nonlinear[3]))
+                finally:
+                    self._updating_position_controls = False
+            self.log_msg("Position tuning snapshot read")
+
+        self._run("Read Position tuning", work)
 
     def _build_pos_sensor_matrix_page(self) -> QtWidgets.QWidget:
         """Position sensor matrix page."""
@@ -4495,6 +4609,14 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         logging_page = getattr(self, "logging_page_widget", None)
         if logging_page is not None:
             logging_page.shutdown()
+        live_session = getattr(self, "_remote_live_session", None)
+        if live_session is not None and live_session is not self.session:
+            try:
+                live_session.close()
+            except Exception:
+                pass
+        self._remote_live_session = None
+        self._remote_live_source_session = None
         if self.session:
             self.session.close()
         self.session = None
@@ -4681,24 +4803,23 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         """Read all 42 filters (6 axes × 7 stages) and update cell texts."""
         def work() -> None:
             s = self._require_session()
-            try:
-                limiters = s.get_vel_axes_output_limiter()
-                for editor, value in zip(self.vel_axis_limiters, limiters):
-                    editor.setText(f"{float(value):g}")
-            except Exception as exc:
-                self.log_msg(f"Velocity axis limiter read: {exc}")
+            keys = [(ax, st) for ax in range(6) for st in range(7)]
+            snapshot = s.get_velocity_tuning_snapshot(keys)
+            for editor, value in zip(self.vel_axis_limiters, snapshot["limiters"]):
+                editor.setText(f"{float(value):g}")
             first_stage = None
-            for ax in range(6):
-                for st in range(7):
-                    try:
-                        fs = s.get_velocity_filter(ax, st)
-                        if ax == 0 and st == 0:
-                            first_stage = fs
-                        self.vel_filter_buttons[(ax, st)].set_info(
-                            fs.type_name, short=filter_small_name(fs.filter_type)
-                        )
-                    except Exception:
-                        self.vel_filter_buttons[(ax, st)].set_info("?")
+            try:
+                filters = snapshot["filters"]
+                for key, fs in zip(keys, filters):
+                    if key == (0, 0):
+                        first_stage = fs
+                    self.vel_filter_buttons[key].set_info(
+                        fs.type_name, short=filter_small_name(fs.filter_type)
+                    )
+            except Exception as exc:
+                for key in keys:
+                    self.vel_filter_buttons[key].set_info("?")
+                self.log_msg(f"Velocity filter batch read: {exc}")
             # Load the first cell into the panel
             if first_stage is not None:
                 self.vel_filter.set_stage(first_stage)
@@ -5138,6 +5259,12 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         self._configure_proximity_widgets(count)
         session = self._require_session()
         values = session.get_proximity_input_values(count)
+        self._apply_position_live_values(values)
+
+    def _apply_position_live_values(self, values) -> None:
+        """Apply already-read proximity values without touching the transport."""
+        count = self._proximity_count
+        self._configure_proximity_widgets(count)
         raw_values = [float(value) for value in values[:count]]
         self._last_proximity_values = raw_values
         display_values = self._proximity_raw_to_display(raw_values)
@@ -5658,21 +5785,22 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
     def on_diag_read(self) -> None:
         def work() -> None:
             s = self._require_session()
-            nt = s.get_noise_type()
+            snapshot = s.get_diagnostics_snapshot()
+            nt = snapshot["noise_type"]
             idx = self.noise_type.findData(nt)
             if idx >= 0:
                 self.noise_type.setCurrentIndex(idx)
-            self.noise_gain.setText(f"{s.get_noise_gain():.5e}")
-            self.noise_freq.setText(f"{s.get_noise_frequency():.5e}")
-            inject = s.get_noise_inject_point()
+            self.noise_gain.setText(f"{snapshot['noise_gain']:.5e}")
+            self.noise_freq.setText(f"{snapshot['noise_frequency']:.5e}")
+            inject = snapshot["inject"]
             if len(inject) >= 3:
                 self.noise_inject.set_io_signal(inject[:3])
-            diagnostics = s.get_diagnostic_outputs()
+            diagnostics = snapshot["outputs"]
             if len(diagnostics) >= 6:
                 self.diag_0.set_io_signal(diagnostics[:3])
                 self.diag_1.set_io_signal(diagnostics[3:6])
             try:
-                usage = str(s.get_noise_filter_usage()).strip().upper()
+                usage = str(snapshot["filter_usage"]).strip().upper()
                 usage_index = self.noise_filt_usage.findText(usage)
                 if usage_index >= 0:
                     self.noise_filt_usage.setCurrentIndex(usage_index)
@@ -5683,9 +5811,8 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
                     self._refresh_dynamic_style(self.exc_filter_usage_label)
             except Exception as exc:
                 self.log_msg(f"Excitation filter usage read: {exc}")
-            for stage in range(4):
+            for stage, filt in enumerate(snapshot["filters"]):
                 try:
-                    filt = s.get_noise_filter_stage(stage)
                     if stage < len(getattr(self, "exc_filter_buttons", [])):
                         self.exc_filter_buttons[stage].set_info(
                             filt.type_name,
@@ -5821,11 +5948,12 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         """Read the complete AD/DA mapping page like ADDAMappingPage.UpdatePage."""
         def work() -> None:
             s = self._require_session()
-            seq = s.get_adc_sequence()
+            snapshot = s.get_adc_dac_snapshot()
+            seq = snapshot["adc"]
             for ed, val in zip(self.adc_edits, seq):
                 ed.setText(str(val))
             try:
-                adc_count = int(s.get_adc_set_number())
+                adc_count = int(snapshot["adc_set"])
                 if isinstance(self.adc_set_num, QtWidgets.QComboBox):
                     if not 0 <= adc_count < self.adc_set_num.count():
                         raise ValueError(f"NGASN returned invalid ADC set {adc_count}")
@@ -5837,12 +5965,12 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
             except Exception as exc:
                 self.log_msg(f"ADC set number read: {exc}")
             try:
-                temperatures = s.get_temp_sensor_adc_mapping()
+                temperatures = snapshot["temperature"]
                 for editor, value in zip(self.adc_temperature_edits, temperatures):
                     editor.setText(str(value))
             except Exception as exc:
                 self.log_msg(f"Temperature ADC mapping read: {exc}")
-            dac = s.get_dac_sequence()
+            dac = snapshot["dac"]
             for editor, value in zip(self.dac_edits, dac):
                 editor.setText(str(value))
             self.log_msg(
@@ -5919,19 +6047,33 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         """
 
         session = self._require_session()
+        snapshot: dict[str, object] = {
+            "motor_power": session.get_motor_power_values(),
+            "motor_failsafe": session.get_motor_failsafe_status(),
+        }
+        include_power_supply = False
+        if hasattr(self, "ps_current_limit"):
+            features = self._controller_features
+            include_power_supply = features is None or "PSUCL" in features
+        if include_power_supply:
+            snapshot["power_supply"] = session.get_power_supply_parameters()
+        self._apply_motor_protection_live_snapshot(snapshot, loop)
+
+    def _apply_motor_protection_live_snapshot(self, snapshot, loop=None) -> None:
+        """Apply a data-only Motor Protection refresh snapshot."""
         if loop is not None and hasattr(self, "mot_use_temperature"):
             self._set_motor_toggle_silently(
                 self.mot_use_temperature,
                 bool(loop.system & int(SystemStatus.USE_TEMP_SENSORS)),
             )
 
-        power = session.get_motor_power_values()
+        power = snapshot.get("motor_power", [])
         for editor, value in zip(
             getattr(self, "mot_actual_values", ()), power
         ):
             editor.setText(format_ui_number(value))
 
-        failsafe = session.get_motor_failsafe_status()
+        failsafe = snapshot.get("motor_failsafe", [])
         for label, value in zip(
             getattr(self, "mot_status_labels", ()), failsafe
         ):
@@ -5948,10 +6090,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         # controls visible, so retain the conservative read in that case.
         if not hasattr(self, "ps_current_limit"):
             return
-        features = self._controller_features
-        if features is not None and "PSUCL" not in features:
-            return
-        power_supply = session.get_power_supply_parameters()
+        power_supply = snapshot.get("power_supply", [])
         if len(power_supply) < 8:
             return
         self.ps_current_limit.setText(str(power_supply[0]))
@@ -6034,7 +6173,22 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         """Read motor overcurrent protection values."""
         def work() -> None:
             s = self._require_session()
-            cfg = s.get_motor_overcurrent_config()
+            self._ensure_controller_capabilities()
+            linear_12 = bool(
+                self._controller_features and "SALMO" in self._controller_features
+            )
+            include_power_supply = bool(
+                hasattr(self, "ps_current_limit")
+                and (
+                    self._controller_features is None
+                    or "PSUCL" in self._controller_features
+                )
+            )
+            snapshot = s.get_motor_protection_snapshot(
+                linear_offsets=linear_12,
+                include_power_supply=include_power_supply,
+            )
+            cfg = snapshot["config"]
             # cfg format: [DisableAllFlag, ResetDelay, thresh0, thresh1, ..., thresh11]
             if len(cfg) >= 2:
                 self._set_motor_toggle_silently(
@@ -6048,12 +6202,12 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
             # Read cooling constant
             try:
                 self.mot_cool.setText(
-                    format_ui_number(s.get_motor_overcurrent_cooling_constant())
+                    format_ui_number(snapshot["cooling"])
                 )
             except Exception as exc:
                 self.log_msg(f"Motor cooling constant read: {exc}")
             try:
-                loop = s.get_loop_status()
+                loop = snapshot["loop"]
                 self._set_motor_toggle_silently(
                     self.mot_use_temperature,
                     bool(loop.system & int(SystemStatus.USE_TEMP_SENSORS)),
@@ -6061,18 +6215,12 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
             except Exception as exc:
                 self.log_msg(f"Motor temperature-sensor mode read: {exc}")
             try:
-                self._ensure_controller_capabilities()
-                linear_12 = bool(
-                    self._controller_features
-                    and "SALMO" in self._controller_features
-                )
                 self._configure_motor_offset_mode(linear_12)
+                offsets = snapshot["offsets"]
                 if linear_12:
-                    offsets = s.get_linear_motor_offsets()
                     for editor, value in zip(self.mot_offsets, offsets):
                         editor.setText(format_ui_number(value))
                 else:
-                    offsets = s.get_motor_offsets()
                     if len(offsets) < 8:
                         raise RuntimeError(
                             f"CGMOV returned {len(offsets)} offsets; expected at least 8"
@@ -6084,13 +6232,13 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
             except Exception as exc:
                 self.log_msg(f"Motor offsets read: {exc}")
             try:
-                power = s.get_motor_power_values()
+                power = snapshot["power"]
                 for editor, value in zip(self.mot_actual_values, power):
                     editor.setText(format_ui_number(value))
             except Exception as exc:
                 self.log_msg(f"Motor power values read: {exc}")
             try:
-                failsafe = s.get_motor_failsafe_status()
+                failsafe = snapshot["failsafe"]
                 for label, value in zip(self.mot_status_labels, failsafe):
                     text, color = _motor_status_presentation(value)
                     label.setText(text)
@@ -6103,11 +6251,11 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
                 self.log_msg(f"Motor failsafe status read: {exc}")
             try:
                 if self.mot_limit_edits:
-                    self.mot_limit_edits[0].setText(str(s.get_output_limit()))
+                    self.mot_limit_edits[0].setText(str(snapshot["output_limit"]))
             except Exception as exc:
                 self.log_msg(f"Motor limit read: {exc}")
             try:
-                power_supply = s.get_power_supply_parameters()
+                power_supply = snapshot.get("power_supply", [])
                 if len(power_supply) >= 8 and hasattr(self, "ps_current_limit"):
                     self.ps_current_limit.setText(str(power_supply[0]))
                     self.ps_current_si_unit.setText(str(power_supply[1]))
@@ -6535,6 +6683,12 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         logging_page = getattr(self, "logging_page_widget", None)
         if logging_page is not None:
             logging_page.shutdown()
+        live_session = getattr(self, "_remote_live_session", None)
+        if live_session is not None and live_session is not self.session:
+            try:
+                live_session.close()
+            except Exception:
+                pass
         if self.session:
             self.session.close()
         super().closeEvent(event)

@@ -62,6 +62,14 @@ class RecordingTransport(Transport):
                 self.active -= 1
 
 
+class FailingTransport(RecordingTransport):
+    def exchange(
+        self, request: bytes, terminator: bytes = b"\r", timeout: float = 2.0
+    ) -> bytes:
+        self.requests.append(bytes(request))
+        raise TransportError("simulated physical disconnect")
+
+
 def _endpoint(server: CommunicationServer) -> str:
     host, port = server.addresses[0]
     return f"{host}:{port}"
@@ -149,11 +157,160 @@ def test_binary_exchange_preserves_nul_and_carriage_return(tmp_path) -> None:
     client = _client(server)
     try:
         client.open()
+        assert client._socket is not None
+        assert client._socket.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) == 1
+        assert client._socket.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE) == 1
         assert client.exchange(b"DGTBB-binary-request", b"\r", 1.0) == binary
         assert transports[0].requests == [b"DGTBB-binary-request"]
     finally:
         client.close()
         server.stop()
+
+
+def test_batch_exchange_uses_one_rpc_and_preserves_response_order(tmp_path) -> None:
+    transports: list[RecordingTransport] = []
+
+    def factory(config: SerialConfig) -> Transport:
+        transport = RecordingTransport(config)
+        transports.append(transport)
+        return transport
+
+    server = CommunicationServer(
+        ("127.0.0.1", 0),
+        transport_factory=factory,
+        log_file=tmp_path / "server.log",
+    ).start()
+    client = _client(server)
+    try:
+        client.open()
+        assert "exchange_batch" in client._features
+        requests = [b"first\x00", b"second\rinside", b"third"]
+        rpc_ops: list[str] = []
+        original_rpc = client._rpc
+
+        def counting_rpc(op: str, **kwargs):
+            rpc_ops.append(op)
+            return original_rpc(op, **kwargs)
+
+        client._rpc = counting_rpc  # type: ignore[method-assign]
+        responses = client.exchange_many(
+            [(request, b"\r", 1.0) for request in requests]
+        )
+
+        assert responses == [b"reply:" + request for request in requests]
+        assert transports[0].requests == requests
+        assert rpc_ops == ["exchange_batch"]
+        assert client.status()["features"] == ["exchange_batch"]
+    finally:
+        client.close()
+        server.stop()
+
+
+def test_batch_items_are_contiguous_in_global_fifo(tmp_path) -> None:
+    transports: list[RecordingTransport] = []
+
+    def factory(config: SerialConfig) -> Transport:
+        transport = RecordingTransport(config)
+        transports.append(transport)
+        return transport
+
+    server = CommunicationServer(
+        ("127.0.0.1", 0),
+        transport_factory=factory,
+        log_file=tmp_path / "server.log",
+    ).start()
+    batch_client = _client(server, name="batch")
+    other_client = _client(server, name="other")
+    barrier = threading.Barrier(2)
+    errors: list[BaseException] = []
+    batch_requests = [f"B-{index}".encode("ascii") for index in range(60)]
+
+    def run_batch() -> None:
+        try:
+            barrier.wait()
+            responses = batch_client.exchange_many(
+                [(request, b"\r", 2.0) for request in batch_requests]
+            )
+            assert responses == [b"reply:" + request for request in batch_requests]
+        except BaseException as exc:
+            errors.append(exc)
+
+    def run_singles() -> None:
+        try:
+            barrier.wait()
+            for index in range(20):
+                request = f"S-{index}".encode("ascii")
+                assert other_client.exchange(request) == b"reply:" + request
+        except BaseException as exc:
+            errors.append(exc)
+
+    try:
+        batch_client.open()
+        other_client.open()
+        threads = [threading.Thread(target=run_batch), threading.Thread(target=run_singles)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10.0)
+        assert all(not thread.is_alive() for thread in threads)
+        assert not errors
+
+        positions = [
+            index
+            for index, request in enumerate(transports[0].requests)
+            if request.startswith(b"B-")
+        ]
+        assert len(positions) == len(batch_requests)
+        assert positions == list(range(positions[0], positions[0] + len(batch_requests)))
+        assert transports[0].requests[positions[0] : positions[-1] + 1] == batch_requests
+    finally:
+        batch_client.close()
+        other_client.close()
+        server.stop()
+
+
+def test_physical_failure_aborts_remaining_batch_items(tmp_path) -> None:
+    transports: list[FailingTransport] = []
+
+    def factory(config: SerialConfig) -> Transport:
+        transport = FailingTransport(config)
+        transports.append(transport)
+        return transport
+
+    server = CommunicationServer(
+        ("127.0.0.1", 0), transport_factory=factory, log_file=tmp_path / "server.log"
+    ).start()
+    client = _client(server)
+    try:
+        client.open()
+        with pytest.raises(TransportError, match="simulated physical disconnect"):
+            client.exchange_many(
+                [(f"request-{index}".encode(), b"\r", 1.0) for index in range(40)]
+            )
+        assert sum(len(transport.requests) for transport in transports) == 1
+        assert server.status()["completed_requests"] == 40
+    finally:
+        client.close()
+        server.stop()
+
+
+def test_new_client_falls_back_to_single_exchange_for_legacy_server() -> None:
+    client = CommServerTransport(
+        CommServerConfig(port="COM1", endpoint="127.0.0.1:1", auto_start=False)
+    )
+    calls: list[bytes] = []
+
+    def fake_exchange(
+        request: bytes, terminator: bytes = b"\r", timeout: float = 2.0
+    ) -> bytes:
+        calls.append(request)
+        return b"legacy:" + request
+
+    client.exchange = fake_exchange  # type: ignore[method-assign]
+    assert client.exchange_many(
+        [(b"one", b"\r", 1.0), (b"two", b"\r", 1.0)]
+    ) == [b"legacy:one", b"legacy:two"]
+    assert calls == [b"one", b"two"]
 
 
 def test_authentication_and_serial_configuration_conflict(tmp_path) -> None:
@@ -358,6 +515,152 @@ def test_mock_controller_ascii_and_dgtbb_through_server(tmp_path) -> None:
     finally:
         samba.close()
         sidmat.close()
+        server.stop()
+
+
+def test_page_snapshots_each_use_one_server_batch_rpc(tmp_path) -> None:
+    server = CommunicationServer(
+        ("127.0.0.1", 0),
+        transport_factory=lambda config: MockTransport(),
+        log_file=tmp_path / "server.log",
+    ).start()
+    session = open_comm_server(
+        "COM1", server=_endpoint(server), auto_start=False, readonly=True
+    )
+    try:
+        session.open()
+        transport = session.transport
+        assert isinstance(transport, CommServerTransport)
+        rpc_ops: list[str] = []
+        original_rpc = transport._rpc
+
+        def counting_rpc(op: str, **kwargs):
+            rpc_ops.append(op)
+            return original_rpc(op, **kwargs)
+
+        transport._rpc = counting_rpc  # type: ignore[method-assign]
+        velocity_keys = [(axis, stage) for axis in range(6) for stage in range(7)]
+        position_keys = [(axis, stage) for axis in range(6) for stage in range(4)]
+        pff_keys = (
+            [(0, source, stage) for source in range(4) for stage in range(6)]
+            + [(axis, 0, stage) for axis in range(3) for stage in range(6, 8)]
+        )
+        pneumatic_keys = [(axis, stage) for axis in range(3) for stage in range(4)]
+
+        session.get_system_setting_snapshot()
+        session.get_status_page_snapshot()
+        session.get_monitor_page_snapshot(16)
+        session.get_adc_dac_snapshot()
+        session.get_motor_protection_snapshot(
+            linear_offsets=False, include_power_supply=True
+        )
+        session.get_velocity_tuning_snapshot(velocity_keys)
+        session.get_diagnostics_snapshot()
+        session.get_position_tuning_snapshot(
+            position_keys, proximity_count=6, include_cascaded=True
+        )
+        session.get_ff_filters(
+            [(source, stage) for source in range(7) for stage in range(6)]
+            + [(axis, stage) for axis in range(6) for stage in range(6, 8)]
+        )
+        session.get_ff_runtime_snapshot(7)
+        session.get_pff_tuning_snapshot(pff_keys, source_count=4)
+        session.get_pneumatic_page_snapshot(pneumatic_keys, include_ramp=True)
+        session.get_live_refresh_snapshot(
+            include_switch_conditions=True,
+            include_axis_status=True,
+            include_controller_config=True,
+            proximity_count=6,
+            include_motor=True,
+            include_power_supply=True,
+            include_pneumatic=True,
+            monitor_count=16,
+        )
+        session.get_logging_workspace_snapshot(16)
+        session.get_internal_logging_snapshot()
+
+        assert rpc_ops == ["exchange_batch"] * 15
+    finally:
+        session.close()
+        server.stop()
+
+
+def test_trace_buffer_groups_use_one_server_rpc_per_group(tmp_path) -> None:
+    server = CommunicationServer(
+        ("127.0.0.1", 0),
+        transport_factory=lambda config: MockTransport(),
+        log_file=tmp_path / "server.log",
+    ).start()
+    session = open_comm_server(
+        "COM1", server=_endpoint(server), auto_start=False, readonly=False
+    )
+    try:
+        session.open()
+        transport = session.transport
+        assert isinstance(transport, CommServerTransport)
+        rpc_ops: list[str] = []
+        original_rpc = transport._rpc
+
+        def counting_rpc(op: str, **kwargs):
+            rpc_ops.append(op)
+            return original_rpc(op, **kwargs)
+
+        transport._rpc = counting_rpc  # type: ignore[method-assign]
+        text_chunks = session.get_digital_trace_buffers([0, 16, 32])
+        binary_chunks = session.get_digital_trace_buffers_binary(
+            [(0, 4), (4, 4), (8, 4)]
+        )
+        assert [len(values) for values in text_chunks] == [16, 16, 16]
+        assert [len(values) for values in binary_chunks] == [8, 8, 8]
+        assert rpc_ops == ["exchange_batch", "exchange_batch"]
+    finally:
+        session.close()
+        server.stop()
+
+
+def test_remote_timer_refresh_is_non_blocking_and_coalesced(tmp_path) -> None:
+    pytest.importorskip("PySide6")
+    from PySide6 import QtWidgets
+    from python_samba.services.safety import SafetyGate
+    from python_samba.ui.main_window import MainWindow
+    from python_samba.ui.patches import apply_all_patches
+
+    apply_all_patches(MainWindow, strict=True)
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    server = CommunicationServer(
+        ("127.0.0.1", 0),
+        transport_factory=lambda config: MockTransport(),
+        log_file=tmp_path / "server.log",
+    ).start()
+    session = open_comm_server(
+        "COM1", server=_endpoint(server), auto_start=False, readonly=False
+    )
+    session.open()
+    window = MainWindow()
+    window.session = session
+    window.gate = SafetyGate(session)
+    try:
+        started = time.perf_counter()
+        window._on_timer_tick()
+        elapsed = time.perf_counter() - started
+        assert elapsed < 0.2
+        assert window._remote_live_refresh_inflight
+        # A second overdue timer event is discarded rather than starting a
+        # second worker against the same page snapshot.
+        window._on_timer_tick()
+        deadline = time.monotonic() + 5.0
+        while window._remote_live_refresh_inflight and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        app.processEvents()
+        assert not window._remote_live_refresh_inflight
+        live_reader = window._remote_live_session
+        assert live_reader is not None and live_reader is not session
+        assert live_reader.transport.status()["completed_requests"] >= 3
+    finally:
+        window.on_disconnect()
+        window.close()
+        app.processEvents()
         server.stop()
 
 

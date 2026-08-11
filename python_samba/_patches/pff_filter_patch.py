@@ -918,35 +918,37 @@ def on_pff_read_all_filters(self) -> None:
     def work() -> None:
         s = self._require_session()
         first_stage = None
-
-        # Ref filters: 4 sources x 3 stages
-        for src in range(4):
-            for st in range(3):
-                try:
-                    fs = s.get_pff_filter(0, src, st)
-                    if src == 0 and st == 0:
-                        first_stage = fs
-                    self.pff_ref_buttons[(src, st)].set_info(fs.type_name[:5])
-                except Exception:
-                    self.pff_ref_buttons[(src, st)].set_info("?")
-
-        # Sec filters: 4 sources x 3 stages  (RPC stage = st+3)
-        for src in range(4):
-            for st in range(3):
-                try:
-                    fs = s.get_pff_filter(0, src, st + 3)
-                    self.pff_sec_buttons[(src, st)].set_info(fs.type_name[:5])
-                except Exception:
-                    self.pff_sec_buttons[(src, st)].set_info("?")
-
-        # Err filters: 3 axes x 2 stages  (RPC stage = st+6)
-        for ax in range(3):
-            for st in range(2):
-                try:
-                    fs = s.get_pff_filter(ax, 0, st + 6)
-                    self.pff_err_buttons[(ax, st)].set_info(fs.type_name[:5])
-                except Exception:
-                    self.pff_err_buttons[(ax, st)].set_info("?")
+        entries = (
+            [("ref", (src, st), (0, src, st)) for src in range(4) for st in range(3)]
+            + [
+                ("sec", (src, st), (0, src, st + 3))
+                for src in range(4)
+                for st in range(3)
+            ]
+            + [
+                ("err", (ax, st), (ax, 0, st + 6))
+                for ax in range(3)
+                for st in range(2)
+            ]
+        )
+        snapshot = s.get_pff_tuning_snapshot(
+            [address for _, _, address in entries], source_count=4
+        )
+        try:
+            filters = snapshot["filters"]
+            button_groups = {
+                "ref": self.pff_ref_buttons,
+                "sec": self.pff_sec_buttons,
+                "err": self.pff_err_buttons,
+            }
+            for (group, button_key, _), fs in zip(entries, filters):
+                if group == "ref" and button_key == (0, 0):
+                    first_stage = fs
+                button_groups[group][button_key].set_info(fs.type_name[:5])
+        except Exception as exc:
+            for group, button_key, _ in entries:
+                getattr(self, f"pff_{group}_buttons")[button_key].set_info("?")
+            self.log_msg(f"PFF filter batch read: {exc}")
 
         # Show first filter in the editor
         try:
@@ -959,7 +961,7 @@ def on_pff_read_all_filters(self) -> None:
 
         # Source mapping, output matrix, adaptation rate and configuration.
         try:
-            inputs = s.get_pff_inputs()
+            inputs = snapshot["inputs"]
             for index, combo in enumerate(self.pff_source_cbxs):
                 if index < len(inputs) and 0 <= int(inputs[index]) < combo.count():
                     combo.blockSignals(True)
@@ -968,9 +970,8 @@ def on_pff_read_all_filters(self) -> None:
         except Exception as exc:
             self.log_msg(f"PFF inputs read: {exc}")
 
-        for source in range(4):
+        for source, params in enumerate(snapshot["parameters"]):
             try:
-                params = s.get_pff_parameters(source)
                 outputs = _parse_pff_output_mask(params[0]) if params else 0
                 if len(params) > 1:
                     self.pff_adaptive_rate_edits[source].setText(str(params[1]))
@@ -980,7 +981,7 @@ def on_pff_read_all_filters(self) -> None:
                 self.log_msg(f"PFF source {source + 1} parameters: {exc}")
 
         try:
-            config = s.get_pff_config()
+            config = snapshot["config"]
             if config:
                 self.pff_used_gains.setText(str(config[0]))
             if len(config) > 1:
@@ -988,12 +989,12 @@ def on_pff_read_all_filters(self) -> None:
         except Exception as exc:
             self.log_msg(f"PFF config read: {exc}")
 
-        loop = s.get_loop_status()
+        loop = snapshot["loop"]
         _set_pff_status_buttons_from_system(self, loop.system)
         try:
-            _position, pneumatic, _digital_in, _digital_out = (
-                s.get_pos_pneum_digital_status()
-            )
+            _position, pneumatic, _digital_in, _digital_out = snapshot[
+                "axis_loop_status"
+            ]
             _set_pff_individual_loop_buttons(self, pneumatic)
         except Exception as exc:
             self.log_msg(f"PFF individual-loop status read: {exc}")

@@ -33,6 +33,32 @@ def test_mock_status_and_filter():
         assert session.get_sample_frequency() == pytest.approx(2000.0)
 
 
+def test_bulk_filter_helpers_use_transport_batch_interface() -> None:
+    with open_mock() as session:
+        original_exchange_many = session.transport.exchange_many
+        batch_sizes: list[int] = []
+
+        def counting_exchange_many(requests):
+            items = list(requests)
+            batch_sizes.append(len(items))
+            return original_exchange_many(items)
+
+        session.transport.exchange_many = counting_exchange_many  # type: ignore[method-assign]
+
+        velocity = session.get_velocity_filters([(0, 0), (1, 1)])
+        position = session.get_proximity_filters([(0, 0), (1, 1)])
+        ff = session.get_ff_filters([(0, 0), (5, 6)])
+        pneumatic = session.get_pneumatic_filters([(0, 0), (2, 3)])
+        pff = session.get_pff_filters([(0, 0, 0), (2, 0, 7)])
+
+        assert batch_sizes == [2, 2, 2, 2, 2]
+        assert [stage.stage for stage in velocity] == [0, 1]
+        assert [stage.stage for stage in position] == [0, 1]
+        assert [stage.stage for stage in ff] == [0, 6]
+        assert [stage.stage for stage in pneumatic] == [0, 3]
+        assert [stage.stage for stage in pff] == [0, 7]
+
+
 def test_mock_matrix_and_geophone():
     with open_mock() as session:
         sens = session.get_velocity_sensor_matrix(0)

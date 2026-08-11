@@ -9,13 +9,16 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from python_samba.commserver.protocol import (
     DEFAULT_ENDPOINT,
+    MAX_BATCH_ITEMS,
     PROTOCOL_VERSION,
     ProtocolMessageError,
+    configure_low_latency_socket,
     decode_bytes,
     default_token_file,
     encode_bytes,
@@ -51,6 +54,7 @@ class CommServerTransport(Transport):
         self.config = config
         self._socket: socket.socket | None = None
         self._client_id: str | None = None
+        self._features: frozenset[str] = frozenset()
         self._open = False
         self._rpc_lock = threading.RLock()
         self._next_id = 0
@@ -143,6 +147,79 @@ class CommServerTransport(Transport):
                     raise
                 raise TransportError(f"communication-server exchange failed: {exc}") from exc
 
+    def exchange_many(
+        self,
+        requests: Sequence[tuple[bytes, bytes, float]],
+    ) -> list[bytes]:
+        """Relay a group of exchanges in one RPC when the server supports it."""
+        items = list(requests)
+        if not items:
+            return []
+        if len(items) > MAX_BATCH_ITEMS:
+            raise ValueError(
+                f"exchange batch has {len(items)} items; limit is {MAX_BATCH_ITEMS}"
+            )
+        if "exchange_batch" not in self._features:
+            # Protocol-v1 servers built before batch support omit ``features``.
+            # Keep new clients compatible with those running instances.
+            return super().exchange_many(items)
+        if not self.is_open:
+            raise TransportError("communication-server transport is not open")
+
+        payload: list[dict[str, object]] = []
+        total_timeout = 0.0
+        for request, terminator, timeout in items:
+            if not request or not terminator:
+                raise ValueError("request and terminator must not be empty")
+            timeout_value = float(timeout)
+            if not 0 < timeout_value <= 300.0:
+                raise ValueError("timeout must be in (0, 300] seconds")
+            total_timeout += timeout_value
+            payload.append(
+                {
+                    "request": encode_bytes(bytes(request)),
+                    "terminator": encode_bytes(bytes(terminator)),
+                    "timeout": timeout_value,
+                }
+            )
+
+        with self._rpc_lock:
+            try:
+                result = self._rpc(
+                    "exchange_batch",
+                    rpc_timeout=max(30.0, total_timeout + 30.0),
+                    items=payload,
+                )
+                if not isinstance(result, dict):
+                    raise ProtocolMessageError("exchange_batch result must be an object")
+                result_items = result.get("items")
+                if not isinstance(result_items, list):
+                    raise ProtocolMessageError("exchange_batch items must be a list")
+                if len(result_items) != len(items):
+                    raise ProtocolMessageError(
+                        "exchange_batch response count mismatch: "
+                        f"expected {len(items)}, got {len(result_items)}"
+                    )
+                responses: list[bytes] = []
+                for index, item in enumerate(result_items):
+                    if not isinstance(item, dict):
+                        raise ProtocolMessageError(
+                            f"exchange_batch item {index} must be an object"
+                        )
+                    responses.append(
+                        decode_bytes(item.get("response"), field=f"items[{index}].response")
+                    )
+                return responses
+            except BaseException as exc:
+                # As with a single exchange, never retry an ambiguous batch:
+                # one or more physical commands may already have executed.
+                self._drop_socket()
+                if isinstance(exc, TransportError):
+                    raise
+                raise TransportError(
+                    f"communication-server batch exchange failed: {exc}"
+                ) from exc
+
     def status(self) -> dict[str, object]:
         result = self._rpc("status", rpc_timeout=5.0)
         if not isinstance(result, dict):
@@ -167,6 +244,7 @@ class CommServerTransport(Transport):
             )
         except OSError as exc:
             raise _ServerUnavailable(str(exc)) from exc
+        configure_low_latency_socket(sock)
         sock.settimeout(max(0.1, float(self.config.connect_timeout)))
         self._socket = sock
         hello = self._rpc(
@@ -182,6 +260,13 @@ class CommServerTransport(Transport):
         if not isinstance(hello, dict) or hello.get("protocol") != PROTOCOL_VERSION:
             raise TransportError("communication-server hello response is invalid")
         self._client_id = str(hello.get("client_id") or "")
+        feature_values = hello.get("features", [])
+        if isinstance(feature_values, list):
+            self._features = frozenset(
+                str(value) for value in feature_values if isinstance(value, str)
+            )
+        else:
+            self._features = frozenset()
         self._rpc(
             "attach",
             rpc_timeout=max(5.0, float(self.config.timeout) + 1.0),
@@ -247,6 +332,7 @@ class CommServerTransport(Transport):
         sock, self._socket = self._socket, None
         self._open = False
         self._client_id = None
+        self._features = frozenset()
         if sock is not None:
             try:
                 sock.shutdown(socket.SHUT_RDWR)

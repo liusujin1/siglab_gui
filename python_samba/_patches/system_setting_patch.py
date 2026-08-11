@@ -618,21 +618,31 @@ def _read_system_setting_reference(self) -> None:
     """Refresh all data groups read by the original SystemSettingPage."""
     def work() -> None:
         s = self._require_session()
-        loop = s.get_loop_status()
+        snapshot = s.get_system_setting_snapshot()
+        loop = snapshot["loop"]
 
-        sample_hz = s.get_sample_frequency()
+        sample_hz = snapshot["sample_frequency"]
         self.fs_sample.setText(f"{sample_hz:g}")
         self.fs_manual.setText(f"{sample_hz:g}")
-        self.fs_load.setText(f"{s.get_system_load():g}")
+        self.fs_load.setText(f"{snapshot['system_load']:g}")
 
         self._updating_system_controls = True
         try:
-            self._refresh_system_loop_configuration()
+            from python_samba.ui.main_window import _parse_protocol_int
+
+            config = snapshot["controller_config"]
+            mask = _parse_protocol_int(config[0]) if config else 0
+            self._controller_config_mask = mask
+            for lamp, bit in zip(
+                self.system_loop_lamps,
+                (0x01, 0x02, 0x04, 0x10, 0x20, 0x40, 0x80),
+            ):
+                lamp.set_on(bool(mask & bit))
         except Exception as exc:
             self.log_msg(f"Firmware configuration read: {exc}")
 
         try:
-            perf = s.get_performance_monitor()
+            perf = snapshot["performance"]
             perf_offset = 3 if len(perf) >= 6 else 1
             if len(perf) >= 3:
                 self._set_system_io_button(
@@ -647,7 +657,7 @@ def _read_system_setting_reference(self) -> None:
             ):
                 if index < len(perf):
                     editor.setText(str(perf[index]))
-            status = s.get_performance_status()
+            status = snapshot["performance_status"]
             if status:
                 self.perf_actual.setText("Perf. Okay" if str(status[0]) == "0" else "Fault")
             if len(status) > 1:
@@ -656,21 +666,21 @@ def _read_system_setting_reference(self) -> None:
             self.log_msg(f"Performance monitor read: {exc}")
 
         try:
-            switch = s.get_switch_conditions()
+            switch = snapshot["switch_conditions"]
             for editor, index in (
                 (self.sw_trig, 0), (self.sw_min, 1),
                 (self.sw_hold, 2),
             ):
                 if index < len(switch):
                     editor.setText(str(switch[index]))
-            signal = s.get_switch_signal()
+            signal = snapshot["switch_signal"]
             if len(signal) >= 3:
                 self._set_system_io_button(self.sw_signal, signal[:3])
             elif signal:
                 self.sw_signal.setText(" ".join(signal))
             self._switch_config = int(switch[3], 0) if len(switch) > 3 else 0
             self._switch_config_loaded = len(switch) > 3
-            status = s.get_switch_status()
+            status = snapshot["switch_status"]
             status_word = int(status[0], 0) if status else 0
             if len(status) > 1:
                 self.sw_fb.setText(str(status[1]))
@@ -696,7 +706,7 @@ def _read_system_setting_reference(self) -> None:
             self.log_msg(f"Switch criterion read: {exc}")
 
         try:
-            ramp = s.get_startup_ramp()
+            ramp = snapshot["startup_ramp"]
             if ramp:
                 self.ramp_type_combo.setCurrentIndex(max(0, min(1, int(ramp[0]))))
             if len(ramp) > 1:
@@ -718,9 +728,14 @@ def _refresh_system_loop_configuration(self) -> int:
     This lightweight path is safe for the one-second visible-page timer and
     keeps configuration freshness independent from the BGSTS running lamps.
     """
+    config = self._require_session().get_controller_config()
+    return _apply_system_loop_configuration(self, config)
+
+
+def _apply_system_loop_configuration(self, config) -> int:
+    """Apply an NGEXL response already collected by the live worker."""
     from python_samba.ui.main_window import _parse_protocol_int
 
-    config = self._require_session().get_controller_config()
     mask = _parse_protocol_int(config[0]) if config else 0
     self._controller_config_mask = mask
     for lamp, bit in zip(
@@ -1221,6 +1236,7 @@ def patch_system_setting(instance) -> None:
         "_on_switch_condition_changed",
         "_on_ramp_changed",
         "_refresh_system_loop_configuration",
+        "_apply_system_loop_configuration",
     ):
         if not hasattr(instance, name):
             fn = globals()[name]
@@ -1253,5 +1269,6 @@ def apply_patches(cls: type) -> None:
         "_on_ramp_changed",
         "_read_system_setting_reference",
         "_refresh_system_loop_configuration",
+        "_apply_system_loop_configuration",
     ):
         setattr(cls, name, globals()[name])

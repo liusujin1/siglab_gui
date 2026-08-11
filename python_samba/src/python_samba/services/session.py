@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import struct
 import threading
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
 
 from python_samba.protocol.commands import (
     CommandEncoder,
@@ -98,6 +99,43 @@ class ControllerSession:
         self._connected = False
         self.transport.close()
 
+    def open_background_reader(self, client_name: str) -> ControllerSession | None:
+        """Open an independent read-only server client for a long worker.
+
+        A file logger must not hold the GUI session's ``_io_lock`` for every
+        remote sample.  Shared-server backends can cheaply attach a second TCP
+        client to the same physical COM port; serial and mock sessions return
+        ``None`` so callers keep using the original session.
+        """
+
+        if not self.connected or self.info.backend != "server":
+            return None
+        from python_samba.transport.comm_server import (
+            CommServerConfig,
+            CommServerTransport,
+        )
+
+        if not isinstance(self.transport, CommServerTransport):
+            return None
+        config: CommServerConfig = replace(
+            self.transport.config,
+            client_name=str(client_name),
+            auto_start=False,
+            timeout=float(self.timeout),
+        )
+        transport = CommServerTransport(config)
+        session = ControllerSession(
+            transport,
+            backend_name="server",
+            port=config.port,
+            baudrate=config.baudrate,
+            server_endpoint=config.endpoint,
+            timeout=self.timeout,
+            readonly=True,
+        )
+        session.open()
+        return session
+
     def __enter__(self) -> ControllerSession:
         self.open()
         return self
@@ -113,7 +151,7 @@ class ControllerSession:
     def _transact_unlocked(self, frame: bytes) -> RciResponse:
         if not self.transport.is_open:
             raise TransportError("session transport is not open")
-        expected_msg_id, expected_crl, expected_mnemonic = _request_identity(frame)
+        identity = _request_identity(frame)
         try:
             raw = self.transport.exchange(frame, b"\r", self.timeout)
         except TransportError as exc:
@@ -126,7 +164,80 @@ class ControllerSession:
                 self.transport.close()
             except Exception:
                 pass
-            raise TransportError(f"{expected_mnemonic}: {exc}") from exc
+            raise TransportError(f"{identity[2]}: {exc}") from exc
+        return self._parse_transaction_response(raw, identity)
+
+    def transact_many(self, frames: Sequence[bytes]) -> list[RciResponse]:
+        """Execute several RCI frames as one transport-level transaction group.
+
+        On a Communication Server backend this crosses the network once.  The
+        server still exchanges every frame with the controller sequentially and
+        returns responses in exactly the same order.  Serial and mock backends
+        use the compatible sequential fallback supplied by ``Transport``.
+        """
+        frame_list = [bytes(frame) for frame in frames]
+        if not frame_list:
+            return []
+        with self._io_lock:
+            if not self.transport.is_open:
+                raise TransportError("session transport is not open")
+            identities = [_request_identity(frame) for frame in frame_list]
+            try:
+                raw_responses = self.transport.exchange_many(
+                    [(frame, b"\r", self.timeout) for frame in frame_list]
+                )
+            except TransportError as exc:
+                self._connected = False
+                try:
+                    self.transport.close()
+                except Exception:
+                    pass
+                first_mnemonic = identities[0][2]
+                label = (
+                    first_mnemonic
+                    if len(identities) == 1
+                    else f"{first_mnemonic} batch[{len(identities)}]"
+                )
+                raise TransportError(f"{label}: {exc}") from exc
+            if len(raw_responses) != len(frame_list):
+                raise ProtocolError(
+                    "transport response count mismatch: "
+                    f"expected {len(frame_list)}, got {len(raw_responses)}"
+                )
+            return [
+                self._parse_transaction_response(raw, identity)
+                for raw, identity in zip(raw_responses, identities)
+            ]
+
+    def _query_snapshot(
+        self,
+        queries: Sequence[
+            tuple[str, bytes, Callable[[RciResponse], object]]
+        ],
+    ) -> dict[str, object]:
+        """Execute named read queries in one batch and decode them in order."""
+        responses = self.transact_many([frame for _, frame, _ in queries])
+        return {
+            name: decoder(response)
+            for (name, _, decoder), response in zip(queries, responses)
+        }
+
+    def _decode_raw_ints(self, response: RciResponse, mnemonic: str) -> list[int]:
+        self.encoder.ensure_ok(response, mnemonic)
+        return [int(value) for value in response.data_tokens]
+
+    def _decode_raw_floats(
+        self, response: RciResponse, mnemonic: str
+    ) -> list[float]:
+        self.encoder.ensure_ok(response, mnemonic)
+        return [float(value) for value in response.data_tokens]
+
+    def _parse_transaction_response(
+        self,
+        raw: bytes,
+        identity: tuple[str, str, str],
+    ) -> RciResponse:
+        expected_msg_id, expected_crl, expected_mnemonic = identity
         response = self.encoder.parse(raw)
         self.last_response = response
         if response.msg_id != expected_msg_id:
@@ -179,6 +290,18 @@ class ControllerSession:
         return self.encoder.decode_vgvfs(
             self.transact(self.encoder.vgvfs(axis, stage)), axis, stage
         )
+
+    def get_velocity_filters(
+        self, keys: Sequence[tuple[int, int]]
+    ) -> list[FilterStage]:
+        addresses = [(int(axis), int(stage)) for axis, stage in keys]
+        responses = self.transact_many(
+            [self.encoder.vgvfs(axis, stage) for axis, stage in addresses]
+        )
+        return [
+            self.encoder.decode_vgvfs(response, axis, stage)
+            for response, (axis, stage) in zip(responses, addresses)
+        ]
 
     def set_velocity_filter(self, stage: FilterStage) -> None:
         self._ensure_writable()
@@ -246,6 +369,18 @@ class ControllerSession:
             self.transact(self.encoder.cgpfs(axis, stage)), axis, stage
         )
 
+    def get_proximity_filters(
+        self, keys: Sequence[tuple[int, int]]
+    ) -> list[FilterStage]:
+        addresses = [(int(axis), int(stage)) for axis, stage in keys]
+        responses = self.transact_many(
+            [self.encoder.cgpfs(axis, stage) for axis, stage in addresses]
+        )
+        return [
+            self.encoder.decode_cgpfs(response, axis, stage)
+            for response, (axis, stage) in zip(responses, addresses)
+        ]
+
     def set_proximity_filter(self, stage: FilterStage) -> None:
         self._ensure_writable()
         self.encoder.ensure_ok(self.transact(self.encoder.cspfs(stage)), "CSPFS")
@@ -271,6 +406,25 @@ class ControllerSession:
             source,
             stage,
         )
+
+    def get_ff_filters(
+        self, keys: Sequence[tuple[int, int]]
+    ) -> list[FilterStage]:
+        addresses = [(int(source), int(stage)) for source, stage in keys]
+        wire_addresses = [
+            (source if stage >= 6 else 0, 0 if stage >= 6 else source, stage)
+            for source, stage in addresses
+        ]
+        responses = self.transact_many(
+            [
+                self.encoder.fgpfs(wire_axis, wire_source, stage)
+                for wire_axis, wire_source, stage in wire_addresses
+            ]
+        )
+        return [
+            self.encoder.decode_fgpfs(response, source, stage)
+            for response, (source, stage) in zip(responses, addresses)
+        ]
 
     def set_ff_filter(self, stage: FilterStage) -> None:
         self._ensure_writable()
@@ -420,6 +574,18 @@ class ControllerSession:
         return self.encoder.decode_pgpaf(
             self.transact(self.encoder.pgpaf(axis, stage)), axis, stage
         )
+
+    def get_pneumatic_filters(
+        self, keys: Sequence[tuple[int, int]]
+    ) -> list[FilterStage]:
+        addresses = [(int(axis), int(stage)) for axis, stage in keys]
+        responses = self.transact_many(
+            [self.encoder.pgpaf(axis, stage) for axis, stage in addresses]
+        )
+        return [
+            self.encoder.decode_pgpaf(response, axis, stage)
+            for response, (axis, stage) in zip(responses, addresses)
+        ]
 
     def set_pneumatic_filter(self, stage: FilterStage) -> None:
         self._ensure_writable()
@@ -695,39 +861,79 @@ class ControllerSession:
             self.transact(self.encoder.dgtbv(read_offset))
         )
 
+    def get_digital_trace_buffers(
+        self, read_offsets: Sequence[int]
+    ) -> list[list[float]]:
+        """Read several text DGTBV chunks in one transport round trip."""
+
+        offsets = [int(value) for value in read_offsets]
+        responses = self.transact_many(
+            [self.encoder.dgtbv(read_offset) for read_offset in offsets]
+        )
+        return [self.encoder.decode_dgtbv(response) for response in responses]
+
     def get_digital_trace_buffer_binary(
         self, read_offset: int, sample_count: int = 40
     ) -> list[float]:
         """Read one binary trace response without allowing interleaving."""
-        with self._io_lock:
-            return self._get_digital_trace_buffer_binary_unlocked(
-                read_offset, sample_count
-            )
+        return self.get_digital_trace_buffers_binary(
+            [(int(read_offset), int(sample_count))]
+        )[0]
 
-    def _get_digital_trace_buffer_binary_unlocked(
-        self, read_offset: int, sample_count: int = 40
+    def get_digital_trace_buffers_binary(
+        self, requests: Sequence[tuple[int, int]]
+    ) -> list[list[float]]:
+        """Read several binary DGTBB chunks in one transport round trip."""
+
+        items = [(int(offset), int(count)) for offset, count in requests]
+        if not items:
+            return []
+        frames = [self.encoder.dgtbb(offset, count) for offset, count in items]
+        with self._io_lock:
+            if not self.transport.is_open:
+                raise TransportError("session transport is not open")
+            identities = [_request_identity(frame) for frame in frames]
+            try:
+                raw_responses = self.transport.exchange_many(
+                    [(frame, b"\r", self.timeout) for frame in frames]
+                )
+            except TransportError as exc:
+                self._connected = False
+                try:
+                    self.transport.close()
+                except Exception:
+                    pass
+                raise TransportError(f"DGTBB batch[{len(frames)}]: {exc}") from exc
+            if len(raw_responses) != len(frames):
+                raise ProtocolError(
+                    "DGTBB response count mismatch: "
+                    f"expected {len(frames)}, got {len(raw_responses)}"
+                )
+            values = [
+                self._decode_dgtbb_response(raw, sample_count, identity)
+                for raw, (_, sample_count), identity in zip(
+                    raw_responses, items, identities
+                )
+            ]
+            self.last_response = None
+            return values
+
+    @staticmethod
+    def _decode_dgtbb_response(
+        raw: bytes,
+        sample_count: int,
+        identity: tuple[str, str, str],
     ) -> list[float]:
-        """Read interleaved Ch1/Ch2 values from legacy binary ``DGTBB``.
+        """Decode interleaved Ch1/Ch2 values from one binary DGTBB frame.
 
         The binary payload is intentionally parsed here instead of passing it
         through ``parse_frame``: six-byte Opticon floats are not ASCII RCI
         tokens.  The controller sends two six-byte values per sample, in
         Ch1/Ch2 order.
         """
-        frame = self.encoder.dgtbb(read_offset, sample_count)
-        if not self.transport.is_open:
-            raise TransportError("session transport is not open")
-        expected_msg_id, expected_crl, expected_mnemonic = _request_identity(frame)
-        try:
-            raw = self.transport.exchange(frame, b"\r", self.timeout)
-        except TransportError as exc:
-            self._connected = False
-            try:
-                self.transport.close()
-            except Exception:
-                pass
-            raise TransportError(f"{expected_mnemonic}: {exc}") from exc
-
+        _expected_msg_id, _expected_crl, expected_mnemonic = identity
+        if expected_mnemonic.upper() != "DGTBB":
+            raise ProtocolError(f"expected DGTBB identity, got {identity!r}")
         marker = b" DGTBB "
         marker_pos = raw.upper().find(marker)
         if marker_pos < 0:
@@ -761,9 +967,7 @@ class ControllerSession:
                 f"got {len(fields)}"
             )
         fields = fields[-expected_values:]
-        values = [_decode_opticon_float(field) for field in fields]
-        self.last_response = None
-        return values
+        return [_decode_opticon_float(field) for field in fields]
 
     # --- Position devices / offsets ---
 
@@ -985,6 +1189,23 @@ class ControllerSession:
             self.transact(self.encoder.fgfsp(axis, source, stage)), axis, source, stage
         )
 
+    def get_pff_filters(
+        self, keys: Sequence[tuple[int, int, int]]
+    ) -> list[FilterStage]:
+        addresses = [
+            (int(axis), int(source), int(stage)) for axis, source, stage in keys
+        ]
+        responses = self.transact_many(
+            [
+                self.encoder.fgfsp(axis, source, stage)
+                for axis, source, stage in addresses
+            ]
+        )
+        return [
+            self.encoder.decode_fgfsp(response, axis, source, stage)
+            for response, (axis, source, stage) in zip(responses, addresses)
+        ]
+
     def set_pff_filter(self, axis: int, source: int, stage: int, filter_type: int, params: tuple[float, ...]) -> None:
         self._ensure_writable()
         self.encoder.ensure_ok(
@@ -1032,6 +1253,557 @@ class ControllerSession:
     def set_pff_inputs(self, inputs: list[int]) -> None:
         self._ensure_writable()
         self.encoder.ensure_ok(self.transact(self.encoder.fsipf(inputs)), "FSIPF")
+
+    # --- WAN-efficient page snapshots ---
+
+    def get_system_setting_snapshot(self) -> dict[str, object]:
+        """Read all System Setting page values with one transport batch."""
+        return self._query_snapshot(
+            [
+                ("loop", self.encoder.bgsts(), self.encoder.decode_bgsts),
+                ("sample_frequency", self.encoder.ngsfr(), self.encoder.decode_ngsfr),
+                ("system_load", self.encoder.dgslo(), self.encoder.decode_dgslo),
+                ("controller_config", self.encoder.ngexl(), self.encoder.decode_ngexl),
+                ("performance", self.encoder.dgpmv(), self.encoder.decode_dgpmv),
+                ("performance_status", self.encoder.dgpms(), self.encoder.decode_dgpms),
+                ("switch_conditions", self.encoder.bgocd(), self.encoder.decode_bgocd),
+                ("switch_signal", self.encoder.bgsws(), self.encoder.decode_bgsws),
+                ("switch_status", self.encoder.dgcss(), self.encoder.decode_dgcss),
+                ("startup_ramp", self.encoder.bgsut(), self.encoder.decode_bgsut),
+            ]
+        )
+
+    def get_status_page_snapshot(
+        self,
+        *,
+        include_loop: bool = True,
+        include_switch_conditions: bool = True,
+        include_axis_status: bool = True,
+        include_events: bool = True,
+    ) -> dict[str, object]:
+        """Read loop/status/event words in one transport batch."""
+        queries: list[tuple[str, bytes, Callable[[RciResponse], object]]] = []
+        if include_loop:
+            queries.append(("loop", self.encoder.bgsts(), self.encoder.decode_bgsts))
+        queries.append(
+            ("switch_status", self.encoder.dgcss(), self.encoder.decode_dgcss)
+        )
+        if include_switch_conditions:
+            queries.append(
+                (
+                    "switch_conditions",
+                    self.encoder.bgocd(),
+                    self.encoder.decode_bgocd,
+                )
+            )
+        if include_axis_status:
+            queries.append(
+                ("axis_status", self.encoder.bgsst(), self.encoder.decode_bgsst)
+            )
+        if include_events:
+            queries.append(("events", self.encoder.dgade(), self.encoder.decode_dgade))
+        return self._query_snapshot(queries)
+
+    def get_live_refresh_snapshot(
+        self,
+        *,
+        include_switch_conditions: bool = False,
+        include_axis_status: bool = False,
+        include_controller_config: bool = False,
+        proximity_count: int = 0,
+        include_motor: bool = False,
+        include_power_supply: bool = False,
+        include_pneumatic: bool = False,
+        monitor_count: int = 0,
+    ) -> dict[str, object]:
+        """Collect one visible-page refresh in a single server RPC.
+
+        This method is intentionally data-only so the server backend can run it
+        on a worker thread.  The physical RCI exchanges remain ordered, while a
+        300+ ms Tailscale round trip is paid once per tick instead of once per
+        field group.
+        """
+
+        queries: list[tuple[str, bytes, Callable[[RciResponse], object]]] = [
+            ("loop", self.encoder.bgsts(), self.encoder.decode_bgsts),
+            ("switch_status", self.encoder.dgcss(), self.encoder.decode_dgcss),
+        ]
+        if include_switch_conditions:
+            queries.append(
+                (
+                    "switch_conditions",
+                    self.encoder.bgocd(),
+                    self.encoder.decode_bgocd,
+                )
+            )
+        if include_axis_status or include_pneumatic:
+            queries.append(
+                ("axis_status", self.encoder.bgsst(), self.encoder.decode_bgsst)
+            )
+        if include_controller_config:
+            queries.append(
+                (
+                    "controller_config",
+                    self.encoder.ngexl(),
+                    self.encoder.decode_ngexl,
+                )
+            )
+        count = int(proximity_count)
+        if count:
+            if count == 8:
+                queries.append(
+                    (
+                        "proximity_values",
+                        self.encoder.pggix(),
+                        self.encoder.decode_pggix,
+                    )
+                )
+            else:
+                queries.append(
+                    (
+                        "proximity_values",
+                        self.encoder.pggiv(),
+                        self.encoder.decode_pggiv,
+                    )
+                )
+        if include_motor:
+            queries.extend(
+                [
+                    (
+                        "motor_power",
+                        self.encoder.bgmpv(),
+                        self.encoder.decode_bgmpv,
+                    ),
+                    (
+                        "motor_failsafe",
+                        self.encoder.bgmps(),
+                        self.encoder.decode_bgmps,
+                    ),
+                ]
+            )
+            if include_power_supply:
+                queries.append(
+                    (
+                        "power_supply",
+                        self.encoder.lgpsl(),
+                        self.encoder.decode_lgpsl,
+                    )
+                )
+        if include_pneumatic:
+            queries.extend(
+                [
+                    (
+                        "pneumatic_axes_status",
+                        self.encoder.pgpas(),
+                        self.encoder.decode_pgpas,
+                    ),
+                    (
+                        "pneumatic_heights_valves",
+                        self.encoder.pgphv(),
+                        self.encoder.decode_pgphv,
+                    ),
+                    (
+                        "pneumatic_status_timer",
+                        self.encoder.pgpst(),
+                        self.encoder.decode_pgpst,
+                    ),
+                    (
+                        "pneumatic_setpoint_status",
+                        self.encoder.pgpss(),
+                        self.encoder.decode_pgpss,
+                    ),
+                ]
+            )
+        used_monitors = max(0, min(40, int(monitor_count)))
+        if used_monitors:
+            queries.append(
+                (
+                    "monitor_values",
+                    self.encoder.dgmsv(0, used_monitors - 1),
+                    self.encoder.decode_dgmsv,
+                )
+            )
+        return self._query_snapshot(queries)
+
+    def get_monitor_page_snapshot(self, count: int) -> dict[str, object]:
+        """Read monitor definitions and current values in one transport batch."""
+        signal_count = max(0, int(count))
+        queries: list[tuple[str, bytes, Callable[[RciResponse], object]]] = []
+        for signal_number in range(signal_count):
+            queries.append(
+                (
+                    f"signal_{signal_number}",
+                    self.encoder.dgmos(signal_number),
+                    self.encoder.decode_dgmos,
+                )
+            )
+        if signal_count:
+            queries.append(
+                (
+                    "values",
+                    self.encoder.dgmsv(0, signal_count - 1),
+                    self.encoder.decode_dgmsv,
+                )
+            )
+        snapshot = self._query_snapshot(queries)
+        return {
+            "signals": [snapshot[f"signal_{index}"] for index in range(signal_count)],
+            "values": snapshot.get("values", []),
+        }
+
+    def get_logging_workspace_snapshot(self, monitor_count: int) -> dict[str, object]:
+        """Read monitor definitions/live data and trace metadata in one batch."""
+
+        count = max(1, min(40, int(monitor_count)))
+        queries: list[tuple[str, bytes, Callable[[RciResponse], object]]] = []
+        for signal_number in range(40):
+            queries.append(
+                (
+                    f"signal_{signal_number}",
+                    self.encoder.dgmos(signal_number),
+                    self.encoder.decode_dgmos,
+                )
+            )
+        queries.extend(
+            [
+                (
+                    "values",
+                    self.encoder.dgmsv(0, count - 1),
+                    self.encoder.decode_dgmsv,
+                ),
+                ("params", self.encoder.dgetp(), self.encoder.decode_dgetp),
+                ("info", self.encoder.dgeti(), self.encoder.decode_dgeti),
+                ("event", self.encoder.dgets(), self.encoder.decode_dgets),
+                (
+                    "sample_frequency",
+                    self.encoder.ngsfr(),
+                    self.encoder.decode_ngsfr,
+                ),
+            ]
+        )
+        snapshot = self._query_snapshot(queries)
+        snapshot["signals"] = [
+            snapshot.pop(f"signal_{index}") for index in range(40)
+        ]
+        return snapshot
+
+    def get_internal_logging_snapshot(self) -> dict[str, object]:
+        """Read trace state/configuration without four WAN round trips."""
+
+        return self._query_snapshot(
+            [
+                ("params", self.encoder.dgetp(), self.encoder.decode_dgetp),
+                ("info", self.encoder.dgeti(), self.encoder.decode_dgeti),
+                ("event", self.encoder.dgets(), self.encoder.decode_dgets),
+                (
+                    "sample_frequency",
+                    self.encoder.ngsfr(),
+                    self.encoder.decode_ngsfr,
+                ),
+            ]
+        )
+
+    def get_adc_dac_snapshot(self) -> dict[str, object]:
+        """Read all AD/DA mapping values in one transport batch."""
+        return self._query_snapshot(
+            [
+                ("adc", self.encoder.bgads(), self.encoder.decode_bgads),
+                ("adc_set", self.encoder.ngasn(), self.encoder.decode_ngasn),
+                (
+                    "temperature",
+                    self.encoder.raw("BGTSA"),
+                    lambda response: self._decode_raw_ints(response, "BGTSA"),
+                ),
+                ("dac", self.encoder.bgdas(), self.encoder.decode_bgdas),
+            ]
+        )
+
+    def get_motor_protection_snapshot(
+        self, *, linear_offsets: bool, include_power_supply: bool
+    ) -> dict[str, object]:
+        """Read Motor Protection configuration/live values in one batch."""
+        offset_query: tuple[str, bytes, Callable[[RciResponse], object]]
+        if linear_offsets:
+            offset_query = (
+                "offsets",
+                self.encoder.raw("LGLMO"),
+                lambda response: self._decode_raw_floats(response, "LGLMO"),
+            )
+        else:
+            offset_query = (
+                "offsets",
+                self.encoder.cgmov(),
+                self.encoder.decode_cgmov,
+            )
+        queries: list[tuple[str, bytes, Callable[[RciResponse], object]]] = [
+            ("config", self.encoder.bgocv(), self.encoder.decode_bgocv),
+            ("cooling", self.encoder.bgmcc(), self.encoder.decode_bgmcc),
+            ("loop", self.encoder.bgsts(), self.encoder.decode_bgsts),
+            offset_query,
+            ("power", self.encoder.bgmpv(), self.encoder.decode_bgmpv),
+            ("failsafe", self.encoder.bgmps(), self.encoder.decode_bgmps),
+            ("output_limit", self.encoder.bgopl(), self.encoder.decode_bgopl),
+        ]
+        if include_power_supply:
+            queries.append(
+                ("power_supply", self.encoder.lgpsl(), self.encoder.decode_lgpsl)
+            )
+        return self._query_snapshot(queries)
+
+    def get_velocity_tuning_snapshot(
+        self, keys: Sequence[tuple[int, int]]
+    ) -> dict[str, object]:
+        """Read the limiter and all requested velocity filters in one batch."""
+        addresses = [(int(axis), int(stage)) for axis, stage in keys]
+        queries: list[tuple[str, bytes, Callable[[RciResponse], object]]] = [
+            ("limiters", self.encoder.bgfbl(), self.encoder.decode_bgfbl)
+        ]
+        for index, (axis, stage) in enumerate(addresses):
+            queries.append(
+                (
+                    f"filter_{index}",
+                    self.encoder.vgvfs(axis, stage),
+                    lambda response, axis=axis, stage=stage: self.encoder.decode_vgvfs(
+                        response, axis, stage
+                    ),
+                )
+            )
+        snapshot = self._query_snapshot(queries)
+        return {
+            "limiters": snapshot["limiters"],
+            "filters": [snapshot[f"filter_{index}"] for index in range(len(addresses))],
+        }
+
+    def get_diagnostics_snapshot(self) -> dict[str, object]:
+        """Read the complete excitation/diagnostics group in one batch."""
+        queries: list[tuple[str, bytes, Callable[[RciResponse], object]]] = [
+            ("noise_type", self.encoder.dgnty(), self.encoder.decode_dgnty),
+            ("noise_gain", self.encoder.dgnsg(), self.encoder.decode_dgnsg),
+            ("noise_frequency", self.encoder.dgnsf(), self.encoder.decode_dgnsf),
+            ("inject", self.encoder.dgnip(), self.encoder.decode_dgnip),
+            ("outputs", self.encoder.dgdos(), self.encoder.decode_dgdos),
+            ("filter_usage", self.encoder.dgnfu(), self.encoder.decode_dgnfu),
+        ]
+        for stage in range(4):
+            queries.append(
+                (
+                    f"filter_{stage}",
+                    self.encoder.dgnfs(stage),
+                    lambda response, stage=stage: self.encoder.decode_dgnfs(
+                        response, stage
+                    ),
+                )
+            )
+        snapshot = self._query_snapshot(queries)
+        snapshot["filters"] = [snapshot.pop(f"filter_{stage}") for stage in range(4)]
+        return snapshot
+
+    def get_position_tuning_snapshot(
+        self,
+        keys: Sequence[tuple[int, int]],
+        *,
+        proximity_count: int,
+        include_cascaded: bool,
+    ) -> dict[str, object]:
+        """Read the complete Position Tuning page in one transport batch."""
+        addresses = [(int(axis), int(stage)) for axis, stage in keys]
+        queries: list[tuple[str, bytes, Callable[[RciResponse], object]]] = []
+        for index, (axis, stage) in enumerate(addresses):
+            queries.append(
+                (
+                    f"filter_{index}",
+                    self.encoder.cgpfs(axis, stage),
+                    lambda response, axis=axis, stage=stage: self.encoder.decode_cgpfs(
+                        response, axis, stage
+                    ),
+                )
+            )
+        if int(proximity_count) == 8:
+            queries.append(("offsets", self.encoder.cgpox(), self.encoder.decode_cgpox))
+        else:
+            queries.append(("offsets", self.encoder.cgpov(), self.encoder.decode_cgpov))
+        if include_cascaded:
+            for stage in range(3):
+                queries.append(
+                    (
+                        f"cascaded_filter_{stage}",
+                        self.encoder.cgpcf(stage),
+                        lambda response, stage=stage: self.encoder.decode_cgpcf(
+                            response, stage
+                        ),
+                    )
+                )
+            queries.append(
+                (
+                    "cascaded_parameter",
+                    self.encoder.cgpcm(),
+                    self.encoder.decode_cgpcm,
+                )
+            )
+        queries.append(
+            ("nonlinear", self.encoder.cgpnp(), self.encoder.decode_cgpnp)
+        )
+        snapshot = self._query_snapshot(queries)
+        snapshot["filters"] = [
+            snapshot.pop(f"filter_{index}") for index in range(len(addresses))
+        ]
+        snapshot["cascaded_filters"] = (
+            [snapshot.pop(f"cascaded_filter_{stage}") for stage in range(3)]
+            if include_cascaded
+            else []
+        )
+        return snapshot
+
+    def get_ff_runtime_snapshot(self, source_count: int = 7) -> dict[str, object]:
+        """Read FF status/configuration matrices in one transport batch."""
+        count = max(0, int(source_count))
+        queries: list[tuple[str, bytes, Callable[[RciResponse], object]]] = [
+            ("status", self.encoder.fgffs(), self.encoder.decode_fgffs),
+            ("inputs", self.encoder.fgffi(), self.encoder.decode_fgffi),
+            ("config", self.encoder.fgffc(), self.encoder.decode_fgffc),
+        ]
+        for source in range(count):
+            queries.append(
+                (
+                    f"parameter_{source}",
+                    self.encoder.fgffp(source),
+                    self.encoder.decode_fgffp,
+                )
+            )
+        for axis in range(6):
+            queries.append(
+                (
+                    f"gain_{axis}",
+                    self.encoder.fgffg(axis, 0),
+                    self.encoder.decode_fgffg,
+                )
+            )
+        queries.extend(
+            [
+                ("multipliers", self.encoder.fgsfm(), self.encoder.decode_fgsfm),
+                ("output_limit", self.encoder.bgffl(), self.encoder.decode_bgffl),
+                ("zrot", self.encoder.fgzrp(), self.encoder.decode_fgzrp),
+                ("loop", self.encoder.bgsts(), self.encoder.decode_bgsts),
+            ]
+        )
+        snapshot = self._query_snapshot(queries)
+        snapshot["parameters"] = [
+            snapshot.pop(f"parameter_{source}") for source in range(count)
+        ]
+        gains: list[float] = []
+        for axis in range(6):
+            gains.extend(snapshot.pop(f"gain_{axis}"))  # type: ignore[arg-type]
+        snapshot["gains"] = gains
+        return snapshot
+
+    def get_pff_tuning_snapshot(
+        self,
+        keys: Sequence[tuple[int, int, int]],
+        *,
+        source_count: int = 4,
+    ) -> dict[str, object]:
+        """Read PFF filters and configuration in one transport batch."""
+        addresses = [
+            (int(axis), int(source), int(stage)) for axis, source, stage in keys
+        ]
+        count = max(0, int(source_count))
+        queries: list[tuple[str, bytes, Callable[[RciResponse], object]]] = []
+        for index, (axis, source, stage) in enumerate(addresses):
+            queries.append(
+                (
+                    f"filter_{index}",
+                    self.encoder.fgfsp(axis, source, stage),
+                    lambda response, axis=axis, source=source, stage=stage: self.encoder.decode_fgfsp(
+                        response, axis, source, stage
+                    ),
+                )
+            )
+        queries.append(("inputs", self.encoder.fgipf(), self.encoder.decode_fgipf))
+        for source in range(count):
+            queries.append(
+                (
+                    f"parameter_{source}",
+                    self.encoder.fgppf(source),
+                    self.encoder.decode_fgppf,
+                )
+            )
+        queries.append(("config", self.encoder.fgcpf(), self.encoder.decode_fgcpf))
+        queries.extend(
+            [
+                ("loop", self.encoder.bgsts(), self.encoder.decode_bgsts),
+                ("axis_loop_status", self.encoder.bgsst(), self.encoder.decode_bgsst),
+            ]
+        )
+        snapshot = self._query_snapshot(queries)
+        snapshot["filters"] = [
+            snapshot.pop(f"filter_{index}") for index in range(len(addresses))
+        ]
+        snapshot["parameters"] = [
+            snapshot.pop(f"parameter_{source}") for source in range(count)
+        ]
+        return snapshot
+
+    def get_pneumatic_page_snapshot(
+        self,
+        keys: Sequence[tuple[int, int]],
+        *,
+        include_ramp: bool,
+    ) -> dict[str, object]:
+        """Read the complete Pneumatic page in one transport batch."""
+        addresses = [(int(axis), int(stage)) for axis, stage in keys]
+        queries: list[tuple[str, bytes, Callable[[RciResponse], object]]] = []
+        for index, (axis, stage) in enumerate(addresses):
+            queries.append(
+                (
+                    f"filter_{index}",
+                    self.encoder.pgpaf(axis, stage),
+                    lambda response, axis=axis, stage=stage: self.encoder.decode_pgpaf(
+                        response, axis, stage
+                    ),
+                )
+            )
+        for axis in range(3):
+            queries.append(
+                (
+                    f"steering_{axis}",
+                    self.encoder.pgpsm(axis),
+                    self.encoder.decode_pgpsm,
+                )
+            )
+        queries.extend(
+            [
+                ("valve_offsets", self.encoder.pgpvo(), self.encoder.decode_pgpvo),
+                ("motor_offsets", self.encoder.cgmov(), self.encoder.decode_cgmov),
+                ("dither_value", self.encoder.pgdit(), self.encoder.decode_pgdit),
+                ("dither_frequency", self.encoder.pgdfr(), self.encoder.decode_pgdfr),
+                ("dither_alpha", self.encoder.pgdca(), self.encoder.decode_pgdca),
+                ("config", self.encoder.pgpcp(), self.encoder.decode_pgpcp),
+            ]
+        )
+        if include_ramp:
+            queries.append(("ramp", self.encoder.pgprp(), self.encoder.decode_pgprp))
+        queries.extend(
+            [
+                ("axes_status", self.encoder.pgpas(), self.encoder.decode_pgpas),
+                (
+                    "heights_valves",
+                    self.encoder.pgphv(),
+                    self.encoder.decode_pgphv,
+                ),
+                ("status_timer", self.encoder.pgpst(), self.encoder.decode_pgpst),
+                ("loop", self.encoder.bgsts(), self.encoder.decode_bgsts),
+                ("setpoint_status", self.encoder.pgpss(), self.encoder.decode_pgpss),
+                ("axis_loop_status", self.encoder.bgsst(), self.encoder.decode_bgsst),
+            ]
+        )
+        snapshot = self._query_snapshot(queries)
+        snapshot["filters"] = [
+            snapshot.pop(f"filter_{index}") for index in range(len(addresses))
+        ]
+        snapshot["steering"] = [
+            snapshot.pop(f"steering_{axis}") for axis in range(3)
+        ]
+        return snapshot
 
     # --- Raw escape ---
 

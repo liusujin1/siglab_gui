@@ -149,6 +149,7 @@ class LoggingPage(QtWidgets.QWidget):
             IOSignalButton.format_io_signal(tokens) for tokens in self.monitor_definitions
         ]
         self._definitions_loaded = False
+        self._definitions_loading = False
         self._pending_file_start = False
         self._build_ui()
         self._install_compatibility_fields()
@@ -784,12 +785,16 @@ class LoggingPage(QtWidgets.QWidget):
         self._task_threads = {thread for thread in self._task_threads if thread.is_alive()}
         callback = self._task_callbacks.pop(task_id, None)
         generation = self._task_generations.pop(task_id, -1)
+        if label == "Read monitor definitions":
+            self._definitions_loading = False
         if generation != self._generation:
             return
         if error is not None:
             if label == "Read monitor definitions" and self._pending_file_start:
                 self._pending_file_start = False
                 self.btn_file_start.setEnabled(True)
+                self.btn_file_stop.setEnabled(False)
+                self.file_state.setText("Error")
             if label == "Download controller trace":
                 self.btn_trace_download.setEnabled(True)
                 self.btn_trace_cancel.setEnabled(False)
@@ -877,11 +882,20 @@ class LoggingPage(QtWidgets.QWidget):
         self._write_monitor_channel(row, values)
 
     def read_monitor_definitions(self) -> None:
+        if self._definitions_loading:
+            return
+        self._definitions_loading = True
+
         def work():
             session = self._session()
+            reader = getattr(session, "get_monitor_page_snapshot", None)
+            if callable(reader):
+                rows = reader(40)["signals"]
+            else:
+                rows = [session.get_monitor_signal(index) for index in range(40)]
             definitions = []
-            for index in range(40):
-                values = [int(value) for value in session.get_monitor_signal(index)[:3]]
+            for row in rows:
+                values = [int(value) for value in row[:3]]
                 values.extend([0] * (3 - len(values)))
                 definitions.append(tuple(values[:3]))
             return definitions
@@ -955,21 +969,34 @@ class LoggingPage(QtWidgets.QWidget):
 
         def work():
             session = self._session()
+            reader = getattr(session, "get_logging_workspace_snapshot", None)
+            if callable(reader):
+                snapshot = reader(monitor_count)
+                raw_definitions = snapshot["signals"]
+                live_values = snapshot["values"]
+                params = snapshot["params"]
+                info = snapshot["info"]
+                event = snapshot["event"]
+                sample_frequency = snapshot["sample_frequency"]
+            else:
+                raw_definitions = [
+                    session.get_monitor_signal(index) for index in range(40)
+                ]
+                live_values = session.get_monitor_values(0, monitor_count - 1)
+                params = session.get_event_trace_params()
+                info = session.get_event_trace_info()
+                event = session.get_event_signal()
+                sample_frequency = session.get_sample_frequency()
             definitions: list[tuple[int, int, int]] = []
-            for index in range(40):
-                values = [int(value) for value in session.get_monitor_signal(index)[:3]]
+            for row in raw_definitions:
+                values = [int(value) for value in row[:3]]
                 values.extend([0] * (3 - len(values)))
                 definitions.append(tuple(values[:3]))
-            live_values = session.get_monitor_values(0, monitor_count - 1)
-            params = session.get_event_trace_params()
-            info = session.get_event_trace_info()
-            event = session.get_event_signal()
             event_time = (
                 session.get_event_time(trace_number)
                 if len(info) > 2 and _protocol_int(info[2]) > trace_number
                 else []
             )
-            sample_frequency = session.get_sample_frequency()
             return (
                 definitions,
                 live_values,
@@ -1006,11 +1033,19 @@ class LoggingPage(QtWidgets.QWidget):
 
         def work():
             session = self._session()
-            params = session.get_event_trace_params()
-            info = session.get_event_trace_info()
-            event = session.get_event_signal()
+            reader = getattr(session, "get_internal_logging_snapshot", None)
+            if callable(reader):
+                snapshot = reader()
+                params = snapshot["params"]
+                info = snapshot["info"]
+                event = snapshot["event"]
+                sample_frequency = snapshot["sample_frequency"]
+            else:
+                params = session.get_event_trace_params()
+                info = session.get_event_trace_info()
+                event = session.get_event_signal()
+                sample_frequency = session.get_sample_frequency()
             event_time = session.get_event_time(trace_number) if len(info) > 2 and _protocol_int(info[2]) > trace_number else []
-            sample_frequency = session.get_sample_frequency()
             return params, info, event, event_time, sample_frequency
 
         self._submit("Read internal trace", work, self._apply_internal_readback)
@@ -1286,6 +1321,9 @@ class LoggingPage(QtWidgets.QWidget):
         if not self._definitions_loaded:
             self._pending_file_start = True
             self.btn_file_start.setEnabled(False)
+            self.btn_file_stop.setEnabled(True)
+            self.file_state.setText("Preparing")
+            self.file_message.setText("Reading monitor definitions…")
             self.read_monitor_definitions()
             return
         try:
@@ -1302,6 +1340,8 @@ class LoggingPage(QtWidgets.QWidget):
                 ),
             )
         except Exception as exc:
+            self.btn_file_start.setEnabled(True)
+            self.btn_file_stop.setEnabled(False)
             QtWidgets.QMessageBox.critical(self, "Start file logging", str(exc))
             return
         self.file_service = service
@@ -1319,9 +1359,19 @@ class LoggingPage(QtWidgets.QWidget):
         self.host.log_msg(f"File logging scheduled: {config.path}")
 
     def stop_file_logging(self) -> None:
+        if self._pending_file_start:
+            self._pending_file_start = False
+            self.btn_file_start.setEnabled(True)
+            self.btn_file_stop.setEnabled(False)
+            self.file_state.setText("Cancelled")
+            self.file_message.setText("Start cancelled")
+            self.page_status.setText("Ready")
+            return
         if self.file_service:
             self.file_service.stop()
+            self.btn_file_stop.setEnabled(False)
             self.file_state.setText("Stopping…")
+            self.file_message.setText("Stopping after the current controller read…")
 
     @QtCore.Slot(object, object, int)
     def _on_file_sample(self, stats, values, generation: int) -> None:
@@ -1447,6 +1497,7 @@ class LoggingPage(QtWidgets.QWidget):
         self.file_service = None
         self._active_file_duration_s = None
         self._definitions_loaded = False
+        self._definitions_loading = False
         self._pending_file_start = False
         self.btn_file_start.setEnabled(True)
         self.btn_file_stop.setEnabled(False)
@@ -1461,6 +1512,7 @@ class LoggingPage(QtWidgets.QWidget):
         """Request worker cancellation before the shared serial session closes."""
         self._generation += 1
         self._shutdown = True
+        self._definitions_loading = False
         self._pending_file_start = False
         self._download_cancel.set()
         if self.file_service:

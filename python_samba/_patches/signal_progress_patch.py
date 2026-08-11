@@ -35,6 +35,7 @@ Usage:
 from __future__ import annotations
 
 import os
+import threading
 import xml.etree.ElementTree as ET
 
 try:
@@ -439,7 +440,7 @@ def _on_sig_load_settings(win) -> None:
 # _on_timer_tick  — replaces MainWindow._on_timer_tick
 # Adds signal display value updates
 # ===================================================================
-def _on_timer_tick(win) -> None:
+def _on_timer_tick_sync(win) -> None:
     """1-second refresh timer — updates loop status LEDs and signal display values."""
     if win.session and win.session.connected:
         main = win.main_tabs.tabText(win.main_tabs.currentIndex())
@@ -502,6 +503,197 @@ def _on_timer_tick(win) -> None:
                 pass
 
 
+class _LiveRefreshBridge(QtCore.QObject):
+    finished = QtCore.Signal(object, object, object, object)
+
+
+def _is_remote_server_session(session) -> bool:
+    info = getattr(session, "info", None)
+    return getattr(info, "backend", "") == "server"
+
+
+def _live_refresh_context(win) -> dict[str, object]:
+    main = win.main_tabs.tabText(win.main_tabs.currentIndex())
+    sub = win._current_subtab_text()
+    monitor_visible = main == "Status" and sub == "Signals Display"
+    monitor_count = NUM_SIGNALS if (
+        getattr(win, "_sig_monitoring_active", False) or monitor_visible
+    ) else 0
+    include_power_supply = False
+    if main == "Controller" and sub == "Motor Protection" and hasattr(
+        win, "ps_current_limit"
+    ):
+        features = getattr(win, "_controller_features", None)
+        include_power_supply = features is None or "PSUCL" in features
+    include_axis_status = (
+        (main == "Status" and sub in {"Status", "DigIO Status"})
+        or main in {"Pneumatic", "Pneum. SFF"}
+    )
+    return {
+        "main": main,
+        "sub": sub,
+        "include_switch_conditions": not getattr(
+            win, "_switch_config_loaded", False
+        ),
+        "include_axis_status": include_axis_status,
+        "include_controller_config": main == "Controller"
+        and sub == "System Setting",
+        "proximity_count": getattr(win, "_proximity_count", 6)
+        if main == "Position" and sub in {"Tuning", "Proxy Adjustment"}
+        else 0,
+        "include_motor": main == "Controller" and sub == "Motor Protection",
+        "include_power_supply": include_power_supply,
+        "include_pneumatic": main == "Pneumatic",
+        "monitor_count": monitor_count,
+    }
+
+
+def _remote_live_reader(win, source_session):
+    reader = getattr(win, "_remote_live_session", None)
+    source = getattr(win, "_remote_live_source_session", None)
+    if reader is not None and source is source_session and reader.connected:
+        return reader
+    if reader is not None:
+        try:
+            reader.close()
+        except Exception:
+            pass
+    open_reader = getattr(source_session, "open_background_reader", None)
+    candidate = open_reader("python_samba-live-refresh") if callable(open_reader) else None
+    reader = candidate or source_session
+    win._remote_live_session = reader
+    win._remote_live_source_session = source_session
+    return reader
+
+
+def _on_timer_tick(win) -> None:
+    """Keep remote polling off the Qt thread and coalesce overdue ticks."""
+    session = getattr(win, "session", None)
+    if not session or not session.connected:
+        return
+    snapshot_reader = getattr(session, "get_live_refresh_snapshot", None)
+    if not _is_remote_server_session(session) or not callable(snapshot_reader):
+        _on_timer_tick_sync(win)
+        return
+    if getattr(win, "_remote_live_refresh_inflight", False):
+        return
+
+    bridge = getattr(win, "_remote_live_refresh_bridge", None)
+    if bridge is None:
+        bridge = _LiveRefreshBridge(win)
+        bridge.finished.connect(win._on_remote_live_refresh_finished)
+        win._remote_live_refresh_bridge = bridge
+    context = _live_refresh_context(win)
+    win._remote_live_refresh_inflight = True
+
+    def target() -> None:
+        payload = None
+        error = None
+        try:
+            reader_session = _remote_live_reader(win, session)
+            payload = reader_session.get_live_refresh_snapshot(
+                include_switch_conditions=bool(
+                    context["include_switch_conditions"]
+                ),
+                include_axis_status=bool(context["include_axis_status"]),
+                include_controller_config=bool(
+                    context["include_controller_config"]
+                ),
+                proximity_count=int(context["proximity_count"]),
+                include_motor=bool(context["include_motor"]),
+                include_power_supply=bool(context["include_power_supply"]),
+                include_pneumatic=bool(context["include_pneumatic"]),
+                monitor_count=int(context["monitor_count"]),
+            )
+        except BaseException as exc:
+            error = exc
+        try:
+            bridge.finished.emit(session, context, payload, error)
+        except RuntimeError:
+            pass
+
+    threading.Thread(
+        target=target,
+        name="SambaRemoteLiveRefresh",
+        daemon=True,
+    ).start()
+
+
+@QtCore.Slot(object, object, object, object)
+def _on_remote_live_refresh_finished(win, source_session, context, payload, error) -> None:
+    win._remote_live_refresh_inflight = False
+    if getattr(win, "session", None) is not source_session or not source_session.connected:
+        reader = getattr(win, "_remote_live_session", None)
+        if reader is not None and reader is not source_session:
+            try:
+                reader.close()
+            except Exception:
+                pass
+        win._remote_live_session = None
+        win._remote_live_source_session = None
+        return
+    if error is not None:
+        win._report_live_refresh_error("remote live refresh", error)
+        return
+    if not isinstance(payload, dict):
+        return
+
+    from python_samba.ui.main_window import _parse_protocol_int
+
+    loop = payload.get("loop")
+    if loop is None:
+        return
+    if hasattr(win, "sb_loop"):
+        win.sb_loop.setText(f"  Loop: {loop.individual:X}/{loop.system:X}  ")
+    switch = payload.get("switch_status", [])
+    switch_word = _parse_protocol_int(switch[0]) if switch else 0
+    if not getattr(win, "_switch_config_loaded", False):
+        conditions = payload.get("switch_conditions", [])
+        if len(conditions) > 3:
+            win._switch_config = _parse_protocol_int(conditions[3])
+            win._switch_config_loaded = True
+    status_words = (
+        payload.get("axis_status") if context.get("include_axis_status") else None
+    )
+    win._update_status_loop_widgets(
+        loop,
+        switch_word,
+        status_words,
+        getattr(win, "_switch_config", 0),
+    )
+
+    main = win.main_tabs.tabText(win.main_tabs.currentIndex())
+    sub = win._current_subtab_text()
+    if main != context.get("main") or sub != context.get("sub"):
+        return
+    if "controller_config" in payload and hasattr(
+        win, "_apply_system_loop_configuration"
+    ):
+        win._apply_system_loop_configuration(payload["controller_config"])
+    if "proximity_values" in payload:
+        win._apply_position_live_values(payload["proximity_values"])
+    if "motor_power" in payload:
+        win._apply_motor_protection_live_snapshot(payload, loop)
+    if "pneumatic_axes_status" in payload and hasattr(
+        win, "_apply_pneumatic_live_snapshot"
+    ):
+        win._apply_pneumatic_live_snapshot(payload, loop)
+    if main == "Status" and sub == "DigIO Status" and status_words:
+        _position, _pneumatic, input_word, output_word = status_words
+        win._apply_digio_words(int(input_word), int(output_word))
+    if main == "Pneum. SFF" and status_words and hasattr(
+        win, "_set_pff_individual_loop_buttons"
+    ):
+        win._set_pff_individual_loop_buttons(int(status_words[1]))
+    if "monitor_values" in payload:
+        _apply_signal_display_values(win, payload["monitor_values"])
+
+
+def _apply_signal_display_values(win, values) -> None:
+    for index, value in enumerate(values[: len(getattr(win, "sig_values", ())) ]):
+        win.sig_values[index].setText(format_ui_number(value))
+
+
 def _update_signal_display_values(win) -> None:
     """Fetch current monitor signal values from controller and update display labels.
 
@@ -514,12 +706,7 @@ def _update_signal_display_values(win) -> None:
         return
     try:
         values = win.session.get_monitor_values(0, NUM_SIGNALS - 1)
-        for i in range(min(len(values), len(win.sig_values))):
-            val = values[i]
-            if isinstance(val, (int, float)):
-                win.sig_values[i].setText(format_ui_number(val))
-            else:
-                win.sig_values[i].setText(str(val))
+        _apply_signal_display_values(win, values)
     except Exception:
         # If DGMSV fails, try individual DGMOS for each signal
         for i in range(len(win.sig_values)):
@@ -1369,6 +1556,9 @@ def apply_patches(main_window_cls) -> None:
     # Don't overwrite _build_special_tab — unified_special_tab handles it
     main_window_cls._build_saveload_tab = _build_saveload_tab_reference
     main_window_cls._on_timer_tick = _on_timer_tick
+    main_window_cls._on_remote_live_refresh_finished = (
+        _on_remote_live_refresh_finished
+    )
     main_window_cls._show_progress_dialog = staticmethod(_show_progress_dialog)
     main_window_cls._hide_progress_dialog = staticmethod(_hide_progress_dialog)
     main_window_cls.on_signal_continue_read = on_signal_continue_read

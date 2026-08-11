@@ -193,6 +193,43 @@ def test_engine_fast_load_keeps_full_trace_length() -> None:
         assert len(raw.channel(1)) == 64
 
 
+@pytest.mark.parametrize("fast", [False, True])
+def test_remote_engine_batches_trace_download(fast: bool) -> None:
+    with _make_controller() as ctrl:
+        ctrl.session.info.backend = "server"
+        trace = TraceParameters(
+            trace_ch0=IOType(0, 0, 0),
+            trace_ch1=IOType(0, 1, 0),
+            no_samples=128,
+            average_number=1,
+            is_fast_data_loading=fast,
+        )
+        calls: list[list[object]] = []
+        if fast:
+            original = ctrl.get_trace_buffers_binary
+
+            def wrapped(requests):
+                calls.append(list(requests))
+                return original(requests)
+
+            ctrl.get_trace_buffers_binary = wrapped
+        else:
+            original = ctrl.get_trace_buffers
+
+            def wrapped(offsets):
+                calls.append(list(offsets))
+                return original(offsets)
+
+            ctrl.get_trace_buffers = wrapped
+        raw = MeasurementEngine(ctrl, trace, sample_frequency=1000.0).run()
+        assert raw.sample_num == 128
+        # The text mock deliberately returns only eight pairs for a requested
+        # 16-pair chunk.  The first batch detects that real controller limit and
+        # the second batch adapts; DGTBB returns the full requested 40 pairs.
+        assert len(calls) == (1 if fast else 2)
+        assert len(calls[0]) == (4 if fast else 8)
+
+
 def test_binary_trace_roundtrip_decodes_interleaved_pairs() -> None:
     with _make_controller() as ctrl:
         ch1, ch2 = ctrl.get_trace_buffer_binary(0, 4)

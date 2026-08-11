@@ -1344,20 +1344,25 @@ def _on_pneu_read_all(self) -> None:
         s = self._require_session()
         self._ensure_controller_capabilities()
 
-        # Read filters (3 axes x 4 stages)
-        for ax in range(3):
-            for st in range(4):
-                try:
-                    fs = s.get_pneumatic_filter(ax, st)
-                    self.pneum_filter_buttons[(ax, st)].set_info(fs.type_name[:5])
-                except Exception:
-                    self.pneum_filter_buttons[(ax, st)].set_info("?")
+        # Read filters (3 axes x 4 stages) in one Communication Server RPC.
+        filter_keys = [(ax, st) for ax in range(3) for st in range(4)]
+        supports_ramp = self._supports_controller_feature("pneumatic_ramp")
+        snapshot = s.get_pneumatic_page_snapshot(
+            filter_keys, include_ramp=supports_ramp
+        )
+        try:
+            filters = snapshot["filters"]
+            for key, fs in zip(filter_keys, filters):
+                self.pneum_filter_buttons[key].set_info(fs.type_name[:5])
+        except Exception as exc:
+            for key in filter_keys:
+                self.pneum_filter_buttons[key].set_info("?")
+            self.log_msg(f"Pneumatic filter batch read: {exc}")
 
         # One request returns both input and output halves.  Do not call the
         # two slicing aliases separately: that reads the same row twice.
-        for axis in range(3):
+        for axis, values in enumerate(snapshot["steering"]):
             try:
-                values = s.get_pneumatic_steering_matrix(axis)
                 split = len(values) // 2
                 in_vals = values[:split]
                 out_vals = values[split:]
@@ -1374,7 +1379,7 @@ def _on_pneu_read_all(self) -> None:
 
         # Read valve offsets
         try:
-            offsets = s.get_pneumatic_valve_offsets()
+            offsets = snapshot["valve_offsets"]
             split = len(offsets) // 2
             up_vals = offsets[:split]
             dn_vals = offsets[split:]
@@ -1389,7 +1394,7 @@ def _on_pneu_read_all(self) -> None:
 
         # Read ISO offsets
         try:
-            iso_vals = s.get_motor_and_iso_offset_values()
+            iso_vals = snapshot["motor_offsets"]
             iso_tail = iso_vals[-3:]
             for i, ed in enumerate(self.pneum_iso_offsets):
                 if i < len(iso_tail):
@@ -1399,9 +1404,9 @@ def _on_pneu_read_all(self) -> None:
 
         # Read dither
         try:
-            dith_val = s.get_dither_value()
-            dith_freq = s.get_dither_frequency()
-            dith_alpha = s.get_dither_alpha()
+            dith_val = snapshot["dither_value"]
+            dith_freq = snapshot["dither_frequency"]
+            dith_alpha = snapshot["dither_alpha"]
             self.pneum_dither_amount.setText(format_ui_number(dith_val))
             self.pneum_dither_freq.setText(format_ui_number(dith_freq))
             self.pneum_dither_alpha.setText(format_ui_number(dith_alpha))
@@ -1410,7 +1415,7 @@ def _on_pneu_read_all(self) -> None:
 
         # Read floatation
         try:
-            cfg = s.get_pneumatic_config_parameters()
+            cfg = snapshot["config"]
             if len(cfg) != 3:
                 raise ValueError(
                     f"PGPCP expected exactly 3 values, got {len(cfg)}: {cfg}"
@@ -1424,9 +1429,9 @@ def _on_pneu_read_all(self) -> None:
 
         # Read ramp parameters only when advertised by BGGSC.  Firmware that
         # omits PRamp/PneumRamp responds UNKNOWN COMMAND to PGPRP.
-        if self._supports_controller_feature("pneumatic_ramp"):
+        if supports_ramp:
             try:
-                ramp = s.get_pneumatic_ramp_parameters()
+                ramp = snapshot["ramp"]
                 if len(ramp) != 5:
                     raise ValueError(
                         f"PGPRP expected exactly 5 values, got {len(ramp)}: {ramp}"
@@ -1443,35 +1448,47 @@ def _on_pneu_read_all(self) -> None:
 
         # Read live status
         try:
-            axes_status = s.get_pneumatic_axes_status()
+            axes_status = snapshot["axes_status"]
             _update_pneu_live_status(self, axes_status)
         except Exception:
             pass
 
         try:
-            heights_valves = s.get_pneumatic_heights_valves()
+            heights_valves = snapshot["heights_valves"]
             _update_pneu_heights_valves(self, heights_valves)
         except Exception:
             pass
 
         try:
-            _update_pneu_status_timer(self, s.get_pneumatic_status_timer())
+            _update_pneu_status_timer(self, snapshot["status_timer"])
         except Exception:
             pass
 
         # Read loop statuses
         try:
-            loop_bits = s.get_system_loop_status()
-            loop_bits["use_setpoint_for_all"] = bool(
-                s.get_pneumatic_setpoint_status()
-            )
+            loop = snapshot["loop"]
+            loop_bits = {
+                "overall": bool(loop.system & 0x00001),
+                "velocity": bool(loop.individual & 0x01),
+                "position": bool(loop.individual & 0x02),
+                "pneumatic": bool(loop.system & 0x00040),
+                "ff": bool(loop.system & 0x00004),
+                "pff": bool(loop.system & 0x04000),
+                "dither_compensation": bool(loop.system & 0x02000),
+                "reference_metrology": bool(loop.system & 0x20000),
+                "move_up_at_startup": bool(loop.system & 0x00008),
+                "use_setpoint_for_all": bool(snapshot["setpoint_status"]),
+            }
             _update_pneu_loop_leds(self, loop_bits)
         except Exception:
             pass
 
         # Read individual loop status
         try:
-            indiv = s.get_pneumatic_individual_loop_status()
+            _position, pneumatic, _digital_in, _digital_out = snapshot[
+                "axis_loop_status"
+            ]
+            indiv = [int(bool(pneumatic & (1 << bit))) for bit in range(3)]
             _update_pneu_individual_loop_btns(self, indiv)
         except Exception:
             pass
@@ -1668,6 +1685,29 @@ def _refresh_pneumatic_live_state(self, loop=None) -> None:
     })
 
 
+def _apply_pneumatic_live_snapshot(self, snapshot, loop) -> None:
+    """Apply one transport-free pneumatic refresh collected in the worker."""
+    _configure_pneu_live_rows(self)
+    _update_pneu_live_status(self, snapshot.get("pneumatic_axes_status", []))
+    _update_pneu_heights_valves(
+        self, snapshot.get("pneumatic_heights_valves", [])
+    )
+    timers = snapshot.get("pneumatic_status_timer", ())
+    if timers:
+        _update_pneu_status_timer(self, timers)
+    use_setpoint_for_all = bool(snapshot.get("pneumatic_setpoint_status", 0))
+    axis_status = snapshot.get("axis_status", ())
+    if len(axis_status) > 1:
+        _set_pneum_individual_loop_buttons(self, int(axis_status[1]))
+    _update_pneu_loop_leds(self, {
+        "pneumatic": bool(loop.system & 0x00040),
+        "dither_compensation": bool(loop.system & 0x02000),
+        "reference_metrology": bool(loop.system & 0x20000),
+        "move_up_at_startup": bool(loop.system & 0x00008),
+        "use_setpoint_for_all": use_setpoint_for_all,
+    })
+
+
 def _update_pneu_loop_leds(self, loop_bits: dict[str, bool]) -> None:
     """Update the loop status LEDs based on system loop bits."""
     mapping = {
@@ -1760,7 +1800,7 @@ def _on_pneum_write_all(self) -> None:
 def apply_patches(cls: type) -> None:
     """Install pneumatic handlers and the reference two-column page."""
     prefixes = (
-        "_build_", "_on_", "on_", "_pneu_", "_update_", "_sync_", "_refresh_",
+        "_build_", "_on_", "on_", "_pneu_", "_update_", "_apply_", "_sync_", "_refresh_",
     )
     for name, value in globals().items():
         if name.startswith(prefixes) and callable(value):

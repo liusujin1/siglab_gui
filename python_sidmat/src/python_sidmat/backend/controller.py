@@ -288,6 +288,21 @@ class Controller:
         n = len(vals) // 2
         return vals[:n], vals[n:]
 
+    def get_trace_buffers(
+        self, read_offsets: list[int]
+    ) -> list[tuple[list[float], list[float]]]:
+        """Read several text trace chunks with one remote server RPC."""
+        chunks = self.session.get_digital_trace_buffers(read_offsets)
+        result: list[tuple[list[float], list[float]]] = []
+        for read_offset, vals in zip(read_offsets, chunks):
+            if not vals or len(vals) % 2:
+                raise ControllerError(
+                    f"bad DGTBV payload length {len(vals)} at offset {read_offset}"
+                )
+            count = len(vals) // 2
+            result.append((vals[:count], vals[count:]))
+        return result
+
     def get_trace_buffer_binary(
         self, read_offset: int, sample_count: int = 40
     ) -> tuple[list[float], list[float]]:
@@ -298,6 +313,20 @@ class Controller:
                 f"odd DGTBB payload length {len(vals)} at offset {read_offset}"
             )
         return vals[::2], vals[1::2]
+
+    def get_trace_buffers_binary(
+        self, requests: list[tuple[int, int]]
+    ) -> list[tuple[list[float], list[float]]]:
+        """Read several binary trace chunks with one remote server RPC."""
+        chunks = self.session.get_digital_trace_buffers_binary(requests)
+        result: list[tuple[list[float], list[float]]] = []
+        for (read_offset, _sample_count), vals in zip(requests, chunks):
+            if len(vals) % 2:
+                raise ControllerError(
+                    f"odd DGTBB payload length {len(vals)} at offset {read_offset}"
+                )
+            result.append((vals[::2], vals[1::2]))
+        return result
 
     # -- excitation -------------------------------------------------------
 
