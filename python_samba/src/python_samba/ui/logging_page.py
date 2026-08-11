@@ -349,6 +349,49 @@ class LoggingPage(QtWidgets.QWidget):
         self.records_window.raise_()
         self.records_window.activateWindow()
 
+    def eventFilter(self, watched, event):  # noqa: N802
+        if (
+            watched is getattr(self, "monitor_table", None)
+            and event.type() == QtCore.QEvent.Resize
+        ):
+            QtCore.QTimer.singleShot(0, self._resize_monitor_columns)
+        return super().eventFilter(watched, event)
+
+    def _resize_monitor_columns(self) -> None:
+        """Keep channel numbers narrow and give both signal buttons the spare width."""
+        table = getattr(self, "monitor_table", None)
+        if table is None:
+            return
+        available = table.viewport().width()
+        if available <= 0:
+            return
+
+        # Use logical pixels rather than font metrics here.  On high-DPI
+        # Windows displays the global application font is already scaled;
+        # feeding those scaled metrics back into the section widths can make
+        # the #/Live columns consume most of this compact table.
+        number_width = 38
+        live_width = 68
+        minimum_signal = 88
+        signal_total = max(
+            minimum_signal * 2,
+            available - (number_width + live_width) * 2,
+        )
+        first_signal = signal_total // 2
+        widths = (
+            number_width,
+            first_signal,
+            live_width,
+            number_width,
+            signal_total - first_signal,
+            live_width,
+        )
+        header = table.horizontalHeader()
+        header.setStretchLastSection(False)
+        for column, width in enumerate(widths):
+            header.setSectionResizeMode(column, QtWidgets.QHeaderView.Fixed)
+            table.setColumnWidth(column, width)
+
     def _build_monitor_tab(self) -> QtWidgets.QWidget:
         page = GroupPanel("Monitor Signals Definition")
         root = QtWidgets.QVBoxLayout(page)
@@ -377,17 +420,11 @@ class LoggingPage(QtWidgets.QWidget):
         self.monitor_table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.monitor_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.monitor_table.verticalHeader().setVisible(False)
-        self.monitor_table.horizontalHeader().setStretchLastSection(False)
-        for column in (1, 4):
-            self.monitor_table.horizontalHeader().setSectionResizeMode(
-                column, QtWidgets.QHeaderView.Stretch
-            )
-        for column in (0, 2, 3, 5):
-            self.monitor_table.horizontalHeader().setSectionResizeMode(
-                column, QtWidgets.QHeaderView.Fixed
-            )
-        for column, width in ((0, 34), (2, 54), (3, 34), (5, 54)):
-            self.monitor_table.setColumnWidth(column, width)
+        header = self.monitor_table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setMinimumSectionSize(24)
+        for column in range(6):
+            header.setSectionResizeMode(column, QtWidgets.QHeaderView.Fixed)
         self.monitor_table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
         self.monitor_signal_buttons: list[FlatPush] = []
         for channel in range(40):
@@ -420,6 +457,8 @@ class LoggingPage(QtWidgets.QWidget):
             self._set_monitor_row(channel, self.monitor_definitions[channel], None)
         self.monitor_table.setCurrentCell(0, 1)
         root.addWidget(self.monitor_table, 1)
+        self.monitor_table.installEventFilter(self)
+        self._resize_monitor_columns()
 
         # The legacy UI edits each of the forty signal buttons directly.  Keep
         # one hidden IOSignalButton as the shared popup/menu owner so the table

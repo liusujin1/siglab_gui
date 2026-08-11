@@ -121,7 +121,12 @@ def test_logging_page_is_primary_and_exposes_40_channels():
     try:
         labels = [button.text() for button in window.nav_buttons]
         assert "Logging" in labels
+        window.resize(1840, 1240)
+        next(button for button in window.nav_buttons if button.text() == "Logging").click()
+        window.show()
+        app.processEvents()
         page = window.logging_page_widget
+        page._resize_monitor_columns()
         assert page.workspace_splitter.count() == 3
         assert page.monitor_table.rowCount() == 20
         assert len(page.monitor_signal_buttons) == 40
@@ -129,10 +134,19 @@ def test_logging_page_is_primary_and_exposes_40_channels():
         assert page.monitor_signal_buttons[20].text()
         assert page.monitor_table.item(0, 0).text() == "1"
         assert page.monitor_table.item(0, 3).text() == "21"
-        assert page.monitor_table.columnWidth(0) == 34
-        assert page.monitor_table.columnWidth(3) == 34
-        assert page.monitor_table.columnWidth(1) > page.monitor_table.columnWidth(0)
-        assert page.monitor_table.columnWidth(4) > page.monitor_table.columnWidth(3)
+        widths = [page.monitor_table.columnWidth(index) for index in range(6)]
+        assert 34 <= widths[0] <= 44
+        assert widths[3] == widths[0]
+        assert widths[1] > widths[0] * 2
+        assert widths[4] > widths[3] * 2
+        assert widths[1] > widths[2]
+        assert widths[4] > widths[5]
+        assert abs(sum(widths) - page.monitor_table.viewport().width()) <= 2
+        assert all(
+            page.monitor_table.horizontalHeader().sectionResizeMode(index)
+            == QtWidgets.QHeaderView.Fixed
+            for index in range(6)
+        )
         assert page.records_window.isHidden()
         page.btn_show_records.click()
         app.processEvents()
