@@ -673,7 +673,6 @@ class RecordPlotWindow(QtWidgets.QDialog):
         modifiers = QtWidgets.QApplication.keyboardModifiers()
         additive = bool(modifiers & (QtCore.Qt.ControlModifier | QtCore.Qt.ShiftModifier))
         self._select_curve_in_tree(curve_id, additive=additive)
-        self._refresh_plots()
 
     def _select_curve_in_tree(self, curve_id: str, *, additive: bool = False) -> None:
         """Make a curve the primary operation/annotation target."""
@@ -699,7 +698,6 @@ class RecordPlotWindow(QtWidgets.QDialog):
         modifiers = event.modifiers() if hasattr(event, "modifiers") else QtCore.Qt.NoModifier
         additive = bool(modifiers & (QtCore.Qt.ControlModifier | QtCore.Qt.ShiftModifier))
         self._select_curve_in_tree(curve_id, additive=additive)
-        self._refresh_plots()
         if self.analysis_session is not None:
             curve = self.analysis_session.get_curve(curve_id)
             self.status_label.setText(f"Selected curve: {curve.name}")
@@ -715,6 +713,34 @@ class RecordPlotWindow(QtWidgets.QDialog):
         ]
         self.btn_rename_curve.setEnabled(len(derived) == 1 and len(selected) == 1)
         self.btn_delete_curve.setEnabled(bool(derived))
+        self._update_curve_selection_style()
+
+    def _update_curve_selection_style(self) -> None:
+        """Update emphasis without replacing a curve during its click event.
+
+        pyqtgraph keeps the clicked PlotCurveItem in its scene mouse-event
+        candidate list until mouseReleaseEvent has returned.  Removing and
+        recreating PlotDataItems from ``sigClicked`` invalidates that C++
+        object mid-dispatch and causes a libshiboken RuntimeError.  Pen changes
+        are safe and preserve both the PlotDataItem and its PlotCurveItem.
+        """
+
+        if self.analysis_session is None:
+            return
+        selected = set(self.selected_curve_ids())
+        for items in self._curve_items.values():
+            for curve_id, item in items.items():
+                try:
+                    item.setPen(
+                        pg.mkPen(
+                            self._curve_colors[curve_id],
+                            width=2.2 if curve_id in selected else 1.45,
+                        )
+                    )
+                except RuntimeError:
+                    # A record replacement may already have scheduled this
+                    # item for Qt deletion; the next full refresh owns it.
+                    continue
 
     def _display_data(self, curve: NumericCurve) -> tuple[Any, Any, Any]:
         sample_rate = (
