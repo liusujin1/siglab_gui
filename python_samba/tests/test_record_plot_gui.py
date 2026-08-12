@@ -68,7 +68,9 @@ def test_record_window_lists_all_numeric_channels_and_shows_first_six():
         assert window.curve_tree.topLevelItemCount() == 40
         assert len(window._visible_ids) == 6
         assert len(window._curve_items["time"]) == 6
-        assert window.record_table.rowCount() == 512
+        assert not hasattr(window, "record_table")
+        assert window.width() >= 1050
+        assert window.height() >= 700
         assert window.record_summary.text().startswith("512 samples · 40 numeric signals")
 
         first = window.curve_tree.topLevelItem(0)
@@ -162,6 +164,96 @@ def test_cursor_markers_tips_zoom_and_copy_are_available():
         assert restored[0] == pytest.approx(original_range[0])
         assert window.copy_active_plot()
         assert not QtWidgets.QApplication.clipboard().pixmap().isNull()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_checking_or_plot_clicking_other_curves_changes_processing_target():
+    app = _application()
+    window = RecordPlotWindow()
+    try:
+        window.set_record(_record(channels=3, samples=2048))
+        sources = window.analysis_session.curves[:3]
+
+        second_item = window.curve_tree.topLevelItem(1)
+        window.curve_tree.itemClicked.emit(second_item, 0)
+        app.processEvents()
+        assert window.selected_curve_ids() == [sources[1].curve_id]
+        second_fft = window.fft_selected()
+        assert len(second_fft) == 1
+        assert second_fft[0].parent_id == sources[1].curve_id
+        assert second_fft[0].curve_id in window._curve_items["frequency"]
+        assert len(window.frequency_plot._record_legend.items) == 1
+
+        window.plot_tabs.setCurrentIndex(0)
+        fake_click = type(
+            "CurveClick",
+            (),
+            {"modifiers": lambda self: QtCore.Qt.NoModifier},
+        )()
+        window._plot_curve_clicked(sources[2].curve_id, fake_click)
+        assert window.selected_curve_ids() == [sources[2].curve_id]
+        third_detrended = window.detrend_selected("constant")
+        assert len(third_detrended) == 1
+        assert third_detrended[0].parent_id == sources[2].curve_id
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ctrl_plot_click_selects_multiple_curves_for_processing():
+    app = _application()
+    window = RecordPlotWindow()
+    try:
+        window.set_record(_record(channels=3, samples=512))
+        sources = window.analysis_session.curves[:3]
+        _select_curve(window, sources[0].curve_id)
+        additive_click = type(
+            "CurveClick",
+            (),
+            {"modifiers": lambda self: QtCore.Qt.ControlModifier},
+        )()
+        window._plot_curve_clicked(sources[1].curve_id, additive_click)
+        assert set(window.selected_curve_ids()) == {
+            sources[0].curve_id,
+            sources[1].curve_id,
+        }
+        created = window.detrend_selected("constant")
+        assert {curve.parent_id for curve in created} == {
+            sources[0].curve_id,
+            sources[1].curve_id,
+        }
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_data_tip_context_suppresses_duplicate_plot_menu():
+    app = _application()
+    window = RecordPlotWindow()
+    try:
+        window.set_record(_record(channels=1, samples=64))
+        source = window.analysis_session.curves[0]
+        nearest = window._nearest_for_view_x("time", source.curve_id, 0.02)
+        window._add_data_tip("time", nearest)
+        # The tip item's accepted right click sets this guard before opening
+        # its own menu.  Verify that the following scene click cannot open the
+        # plot menu as well; do not launch a modal QMenu in offscreen CI.
+        window._tip_menu_suppressed_until = time.monotonic() + 0.5
+
+        calls: list[str] = []
+        window._show_plot_menu = lambda domain, _position: calls.append(domain)
+        right_click = type(
+            "SceneClick",
+            (),
+            {
+                "button": lambda self: QtCore.Qt.RightButton,
+                "screenPos": lambda self: QtCore.QPointF(20.0, 20.0),
+            },
+        )()
+        window._plot_scene_clicked("time", right_click)
+        assert calls == []
     finally:
         window.close()
         app.processEvents()

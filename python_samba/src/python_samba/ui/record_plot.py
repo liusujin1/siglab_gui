@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from collections import deque
 from pathlib import Path
+import time
 from typing import Any, Callable
 
 from python_samba.logging_tools.models import LoggingRecord
-from python_samba.ui.classic_widgets import FlatPush, GroupPanel, format_ui_number
+from python_samba.ui.classic_widgets import FlatPush, GroupPanel
 
 try:
     from PySide6 import QtCore, QtGui, QtWidgets
@@ -203,8 +204,16 @@ class RecordPlotWindow(QtWidgets.QDialog):
         self.setWindowTitle("Logging Records / Plot")
         self.setWindowModality(QtCore.Qt.NonModal)
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose, False)
-        self.setMinimumSize(900, 620)
-        self.resize(1280, 820)
+        self.setMinimumSize(1050, 700)
+        screen = QtWidgets.QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry().size()
+            self.resize(
+                min(1560, max(1180, int(available.width() * 0.94))),
+                min(1020, max(760, int(available.height() * 0.94))),
+            )
+        else:
+            self.resize(1440, 940)
 
         self.analysis_session: RecordAnalysisSession | None = None
         self._populating_curves = False
@@ -225,6 +234,7 @@ class RecordPlotWindow(QtWidgets.QDialog):
             "frequency": {},
         }
         self._moving_marker = False
+        self._tip_menu_suppressed_until = 0.0
 
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
@@ -309,32 +319,16 @@ class RecordPlotWindow(QtWidgets.QDialog):
         workspace.setChildrenCollapsible(False)
         workspace.addWidget(self._build_curve_and_processing_panel())
 
-        right = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        right.setChildrenCollapsible(False)
         self.plot_tabs = QtWidgets.QTabWidget()
         self.time_plot = self._create_plot("time")
         self.frequency_plot = self._create_plot("frequency")
         self.plot_tabs.addTab(self.time_plot, "Time domain")
         self.plot_tabs.addTab(self.frequency_plot, "Frequency domain")
         self.plot_tabs.currentChanged.connect(self._active_plot_changed)
-        right.addWidget(self.plot_tabs)
-
-        table_panel = GroupPanel("Raw record (first 1000 rows)")
-        table_layout = QtWidgets.QVBoxLayout(table_panel)
-        table_layout.setContentsMargins(6, 8, 6, 6)
-        self.record_table = QtWidgets.QTableWidget()
-        self.record_table.setAlternatingRowColors(True)
-        self.record_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.record_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
-        table_layout.addWidget(self.record_table)
-        right.addWidget(table_panel)
-        right.setStretchFactor(0, 3)
-        right.setStretchFactor(1, 1)
-        right.setSizes([590, 190])
-        workspace.addWidget(right)
+        workspace.addWidget(self.plot_tabs)
         workspace.setStretchFactor(0, 0)
         workspace.setStretchFactor(1, 1)
-        workspace.setSizes([325, 925])
+        workspace.setSizes([420, 1020])
         self.plot_widget = self.time_plot
         return workspace
 
@@ -349,11 +343,7 @@ class RecordPlotWindow(QtWidgets.QDialog):
         )
         message.setWordWrap(True)
         message.setAlignment(QtCore.Qt.AlignCenter)
-        layout.addWidget(message)
-        self.record_table = QtWidgets.QTableWidget()
-        self.record_table.setAlternatingRowColors(True)
-        self.record_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        layout.addWidget(self.record_table, 1)
+        layout.addWidget(message, 1)
         self.plot_widget = message
         return panel
 
@@ -361,8 +351,8 @@ class RecordPlotWindow(QtWidgets.QDialog):
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-        scroll.setMinimumWidth(290)
-        scroll.setMaximumWidth(410)
+        scroll.setMinimumWidth(380)
+        scroll.setMaximumWidth(500)
         panel = QtWidgets.QWidget()
         root = QtWidgets.QVBoxLayout(panel)
         root.setContentsMargins(2, 2, 5, 2)
@@ -376,13 +366,15 @@ class RecordPlotWindow(QtWidgets.QDialog):
         self.curve_tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.curve_tree.setRootIsDecorated(False)
         self.curve_tree.setAlternatingRowColors(True)
-        self.curve_tree.setMinimumHeight(220)
+        self.curve_tree.setMinimumHeight(180)
         curve_header = self.curve_tree.header()
         curve_header.setSectionResizeMode(0, QtWidgets.QHeaderView.Fixed)
-        curve_header.resizeSection(0, 48)
+        curve_header.resizeSection(0, 44)
         curve_header.setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
-        curve_header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
-        curve_header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeToContents)
+        curve_header.setSectionResizeMode(2, QtWidgets.QHeaderView.Fixed)
+        curve_header.resizeSection(2, 76)
+        curve_header.setSectionResizeMode(3, QtWidgets.QHeaderView.Fixed)
+        curve_header.resizeSection(3, 76)
         curves_layout.addWidget(self.curve_tree, 1)
         curve_actions = QtWidgets.QHBoxLayout()
         self.btn_rename_curve = FlatPush("Rename")
@@ -481,6 +473,7 @@ class RecordPlotWindow(QtWidgets.QDialog):
         scroll.setWidget(panel)
 
         self.curve_tree.itemChanged.connect(self._curve_visibility_changed)
+        self.curve_tree.itemClicked.connect(self._curve_item_clicked)
         self.curve_tree.itemSelectionChanged.connect(self._curve_selection_changed)
         self.btn_rename_curve.clicked.connect(self.rename_selected_curve)
         self.btn_delete_curve.clicked.connect(self.delete_selected_curves)
@@ -522,6 +515,10 @@ class RecordPlotWindow(QtWidgets.QDialog):
         plot.getPlotItem().setLabel("left", "Value")
         legend = plot.getPlotItem().addLegend(offset=(8, 8))
         legend.setZValue(10)
+        legend.setBrush(pg.mkBrush(255, 255, 255, 228))
+        legend.setPen(pg.mkPen("#7595a7", width=1.0))
+        if hasattr(legend, "setLabelTextColor"):
+            legend.setLabelTextColor(PLOT_FOREGROUND)
         plot._record_domain = domain
         plot._record_view_box = view_box
         plot._record_legend = legend
@@ -533,15 +530,14 @@ class RecordPlotWindow(QtWidgets.QDialog):
     def set_record(self, record: LoggingRecord) -> None:
         """Replace the viewer contents with one completed logging record."""
 
-        self._populate_raw_table(record)
-        suffix = " (first 1000 shown)" if len(record.rows) > 1000 else ""
+        suffix = ""
         if _ANALYSIS_IMPORT_ERROR is not None:  # pragma: no cover
             self.record_summary.setText(
                 f"{len(record.rows)} samples · plotting dependencies unavailable{suffix}"
             )
             self.record_path.setText(record.source)
             self.status_label.setText(
-                f"Plotting unavailable: {_ANALYSIS_IMPORT_ERROR}. Raw rows remain accessible."
+                f"Plotting unavailable: {_ANALYSIS_IMPORT_ERROR}."
             )
             return
 
@@ -582,25 +578,6 @@ class RecordPlotWindow(QtWidgets.QDialog):
                     pass
             plot._record_legend.clear()
         self._curve_items.clear()
-
-    def _populate_raw_table(self, record: LoggingRecord) -> None:
-        preview = record.rows[:1000]
-        self.record_table.setUpdatesEnabled(False)
-        try:
-            self.record_table.clear()
-            self.record_table.setColumnCount(len(record.headers))
-            self.record_table.setHorizontalHeaderLabels(record.headers)
-            self.record_table.setRowCount(len(preview))
-            for row_index, row in enumerate(preview):
-                for column, value in enumerate(row[: len(record.headers)]):
-                    self.record_table.setItem(
-                        row_index,
-                        column,
-                        QtWidgets.QTableWidgetItem(format_ui_number(value)),
-                    )
-            self.record_table.resizeColumnsToContents()
-        finally:
-            self.record_table.setUpdatesEnabled(True)
 
     def _refresh_curve_tree(
         self,
@@ -684,9 +661,48 @@ class RecordPlotWindow(QtWidgets.QDialog):
         curve_id = str(item.data(0, QtCore.Qt.UserRole))
         if item.checkState(0) == QtCore.Qt.Checked:
             self._visible_ids.add(curve_id)
+            self._select_curve_in_tree(curve_id)
         else:
             self._visible_ids.discard(curve_id)
         self._refresh_plots()
+
+    def _curve_item_clicked(self, item, _column: int) -> None:
+        """Treat every tree-cell click, including Show, as target selection."""
+
+        curve_id = str(item.data(0, QtCore.Qt.UserRole))
+        modifiers = QtWidgets.QApplication.keyboardModifiers()
+        additive = bool(modifiers & (QtCore.Qt.ControlModifier | QtCore.Qt.ShiftModifier))
+        self._select_curve_in_tree(curve_id, additive=additive)
+        self._refresh_plots()
+
+    def _select_curve_in_tree(self, curve_id: str, *, additive: bool = False) -> None:
+        """Make a curve the primary operation/annotation target."""
+
+        if not additive:
+            self.curve_tree.clearSelection()
+        for row in range(self.curve_tree.topLevelItemCount()):
+            item = self.curve_tree.topLevelItem(row)
+            if str(item.data(0, QtCore.Qt.UserRole)) != curve_id:
+                continue
+            if additive:
+                self.curve_tree.setCurrentItem(
+                    item, 0, QtCore.QItemSelectionModel.NoUpdate
+                )
+                item.setSelected(True)
+            else:
+                self.curve_tree.setCurrentItem(item)
+                item.setSelected(True)
+            self.curve_tree.scrollToItem(item)
+            break
+
+    def _plot_curve_clicked(self, curve_id: str, event) -> None:
+        modifiers = event.modifiers() if hasattr(event, "modifiers") else QtCore.Qt.NoModifier
+        additive = bool(modifiers & (QtCore.Qt.ControlModifier | QtCore.Qt.ShiftModifier))
+        self._select_curve_in_tree(curve_id, additive=additive)
+        self._refresh_plots()
+        if self.analysis_session is not None:
+            curve = self.analysis_session.get_curve(curve_id)
+            self.status_label.setText(f"Selected curve: {curve.name}")
 
     def _curve_selection_changed(self) -> None:
         if self._populating_curves or self.analysis_session is None:
@@ -763,6 +779,12 @@ class RecordPlotWindow(QtWidgets.QDialog):
                 width = 2.2 if curve.curve_id in selected else 1.45
                 pen = pg.mkPen(self._curve_colors[curve.curve_id], width=width)
                 item = pg.PlotDataItem(x_values, y_values, pen=pen, name=curve.name)
+                item.setCurveClickable(True, width=10)
+                item.sigClicked.connect(
+                    lambda _item, event, selected_id=curve.curve_id: self._plot_curve_clicked(
+                        selected_id, event
+                    )
+                )
                 item.setZValue(0)
                 view_box.addItem(item)
                 # Enable view-dependent optimisations after the item has a
@@ -819,13 +841,19 @@ class RecordPlotWindow(QtWidgets.QDialog):
         if only_curve_id:
             curve = self.analysis_session.get_curve(only_curve_id)
             return [curve] if curve.domain == domain else []
-        selected = set(self.selected_curve_ids(domain))
+        selected_ids = self.selected_curve_ids(domain)
+        selected = set(selected_ids)
         visible = [
             curve
             for curve in self.analysis_session.curves_for_domain(domain)
             if curve.curve_id in self._visible_ids
         ]
+        current = self.curve_tree.currentItem()
+        current_id = (
+            str(current.data(0, QtCore.Qt.UserRole)) if current is not None else ""
+        )
         selected_visible = [curve for curve in visible if curve.curve_id in selected]
+        selected_visible.sort(key=lambda curve: curve.curve_id != current_id)
         return selected_visible or visible
 
     def _nearest_point(
@@ -908,6 +936,8 @@ class RecordPlotWindow(QtWidgets.QDialog):
 
     def _plot_scene_clicked(self, domain: str, event) -> None:
         if event.button() == QtCore.Qt.RightButton:
+            if time.monotonic() < self._tip_menu_suppressed_until:
+                return
             self._show_plot_menu(domain, event.screenPos())
             return
         if event.button() == QtCore.Qt.LeftButton:
@@ -1043,10 +1073,15 @@ class RecordPlotWindow(QtWidgets.QDialog):
         tip["label"].setPos(nearest[4], nearest[5])
 
     def _show_tip_menu(self, tip_id: int, screen_position) -> None:
+        # pyqtgraph also emits the scene-level right-click signal after a
+        # graphics item has accepted the click.  Suppress the plot menu for
+        # this event so a data tip produces exactly one context menu.
+        self._tip_menu_suppressed_until = time.monotonic() + 0.5
         menu = QtWidgets.QMenu(self)
         remove = menu.addAction("Delete this data tip")
         clear = menu.addAction("Clear all data tips")
         action = menu.exec(self._screen_point(screen_position))
+        self._tip_menu_suppressed_until = time.monotonic() + 0.5
         if action == remove:
             self._remove_data_tip(tip_id)
         elif action == clear:

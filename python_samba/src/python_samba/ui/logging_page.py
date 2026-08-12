@@ -200,7 +200,6 @@ class LoggingPage(QtWidgets.QWidget):
         self.btn_record_browse = self.records_window.btn_record_browse
         self.record_summary = self.records_window.record_summary
         self.record_plot = self.records_window.plot_widget
-        self.record_table = self.records_window.record_table
 
         self.btn_internal_start.clicked.connect(self.start_internal)
         self.btn_file_start.clicked.connect(self.start_file_logging)
