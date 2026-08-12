@@ -90,6 +90,23 @@ def test_record_window_lists_all_numeric_channels_and_shows_first_six():
         app.processEvents()
 
 
+def test_plot_fonts_are_compact_and_window_uses_available_screen():
+    app = _application()
+    window = RecordPlotWindow()
+    try:
+        screen_size = app.primaryScreen().availableGeometry().size()
+        assert window.width() >= min(screen_size.width(), 1120)
+        assert window.height() >= min(screen_size.height(), 740)
+        for plot in (window.time_plot, window.frequency_plot):
+            for side in ("bottom", "left"):
+                axis = plot.getPlotItem().getAxis(side)
+                assert axis.compact_tick_font.pointSize() == 9
+                assert axis.label.font().pointSize() == 9
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_processing_replaces_selected_curve_without_adding_rows(tmp_path: Path):
     app = _application()
     window = RecordPlotWindow()
@@ -147,16 +164,16 @@ def test_frequency_defaults_cutoffs_and_auto_fit_are_usable():
 
         assert window.frequency_x_log.isChecked()
         assert window.frequency_db.isChecked()
-        assert window.filter_low.value() == pytest.approx(5.0)
-        assert window.filter_high.value() == pytest.approx(100.0)
+        assert window.filter_low.value() == pytest.approx(100.0)
+        assert window.filter_high.value() == pytest.approx(5.0)
         assert window.filter_low.isEnabled()
         assert window.filter_high.isEnabled()
         assert not window.filter_low.lineEdit().isReadOnly()
         assert not window.filter_high.lineEdit().isReadOnly()
-        window.filter_low.setValue(7.5)
-        window.filter_high.setValue(125.0)
-        assert window.filter_low.value() == pytest.approx(7.5)
-        assert window.filter_high.value() == pytest.approx(125.0)
+        window.filter_low.setValue(125.0)
+        window.filter_high.setValue(7.5)
+        assert window.filter_low.value() == pytest.approx(125.0)
+        assert window.filter_high.value() == pytest.approx(7.5)
 
         spectrum = window.fft_selected()[0]
         x_values, y_values, finite = window._display_data(spectrum)
@@ -168,6 +185,32 @@ def test_frequency_defaults_cutoffs_and_auto_fit_are_usable():
         x_range, y_range = window.frequency_plot._record_view_box.viewRange()
         assert np.all(np.isfinite([*x_range, *y_range]))
         assert y_range[1] - y_range[0] < 135.0
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_filter_cutoff_labels_map_to_lowpass_and_highpass_edges(monkeypatch):
+    app = _application()
+    window = RecordPlotWindow()
+    calls = []
+    try:
+        window.set_record(_record(channels=1, samples=2048))
+        source = window.analysis_session.curves[0]
+        _select_curve(window, source.curve_id)
+        original = window.analysis_session.filter_curve
+
+        def capture(curve_id, filter_type, **kwargs):
+            calls.append((filter_type, kwargs))
+            return original(curve_id, filter_type, **kwargs)
+
+        monkeypatch.setattr(window.analysis_session, "filter_curve", capture)
+        window.filter_low.setValue(100.0)
+        window.filter_high.setValue(5.0)
+        window.filter_type.setCurrentIndex(window.filter_type.findData("bandpass"))
+        assert len(window.filter_selected()) == 1
+        assert calls[0][1]["low_hz"] == pytest.approx(5.0)
+        assert calls[0][1]["high_hz"] == pytest.approx(100.0)
     finally:
         window.close()
         app.processEvents()

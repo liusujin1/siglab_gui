@@ -50,6 +50,14 @@ CURVE_COLORS = (
     "#b44c9b",
     "#6d7a86",
 )
+PLOT_FONT_POINTS = 9
+
+
+def _plot_font(*, bold: bool = False) -> QtGui.QFont:
+    font = QtGui.QFont()
+    font.setPointSize(PLOT_FONT_POINTS)
+    font.setBold(bold)
+    return font
 
 
 def _short_number(value: float) -> str:
@@ -79,6 +87,9 @@ if pg is not None:
 
         def __init__(self, *args, **kwargs) -> None:
             super().__init__(*args, **kwargs)
+            self.compact_tick_font = _plot_font()
+            self.setTickFont(self.compact_tick_font)
+            self.setStyle(tickTextHeight=15, autoExpandTextSpace=False)
             if hasattr(self, "enableAutoSIPrefix"):
                 self.enableAutoSIPrefix(False)
 
@@ -205,16 +216,18 @@ class RecordPlotWindow(QtWidgets.QDialog):
         self.setWindowTitle("Logging Records / Plot")
         self.setWindowModality(QtCore.Qt.NonModal)
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose, False)
-        self.setMinimumSize(1050, 700)
+        self.setMinimumSize(1120, 740)
         screen = QtWidgets.QApplication.primaryScreen()
         if screen is not None:
             available = screen.availableGeometry().size()
+            target_width = max(1120, int(available.width() * 0.98))
+            target_height = max(740, int(available.height() * 0.98))
             self.resize(
-                min(1560, max(1180, int(available.width() * 0.94))),
-                min(1020, max(760, int(available.height() * 0.94))),
+                min(available.width(), target_width),
+                min(available.height(), target_height),
             )
         else:
-            self.resize(1440, 940)
+            self.resize(1600, 980)
 
         self.analysis_session: RecordAnalysisSession | None = None
         self._populating_curves = False
@@ -429,8 +442,10 @@ class RecordPlotWindow(QtWidgets.QDialog):
             control.setDecimals(6)
             control.setSuffix(" Hz")
             control.setKeyboardTracking(False)
-        self.filter_low.setValue(5.0)
-        self.filter_high.setValue(100.0)
+        # These labels follow the processing UI convention: Low cutoff is the
+        # low-pass frequency; High cutoff is the high-pass frequency.
+        self.filter_low.setValue(100.0)
+        self.filter_high.setValue(5.0)
         self.filter_order = QtWidgets.QSpinBox()
         self.filter_order.setRange(1, 12)
         self.filter_order.setValue(4)
@@ -506,9 +521,13 @@ class RecordPlotWindow(QtWidgets.QDialog):
         plot.getPlotItem().showGrid(x=True, y=True, alpha=0.22)
         plot.getPlotItem().setMenuEnabled(False)
         plot.getPlotItem().setLabel(
-            "bottom", "Time (s)" if domain == "time" else "Frequency (Hz)"
+            "bottom",
+            "Time (s)" if domain == "time" else "Frequency (Hz)",
+            **{"font-size": f"{PLOT_FONT_POINTS}pt"},
         )
-        plot.getPlotItem().setLabel("left", "Value")
+        plot.getPlotItem().setLabel(
+            "left", "Value", **{"font-size": f"{PLOT_FONT_POINTS}pt"}
+        )
         legend = plot.getPlotItem().addLegend(offset=(8, 8))
         legend.setZValue(10)
         legend.setBrush(pg.mkBrush(255, 255, 255, 228))
@@ -866,6 +885,9 @@ class RecordPlotWindow(QtWidgets.QDialog):
                 item.setDownsampling(auto=True, method="peak")
                 item.setClipToView(True)
                 plot._record_legend.addItem(item, curve.name)
+                legend_label = plot._record_legend.items[-1][1]
+                if hasattr(legend_label, "item"):
+                    legend_label.item.setFont(_plot_font())
                 self._curve_items[domain][curve.curve_id] = item
         if auto_range:
             self._auto_fit_domain("time")
@@ -913,7 +935,9 @@ class RecordPlotWindow(QtWidgets.QDialog):
         axis = self.frequency_plot.getPlotItem().getAxis("bottom")
         axis.setLogMode(self.frequency_x_log.isChecked())
         self.frequency_plot.getPlotItem().setLabel(
-            "left", "Level (dB)" if self.frequency_db.isChecked() else "Value"
+            "left",
+            "Level (dB)" if self.frequency_db.isChecked() else "Value",
+            **{"font-size": f"{PLOT_FONT_POINTS}pt"},
         )
         self.clear_annotations(domain="frequency")
         self._refresh_plots()
@@ -1098,6 +1122,7 @@ class RecordPlotWindow(QtWidgets.QDialog):
                 border=pg.mkPen("#071827", width=0.8),
                 anchor=(0.0, 1.0),
             )
+            label.setFont(_plot_font())
             line.setZValue(30)
             point.setZValue(31)
             label.setZValue(32)
@@ -1143,6 +1168,7 @@ class RecordPlotWindow(QtWidgets.QDialog):
             on_drag=lambda scene, selected=tip_id: self._drag_tip_label(selected, scene),
             on_menu=lambda screen, selected=tip_id: self._show_tip_menu(selected, screen),
         )
+        label.setFont(_plot_font())
         point.setZValue(40)
         label.setZValue(41)
         label.setPos(plot_x, plot_y)
@@ -1260,6 +1286,7 @@ class RecordPlotWindow(QtWidgets.QDialog):
             border=pg.mkPen(color, width=1.0),
             anchor=(0.0, 1.0),
         )
+        label.setFont(_plot_font())
         line.setZValue(20)
         point.setZValue(21)
         label.setZValue(22)
@@ -1499,8 +1526,10 @@ class RecordPlotWindow(QtWidgets.QDialog):
             nyquist = sampling.sample_rate_hz / 2.0
             self.filter_low.setMaximum(max(0.000001, nyquist * 0.999999))
             self.filter_high.setMaximum(max(0.000001, nyquist * 0.999999))
+            if self.filter_low.value() >= nyquist:
+                self.filter_low.setValue(max(0.000001, nyquist * 0.8))
             if self.filter_high.value() >= nyquist:
-                self.filter_high.setValue(max(0.000001, nyquist * 0.8))
+                self.filter_high.setValue(max(0.000001, nyquist * 0.1))
 
     def _selected_time_ids(self) -> list[str]:
         selected = self.selected_curve_ids("time")
@@ -1588,13 +1617,17 @@ class RecordPlotWindow(QtWidgets.QDialog):
 
     def filter_selected(self) -> list[NumericCurve]:
         kind = str(self.filter_type.currentData())
+        # UI terminology matches the reference program: "Low cutoff" is
+        # the low-pass edge, while "High cutoff" is the high-pass edge.
+        low_pass_hz = self.filter_low.value()
+        high_pass_hz = self.filter_high.value()
         return self._run_derivation(
             "Filter",
             lambda curve_id: self.analysis_session.filter_curve(
                 curve_id,
                 kind,
-                low_hz=self.filter_low.value(),
-                high_hz=self.filter_high.value(),
+                low_hz=high_pass_hz,
+                high_hz=low_pass_hz,
                 order=self.filter_order.value(),
             ),
         )
