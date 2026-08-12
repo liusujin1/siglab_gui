@@ -362,7 +362,7 @@ class RecordPlotWindow(QtWidgets.QDialog):
         curves_layout = QtWidgets.QVBoxLayout(curves_group)
         curves_layout.setContentsMargins(6, 8, 6, 6)
         self.curve_tree = QtWidgets.QTreeWidget()
-        self.curve_tree.setHeaderLabels(["Show", "Curve", "Domain", "Kind"])
+        self.curve_tree.setHeaderLabels(["Show", "Curve", "Domain", "State"])
         self.curve_tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.curve_tree.setRootIsDecorated(False)
         self.curve_tree.setAlternatingRowColors(True)
@@ -376,12 +376,6 @@ class RecordPlotWindow(QtWidgets.QDialog):
         curve_header.setSectionResizeMode(3, QtWidgets.QHeaderView.Fixed)
         curve_header.resizeSection(3, 76)
         curves_layout.addWidget(self.curve_tree, 1)
-        curve_actions = QtWidgets.QHBoxLayout()
-        self.btn_rename_curve = FlatPush("Rename")
-        self.btn_delete_curve = FlatPush("Delete derived")
-        curve_actions.addWidget(self.btn_rename_curve)
-        curve_actions.addWidget(self.btn_delete_curve)
-        curves_layout.addLayout(curve_actions)
         root.addWidget(curves_group, 2)
 
         sampling_group = GroupPanel("Sampling")
@@ -438,7 +432,7 @@ class RecordPlotWindow(QtWidgets.QDialog):
         self.filter_order = QtWidgets.QSpinBox()
         self.filter_order.setRange(1, 12)
         self.filter_order.setValue(4)
-        self.btn_filter = FlatPush("Create filtered curve")
+        self.btn_filter = FlatPush("Apply to selected")
         filter_form.addRow("Type", self.filter_type)
         filter_form.addRow("Low cutoff", self.filter_low)
         filter_form.addRow("High cutoff", self.filter_high)
@@ -475,8 +469,6 @@ class RecordPlotWindow(QtWidgets.QDialog):
         self.curve_tree.itemChanged.connect(self._curve_visibility_changed)
         self.curve_tree.itemClicked.connect(self._curve_item_clicked)
         self.curve_tree.itemSelectionChanged.connect(self._curve_selection_changed)
-        self.btn_rename_curve.clicked.connect(self.rename_selected_curve)
-        self.btn_delete_curve.clicked.connect(self.delete_selected_curves)
         self.sample_rate.editingFinished.connect(self._sample_rate_edited)
         self.btn_resample.clicked.connect(self.resample_selected)
         self.btn_remove_mean.clicked.connect(lambda: self.detrend_selected("constant"))
@@ -602,7 +594,11 @@ class RecordPlotWindow(QtWidgets.QDialog):
                         "",
                         curve.name,
                         "Time" if curve.domain == "time" else "Frequency",
-                        "Derived" if curve.derived else "Original",
+                        (
+                            "Modified"
+                            if curve.operation.get("type") != "source"
+                            else "Original"
+                        ),
                     ]
                 )
                 item.setData(0, QtCore.Qt.UserRole, curve.curve_id)
@@ -705,14 +701,6 @@ class RecordPlotWindow(QtWidgets.QDialog):
     def _curve_selection_changed(self) -> None:
         if self._populating_curves or self.analysis_session is None:
             return
-        selected = self.selected_curve_ids()
-        derived = [
-            curve_id
-            for curve_id in selected
-            if self.analysis_session.get_curve(curve_id).derived
-        ]
-        self.btn_rename_curve.setEnabled(len(derived) == 1 and len(selected) == 1)
-        self.btn_delete_curve.setEnabled(bool(derived))
         self._update_curve_selection_style()
 
     def _update_curve_selection_style(self) -> None:
@@ -1434,13 +1422,18 @@ class RecordPlotWindow(QtWidgets.QDialog):
         source_ids = self._selected_time_ids()
         if not source_ids:
             return []
-        created: list[NumericCurve] = []
+        updated: list[NumericCurve] = []
         errors: list[str] = []
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
             for curve_id in source_ids:
                 try:
-                    created.append(operation(curve_id))
+                    result = operation(curve_id)
+                    updated.append(
+                        self.analysis_session.replace_curve_data(
+                            curve_id, result.curve_id
+                        )
+                    )
                 except MemoryError:
                     errors.append(
                         f"{self.analysis_session.get_curve(curve_id).name}: operation needs too much memory"
@@ -1449,17 +1442,20 @@ class RecordPlotWindow(QtWidgets.QDialog):
                     errors.append(f"{self.analysis_session.get_curve(curve_id).name}: {exc}")
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
-        created_ids = {curve.curve_id for curve in created}
-        if created:
+        updated_ids = {curve.curve_id for curve in updated}
+        if updated:
+            # Existing pointers refer to the pre-processing arrays and must not
+            # survive an in-place data/domain replacement.
+            self.clear_annotations(all_domains=True)
             self._display_cache.clear()
-            self._refresh_curve_tree(select_ids=created_ids, make_visible=created_ids)
+            self._refresh_curve_tree(select_ids=updated_ids, make_visible=updated_ids)
             self._refresh_plots(auto_range=True)
             if switch_to_frequency:
                 self.plot_tabs.setCurrentIndex(1)
-            self.status_label.setText(f"{label}: created {len(created)} derived curve(s).")
+            self.status_label.setText(f"{label}: updated {len(updated)} selected curve(s).")
         if errors:
             self._show_error("\n".join(errors))
-        return created
+        return updated
 
     def resample_selected(self) -> list[NumericCurve]:
         rate = self.sample_rate.value()

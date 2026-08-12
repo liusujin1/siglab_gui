@@ -408,6 +408,51 @@ class RecordAnalysisSession:
             if selected in self._order:
                 self._order.remove(selected)
 
+    def replace_curve_data(
+        self, curve_id: str, result_curve_id: str
+    ) -> NumericCurve:
+        """Replace one curve with a computed result while preserving its identity.
+
+        Numerical operations intentionally continue to build an immutable result
+        first.  The record viewer then commits that result to the selected row so
+        users can process a curve repeatedly without accumulating derivative
+        entries in the curve list.
+        """
+
+        source = self.get_curve(curve_id)
+        result = self.get_curve(result_curve_id)
+        if result_curve_id == curve_id:
+            return source
+        if result.parent_id != curve_id:
+            raise ValueError("the computed result does not belong to the selected curve")
+
+        history = list(source.operation.get("processing_chain", ()))
+        if (
+            source.operation
+            and source.operation.get("type") != "source"
+            and not history
+        ):
+            history.append(dict(source.operation))
+        step = dict(result.operation)
+        step.pop("processing_chain", None)
+        history.append(step)
+        operation = dict(step)
+        operation["processing_chain"] = history
+
+        updated = replace(
+            result,
+            curve_id=source.curve_id,
+            name=source.name,
+            source_header=source.source_header,
+            derived=source.derived,
+            parent_id=source.parent_id,
+            operation=operation,
+        )
+        del self._curves[result_curve_id]
+        self._order.remove(result_curve_id)
+        self._curves[curve_id] = updated
+        return updated
+
     def resample_curve(
         self, curve_id: str, sample_rate_hz: float | None = None
     ) -> NumericCurve:

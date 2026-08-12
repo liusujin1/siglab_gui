@@ -144,6 +144,34 @@ def test_time_processing_creates_immutable_chained_derivatives():
     assert not filtered.y.flags.writeable
 
 
+def test_computed_result_can_replace_original_curve_without_adding_a_row():
+    session = RecordAnalysisSession(_sine_record(samples=512))
+    original = session.curves[0]
+    original_values = original.y.copy()
+
+    temporary = session.detrend_curve(original.curve_id, "constant")
+    updated = session.replace_curve_data(original.curve_id, temporary.curve_id)
+
+    assert len(session.curves) == 1
+    assert updated.curve_id == original.curve_id
+    assert updated.name == original.name
+    assert not updated.derived
+    assert updated.parent_id is None
+    assert updated.operation["type"] == "detrend"
+    assert updated.operation["processing_chain"][-1]["type"] == "detrend"
+    assert not np.array_equal(updated.y, original_values)
+
+    spectrum = session.fft_curve(updated.curve_id)
+    updated = session.replace_curve_data(updated.curve_id, spectrum.curve_id)
+    assert len(session.curves) == 1
+    assert updated.curve_id == original.curve_id
+    assert updated.domain == "frequency"
+    assert [step["type"] for step in updated.operation["processing_chain"]] == [
+        "detrend",
+        "fft",
+    ]
+
+
 def test_fft_and_welch_psd_find_the_tone_and_support_db_display():
     session = RecordAnalysisSession(_sine_record(frequency=73.0))
     source = session.curves[0]

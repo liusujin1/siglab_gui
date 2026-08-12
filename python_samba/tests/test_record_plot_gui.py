@@ -90,20 +90,24 @@ def test_record_window_lists_all_numeric_channels_and_shows_first_six():
         app.processEvents()
 
 
-def test_processing_creates_selectable_derivatives_without_changing_source(tmp_path: Path):
+def test_processing_replaces_selected_curve_without_adding_rows(tmp_path: Path):
     app = _application()
     window = RecordPlotWindow()
     try:
         window.set_record(_record(channels=2, samples=2048))
         source = window.analysis_session.curves[0]
         source_copy = source.y.copy()
+        original_count = window.curve_tree.topLevelItemCount()
         _select_curve(window, source.curve_id)
 
         detrended = window.detrend_selected("constant")
         assert len(detrended) == 1
-        assert detrended[0].derived
-        assert detrended[0].parent_id == source.curve_id
-        assert np.array_equal(source.y, source_copy)
+        assert detrended[0].curve_id == source.curve_id
+        assert detrended[0].name == source.name
+        assert not detrended[0].derived
+        assert not np.array_equal(detrended[0].y, source_copy)
+        assert window.curve_tree.topLevelItemCount() == original_count
+        assert window.curve_tree.topLevelItem(0).text(3) == "Modified"
         assert detrended[0].curve_id in window._visible_ids
 
         _select_curve(window, detrended[0].curve_id)
@@ -111,7 +115,9 @@ def test_processing_creates_selectable_derivatives_without_changing_source(tmp_p
         assert len(spectra) == 1
         assert spectra[0].domain == "frequency"
         assert window.plot_tabs.currentIndex() == 1
+        assert spectra[0].curve_id == source.curve_id
         assert spectra[0].curve_id in window._curve_items["frequency"]
+        assert window.curve_tree.topLevelItemCount() == original_count
 
         window.frequency_db.setChecked(True)
         nearest = window._nearest_for_view_x("frequency", spectra[0].curve_id, 10.0)
@@ -182,7 +188,7 @@ def test_checking_or_plot_clicking_other_curves_changes_processing_target():
         assert window.selected_curve_ids() == [sources[1].curve_id]
         second_fft = window.fft_selected()
         assert len(second_fft) == 1
-        assert second_fft[0].parent_id == sources[1].curve_id
+        assert second_fft[0].curve_id == sources[1].curve_id
         assert second_fft[0].curve_id in window._curve_items["frequency"]
         assert len(window.frequency_plot._record_legend.items) == 1
 
@@ -192,11 +198,18 @@ def test_checking_or_plot_clicking_other_curves_changes_processing_target():
             (),
             {"modifiers": lambda self: QtCore.Qt.NoModifier},
         )()
+        previous_item = window._curve_items["time"][sources[2].curve_id]
+        previous_curve_item = previous_item.curve
         window._plot_curve_clicked(sources[2].curve_id, fake_click)
         assert window.selected_curve_ids() == [sources[2].curve_id]
+        assert window._curve_items["time"][sources[2].curve_id] is previous_item
+        assert previous_item.curve is previous_curve_item
+        # Accessing flags reproduces the pyqtgraph mouse-release crash when
+        # the C++ PlotCurveItem was deleted by the click callback.
+        previous_curve_item.flags()
         third_detrended = window.detrend_selected("constant")
         assert len(third_detrended) == 1
-        assert third_detrended[0].parent_id == sources[2].curve_id
+        assert third_detrended[0].curve_id == sources[2].curve_id
     finally:
         window.close()
         app.processEvents()
@@ -219,11 +232,12 @@ def test_ctrl_plot_click_selects_multiple_curves_for_processing():
             sources[0].curve_id,
             sources[1].curve_id,
         }
-        created = window.detrend_selected("constant")
-        assert {curve.parent_id for curve in created} == {
+        updated = window.detrend_selected("constant")
+        assert {curve.curve_id for curve in updated} == {
             sources[0].curve_id,
             sources[1].curve_id,
         }
+        assert window.curve_tree.topLevelItemCount() == 3
     finally:
         window.close()
         app.processEvents()
@@ -259,7 +273,7 @@ def test_data_tip_context_suppresses_duplicate_plot_menu():
         app.processEvents()
 
 
-def test_irregular_record_requires_non_destructive_resample():
+def test_irregular_record_resample_replaces_selected_curve():
     app = _application()
     window = RecordPlotWindow()
     record = LoggingRecord(
@@ -272,10 +286,12 @@ def test_irregular_record_requires_non_destructive_resample():
         source = window.analysis_session.curves[0]
         _select_curve(window, source.curve_id)
         assert not window.analysis_session.sampling.regular
-        created = window.resample_selected()
-        assert len(created) == 1
-        assert created[0].operation["type"] == "resample"
-        assert window.analysis_session.can_process(created[0].curve_id) == (True, "")
+        updated = window.resample_selected()
+        assert len(updated) == 1
+        assert updated[0].curve_id == source.curve_id
+        assert updated[0].operation["type"] == "resample"
+        assert window.curve_tree.topLevelItemCount() == 1
+        assert window.analysis_session.can_process(updated[0].curve_id) == (True, "")
     finally:
         window.close()
         app.processEvents()
@@ -305,24 +321,21 @@ def test_sample_index_axis_and_rate_control_reset_between_records():
         app.processEvents()
 
 
-def test_deleting_derived_curve_prunes_its_cursor_annotation():
+def test_processing_clears_stale_cursor_annotation_and_keeps_curve_row():
     app = _application()
     window = RecordPlotWindow()
     try:
         window.set_record(_record(channels=1, samples=128))
         source = window.analysis_session.curves[0]
         _select_curve(window, source.curve_id)
-        derived = window.detrend_selected("constant")[0]
-        nearest = window._nearest_for_view_x("time", derived.curve_id, 0.05)
+        nearest = window._nearest_for_view_x("time", source.curve_id, 0.05)
         window._update_cursor("time", nearest)
         assert "time" in window._cursor_state
 
-        _select_curve(window, derived.curve_id)
-        window.delete_selected_curves()
+        updated = window.detrend_selected("constant")[0]
         assert "time" not in window._cursor_state
-        assert derived.curve_id not in {
-            curve.curve_id for curve in window.analysis_session.curves
-        }
+        assert updated.curve_id == source.curve_id
+        assert len(window.analysis_session.curves) == 1
     finally:
         window.close()
         app.processEvents()
