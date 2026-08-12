@@ -74,8 +74,10 @@ def test_three_state_tree_limit_and_all_selected_visible(app):
             window._catalog, key=lambda spec: metrics.horizontalAdvance(spec.name)
         )
         assert window.signal_tree.viewport().width() >= (
-            metrics.horizontalAdvance(longest.name) + 64
+            metrics.horizontalAdvance(longest.name) + 46
         )
+        assert window.selected_table.columnWidth(0) == 34
+        assert window.selected_table.columnWidth(1) > window.selected_table.columnWidth(2)
         parent = children[0].parent()
         assert parent.checkState(0) in {QtCore.Qt.PartiallyChecked, QtCore.Qt.Checked}
     finally:
@@ -120,12 +122,58 @@ def test_wheel_zoom_adapts_span_without_stopping_live_follow(app):
     try:
         window._follow = True
         window._view_box.setXRange(0.0, 60.0, padding=0.0)
-        window._wheel_navigation_started()
+        window._wheel_navigation_started(0)
         window._view_box.setXRange(10.0, 30.0, padding=0.0)
-        window._wheel_navigation_finished()
+        window._wheel_navigation_finished(0)
         assert window._follow is True
         assert window._follow_span_s == pytest.approx(20.0)
         assert window.btn_resume_follow.text() == "Following"
+    finally:
+        window.hide()
+        window.deleteLater()
+
+
+def test_y_axis_navigation_keeps_x_follow_and_preserves_manual_y(app):
+    window = LiveCurveWindow()
+    signal = MonitorSignalSpec("S0", "Sensor", 0, 0, 0)
+    buffer = LiveCurveSessionBuffer((signal,), chunk_size=16)
+    buffer.start_segment(1.0)
+    for index in range(8):
+        buffer.append(
+            f"2026-08-12T00:00:{index:02d}+00:00", float(index), [float(index)]
+        )
+    window._selected_specs = [signal]
+    window._buffer = buffer
+    window._reset_curve_items((signal,))
+    window._refresh_plot()
+    window._view_box.setYRange(-20.0, 20.0, padding=0.0)
+    window._wheel_navigation_started(1)
+    window._wheel_navigation_finished(1)
+    assert window._follow is True
+    assert window._auto_y is False
+    buffer.append("2026-08-12T00:00:08+00:00", 8.0, [100.0])
+    window._refresh_plot()
+    y_range = window._view_box.viewRange()[1]
+    assert y_range[0] == pytest.approx(-20.0)
+    assert y_range[1] == pytest.approx(20.0)
+    window._axis_drag_started(1)
+    assert window._follow is True
+    window.hide()
+    window.deleteLater()
+
+
+def test_live_curve_pen_and_legend_use_refined_local_style(app):
+    window = LiveCurveWindow()
+    signal = MonitorSignalSpec("S0", "Sensor", 0, 0, 0)
+    try:
+        window._selected_specs = [signal]
+        window._reset_curve_items((signal,))
+        curve = window._curve_items[signal.key]
+        pen = curve.opts["pen"]
+        assert pen.widthF() == pytest.approx(1.2)
+        assert pen.isCosmetic()
+        assert curve.opts["antialias"] is True
+        assert window._legend.brush().color().alpha() == 224
     finally:
         window.hide()
         window.deleteLater()

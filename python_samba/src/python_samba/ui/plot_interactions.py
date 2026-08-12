@@ -104,8 +104,9 @@ if pg is not None:
             on_left_drag: Callable[[Any], None] | None = None,
             on_right_zoom: Callable[[Any, Any], None] | None = None,
             on_navigation_start: Callable[[], None] | None = None,
-            on_wheel_start: Callable[[], None] | None = None,
-            on_wheel_finish: Callable[[], None] | None = None,
+            on_wheel_start: Callable[[int | None], None] | None = None,
+            on_wheel_finish: Callable[[int | None], None] | None = None,
+            on_axis_drag_start: Callable[[int], None] | None = None,
             **kwargs,
         ) -> None:
             super().__init__(*args, **kwargs)
@@ -114,6 +115,7 @@ if pg is not None:
             self._on_navigation_start = on_navigation_start
             self._on_wheel_start = on_wheel_start
             self._on_wheel_finish = on_wheel_finish
+            self._on_axis_drag_start = on_axis_drag_start
             self._zoom_box = QtWidgets.QGraphicsRectItem()
             self._zoom_box.setPen(
                 pg.mkPen("#2a9aab", width=1.6, style=QtCore.Qt.DashLine)
@@ -126,6 +128,11 @@ if pg is not None:
 
         def mouseDragEvent(self, event, axis=None) -> None:  # noqa: N802
             button = event.button()
+            if axis is not None and self._on_axis_drag_start is not None:
+                if event.isStart():
+                    self._on_axis_drag_start(int(axis))
+                super().mouseDragEvent(event, axis=axis)
+                return
             if button == QtCore.Qt.LeftButton and self._on_left_drag is not None:
                 event.accept()
                 self._on_left_drag(event.scenePos())
@@ -150,12 +157,12 @@ if pg is not None:
 
         def wheelEvent(self, event, axis=None) -> None:  # noqa: N802
             if self._on_wheel_start is not None:
-                self._on_wheel_start()
+                self._on_wheel_start(axis)
             elif self._on_navigation_start is not None:
                 self._on_navigation_start()
             super().wheelEvent(event, axis=axis)
             if self._on_wheel_finish is not None:
-                self._on_wheel_finish()
+                self._on_wheel_finish(axis)
 
 
     class DataTipPoint(pg.ScatterPlotItem):

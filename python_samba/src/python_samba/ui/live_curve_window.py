@@ -111,6 +111,7 @@ class LiveCurveWindow(QtWidgets.QDialog):
         self._latest_stats = None
         self._last_plot_generation = -1
         self._follow = True
+        self._auto_y = True
         self._follow_span_s = 60.0
         self._zoom_history: deque[
             tuple[tuple[float, float], tuple[float, float]]
@@ -241,7 +242,7 @@ class LiveCurveWindow(QtWidgets.QDialog):
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 0)
         self.splitter.setStretchFactor(2, 1)
-        self.splitter.setSizes([500, 360, 1000])
+        self.splitter.setSizes([480, 400, 1000])
         root.addWidget(self.splitter, 1)
 
         self.message_label = QtWidgets.QLabel("Select signals, then start acquisition.")
@@ -257,7 +258,7 @@ class LiveCurveWindow(QtWidgets.QDialog):
         panel = GroupPanel("Signal Selection")
         # Reserve enough room for the longest firmware signal name even when
         # the application's high-DPI font scaling is active.
-        panel.setMinimumWidth(500)
+        panel.setMinimumWidth(480)
         layout = QtWidgets.QVBoxLayout(panel)
         layout.setContentsMargins(7, 9, 7, 7)
         self.signal_filter = QtWidgets.QLineEdit()
@@ -268,6 +269,7 @@ class LiveCurveWindow(QtWidgets.QDialog):
         self.signal_tree.setHeaderLabels(["Signal"])
         self.signal_tree.setAlternatingRowColors(True)
         self.signal_tree.setRootIsDecorated(True)
+        self.signal_tree.setIndentation(14)
         self.signal_tree.header().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
         self.signal_tree.itemChanged.connect(self._signal_item_changed)
         layout.addWidget(self.signal_tree, 1)
@@ -277,7 +279,7 @@ class LiveCurveWindow(QtWidgets.QDialog):
 
     def _build_selection_panel(self) -> QtWidgets.QWidget:
         panel = QtWidgets.QWidget()
-        panel.setMinimumWidth(340)
+        panel.setMinimumWidth(380)
         root = QtWidgets.QVBoxLayout(panel)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(7)
@@ -292,10 +294,10 @@ class LiveCurveWindow(QtWidgets.QDialog):
         self.selected_table.setAlternatingRowColors(True)
         header = self.selected_table.horizontalHeader()
         header.setSectionResizeMode(0, QtWidgets.QHeaderView.Fixed)
-        header.resizeSection(0, 54)
+        header.resizeSection(0, 34)
         header.setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
         header.setSectionResizeMode(2, QtWidgets.QHeaderView.Fixed)
-        header.resizeSection(2, 105)
+        header.resizeSection(2, 92)
         selected_layout.addWidget(self.selected_table, 1)
         root.addWidget(selected, 1)
 
@@ -394,6 +396,7 @@ class LiveCurveWindow(QtWidgets.QDialog):
             on_navigation_start=self._navigation_started,
             on_wheel_start=self._wheel_navigation_started,
             on_wheel_finish=self._wheel_navigation_finished,
+            on_axis_drag_start=self._axis_drag_started,
         )
         axes = {
             "bottom": PlainAxisItem(orientation="bottom"),
@@ -401,7 +404,7 @@ class LiveCurveWindow(QtWidgets.QDialog):
         }
         self.plot_widget = pg.PlotWidget(viewBox=view_box, axisItems=axes)
         self.plot_widget.setBackground(PLOT_BACKGROUND)
-        self.plot_widget.showGrid(x=True, y=True, alpha=0.22)
+        self.plot_widget.showGrid(x=True, y=True, alpha=0.14)
         self.plot_widget.setLabel("bottom", "Elapsed time (s)")
         self.plot_widget.setLabel("left", "Controller raw value")
         self.plot_widget.getPlotItem().setMenuEnabled(False)
@@ -412,6 +415,9 @@ class LiveCurveWindow(QtWidgets.QDialog):
         self._view_box.sigRangeChanged.connect(self._view_range_changed)
         self._legend = self.plot_widget.addLegend(offset=(8, 8))
         self._legend.setLabelTextSize("9pt")
+        self._legend.setBrush(pg.mkBrush(255, 255, 255, 224))
+        self._legend.setPen(pg.mkPen("#9bb4c2", width=0.8))
+        self._legend.setZValue(20)
         self.plot_widget.scene().sigMouseClicked.connect(self._plot_scene_clicked)
         layout.addWidget(self.plot_widget, 1)
 
@@ -877,16 +883,22 @@ class LiveCurveWindow(QtWidgets.QDialog):
         self._curve_items.clear()
         self._legend.clear()
         self._visible_keys = {spec.key for spec in signals}
+        self._auto_y = True
         for index, spec in enumerate(signals):
             color = self._colors.setdefault(
                 spec.key, CURVE_COLORS[index % len(CURVE_COLORS)]
             )
+            curve_color = QtGui.QColor(color)
+            curve_color.setAlpha(225)
+            pen = pg.mkPen(curve_color, width=1.2)
+            pen.setCosmetic(True)
             item = pg.PlotDataItem(
                 [],
                 [],
                 name=spec.name,
-                pen=pg.mkPen(color, width=1.45),
+                pen=pen,
                 connect="finite",
+                antialias=True,
             )
             item.setDownsampling(auto=True, method="peak")
             item.setClipToView(True)
@@ -944,7 +956,8 @@ class LiveCurveWindow(QtWidgets.QDialog):
             span = max(1e-6, float(self._follow_span_s))
             x_range = (0.0, span) if latest <= span else (latest - span, latest)
             self._view_box.setXRange(*x_range, padding=0.0)
-            self._auto_y_for_range(*x_range)
+            if self._auto_y:
+                self._auto_y_for_range(*x_range)
 
     def _display_arrays(
         self, snapshot: LiveCurveSnapshot
@@ -1330,21 +1343,33 @@ class LiveCurveWindow(QtWidgets.QDialog):
         self.btn_resume_follow.setText("Resume Follow")
         self._last_plot_generation = -1
 
-    def _wheel_navigation_started(self) -> None:
+    def _wheel_navigation_started(self, axis: int | None = None) -> None:
         """Remember wheel zoom without leaving the live-follow mode."""
 
         self._remember_range()
 
-    def _wheel_navigation_finished(self) -> None:
+    def _wheel_navigation_finished(self, axis: int | None = None) -> None:
         """Adopt the wheel-selected span and keep following the newest point."""
 
-        current = self._view_box.viewRange()[0]
-        span = abs(float(current[1] - current[0]))
-        if span > 1e-9:
-            self._follow_span_s = span
-        self._follow = True
-        self.btn_resume_follow.setText("Following")
+        if axis in (None, 0):
+            current = self._view_box.viewRange()[0]
+            span = abs(float(current[1] - current[0]))
+            if span > 1e-9:
+                self._follow_span_s = span
+            self._follow = True
+            self.btn_resume_follow.setText("Following")
+        if axis in (None, 1):
+            self._auto_y = False
         self._last_plot_generation = -1
+
+    def _axis_drag_started(self, axis: int) -> None:
+        """Keep X following during Y-axis navigation; X-axis drag still pans."""
+
+        self._remember_range()
+        if axis == 1:
+            self._auto_y = False
+            return
+        self._navigation_started()
 
     def _view_range_changed(self, *_args) -> None:
         if not self._follow:
@@ -1391,6 +1416,7 @@ class LiveCurveWindow(QtWidgets.QDialog):
             return
         if not snapshot.elapsed_s.size:
             return
+        self._auto_y = True
         self._snapshot = snapshot
         display_x, display_values = self._display_arrays(snapshot)
         for column, spec in enumerate(self._buffer.signals):
