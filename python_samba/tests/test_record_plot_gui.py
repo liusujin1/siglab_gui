@@ -117,7 +117,10 @@ def test_processing_replaces_selected_curve_without_adding_rows(tmp_path: Path):
         assert window.plot_tabs.currentIndex() == 1
         assert spectra[0].curve_id == source.curve_id
         assert spectra[0].curve_id in window._curve_items["frequency"]
+        assert source.curve_id in window._curve_items["time"]
+        assert window.analysis_session.get_curve(source.curve_id).domain == "time"
         assert window.curve_tree.topLevelItemCount() == original_count
+        assert window.curve_tree.topLevelItem(0).text(2) == "Time + Spectrum"
 
         window.frequency_db.setChecked(True)
         nearest = window._nearest_for_view_x("frequency", spectra[0].curve_id, 10.0)
@@ -129,6 +132,42 @@ def test_processing_replaces_selected_curve_without_adding_rows(tmp_path: Path):
         output = window.export_selected_to(tmp_path / "selected.csv")
         assert output.exists()
         assert output.with_suffix(".csv.meta.json").exists()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_frequency_defaults_cutoffs_and_auto_fit_are_usable():
+    app = _application()
+    window = RecordPlotWindow()
+    try:
+        window.set_record(_record(channels=1, samples=4096))
+        source = window.analysis_session.curves[0]
+        _select_curve(window, source.curve_id)
+
+        assert window.frequency_x_log.isChecked()
+        assert window.frequency_db.isChecked()
+        assert window.filter_low.value() == pytest.approx(5.0)
+        assert window.filter_high.value() == pytest.approx(100.0)
+        assert window.filter_low.isEnabled()
+        assert window.filter_high.isEnabled()
+        assert not window.filter_low.lineEdit().isReadOnly()
+        assert not window.filter_high.lineEdit().isReadOnly()
+        window.filter_low.setValue(7.5)
+        window.filter_high.setValue(125.0)
+        assert window.filter_low.value() == pytest.approx(7.5)
+        assert window.filter_high.value() == pytest.approx(125.0)
+
+        spectrum = window.fft_selected()[0]
+        x_values, y_values, finite = window._display_data(spectrum)
+        assert len(finite) > 0
+        assert np.all(np.isfinite(x_values[finite]))
+        assert np.all(np.isfinite(y_values[finite]))
+        assert np.all(spectrum.x[finite] > 0.0)
+
+        x_range, y_range = window.frequency_plot._record_view_box.viewRange()
+        assert np.all(np.isfinite([*x_range, *y_range]))
+        assert y_range[1] - y_range[0] < 135.0
     finally:
         window.close()
         app.processEvents()

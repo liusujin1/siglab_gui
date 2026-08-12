@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from pathlib import Path
 import time
+from dataclasses import replace
 from typing import Any, Callable
 
 from python_samba.logging_tools.models import LoggingRecord
@@ -218,6 +219,7 @@ class RecordPlotWindow(QtWidgets.QDialog):
         self.analysis_session: RecordAnalysisSession | None = None
         self._populating_curves = False
         self._visible_ids: set[str] = set()
+        self._frequency_views: dict[str, str] = {}
         self._curve_items: dict[str, Any] = {}
         self._curve_colors: dict[str, str] = {}
         self._display_cache: dict[tuple[Any, ...], tuple[Any, Any, Any]] = {}
@@ -427,8 +429,8 @@ class RecordPlotWindow(QtWidgets.QDialog):
             control.setDecimals(6)
             control.setSuffix(" Hz")
             control.setKeyboardTracking(False)
-        self.filter_low.setValue(1.0)
-        self.filter_high.setValue(40.0)
+        self.filter_low.setValue(5.0)
+        self.filter_high.setValue(100.0)
         self.filter_order = QtWidgets.QSpinBox()
         self.filter_order.setRange(1, 12)
         self.filter_order.setValue(4)
@@ -459,6 +461,8 @@ class RecordPlotWindow(QtWidgets.QDialog):
         display_layout = QtWidgets.QHBoxLayout(display_group)
         self.frequency_x_log = QtWidgets.QCheckBox("Log X")
         self.frequency_db = QtWidgets.QCheckBox("dB Y")
+        self.frequency_x_log.setChecked(True)
+        self.frequency_db.setChecked(True)
         display_layout.addWidget(self.frequency_x_log)
         display_layout.addWidget(self.frequency_db)
         display_layout.addStretch(1)
@@ -536,6 +540,7 @@ class RecordPlotWindow(QtWidgets.QDialog):
         self.clear_annotations(all_domains=True)
         self._remove_all_curve_items()
         self.analysis_session = RecordAnalysisSession.from_record(record)
+        self._frequency_views.clear()
         self._curve_colors.clear()
         self._display_cache.clear()
         self._visible_ids = {
@@ -585,7 +590,7 @@ class RecordPlotWindow(QtWidgets.QDialog):
         self._populating_curves = True
         self.curve_tree.clear()
         try:
-            for index, curve in enumerate(self.analysis_session.curves):
+            for index, curve in enumerate(self._time_curves()):
                 color = self._curve_colors.setdefault(
                     curve.curve_id, CURVE_COLORS[index % len(CURVE_COLORS)]
                 )
@@ -593,10 +598,15 @@ class RecordPlotWindow(QtWidgets.QDialog):
                     [
                         "",
                         curve.name,
-                        "Time" if curve.domain == "time" else "Frequency",
+                        (
+                            "Time + Spectrum"
+                            if curve.curve_id in self._frequency_views
+                            else "Time"
+                        ),
                         (
                             "Modified"
                             if curve.operation.get("type") != "source"
+                            or curve.curve_id in self._frequency_views
                             else "Original"
                         ),
                     ]
@@ -647,9 +657,47 @@ class RecordPlotWindow(QtWidgets.QDialog):
                 # The tree is rebuilt after replacing a record or deleting a
                 # derived subtree; stale selected items are ignored.
                 continue
-            if domain is None or curve.domain == domain:
+            if domain is None or domain == "time" or (
+                domain == "frequency" and curve_id in self._frequency_views
+            ):
                 result.append(curve_id)
         return result
+
+    def _time_curves(self) -> tuple[NumericCurve, ...]:
+        if self.analysis_session is None:
+            return ()
+        return tuple(
+            curve
+            for curve in self.analysis_session.curves
+            if not curve.derived and curve.domain == "time"
+        )
+
+    def _frequency_curves(self) -> tuple[NumericCurve, ...]:
+        if self.analysis_session is None:
+            return ()
+        curves: list[NumericCurve] = []
+        for source in self._time_curves():
+            result_id = self._frequency_views.get(source.curve_id)
+            if result_id is None:
+                continue
+            try:
+                result = self.analysis_session.get_curve(result_id)
+            except KeyError:
+                continue
+            curves.append(
+                replace(result, curve_id=source.curve_id, name=source.name)
+            )
+        return tuple(curves)
+
+    def _curves_for_domain(self, domain: str) -> tuple[NumericCurve, ...]:
+        return self._frequency_curves() if domain == "frequency" else self._time_curves()
+
+    def _curve_for_domain(self, curve_id: str, domain: str) -> NumericCurve:
+        curves = self._curves_for_domain(domain)
+        for curve in curves:
+            if curve.curve_id == curve_id:
+                return curve
+        raise KeyError(f"unknown {domain} curve: {curve_id}")
 
     def _curve_visibility_changed(self, item, column: int) -> None:
         if self._populating_curves or column != 0:
@@ -738,6 +786,8 @@ class RecordPlotWindow(QtWidgets.QDialog):
         )
         cache_key = (
             curve.curve_id,
+            curve.domain,
+            curve.operation.get("type"),
             bool(self.frequency_x_log.isChecked()),
             bool(self.frequency_db.isChecked()),
             sample_rate if curve.x_unit == "samples" else None,
@@ -756,6 +806,11 @@ class RecordPlotWindow(QtWidgets.QDialog):
             curve,
             decibels=curve.domain == "frequency" and self.frequency_db.isChecked(),
         )
+        if curve.domain == "frequency" and self.frequency_db.isChecked():
+            # Exact zeros have no logarithmic magnitude and otherwise expand
+            # auto-fit to roughly -6000 dB through the float tiny sentinel.
+            y_values = np.asarray(y_values, dtype=np.float64).copy()
+            y_values[np.asarray(curve.y) <= 0.0] = np.nan
         finite_indices = np.flatnonzero(np.isfinite(x_values) & np.isfinite(y_values))
         result = (x_values, y_values, finite_indices)
         self._display_cache[cache_key] = result
@@ -786,13 +841,17 @@ class RecordPlotWindow(QtWidgets.QDialog):
                 view_box.removeItem(item)
             self._curve_items[domain] = {}
             plot._record_legend.clear()
-            for curve in self.analysis_session.curves_for_domain(domain):
+            for curve in self._curves_for_domain(domain):
                 if curve.curve_id not in self._visible_ids:
                     continue
-                x_values, y_values = self._display_arrays(curve)
+                x_values, y_values, finite = self._display_data(curve)
+                if not len(finite):
+                    continue
                 width = 2.2 if curve.curve_id in selected else 1.45
                 pen = pg.mkPen(self._curve_colors[curve.curve_id], width=width)
-                item = pg.PlotDataItem(x_values, y_values, pen=pen, name=curve.name)
+                item = pg.PlotDataItem(
+                    x_values[finite], y_values[finite], pen=pen, name=curve.name
+                )
                 item.setCurveClickable(True, width=10)
                 item.sigClicked.connect(
                     lambda _item, event, selected_id=curve.curve_id: self._plot_curve_clicked(
@@ -809,8 +868,43 @@ class RecordPlotWindow(QtWidgets.QDialog):
                 plot._record_legend.addItem(item, curve.name)
                 self._curve_items[domain][curve.curve_id] = item
         if auto_range:
-            self.time_plot.getPlotItem().autoRange()
-            self.frequency_plot.getPlotItem().autoRange()
+            self._auto_fit_domain("time")
+            self._auto_fit_domain("frequency")
+
+    def _auto_fit_domain(self, domain: str) -> None:
+        """Fit the visible finite samples, with a useful dB dynamic range."""
+
+        plot = self.frequency_plot if domain == "frequency" else self.time_plot
+        x_parts: list[Any] = []
+        y_parts: list[Any] = []
+        for curve in self._curves_for_domain(domain):
+            if curve.curve_id not in self._visible_ids:
+                continue
+            x_values, y_values, finite = self._display_data(curve)
+            if len(finite):
+                x_parts.append(x_values[finite])
+                y_parts.append(y_values[finite])
+        if not x_parts:
+            return
+        x_values = np.concatenate(x_parts)
+        y_values = np.concatenate(y_parts)
+        x_low, x_high = float(np.min(x_values)), float(np.max(x_values))
+        y_low, y_high = float(np.min(y_values)), float(np.max(y_values))
+        if domain == "frequency" and self.frequency_db.isChecked():
+            y_low = max(y_low, y_high - 120.0)
+
+        def padded(low: float, high: float) -> tuple[float, float]:
+            if high <= low:
+                margin = max(abs(low) * 0.05, 1.0)
+            else:
+                margin = (high - low) * 0.04
+            return low - margin, high + margin
+
+        plot._record_view_box.setRange(
+            xRange=padded(x_low, x_high),
+            yRange=padded(y_low, y_high),
+            padding=0.0,
+        )
 
     def _frequency_display_changed(self) -> None:
         if self.analysis_session is None:
@@ -823,7 +917,7 @@ class RecordPlotWindow(QtWidgets.QDialog):
         )
         self.clear_annotations(domain="frequency")
         self._refresh_plots()
-        self.frequency_plot.getPlotItem().autoRange()
+        self._auto_fit_domain("frequency")
 
     def _active_domain(self) -> str:
         return "frequency" if self.plot_tabs.currentIndex() == 1 else "time"
@@ -853,13 +947,15 @@ class RecordPlotWindow(QtWidgets.QDialog):
         if self.analysis_session is None:
             return []
         if only_curve_id:
-            curve = self.analysis_session.get_curve(only_curve_id)
-            return [curve] if curve.domain == domain else []
+            try:
+                return [self._curve_for_domain(only_curve_id, domain)]
+            except KeyError:
+                return []
         selected_ids = self.selected_curve_ids(domain)
         selected = set(selected_ids)
         visible = [
             curve
-            for curve in self.analysis_session.curves_for_domain(domain)
+            for curve in self._curves_for_domain(domain)
             if curve.curve_id in self._visible_ids
         ]
         current = self.curve_tree.currentItem()
@@ -924,7 +1020,10 @@ class RecordPlotWindow(QtWidgets.QDialog):
     ) -> tuple[NumericCurve, int, float, float, float, float] | None:
         if self.analysis_session is None:
             return None
-        curve = self.analysis_session.get_curve(curve_id)
+        try:
+            curve = self._curve_for_domain(curve_id, domain)
+        except KeyError:
+            return None
         x_values, y_values, indices = self._display_data(curve)
         if not len(indices):
             return None
@@ -1334,8 +1433,7 @@ class RecordPlotWindow(QtWidgets.QDialog):
             return
         selected = domain or self._active_domain()
         self._remember_range(selected)
-        plot = self.frequency_plot if selected == "frequency" else self.time_plot
-        plot.getPlotItem().autoRange()
+        self._auto_fit_domain(selected)
 
     def previous_zoom(self, _checked: bool = False, *, domain: str | None = None) -> None:
         if _ANALYSIS_IMPORT_ERROR is not None:
@@ -1429,11 +1527,14 @@ class RecordPlotWindow(QtWidgets.QDialog):
             for curve_id in source_ids:
                 try:
                     result = operation(curve_id)
+                    previous_spectrum = self._frequency_views.pop(curve_id, None)
                     updated.append(
                         self.analysis_session.replace_curve_data(
                             curve_id, result.curve_id
                         )
                     )
+                    if previous_spectrum is not None:
+                        self.analysis_session.delete_curve(previous_spectrum)
                 except MemoryError:
                     errors.append(
                         f"{self.analysis_session.get_curve(curve_id).name}: operation needs too much memory"
@@ -1480,9 +1581,10 @@ class RecordPlotWindow(QtWidgets.QDialog):
         )
 
     def _filter_type_changed(self, _index: int = -1) -> None:
-        kind = str(self.filter_type.currentData())
-        self.filter_low.setEnabled(kind in {"highpass", "bandpass"})
-        self.filter_high.setEnabled(kind in {"lowpass", "bandpass"})
+        # Keep both cutoff values directly editable.  The selected filter type
+        # determines which value(s) the numerical backend consumes.
+        self.filter_low.setEnabled(True)
+        self.filter_high.setEnabled(True)
 
     def filter_selected(self) -> list[NumericCurve]:
         kind = str(self.filter_type.currentData())
@@ -1498,17 +1600,59 @@ class RecordPlotWindow(QtWidgets.QDialog):
         )
 
     def fft_selected(self) -> list[NumericCurve]:
-        return self._run_derivation(
-            "FFT", self.analysis_session.fft_curve, switch_to_frequency=True
-        )
+        return self._run_spectrum("FFT", self.analysis_session.fft_curve)
 
     def psd_selected(self) -> list[NumericCurve]:
         block = int(self.psd_block.currentData())
-        return self._run_derivation(
+        return self._run_spectrum(
             "Welch PSD",
             lambda curve_id: self.analysis_session.psd_curve(curve_id, block),
-            switch_to_frequency=True,
         )
+
+    def _run_spectrum(
+        self, label: str, operation: Callable[[str], NumericCurve]
+    ) -> list[NumericCurve]:
+        """Create/replace frequency views without destroying time curves."""
+
+        if self.analysis_session is None:
+            return []
+        source_ids = self._selected_time_ids()
+        if not source_ids:
+            return []
+        updated: list[NumericCurve] = []
+        errors: list[str] = []
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            for curve_id in source_ids:
+                source = self.analysis_session.get_curve(curve_id)
+                try:
+                    result = operation(curve_id)
+                    previous = self._frequency_views.get(curve_id)
+                    self._frequency_views[curve_id] = result.curve_id
+                    if previous is not None:
+                        self.analysis_session.delete_curve(previous)
+                    updated.append(
+                        replace(result, curve_id=curve_id, name=source.name)
+                    )
+                except MemoryError:
+                    errors.append(f"{source.name}: operation needs too much memory")
+                except (ValueError, RuntimeError) as exc:
+                    errors.append(f"{source.name}: {exc}")
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        if updated:
+            updated_ids = {curve.curve_id for curve in updated}
+            self.clear_annotations(domain="frequency")
+            self._display_cache.clear()
+            self._refresh_curve_tree(select_ids=updated_ids, make_visible=updated_ids)
+            self._refresh_plots(auto_range=True)
+            self.plot_tabs.setCurrentIndex(1)
+            self.status_label.setText(
+                f"{label}: updated {len(updated)} frequency view(s)."
+            )
+        if errors:
+            self._show_error("\n".join(errors))
+        return updated
 
     def rename_selected_curve(self) -> None:
         if self.analysis_session is None:
