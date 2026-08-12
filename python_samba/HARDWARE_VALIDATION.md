@@ -9,7 +9,7 @@ device snapshots are kept out of the repository.
 
 ## Final results
 
-- Current local Samba suite: **202 tests passed**, with Qt-heavy files run
+- Current local Samba suite: **204 tests passed**, with Qt-heavy files run
   sequentially.  The shared-server
   hardware run also passed remote `compileall`, 107 non-page Samba tests, and
   all 131 SIDMAT tests available at that validation point.

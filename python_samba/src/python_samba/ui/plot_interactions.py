@@ -104,12 +104,16 @@ if pg is not None:
             on_left_drag: Callable[[Any], None] | None = None,
             on_right_zoom: Callable[[Any, Any], None] | None = None,
             on_navigation_start: Callable[[], None] | None = None,
+            on_wheel_start: Callable[[], None] | None = None,
+            on_wheel_finish: Callable[[], None] | None = None,
             **kwargs,
         ) -> None:
             super().__init__(*args, **kwargs)
             self._on_left_drag = on_left_drag
             self._on_right_zoom = on_right_zoom
             self._on_navigation_start = on_navigation_start
+            self._on_wheel_start = on_wheel_start
+            self._on_wheel_finish = on_wheel_finish
             self._zoom_box = QtWidgets.QGraphicsRectItem()
             self._zoom_box.setPen(
                 pg.mkPen("#2a9aab", width=1.6, style=QtCore.Qt.DashLine)
@@ -145,9 +149,13 @@ if pg is not None:
             super().mouseDragEvent(event, axis=axis)
 
         def wheelEvent(self, event, axis=None) -> None:  # noqa: N802
-            if self._on_navigation_start is not None:
+            if self._on_wheel_start is not None:
+                self._on_wheel_start()
+            elif self._on_navigation_start is not None:
                 self._on_navigation_start()
             super().wheelEvent(event, axis=axis)
+            if self._on_wheel_finish is not None:
+                self._on_wheel_finish()
 
 
     class DataTipPoint(pg.ScatterPlotItem):

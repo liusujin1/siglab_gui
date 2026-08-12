@@ -64,7 +64,7 @@ def _select_first(window: LiveCurveWindow, count: int) -> None:
     finally:
         window._populating_tree = False
     window._selected_specs = list(window._catalog[:count])
-    window._visible_keys = {spec.key for spec in window._selected_specs[:6]}
+    window._visible_keys = {spec.key for spec in window._selected_specs}
     window.selection_count.setText(f"{count} / 40 selected")
     window._rebuild_selected_table()
 
@@ -141,7 +141,7 @@ def _exercise_window(
     window._refresh_plot()
     if identities != {key: id(item) for key, item in window._curve_items.items()}:
         raise RuntimeError("PlotDataItem identity changed during live refresh")
-    if window.selected_table.item(0, 3).text() == "—":
+    if window.selected_table.item(0, 2).text() == "—":
         raise RuntimeError("GUI live-value table did not refresh")
     if not window.stop_and_restore(timeout=20.0):
         raise RuntimeError(window.message_label.text())
@@ -171,7 +171,7 @@ def _exercise_window(
         "requested_interval_ms": window.interval_ms.value(),
         "actual_interval_ms": float(getattr(stats, "actual_interval_ms", 0.0)),
         "late_samples": int(getattr(stats, "late_samples", 0)),
-        "live_table_value": window.selected_table.item(0, 3).text(),
+        "live_table_value": window.selected_table.item(0, 2).text(),
         "plot_item_count": len(window._curve_items),
         "visible_plot_items": sum(item.isVisible() for item in window._curve_items.values()),
         "record": str(saved),

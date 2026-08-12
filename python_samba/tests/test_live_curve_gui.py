@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -10,7 +11,7 @@ import numpy as np
 pytest.importorskip("PySide6")
 pytest.importorskip("pyqtgraph")
 
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from python_samba.logging_tools.live_curve import LiveCurveSessionBuffer, MonitorSignalSpec
 from python_samba.services.session import open_mock
@@ -54,7 +55,7 @@ def test_navigation_action_opens_nonmodal_without_switching_page(app):
         window.close()
 
 
-def test_three_state_tree_limit_and_first_six_visible(app):
+def test_three_state_tree_limit_and_all_selected_visible(app):
     window = LiveCurveWindow()
     try:
         children = list(window._spec_items.values())[:41]
@@ -63,7 +64,18 @@ def test_three_state_tree_limit_and_first_six_visible(app):
             child.setCheckState(0, QtCore.Qt.Checked)
         _process(app)
         assert len(window._selected_specs) == 40
-        assert sum(key in window._visible_keys for key in [spec.key for spec in window._selected_specs]) == 6
+        assert window.signal_tree.columnCount() == 1
+        assert window.selected_table.columnCount() == 3
+        assert window._visible_keys == {spec.key for spec in window._selected_specs}
+        window.show()
+        _process(app)
+        metrics = QtGui.QFontMetrics(window.signal_tree.font())
+        longest = max(
+            window._catalog, key=lambda spec: metrics.horizontalAdvance(spec.name)
+        )
+        assert window.signal_tree.viewport().width() >= (
+            metrics.horizontalAdvance(longest.name) + 64
+        )
         parent = children[0].parent()
         assert parent.checkState(0) in {QtCore.Qt.PartiallyChecked, QtCore.Qt.Checked}
     finally:
@@ -101,6 +113,49 @@ def test_plot_items_keep_identity_and_follow_pauses_on_navigation(app):
     assert not QtWidgets.QApplication.clipboard().pixmap().isNull()
     window.hide()
     window.deleteLater()
+
+
+def test_wheel_zoom_adapts_span_without_stopping_live_follow(app):
+    window = LiveCurveWindow()
+    try:
+        window._follow = True
+        window._view_box.setXRange(0.0, 60.0, padding=0.0)
+        window._wheel_navigation_started()
+        window._view_box.setXRange(10.0, 30.0, padding=0.0)
+        window._wheel_navigation_finished()
+        assert window._follow is True
+        assert window._follow_span_s == pytest.approx(20.0)
+        assert window.btn_resume_follow.text() == "Following"
+    finally:
+        window.hide()
+        window.deleteLater()
+
+
+def test_data_tip_right_click_suppresses_scene_menu_after_blocking_menu(
+    app, monkeypatch
+):
+    window = LiveCurveWindow()
+    try:
+        class FakeMenu:
+            def __init__(self, _parent):
+                pass
+
+            def addAction(self, text):  # noqa: N802
+                return text
+
+            def exec(self, _position):
+                time.sleep(0.55)
+                return None
+
+        from python_samba.ui import live_curve_window
+
+        monkeypatch.setattr(live_curve_window.QtWidgets, "QMenu", FakeMenu)
+        window._tip_menu_suppressed_until = 0.0
+        window._show_tip_menu(999, QtCore.QPoint(10, 10))
+        assert window._tip_menu_suppressed_until > time.monotonic()
+    finally:
+        window.hide()
+        window.deleteLater()
 
 
 def test_stop_restart_gap_is_rendered_with_nan_separator(app):

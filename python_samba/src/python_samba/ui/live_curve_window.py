@@ -63,16 +63,17 @@ class LiveCurveWindow(QtWidgets.QDialog):
         self.setWindowTitle("Real-time Curve")
         self.setWindowModality(QtCore.Qt.NonModal)
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose, False)
-        self.setMinimumSize(1120, 680)
+        self.setMinimumSize(1500, 680)
         screen = QtWidgets.QApplication.primaryScreen()
         if screen is not None:
             available = screen.availableGeometry().size()
+            target_width = min(1840, max(1500, int(available.width() * 0.96)))
             self.resize(
-                min(1720, max(1260, int(available.width() * 0.94))),
+                max(1500, min(available.width(), target_width)),
                 min(1040, max(760, int(available.height() * 0.92))),
             )
         else:
-            self.resize(1500, 900)
+            self.resize(1600, 900)
 
         self.bridge = _LiveCurveBridge(self)
         self.bridge.prepared.connect(self._on_prepared)
@@ -240,7 +241,7 @@ class LiveCurveWindow(QtWidgets.QDialog):
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 0)
         self.splitter.setStretchFactor(2, 1)
-        self.splitter.setSizes([310, 400, 900])
+        self.splitter.setSizes([500, 360, 1000])
         root.addWidget(self.splitter, 1)
 
         self.message_label = QtWidgets.QLabel("Select signals, then start acquisition.")
@@ -254,7 +255,9 @@ class LiveCurveWindow(QtWidgets.QDialog):
 
     def _build_signal_panel(self) -> QtWidgets.QWidget:
         panel = GroupPanel("Signal Selection")
-        panel.setMinimumWidth(260)
+        # Reserve enough room for the longest firmware signal name even when
+        # the application's high-DPI font scaling is active.
+        panel.setMinimumWidth(500)
         layout = QtWidgets.QVBoxLayout(panel)
         layout.setContentsMargins(7, 9, 7, 7)
         self.signal_filter = QtWidgets.QLineEdit()
@@ -262,11 +265,10 @@ class LiveCurveWindow(QtWidgets.QDialog):
         self.signal_filter.textChanged.connect(self._filter_signal_tree)
         layout.addWidget(self.signal_filter)
         self.signal_tree = QtWidgets.QTreeWidget()
-        self.signal_tree.setHeaderLabels(["Signal", "IOSignal"])
+        self.signal_tree.setHeaderLabels(["Signal"])
         self.signal_tree.setAlternatingRowColors(True)
         self.signal_tree.setRootIsDecorated(True)
         self.signal_tree.header().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
-        self.signal_tree.header().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
         self.signal_tree.itemChanged.connect(self._signal_item_changed)
         layout.addWidget(self.signal_tree, 1)
         self.selection_count = QtWidgets.QLabel("0 / 40 selected")
@@ -283,20 +285,17 @@ class LiveCurveWindow(QtWidgets.QDialog):
         selected = GroupPanel("Selected Signals")
         selected_layout = QtWidgets.QVBoxLayout(selected)
         selected_layout.setContentsMargins(7, 9, 7, 7)
-        self.selected_table = QtWidgets.QTableWidget(0, 4)
-        self.selected_table.setHorizontalHeaderLabels(["Show", "Color", "Signal", "Live"])
+        self.selected_table = QtWidgets.QTableWidget(0, 3)
+        self.selected_table.setHorizontalHeaderLabels(["Color", "Signal", "Live"])
         self.selected_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.selected_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.selected_table.setAlternatingRowColors(True)
         header = self.selected_table.horizontalHeader()
         header.setSectionResizeMode(0, QtWidgets.QHeaderView.Fixed)
-        header.resizeSection(0, 52)
-        header.setSectionResizeMode(1, QtWidgets.QHeaderView.Fixed)
-        header.resizeSection(1, 54)
-        header.setSectionResizeMode(2, QtWidgets.QHeaderView.Stretch)
-        header.setSectionResizeMode(3, QtWidgets.QHeaderView.Fixed)
-        header.resizeSection(3, 105)
-        self.selected_table.itemChanged.connect(self._selected_table_changed)
+        header.resizeSection(0, 54)
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QtWidgets.QHeaderView.Fixed)
+        header.resizeSection(2, 105)
         selected_layout.addWidget(self.selected_table, 1)
         root.addWidget(selected, 1)
 
@@ -393,6 +392,8 @@ class LiveCurveWindow(QtWidgets.QDialog):
             on_left_drag=lambda scene: self._handle_pointer(scene, dragging=True),
             on_right_zoom=self._rubber_zoom,
             on_navigation_start=self._navigation_started,
+            on_wheel_start=self._wheel_navigation_started,
+            on_wheel_finish=self._wheel_navigation_finished,
         )
         axes = {
             "bottom": PlainAxisItem(orientation="bottom"),
@@ -453,9 +454,7 @@ class LiveCurveWindow(QtWidgets.QDialog):
                 self.signal_tree.addTopLevelItem(parent)
                 self._parent_items[category] = parent
                 for spec in specs:
-                    child = QtWidgets.QTreeWidgetItem(
-                        [spec.name, f"{spec.io_type}/{spec.main_index}/{spec.sub_index}"]
-                    )
+                    child = QtWidgets.QTreeWidgetItem([spec.name])
                     child.setFlags(child.flags() | QtCore.Qt.ItemIsUserCheckable)
                     child.setCheckState(
                         0,
@@ -535,13 +534,7 @@ class LiveCurveWindow(QtWidgets.QDialog):
             for spec in self._catalog
             if self._spec_items[spec.key].checkState(0) == QtCore.Qt.Checked
         ]
-        selected_keys = {spec.key for spec in self._selected_specs}
-        self._visible_keys.intersection_update(selected_keys)
-        if len(self._visible_keys) < min(6, len(self._selected_specs)):
-            for spec in self._selected_specs:
-                self._visible_keys.add(spec.key)
-                if len(self._visible_keys) >= min(6, len(self._selected_specs)):
-                    break
+        self._visible_keys = {spec.key for spec in self._selected_specs}
         self.selection_count.setText(f"{len(self._selected_specs)} / 40 selected")
         self._rebuild_selected_table()
         if self._buffer is not None and tuple(spec.tokens for spec in self._selected_specs) != tuple(
@@ -568,22 +561,8 @@ class LiveCurveWindow(QtWidgets.QDialog):
         self._populating_table = True
         self.selected_table.setRowCount(len(self._selected_specs))
         try:
-            selected_keys = {spec.key for spec in self._selected_specs}
-            self._visible_keys.intersection_update(selected_keys)
-            if len(self._visible_keys) < min(6, len(self._selected_specs)):
-                for spec in self._selected_specs:
-                    self._visible_keys.add(spec.key)
-                    if len(self._visible_keys) >= min(6, len(self._selected_specs)):
-                        break
+            self._visible_keys = {spec.key for spec in self._selected_specs}
             for row, spec in enumerate(self._selected_specs):
-                show = QtWidgets.QTableWidgetItem()
-                show.setFlags(show.flags() | QtCore.Qt.ItemIsUserCheckable)
-                show.setCheckState(
-                    QtCore.Qt.Checked
-                    if spec.key in self._visible_keys
-                    else QtCore.Qt.Unchecked
-                )
-                show.setData(QtCore.Qt.UserRole, spec.key)
                 color = self._colors.setdefault(
                     spec.key, CURVE_COLORS[row % len(CURVE_COLORS)]
                 )
@@ -598,25 +577,11 @@ class LiveCurveWindow(QtWidgets.QDialog):
                 live.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
                 if row < len(self._latest_values):
                     live.setText(format_ui_number(self._latest_values[row]))
-                self.selected_table.setItem(row, 0, show)
-                self.selected_table.setItem(row, 1, swatch)
-                self.selected_table.setItem(row, 2, name)
-                self.selected_table.setItem(row, 3, live)
+                self.selected_table.setItem(row, 0, swatch)
+                self.selected_table.setItem(row, 1, name)
+                self.selected_table.setItem(row, 2, live)
         finally:
             self._populating_table = False
-
-    def _selected_table_changed(self, item: QtWidgets.QTableWidgetItem) -> None:
-        if self._populating_table or item.column() != 0:
-            return
-        key = str(item.data(QtCore.Qt.UserRole) or "")
-        if item.checkState() == QtCore.Qt.Checked:
-            self._visible_keys.add(key)
-        else:
-            self._visible_keys.discard(key)
-        curve = self._curve_items.get(key)
-        if curve is not None:
-            curve.setVisible(key in self._visible_keys)
-        self._sync_legend()
 
     # ---- start / stop / restore --------------------------------------
 
@@ -746,7 +711,7 @@ class LiveCurveWindow(QtWidgets.QDialog):
         )
         self.late_value.setText(str(stats.late_samples))
         for row, value in enumerate(self._latest_values[: self.selected_table.rowCount()]):
-            item = self.selected_table.item(row, 3)
+            item = self.selected_table.item(row, 2)
             if item is not None:
                 item.setText(format_ui_number(value))
         if stats.message:
@@ -911,9 +876,7 @@ class LiveCurveWindow(QtWidgets.QDialog):
                 pass
         self._curve_items.clear()
         self._legend.clear()
-        self._visible_keys.intersection_update(spec.key for spec in signals)
-        if not self._visible_keys:
-            self._visible_keys.update(spec.key for spec in signals[:6])
+        self._visible_keys = {spec.key for spec in signals}
         for index, spec in enumerate(signals):
             color = self._colors.setdefault(
                 spec.key, CURVE_COLORS[index % len(CURVE_COLORS)]
@@ -1236,11 +1199,15 @@ class LiveCurveWindow(QtWidgets.QDialog):
         tip["label"].setPos(nearest[4], nearest[5])
 
     def _show_tip_menu(self, tip_id: int, screen_position) -> None:
+        # pyqtgraph emits a scene-level click after a graphics item has
+        # accepted the same right-click.  The menu is blocking, so refresh the
+        # suppression window after it closes as well as before it opens.
         self._tip_menu_suppressed_until = time.monotonic() + 0.5
         menu = QtWidgets.QMenu(self)
         remove = menu.addAction("Delete this data tip")
         clear = menu.addAction("Clear all data tips")
         action = menu.exec(self._screen_point(screen_position))
+        self._tip_menu_suppressed_until = time.monotonic() + 0.5
         if action == remove:
             self._remove_data_tip(tip_id)
         elif action == clear:
@@ -1260,7 +1227,7 @@ class LiveCurveWindow(QtWidgets.QDialog):
     def set_marker(self, name: str) -> None:
         keys = [spec.key for spec in self._selected_specs if spec.key in self._visible_keys]
         if not keys:
-            self.message_label.setText("Show at least one curve before setting a marker.")
+            self.message_label.setText("Select at least one curve before setting a marker.")
             return
         nearest = None
         if self._cursor_state is not None:
@@ -1361,6 +1328,22 @@ class LiveCurveWindow(QtWidgets.QDialog):
         self._remember_range()
         self._follow = False
         self.btn_resume_follow.setText("Resume Follow")
+        self._last_plot_generation = -1
+
+    def _wheel_navigation_started(self) -> None:
+        """Remember wheel zoom without leaving the live-follow mode."""
+
+        self._remember_range()
+
+    def _wheel_navigation_finished(self) -> None:
+        """Adopt the wheel-selected span and keep following the newest point."""
+
+        current = self._view_box.viewRange()[0]
+        span = abs(float(current[1] - current[0]))
+        if span > 1e-9:
+            self._follow_span_s = span
+        self._follow = True
+        self.btn_resume_follow.setText("Following")
         self._last_plot_generation = -1
 
     def _view_range_changed(self, *_args) -> None:
