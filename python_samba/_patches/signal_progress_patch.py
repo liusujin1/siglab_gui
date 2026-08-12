@@ -334,6 +334,9 @@ def _on_sig_selector_changed(win, num: int, selected, cb: QtWidgets.QWidget) -> 
     """Called when a signal selector combo box changes selection.
     Sends the new signal selection to the controller (like C# SetMonitorSignal).
     """
+    if getattr(win, "_monitor_slots_leased", False):
+        win.log_msg("Monitor signal edit blocked: Real-time Curve owns monitor slots")
+        return
     if isinstance(cb, IOSignalButton):
         try:
             signal_data = tuple(int(value) for value in selected[:3])
@@ -400,6 +403,9 @@ def _on_sig_save_settings(win) -> None:
 
 def _on_sig_load_settings(win) -> None:
     """Load signal selector settings from a file (like C# OpenSignalsSettingBtn_Click)."""
+    if getattr(win, "_monitor_slots_leased", False):
+        win.log_msg("Signal settings load blocked: Real-time Curve owns monitor slots")
+        return
     path, _ = QtWidgets.QFileDialog.getOpenFileName(
         win, "Load Monitor Signal Settings", "",
         "SAMBA19x Signal files (*.sigsig);;All (*.*)"
@@ -496,7 +502,10 @@ def _on_timer_tick_sync(win) -> None:
             win._report_live_refresh_error(f"{main}/{sub}", exc)
 
         monitor_visible = main == "Status" and sub == "Signals Display"
-        if getattr(win, "_sig_monitoring_active", False) or monitor_visible:
+        if (
+            not getattr(win, "_monitor_slots_leased", False)
+            and (getattr(win, "_sig_monitoring_active", False) or monitor_visible)
+        ):
             try:
                 _update_signal_display_values(win)
             except Exception:
@@ -517,7 +526,8 @@ def _live_refresh_context(win) -> dict[str, object]:
     sub = win._current_subtab_text()
     monitor_visible = main == "Status" and sub == "Signals Display"
     monitor_count = NUM_SIGNALS if (
-        getattr(win, "_sig_monitoring_active", False) or monitor_visible
+        not getattr(win, "_monitor_slots_leased", False)
+        and (getattr(win, "_sig_monitoring_active", False) or monitor_visible)
     ) else 0
     include_power_supply = False
     if main == "Controller" and sub == "Motor Protection" and hasattr(
@@ -700,6 +710,8 @@ def _update_signal_display_values(win) -> None:
     Corresponds to C# SignalContinueDisplayPage.UpdateStates() which calls
     Controller.tcmfd.GetMonitorSignalValues(0, 15).
     """
+    if getattr(win, "_monitor_slots_leased", False):
+        return
     if not hasattr(win, "sig_values") or not win.sig_values:
         return
     if not win.session or not win.session.connected:
@@ -761,6 +773,9 @@ def on_signal_continue_start(win) -> None:
     Toggles monitoring mode. When active, signal values are updated
     on each 1-second timer tick.
     """
+    if getattr(win, "_monitor_slots_leased", False):
+        win.log_msg("Signal monitoring blocked: Real-time Curve owns monitor slots")
+        return
     if not win.session or not win.session.connected:
         QtWidgets.QMessageBox.warning(win, "Not connected", "Connect to a controller first")
         return

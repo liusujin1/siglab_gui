@@ -105,13 +105,24 @@ Update Page/回路状态/连接区，以及右侧页面内容和水平二级页�
 收起，可由右上角 **Console** 按钮展开。
 
 主页面包括 Connect、Controller、Status、Velocity、Position、Pneumatic、
-Feed Forward、Pneum. SFF、Save/Load、Logging 和 Special。参数密集页面自动提供
+Feed Forward、Pneum. SFF、Save/Load、Logging 和 Special。Special 下方另有
+**Real-time curve** 动作按钮，点击后打开独立实时曲线窗口而不切换当前参数页。
+参数密集页面自动提供
 横向或纵向滚动，不会因小屏幕裁掉控制项。
 
 Logging 页的 **Records / Plot** 会打开独立的非模态图窗。图窗支持 40 通道曲线
 显隐、时域/频域切换、游标、数据提示、A/B 标记、框选缩放、平移、图片复制和曲线
 导出；去趋势、移动平均、Butterworth 滤波、FFT 与 Welch PSD 均生成不修改原始记录的
 内存派生曲线。不规则时间轴会先提示重采样，关闭图窗后派生曲线不会自动写回记录文件。
+
+Real-time Curve 可从固件支持的 Sensor、Temperature、Actuator、Velocity、Position、
+Pneumatic、Excitation、FF/PFF、Polynom 和 Proximity Correction 信号中选择最多 40 条。
+窗口按 100 ms（可调 20–5000 ms）请求 DGMSV，显示实际平均周期、迟到次数与完整会话
+样本；曲线以 10 Hz 上限刷新并支持跟随、游标、数据提示、A/B 标记、框选缩放、平移和
+图片复制。启动前会把全部 40 个 DGMOS 槽保存到端点绑定的恢复文件，停止、关闭窗口、
+断开或退出时恢复并逐项验证；恢复失败时只允许连接同一端点后执行 **Retry Restore**。
+实时曲线运行期间，Logging 和 Status/Signals Display 的 Monitor 槽操作会被协议层租约
+拦截。保存的 UTF-8-SIG CSV 可直接交给 Records / Plot 做重采样、滤波、FFT 和 PSD。
 
 当前页面注册表中的可见功能均已接入 RCI 读写链路，覆盖系统回路、性能监视、切换条件、
 电机保护、速度/位置矩阵与滤波器、气浮、FF/PFF、诊断、DAC/ADC、事件记录、
@@ -153,7 +164,7 @@ NVRAM 和 Raw RCI。正式 GUI 启动时会校验扩展页面加载结果，CI/�
 
 - 帧编解码、共享服务/串口/mock 三种传输、CLI、会话和安全写入链路已贯通。
 - 23 个可见主/子页面均有对应 RCI 读写或状态刷新入口；Mock 回归用于防止重构断链。
-- Samba 自动化回归共 175 项，SIDMAT 共 133 项；真实 V3.3.127 控制器已完成远程界面刷新、40 通道 Logging、4096 点记录下载/交互分析及 5000 点 DGTBB 采集验收。
+- Samba 自动化回归共 202 项，SIDMAT 共 133 项；真实 V3.3.127 控制器已完成远程界面刷新、40 通道 Logging、Real-time Curve GUI、4096 点记录下载/交互分析及 5000 点 DGTBB 采集验收。
 - GUI 已完成原版层级布局适配，并保留 `main_tabs` 兼容接口供扩展页面使用。
 - 运行时页面扩展有明确加载报告；测试可用严格模式检查每个模块是否真正绑定。
 

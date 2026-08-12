@@ -74,6 +74,8 @@ class LoggingPage(QtWidgets.QWidget):
         self._definitions_loaded = False
         self._definitions_loading = False
         self._pending_file_start = False
+        self._external_monitor_lease = False
+        self._external_monitor_reason = ""
         self._build_ui()
         self._install_compatibility_fields()
 
@@ -87,6 +89,64 @@ class LoggingPage(QtWidgets.QWidget):
     @property
     def file_logging_active(self) -> bool:
         return bool(self.file_service and self.file_service.running)
+
+    def monitor_lease_conflict(self) -> str:
+        """Return why another monitor-slot owner cannot start right now."""
+
+        if self._external_monitor_lease:
+            return self._external_monitor_reason or "Real-time Curve owns the monitor slots."
+        if self._pending_file_start or self.file_logging_active:
+            return "Stop File Logging before starting Real-time Curve."
+        if self._download_cancel.is_set() is False and not self.btn_trace_download.isEnabled():
+            return "Wait for the controller trace download to finish."
+        if self._definitions_loading:
+            return "Wait for monitor definitions to finish loading."
+        if any(thread.is_alive() for thread in self._task_threads):
+            return "Wait for the current Logging controller operation to finish."
+        return ""
+
+    def set_external_monitor_lease(self, active: bool, reason: str = "") -> None:
+        """Interlock Logging controls while Real-time Curve owns DGMOS slots."""
+
+        self._external_monitor_lease = bool(active)
+        self._external_monitor_reason = str(reason)
+        blocked = self._external_monitor_lease
+        for widget in (
+            self.btn_internal_start,
+            self.btn_internal_stop,
+            self.btn_internal_apply,
+            self.btn_internal_read,
+            self.logging_type_combo,
+            self.internal_samples,
+            self.internal_signal_count,
+            self.internal_undersample,
+            self.internal_delay_samples,
+            self.internal_average,
+            self.event_selector,
+            self.event_threshold,
+            self.event_trigger_samples,
+            self.btn_trace_download,
+            self.trace_selector,
+            self.btn_monitor_defs,
+            self.monitor_table,
+            self.btn_logging_update,
+            self.btn_file_start,
+            self.btn_file_check,
+        ):
+            widget.setEnabled(not blocked)
+        if blocked:
+            self.page_status.setText("Monitor slots leased by Real-time Curve")
+        elif not self._shutdown:
+            self.btn_file_start.setEnabled(not self.file_logging_active)
+            self.btn_trace_download.setEnabled(True)
+            self.page_status.setText("Ready")
+
+    def _reject_external_monitor_lease(self) -> bool:
+        if not self._external_monitor_lease:
+            return False
+        self.page_status.setText("Monitor slots leased by Real-time Curve")
+        self.host.log_msg(self._external_monitor_reason or "Logging action blocked by Real-time Curve")
+        return True
 
     def _build_ui(self) -> None:
         self.setSizePolicy(
@@ -816,6 +876,8 @@ class LoggingPage(QtWidgets.QWidget):
             menu.popup(source.mapToGlobal(QtCore.QPoint(0, source.height())))
 
     def _monitor_selector_changed(self, tokens: Any) -> None:
+        if self._reject_external_monitor_lease():
+            return
         row = self.monitor_number.value() - 1
         values = tuple(int(value) for value in tokens[:3])
         self.monitor_definitions[row] = values
@@ -826,6 +888,8 @@ class LoggingPage(QtWidgets.QWidget):
         self._write_monitor_channel(row, values)
 
     def read_monitor_definitions(self) -> None:
+        if self._reject_external_monitor_lease():
+            return
         if self._definitions_loading:
             return
         self._definitions_loading = True
@@ -858,6 +922,8 @@ class LoggingPage(QtWidgets.QWidget):
         self._submit("Read monitor definitions", work, done)
 
     def read_live_values(self) -> None:
+        if self._reject_external_monitor_lease():
+            return
         count = max(self.monitor_used.value(), self.file_signal_count.value())
 
         def done(values):
@@ -872,6 +938,8 @@ class LoggingPage(QtWidgets.QWidget):
         )
 
     def write_selected_monitor(self) -> None:
+        if self._reject_external_monitor_lease():
+            return
         row = self.monitor_number.value() - 1
         self._write_monitor_channel(row, self.monitor_selector.io_tokens())
 
@@ -907,6 +975,9 @@ class LoggingPage(QtWidgets.QWidget):
 
     def update_workspace(self) -> None:
         """Refresh the three visible logging columns in one serialized task."""
+
+        if self._reject_external_monitor_lease():
+            return
 
         trace_number = int(self.trace_selector.currentData() or 0)
         monitor_count = max(self.monitor_used.value(), self.file_signal_count.value())
@@ -973,6 +1044,8 @@ class LoggingPage(QtWidgets.QWidget):
         self._submit("Update logging workspace", work, done)
 
     def read_internal(self) -> None:
+        if self._reject_external_monitor_lease():
+            return
         trace_number = int(self.trace_selector.currentData() or 0)
 
         def work():
@@ -1067,6 +1140,8 @@ class LoggingPage(QtWidgets.QWidget):
         self.trace_selector.blockSignals(False)
 
     def apply_internal(self) -> None:
+        if self._reject_external_monitor_lease():
+            return
         params = (
             int(self.logging_type_combo.currentData()),
             self.internal_samples.value(),
@@ -1106,6 +1181,8 @@ class LoggingPage(QtWidgets.QWidget):
     def _write_event_signal(self) -> None:
         """Apply DSETS immediately when an Event Setting field is committed."""
 
+        if self._reject_external_monitor_lease():
+            return
         values = self._event_values()
         self.log_event.setText(" ".join(format_ui_number(value) for value in values))
         if not self._is_connected():
@@ -1131,6 +1208,8 @@ class LoggingPage(QtWidgets.QWidget):
         self._submit("Apply event signal", work, done)
 
     def start_internal(self) -> None:
+        if self._reject_external_monitor_lease():
+            return
         def checked(info):
             saved = _protocol_int(info[2]) if len(info) > 2 else 0
             if saved:
@@ -1154,6 +1233,8 @@ class LoggingPage(QtWidgets.QWidget):
         self._submit("Check saved traces", lambda: self._session().get_event_trace_info(), checked)
 
     def stop_internal(self) -> None:
+        if self._reject_external_monitor_lease():
+            return
         def work():
             self.host._set_writable(True)
             self._session().start_stop_event_tracing(0)
@@ -1176,6 +1257,8 @@ class LoggingPage(QtWidgets.QWidget):
             self.trace_output.setText(str(current.with_name(f"controller_trace_{trace}.csv")))
 
     def download_trace(self) -> None:
+        if self._reject_external_monitor_lease():
+            return
         path = self.trace_output.text().strip()
         if not path:
             self.browse_trace_output()
@@ -1263,6 +1346,8 @@ class LoggingPage(QtWidgets.QWidget):
         )
 
     def start_file_logging(self) -> None:
+        if self._reject_external_monitor_lease():
+            return
         if not self._definitions_loaded:
             self._pending_file_start = True
             self.btn_file_start.setEnabled(False)
@@ -1375,6 +1460,8 @@ class LoggingPage(QtWidgets.QWidget):
             QtWidgets.QMessageBox.critical(self, "File logging", str(error))
 
     def check_file_rate(self) -> None:
+        if self._reject_external_monitor_lease():
+            return
         count = self.file_signal_count.value()
 
         def work():
@@ -1415,6 +1502,8 @@ class LoggingPage(QtWidgets.QWidget):
 
     def refresh(self) -> None:
         """Called by the main page refresh dispatcher."""
+        if self._external_monitor_lease:
+            return
         if not self.serial_worker_active:
             if not self._definitions_loaded:
                 self.read_monitor_definitions()
@@ -1431,6 +1520,8 @@ class LoggingPage(QtWidgets.QWidget):
         self._definitions_loaded = False
         self._definitions_loading = False
         self._pending_file_start = False
+        self._external_monitor_lease = False
+        self._external_monitor_reason = ""
         self.btn_file_start.setEnabled(True)
         self.btn_file_stop.setEnabled(False)
         self.btn_trace_download.setEnabled(True)

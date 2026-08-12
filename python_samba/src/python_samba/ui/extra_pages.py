@@ -1013,6 +1013,10 @@ class ExtraPagesMixin:
         self._run("Log event write", work)
 
     def on_logging_write_monitor(self) -> None:
+        if getattr(self, "_monitor_slots_leased", False):
+            self.log_msg("Log monitor write blocked: Real-time Curve owns monitor slots")
+            return
+
         def work() -> None:
             s = self._require_session()
             assert self.gate

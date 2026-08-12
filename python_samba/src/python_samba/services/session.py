@@ -77,6 +77,8 @@ class ControllerSession:
         # pair atomic so bytes from BGSTS/DGTAS/DASTA cannot interleave on the
         # serial link.
         self._io_lock = threading.RLock()
+        self._monitor_slot_owner_lock = threading.RLock()
+        self._monitor_slot_owner: object | None = None
         self._connected = False
         self.last_response: RciResponse | None = None
 
@@ -1825,6 +1827,8 @@ class ControllerSession:
     # --- Raw escape ---
 
     def raw_command(self, mnemonic: str, *params: str | int | float) -> RciResponse:
+        if str(mnemonic).upper() == "DSMOS":
+            self._ensure_monitor_slot_owner(None)
         return self.transact(self.encoder.raw(mnemonic, *params))
 
     # --- VelAxes output limiter ---
@@ -1888,9 +1892,101 @@ class ControllerSession:
     def get_monitor_signal(self, sig_num: int) -> list[str]:
         return self.encoder.decode_dgmos(self.transact(self.encoder.dgmos(sig_num)))
 
-    def set_monitor_signal(self, sig_num: int, *monsig: str | int | float) -> None:
+    def claim_monitor_slots(self, owner: object) -> None:
+        """Prevent DSMOS writes outside the active monitor-slot lease."""
+
+        if owner is None:
+            raise ValueError("monitor slot owner cannot be None")
+        with self._monitor_slot_owner_lock:
+            if self._monitor_slot_owner is not None and self._monitor_slot_owner is not owner:
+                raise RuntimeError("controller monitor slots are already leased")
+            self._monitor_slot_owner = owner
+
+    def release_monitor_slots(self, owner: object) -> None:
+        with self._monitor_slot_owner_lock:
+            if self._monitor_slot_owner is owner:
+                self._monitor_slot_owner = None
+
+    def _ensure_monitor_slot_owner(self, owner: object | None) -> None:
+        with self._monitor_slot_owner_lock:
+            if self._monitor_slot_owner is not None and self._monitor_slot_owner is not owner:
+                raise RuntimeError(
+                    "monitor slot write blocked: Real-time Curve owns DGMOS/DSMOS"
+                )
+
+    def set_monitor_signal(
+        self,
+        sig_num: int,
+        *monsig: str | int | float,
+        _lease_owner: object | None = None,
+    ) -> None:
         self._ensure_writable()
+        self._ensure_monitor_slot_owner(_lease_owner)
         self.encoder.ensure_ok(self.transact(self.encoder.dsmos(sig_num, *monsig)), "DSMOS")
+
+    def get_monitor_signals(
+        self, count: int = 40, *, start_index: int = 0
+    ) -> list[tuple[int, int, int]]:
+        """Read a contiguous group of monitor-slot definitions in one batch.
+
+        This is a transport optimization around the existing ``DGMOS`` RCI
+        command.  It deliberately does not cache definitions: callers that
+        lease monitor slots need an authoritative controller snapshot.
+        """
+
+        start = int(start_index)
+        size = int(count)
+        if start < 0 or size < 0 or start + size > 40:
+            raise ValueError("monitor slot range must stay within 0..39")
+        if size == 0:
+            return []
+        responses = self.transact_many(
+            [self.encoder.dgmos(index) for index in range(start, start + size)]
+        )
+        definitions: list[tuple[int, int, int]] = []
+        for response in responses:
+            values = self.encoder.decode_dgmos(response)
+            if len(values) < 3:
+                raise ProtocolError(
+                    f"DGMOS returned {len(values)} values; expected Type/Main/Sub"
+                )
+            definitions.append(tuple(int(value) for value in values[:3]))
+        return definitions
+
+    def set_monitor_signals(
+        self,
+        definitions: Sequence[Sequence[str | int | float]],
+        *,
+        start_index: int = 0,
+        lease_owner: object | None = None,
+    ) -> None:
+        """Write contiguous monitor definitions using batched ``DSMOS``.
+
+        The helper changes no protocol semantics; each element is still one
+        ordinary DSMOS command and the controller replies to every write.
+        """
+
+        self._ensure_writable()
+        self._ensure_monitor_slot_owner(lease_owner)
+        start = int(start_index)
+        normalized: list[tuple[int, int, int]] = []
+        for definition in definitions:
+            values = tuple(int(value) for value in definition)
+            if len(values) != 3:
+                raise ValueError("each monitor definition must contain Type/Main/Sub")
+            normalized.append(values)
+        if start < 0 or start + len(normalized) > 40:
+            raise ValueError("monitor slot range must stay within 0..39")
+        if not normalized:
+            return
+        responses = self.transact_many(
+            [
+                self.encoder.dsmos(start + offset, *definition)
+                for offset, definition in enumerate(normalized)
+            ]
+        )
+        for response in responses:
+            self.encoder.ensure_ok(response, "DSMOS")
 
     # --- Actual time ---
 

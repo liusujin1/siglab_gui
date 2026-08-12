@@ -1,14 +1,15 @@
 # Hardware validation
 
 Core endpoint/action validation was completed against firmware V3.3.122
-(library 103); the current Logging and interactive-record validation was run
-against firmware V3.3.127 (library 103).  Both used COM1 at 57600 baud.
+(library 103); the current Logging, interactive-record, and Real-time Curve
+validation was run against firmware V3.3.127 (library 103).  Both used COM1
+at 57600 baud.
 Hostnames, user accounts, private controller configuration files, and raw
 device snapshots are kept out of the repository.
 
 ## Final results
 
-- Current local Samba suite: **175 tests passed**, with Qt-heavy files run
+- Current local Samba suite: **202 tests passed**, with Qt-heavy files run
   sequentially.  The shared-server
   hardware run also passed remote `compileall`, 107 non-page Samba tests, and
   all 131 SIDMAT tests available at that validation point.
@@ -48,6 +49,27 @@ saved 4096-sample trace before the preservation guard was added.  Its original
 waveform was not recoverable.  A replacement Standard trace was captured,
 restored to `SavedTraceNum=1`, downloaded in full, and backed up locally; the
 replacement is not claimed to reproduce the lost waveform.
+
+## Real-time Curve
+
+- The actual non-modal `LiveCurveWindow` and the independent core probe both
+  connected from the local process to the remote Communication Server; no
+  SSH-launched test process was used.
+- Three-signal and 40-signal leases each snapshotted all 40 DGMOS definitions,
+  mapped and verified the selected signals, polled DGMSV, then restored and
+  verified all 40 definitions.
+- With a requested 100 ms period over the current remote path, the actual GUI
+  measured about 404 ms for 3 signals and 409 ms for 40 signals.  The longer
+  core probe measured about 385 ms and 493 ms respectively; missed periods were
+  counted instead of issuing catch-up bursts.
+- Both sessions were saved as timestamp/elapsed CSV plus metadata, loaded back
+  through the shared record loader, linearly resampled, and processed with Hann
+  FFT and Welch PSD; all resulting values were finite.
+- Before/after comparisons of every DGMOS slot, DGETP, the full DGETI response,
+  and `SavedTraceNum` reported no differences.  DSETP and DSSET were never sent.
+- Core report: `_review/hardware_probe_results/live_curve_final_20260812_20260812_163109/live_curve_hardware_report.json`.
+  Actual GUI report: `_review/hardware_probe_results/live_curve_gui_20260812_165709/live_curve_gui_hardware_report.json`.
+  Hardware data and recovery files remain excluded from publication.
 
 ## Save/Load Setup
 

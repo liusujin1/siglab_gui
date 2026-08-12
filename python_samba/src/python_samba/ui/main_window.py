@@ -64,6 +64,51 @@ try:
 except ImportError as exc:  # pragma: no cover
     raise ImportError("PySide6 required for GUI: pip install python-samba[gui]") from exc
 
+try:
+    from python_samba.ui.live_curve_window import LiveCurveWindow
+except ImportError as _live_curve_import_error:  # pragma: no cover - minimal GUI install
+
+    class LiveCurveWindow(QtWidgets.QDialog):
+        """Dependency-safe placeholder; Logging and the main UI remain usable."""
+
+        lease_active_changed = QtCore.Signal(bool)
+        open_record_requested = QtCore.Signal(str)
+
+        def __init__(self, parent=None) -> None:
+            super().__init__(parent)
+            self.setWindowTitle("Real-time Curve")
+            self.setWindowModality(QtCore.Qt.NonModal)
+            self.setAttribute(QtCore.Qt.WA_DeleteOnClose, False)
+            self.resize(720, 360)
+            layout = QtWidgets.QVBoxLayout(self)
+            message = QtWidgets.QLabel(
+                "Real-time Curve requires NumPy and pyqtgraph.\n\n"
+                "Install the GUI dependencies with:\n"
+                "python -m pip install -e .[gui]\n\n"
+                f"Import error: {_live_curve_import_error}"
+            )
+            message.setAlignment(QtCore.Qt.AlignCenter)
+            message.setWordWrap(True)
+            layout.addWidget(message, 1)
+
+        @property
+        def monitor_slots_active(self) -> bool:
+            return False
+
+        def set_connection(self, *_args, **_kwargs) -> None:
+            return None
+
+        def stop_and_restore(self, **_kwargs) -> bool:
+            return True
+
+        def shutdown(self) -> bool:
+            self.hide()
+            return True
+
+        def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # noqa: N802
+            self.hide()
+            event.ignore()
+
 from python_samba.ui.extra_pages import ExtraPagesMixin, PNEUM_AXIS_LABELS
 
 
@@ -503,7 +548,7 @@ class SamTabWidget(QtWidgets.QTabWidget):
 
 
 class MainNavigation(QtWidgets.QFrame):
-    """Fixed-width navigation matching the hierarchy of the original UI."""
+    """Navigation matching the hierarchy of the original UI."""
 
     currentChanged = QtCore.Signal(int)
 
@@ -514,15 +559,23 @@ class MainNavigation(QtWidgets.QFrame):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("mainNavigation")
-        self.setFixedWidth(265)
+        # The navigation is hosted by a resizable scroll-area viewport.  A
+        # fixed 265 px child inside a 265 px sidebar (which also has margins)
+        # clipped the right edge of every button at the default window size.
+        self.setMinimumWidth(0)
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred
+        )
         self.buttons: list[QtWidgets.QToolButton] = []
         self.tab_indices: list[int] = []
+        self.action_buttons: list[QtWidgets.QToolButton] = []
 
         self._group = QtWidgets.QButtonGroup(self)
         self._group.setExclusive(True)
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        self._layout = QtWidgets.QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(0)
+        self._layout.setSizeConstraint(QtWidgets.QLayout.SetNoConstraint)
 
         for tab_index, label in entries:
             button = QtWidgets.QToolButton()
@@ -532,8 +585,9 @@ class MainNavigation(QtWidgets.QFrame):
             button.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
             button.setCursor(QtCore.Qt.PointingHandCursor)
             button.setFixedHeight(56)
+            button.setMinimumWidth(0)
             button.setSizePolicy(
-                QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed
+                QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed
             )
             button.clicked.connect(
                 lambda _checked=False, idx=tab_index: self.currentChanged.emit(idx)
@@ -541,7 +595,7 @@ class MainNavigation(QtWidgets.QFrame):
             self._group.addButton(button, tab_index)
             self.buttons.append(button)
             self.tab_indices.append(tab_index)
-            layout.addWidget(button)
+            self._layout.addWidget(button)
 
         if self.buttons:
             self.buttons[0].setChecked(True)
@@ -549,6 +603,37 @@ class MainNavigation(QtWidgets.QFrame):
     def setCurrentIndex(self, index: int) -> None:  # noqa: N802
         if index in self.tab_indices:
             self.buttons[self.tab_indices.index(index)].setChecked(True)
+
+    def addActionAfter(  # noqa: N802
+        self,
+        text: str,
+        callback,
+        *,
+        after_label: str,
+    ) -> QtWidgets.QToolButton:
+        """Insert an action-only entry without changing the current main page."""
+
+        button = QtWidgets.QToolButton()
+        button.setObjectName("mainNavButton")
+        button.setProperty("navigationAction", True)
+        button.setText(text)
+        button.setCheckable(False)
+        button.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        button.setCursor(QtCore.Qt.PointingHandCursor)
+        button.setFixedHeight(56)
+        button.setMinimumWidth(0)
+        button.setSizePolicy(
+            QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed
+        )
+        button.clicked.connect(callback)
+        position = self._layout.count()
+        for index, existing in enumerate(self.buttons):
+            if existing.text() == after_label:
+                position = index + 1
+                break
+        self._layout.insertWidget(position, button)
+        self.action_buttons.append(button)
+        return button
 
 
 class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
@@ -737,6 +822,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         self._live_refresh_errors: dict[str, str] = {}
         self._switch_config = 0
         self._switch_config_loaded = False
+        self._monitor_slots_leased = False
 
         central = QtWidgets.QWidget()
         central.setObjectName("applicationRoot")
@@ -811,6 +897,14 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         self.main_tabs.currentChanged.connect(self._on_main_tab_changed)
         self.backend.currentTextChanged.connect(self._sync_port_enabled)
         self._sync_port_enabled(self.backend.currentText())
+
+        self.realtime_curve_window = LiveCurveWindow(self)
+        self.realtime_curve_window.lease_active_changed.connect(
+            self._on_realtime_curve_lease_changed
+        )
+        self.realtime_curve_window.open_record_requested.connect(
+            self._open_realtime_record
+        )
 
         self._apply_theme()
         self._build_context_menu()
@@ -971,7 +1065,19 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         ]
         self.main_navigation = MainNavigation(entries)
         self.nav_buttons = self.main_navigation.buttons
-        layout.addWidget(self.main_navigation)
+        self.realtime_curve_nav_button = self.main_navigation.addActionAfter(
+            "Real-time curve",
+            self._show_realtime_curve_window,
+            after_label="Special",
+        )
+        nav_scroll = QtWidgets.QScrollArea()
+        nav_scroll.setObjectName("mainNavigationScroll")
+        nav_scroll.setWidgetResizable(True)
+        nav_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        nav_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        nav_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        nav_scroll.setWidget(self.main_navigation)
+        layout.addWidget(nav_scroll, 1)
 
         # Keep the index for context-menu/backward compatibility.  Logging is
         # also exposed as a normal first-level workspace.
@@ -983,7 +1089,6 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         self.update_page_btn = FlatPush("Update Page")
         self.update_page_btn.setObjectName("updatePageButton")
         self.update_page_btn.clicked.connect(self._request_page_refresh)
-        layout.addStretch(1)
         layout.addWidget(self.update_page_btn)
         layout.addSpacing(30)
         layout.addWidget(self.loop_states)
@@ -1028,6 +1133,60 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
             self.log_msg("Update skipped: controller is not connected")
             return
         self._refresh_current_page(force=True)
+
+    def _show_realtime_curve_window(self) -> None:
+        window = self.realtime_curve_window
+        if window.isMinimized():
+            window.showNormal()
+        else:
+            window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def _realtime_curve_busy_reason(self) -> str:
+        logging_page = getattr(self, "logging_page_widget", None)
+        if logging_page is not None:
+            reason = logging_page.monitor_lease_conflict()
+            if reason:
+                return reason
+        if getattr(self, "_sig_monitoring_active", False):
+            return "Stop Status / Signals Display continuous monitoring first."
+        return ""
+
+    def _on_realtime_curve_lease_changed(self, active: bool) -> None:
+        self._monitor_slots_leased = bool(active)
+        logging_page = getattr(self, "logging_page_widget", None)
+        if logging_page is not None:
+            logging_page.set_external_monitor_lease(
+                active,
+                "Real-time Curve owns monitor slots 0..39. Stop and restore it before using Logging.",
+            )
+        if active and getattr(self, "_sig_monitoring_active", False):
+            self._sig_monitoring_active = False
+            button = getattr(self, "sig_continue_btn", None)
+            if button is not None:
+                button.setText("Start continuous display")
+        self.log_msg(
+            "Real-time Curve monitor-slot lease active"
+            if active
+            else "Real-time Curve monitor-slot lease released"
+        )
+
+    def _open_realtime_record(self, path: str) -> None:
+        try:
+            from python_samba.logging_tools.storage import load_logging_record
+
+            record = load_logging_record(path)
+            logging_page = getattr(self, "logging_page_widget", None)
+            if logging_page is None:
+                raise RuntimeError("Logging page is unavailable")
+            logging_page._show_record(record)
+            logging_page._show_records_window()
+        except Exception as exc:
+            self.log_msg(f"Open Real-time Curve record: {exc}")
+            QtWidgets.QMessageBox.critical(
+                self, "Open Real-time Curve record", str(exc)
+            )
 
     def _current_subtab_text(self) -> str:
         page = self.main_tabs.currentWidget()
@@ -1356,6 +1515,9 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
 
     def _refresh_signal_display_reference(self) -> None:
         """Refresh monitor definitions and live values for all visible cards."""
+        if self._monitor_slots_leased:
+            self.log_msg("Signals Display refresh skipped: Real-time Curve owns monitor slots")
+            return
         s = self._require_session()
         snapshot = s.get_monitor_page_snapshot(len(self.sig_selectors))
         definitions = snapshot["signals"]
@@ -1412,7 +1574,8 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
             if sub == "Status":
                 self._run("Read Status", self._refresh_status_reference)
             elif sub == "Signals Display":
-                self._run("Read Signals Display", self._refresh_signal_display_reference)
+                if not self._monitor_slots_leased:
+                    self._run("Read Signals Display", self._refresh_signal_display_reference)
             elif sub == "DigIO Status":
                 self._on_digio_read()
         elif main == "Velocity":
@@ -4511,6 +4674,16 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
                 if connect_endpoint is not None:
                     connect_endpoint.setText(self.server_endpoint.text())
                 self._ensure_controller_capabilities()
+                self.realtime_curve_window.set_connection(
+                    self.session,
+                    constants=self._system_constants,
+                    version=version,
+                    controller={
+                        "firmware": str(version),
+                        "firmware_info": version.full_text,
+                    },
+                    busy_checker=self._realtime_curve_busy_reason,
+                )
                 if self._auto_refresh:
                     self._refresh_timer.start()
                     self._on_timer_tick()
@@ -4606,6 +4779,13 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
 
     def on_disconnect(self) -> None:
         self._refresh_timer.stop()
+        realtime_window = getattr(self, "realtime_curve_window", None)
+        if realtime_window is not None:
+            if not realtime_window.stop_and_restore():
+                self.log_msg(
+                    "WARNING Real-time Curve could not restore monitor slots; "
+                    "the endpoint-bound recovery file was retained"
+                )
         logging_page = getattr(self, "logging_page_widget", None)
         if logging_page is not None:
             if not logging_page.shutdown():
@@ -4635,6 +4815,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         self._switch_config = 0
         self._switch_config_loaded = False
         self._live_refresh_errors.clear()
+        self._monitor_slots_leased = False
         self._apply_controller_capabilities()
         self.btn_connect.setEnabled(True)
         self.btn_disconnect.setEnabled(False)
@@ -4644,6 +4825,8 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         self._set_connection_display(False)
         self.conn_info.setText("Not connected")
         self.fw_version.setText("Firmware Version: —")
+        if realtime_window is not None:
+            realtime_window.set_connection(None)
         self.log_msg("disconnected")
 
     def on_refresh(self) -> None:
@@ -6496,6 +6679,11 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         selection still validates and remembers the file, while an online
         selection immediately applies it.
         """
+        if getattr(self, "_monitor_slots_leased", False):
+            self.log_msg(
+                "Load setup blocked: Real-time Curve owns monitor slots; stop and restore it first"
+            )
+            return
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, "Load setup file", "",
             "SAMBA19x Config files (*.SAMBA19x_Config *.xml);;All (*.*)"
@@ -6684,6 +6872,9 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
     # ------------------------------------------------------------------
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # noqa: N802
+        realtime_window = getattr(self, "realtime_curve_window", None)
+        if realtime_window is not None:
+            realtime_window.shutdown()
         logging_page = getattr(self, "logging_page_widget", None)
         if logging_page is not None:
             logging_page.shutdown()
