@@ -216,18 +216,16 @@ class RecordPlotWindow(QtWidgets.QDialog):
         self.setWindowTitle("Logging Records / Plot")
         self.setWindowModality(QtCore.Qt.NonModal)
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose, False)
-        self.setMinimumSize(1120, 740)
+        self.setMinimumSize(1050, 700)
         screen = QtWidgets.QApplication.primaryScreen()
         if screen is not None:
             available = screen.availableGeometry().size()
-            target_width = max(1120, int(available.width() * 0.98))
-            target_height = max(740, int(available.height() * 0.98))
             self.resize(
-                min(available.width(), target_width),
-                min(available.height(), target_height),
+                min(1560, max(1180, int(available.width() * 0.94))),
+                min(1020, max(760, int(available.height() * 0.94))),
             )
         else:
-            self.resize(1600, 980)
+            self.resize(1440, 940)
 
         self.analysis_session: RecordAnalysisSession | None = None
         self._populating_curves = False
@@ -343,7 +341,7 @@ class RecordPlotWindow(QtWidgets.QDialog):
         workspace.addWidget(self.plot_tabs)
         workspace.setStretchFactor(0, 0)
         workspace.setStretchFactor(1, 1)
-        workspace.setSizes([420, 1020])
+        workspace.setSizes([450, 990])
         self.plot_widget = self.time_plot
         return workspace
 
@@ -364,10 +362,11 @@ class RecordPlotWindow(QtWidgets.QDialog):
 
     def _build_curve_and_processing_panel(self) -> QtWidgets.QWidget:
         scroll = QtWidgets.QScrollArea()
+        scroll.setObjectName("recordProcessingScroll")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-        scroll.setMinimumWidth(380)
-        scroll.setMaximumWidth(500)
+        scroll.setMinimumWidth(420)
+        scroll.setMaximumWidth(520)
         panel = QtWidgets.QWidget()
         root = QtWidgets.QVBoxLayout(panel)
         root.setContentsMargins(2, 2, 5, 2)
@@ -391,7 +390,18 @@ class RecordPlotWindow(QtWidgets.QDialog):
         curve_header.setSectionResizeMode(3, QtWidgets.QHeaderView.Fixed)
         curve_header.resizeSection(3, 76)
         curves_layout.addWidget(self.curve_tree, 1)
-        root.addWidget(curves_group, 2)
+        root.addWidget(curves_group, 1)
+
+        operations = QtWidgets.QWidget()
+        operations_layout = QtWidgets.QHBoxLayout(operations)
+        operations_layout.setContentsMargins(0, 0, 0, 0)
+        operations_layout.setSpacing(7)
+        left_column = QtWidgets.QVBoxLayout()
+        left_column.setSpacing(7)
+        right_column = QtWidgets.QVBoxLayout()
+        right_column.setSpacing(7)
+        operations_layout.addLayout(left_column, 1)
+        operations_layout.addLayout(right_column, 1)
 
         sampling_group = GroupPanel("Sampling")
         sampling_form = QtWidgets.QFormLayout(sampling_group)
@@ -407,7 +417,9 @@ class RecordPlotWindow(QtWidgets.QDialog):
         sampling_form.addRow("Sample rate", self.sample_rate)
         sampling_form.addRow("State", self.sampling_state)
         sampling_form.addRow(self.btn_resample)
-        root.addWidget(sampling_group)
+        sampling_form.setContentsMargins(7, 8, 7, 6)
+        sampling_form.setVerticalSpacing(5)
+        left_column.addWidget(sampling_group)
 
         detrend_group = GroupPanel("Detrend")
         detrend_layout = QtWidgets.QHBoxLayout(detrend_group)
@@ -415,7 +427,8 @@ class RecordPlotWindow(QtWidgets.QDialog):
         self.btn_linear_detrend = FlatPush("Linear")
         detrend_layout.addWidget(self.btn_remove_mean)
         detrend_layout.addWidget(self.btn_linear_detrend)
-        root.addWidget(detrend_group)
+        detrend_layout.setContentsMargins(7, 8, 7, 6)
+        right_column.addWidget(detrend_group)
 
         smooth_group = GroupPanel("Moving Average")
         smooth_layout = QtWidgets.QHBoxLayout(smooth_group)
@@ -427,7 +440,8 @@ class RecordPlotWindow(QtWidgets.QDialog):
         smooth_layout.addWidget(QtWidgets.QLabel("Window"))
         smooth_layout.addWidget(self.smooth_window, 1)
         smooth_layout.addWidget(self.btn_smooth)
-        root.addWidget(smooth_group)
+        smooth_layout.setContentsMargins(7, 8, 7, 6)
+        right_column.addWidget(smooth_group)
 
         filter_group = GroupPanel("Butterworth Filter")
         filter_form = QtWidgets.QFormLayout(filter_group)
@@ -455,7 +469,10 @@ class RecordPlotWindow(QtWidgets.QDialog):
         filter_form.addRow("High cutoff", self.filter_high)
         filter_form.addRow("Order", self.filter_order)
         filter_form.addRow(self.btn_filter)
-        root.addWidget(filter_group)
+        filter_form.setContentsMargins(7, 8, 7, 6)
+        filter_form.setVerticalSpacing(5)
+        left_column.addWidget(filter_group)
+        left_column.addStretch(1)
 
         spectrum_group = GroupPanel("Spectrum")
         spectrum_form = QtWidgets.QFormLayout(spectrum_group)
@@ -470,7 +487,9 @@ class RecordPlotWindow(QtWidgets.QDialog):
         spectrum_buttons.addWidget(self.btn_psd)
         spectrum_form.addRow("PSD block", self.psd_block)
         spectrum_form.addRow(spectrum_buttons)
-        root.addWidget(spectrum_group)
+        spectrum_form.setContentsMargins(7, 8, 7, 6)
+        spectrum_form.setVerticalSpacing(5)
+        right_column.addWidget(spectrum_group)
 
         display_group = GroupPanel("Frequency Display")
         display_layout = QtWidgets.QHBoxLayout(display_group)
@@ -481,8 +500,10 @@ class RecordPlotWindow(QtWidgets.QDialog):
         display_layout.addWidget(self.frequency_x_log)
         display_layout.addWidget(self.frequency_db)
         display_layout.addStretch(1)
-        root.addWidget(display_group)
-        root.addStretch(1)
+        display_layout.setContentsMargins(7, 8, 7, 6)
+        right_column.addWidget(display_group)
+        right_column.addStretch(1)
+        root.addWidget(operations)
         scroll.setWidget(panel)
 
         self.curve_tree.itemChanged.connect(self._curve_visibility_changed)

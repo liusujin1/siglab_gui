@@ -90,18 +90,37 @@ def test_record_window_lists_all_numeric_channels_and_shows_first_six():
         app.processEvents()
 
 
-def test_plot_fonts_are_compact_and_window_uses_available_screen():
+def test_plot_fonts_are_compact_and_default_window_is_not_oversized():
     app = _application()
     window = RecordPlotWindow()
     try:
         screen_size = app.primaryScreen().availableGeometry().size()
-        assert window.width() >= min(screen_size.width(), 1120)
-        assert window.height() >= min(screen_size.height(), 740)
+        expected_width = min(1560, max(1180, int(screen_size.width() * 0.94)))
+        expected_height = min(1020, max(760, int(screen_size.height() * 0.94)))
+        assert window.width() == max(window.minimumWidth(), expected_width)
+        assert window.height() == max(window.minimumHeight(), expected_height)
         for plot in (window.time_plot, window.frequency_plot):
             for side in ("bottom", "left"):
                 axis = plot.getPlotItem().getAxis(side)
                 assert axis.compact_tick_font.pointSize() == 9
                 assert axis.label.font().pointSize() == 9
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_processing_controls_fit_without_vertical_scrolling_at_default_size():
+    app = _application()
+    window = RecordPlotWindow()
+    try:
+        window.show()
+        app.processEvents()
+        scroll = window.findChild(QtWidgets.QScrollArea, "recordProcessingScroll")
+        assert isinstance(scroll, QtWidgets.QScrollArea)
+        assert scroll.verticalScrollBar().maximum() == 0
+        assert window.frequency_db.isVisible()
+        assert window.btn_psd.isVisible()
+        assert window.btn_filter.isVisible()
     finally:
         window.close()
         app.processEvents()
