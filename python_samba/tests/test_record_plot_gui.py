@@ -109,7 +109,7 @@ def test_plot_fonts_are_compact_and_default_window_is_not_oversized():
         app.processEvents()
 
 
-def test_processing_controls_fit_without_vertical_scrolling_at_default_size():
+def test_processing_controls_fit_horizontally_at_default_size():
     app = _application()
     window = RecordPlotWindow()
     try:
@@ -117,10 +117,30 @@ def test_processing_controls_fit_without_vertical_scrolling_at_default_size():
         app.processEvents()
         scroll = window.findChild(QtWidgets.QScrollArea, "recordProcessingScroll")
         assert isinstance(scroll, QtWidgets.QScrollArea)
-        assert scroll.verticalScrollBar().maximum() == 0
-        assert window.frequency_db.isVisible()
-        assert window.btn_psd.isVisible()
-        assert window.btn_filter.isVisible()
+        assert scroll.horizontalScrollBarPolicy() == QtCore.Qt.ScrollBarAlwaysOff
+        assert scroll.horizontalScrollBar().maximum() == 0
+        viewport_right = scroll.viewport().mapToGlobal(
+            scroll.viewport().rect().bottomRight()
+        ).x()
+        for control in (
+            window.sample_rate,
+            window.btn_resample,
+            window.btn_remove_mean,
+            window.btn_linear_detrend,
+            window.smooth_window,
+            window.btn_smooth,
+            window.filter_type,
+            window.filter_low,
+            window.filter_high,
+            window.filter_order,
+            window.btn_filter,
+            window.psd_block,
+            window.btn_fft,
+            window.btn_psd,
+            window.frequency_x_log,
+            window.frequency_db,
+        ):
+            assert control.mapToGlobal(control.rect().bottomRight()).x() <= viewport_right
     finally:
         window.close()
         app.processEvents()
