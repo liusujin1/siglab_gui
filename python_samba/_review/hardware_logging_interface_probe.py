@@ -28,9 +28,10 @@ if str(SRC) not in sys.path:
 
 from PySide6 import QtWidgets  # noqa: E402
 
-from python_samba.logging_tools import load_logging_record  # noqa: E402
+from python_samba.logging_tools import load_logging_record, save_trace_record  # noqa: E402
 from python_samba.services.safety import SafetyGate  # noqa: E402
-from python_samba.services.session import open_serial  # noqa: E402
+from python_samba.services.session import open_comm_server, open_serial  # noqa: E402
+from python_samba.ui.classic_widgets import IOSignalButton  # noqa: E402
 from python_samba.ui.main_window import MainWindow  # noqa: E402
 
 
@@ -108,6 +109,12 @@ def main() -> int:
     parser.add_argument("--port", default="COM1")
     parser.add_argument("--baudrate", type=int, default=57600)
     parser.add_argument(
+        "--server",
+        default="",
+        help="Use an existing Communication Server HOST:PORT instead of direct serial",
+    )
+    parser.add_argument("--token-file", default=None)
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=PROJECT_ROOT / "_review" / "hardware_probe_results",
@@ -123,6 +130,7 @@ def main() -> int:
         "timestamp": stamp,
         "port": args.port,
         "baudrate": args.baudrate,
+        "server": args.server or None,
         "checks": [],
         "writes_restored": False,
     }
@@ -156,9 +164,21 @@ def main() -> int:
         lambda *_args, **_kwargs: QtWidgets.QMessageBox.Cancel
     )
 
-    session = open_serial(
-        args.port, args.baudrate, readonly=False, timeout=3.0
-    )
+    if args.server:
+        session = open_comm_server(
+            args.port,
+            args.baudrate,
+            server=args.server,
+            token_file=args.token_file,
+            auto_start=False,
+            client_name="hardware-logging-interface-probe",
+            readonly=False,
+            timeout=10.0,
+        )
+    else:
+        session = open_serial(
+            args.port, args.baudrate, readonly=False, timeout=3.0
+        )
     window: MainWindow | None = None
     initial: dict[str, Any] = {}
     monitor_restore_needed = False
@@ -176,6 +196,39 @@ def main() -> int:
             "monitor": [session.get_monitor_signal(index) for index in range(40)],
         }
         report["initial"] = initial
+        saved_initial = (
+            _integer(initial["trace_info"][2])
+            if len(initial["trace_info"]) > 2
+            else 0
+        )
+        if saved_initial > 0:
+            # DSETP and DSSET can invalidate saved traces on real firmware.
+            # Back up the complete first trace before *any* controller write,
+            # then keep all trace-configuration actions disabled for this run.
+            sample_frequency = float(session.get_sample_frequency())
+            under_sample = max(1, _integer(initial["trace_params"][3], 1))
+            signal_count = max(1, _integer(initial["trace_params"][2], 1))
+            signal_names = [
+                IOSignalButton.format_io_signal(_normalized_signal(values))
+                for values in initial["monitor"][:signal_count]
+            ]
+            backup_rows = session.download_logged_trace(0)
+            backup_path = save_trace_record(
+                output_dir / "pre_write_saved_trace_0.csv",
+                backup_rows,
+                signal_names,
+                sample_interval_s=under_sample / sample_frequency,
+                metadata={
+                    "trace_number": 0,
+                    "event_time": session.get_event_time(0),
+                    "trace_parameters": initial["trace_params"],
+                    "pre_write_backup": True,
+                },
+            )
+            report["pre_write_trace_backup"] = {
+                "path": str(backup_path),
+                "rows": len(backup_rows),
+            }
 
         window = MainWindow()
         window.session = session
@@ -306,7 +359,7 @@ def main() -> int:
 
         record("Event Setting writes and reads back", "DSETS/DGETS", event_write)
 
-        if _valid_trace_params(initial["trace_params"]):
+        if _valid_trace_params(initial["trace_params"]) and saved_initial == 0:
 
             def cycle_logging_types() -> list[dict[str, Any]]:
                 nonlocal trace_restore_needed
@@ -352,6 +405,19 @@ def main() -> int:
                 "DSETP/DGETP",
                 cycle_logging_types,
             )
+        elif saved_initial > 0:
+            checks.append(
+                {
+                    "name": "All three Logging Type values write/read/restore",
+                    "command": "DSETP/DGETP",
+                    "status": "SKIP_SAVED_TRACES_PRESERVED",
+                    "detail": (
+                        f"controller has {saved_initial} saved trace(s); DSETP is not sent "
+                        "after the pre-write backup because firmware invalidates saved traces"
+                    ),
+                }
+            )
+            print("SKIP DSETP/DGETP       saved traces preserved", flush=True)
         else:
             checks.append(
                 {
@@ -414,7 +480,7 @@ def main() -> int:
 
         record("Start File Log streams all 40 channels", "DGMSV/CSV", ui_file_logging)
 
-        saved = _integer(initial["trace_info"][2]) if len(initial["trace_info"]) > 2 else 0
+        saved = saved_initial
         if saved == 0:
 
             def start_stop_trace() -> dict[str, Any]:
@@ -441,11 +507,62 @@ def main() -> int:
         if saved > 0:
 
             def read_saved_trace() -> dict[str, Any]:
-                event_time = session.get_event_time(0)
-                rows = session.download_logged_trace(0, max_samples=20)
-                return {"event_time": event_time, "rows_read": len(rows)}
+                trace_path = output_dir / "controller_trace_0.csv"
+                page.trace_selector.setCurrentIndex(
+                    max(0, page.trace_selector.findData(0))
+                )
+                page.trace_output.setText(str(trace_path))
+                page.download_trace()
+                sample_count = max(
+                    1,
+                    _integer(
+                        initial["trace_info"][4]
+                        if len(initial["trace_info"]) > 4
+                        else initial["trace_params"][1],
+                        1,
+                    ),
+                )
+                # A 4,096-sample trace over the Tailscale CommServer takes
+                # roughly 90 seconds even with DGLDV batching.  Scale the
+                # unattended UI wait to the actual trace size instead of
+                # reporting a false failure at the former fixed 60 seconds.
+                trace_timeout = max(
+                    180.0, min(900.0, sample_count * 0.05 + 60.0)
+                )
+                _wait_page(page, app, timeout=trace_timeout)
+                if not trace_path.exists():
+                    raise AssertionError("UI trace download did not create its CSV")
+                record_data = load_logging_record(trace_path)
+                viewer = page.records_window
+                analysis = viewer.analysis_session
+                if analysis is None or not analysis.curves:
+                    raise AssertionError("downloaded trace did not reach Records / Plot")
+                source = analysis.curves[0]
+                derived = analysis.detrend_curve(source.curve_id, "constant")
+                spectrum = analysis.fft_curve(derived.curve_id)
+                analysis_path = output_dir / "controller_trace_0_analysis.csv"
+                analysis.export_curves(
+                    analysis_path,
+                    [source.curve_id, derived.curve_id, spectrum.curve_id],
+                )
+                if not analysis_path.exists() or not analysis_path.with_suffix(
+                    ".csv.meta.json"
+                ).exists():
+                    raise AssertionError("Records / Plot export is incomplete")
+                return {
+                    "event_time": page.log_event_time.text(),
+                    "rows_read": len(record_data.rows),
+                    "numeric_curves": len(analysis.curves_for_domain("time")),
+                    "derived_curve": derived.name,
+                    "spectrum_curve": spectrum.name,
+                    "analysis_export": str(analysis_path),
+                }
 
-            record("Read a saved internal trace", "DGEVT/DGLDV", read_saved_trace)
+            record(
+                "Download saved trace into interactive Records / Plot",
+                "DGEVT/DGLDV/CSV/FFT",
+                read_saved_trace,
+            )
         else:
             checks.append(
                 {

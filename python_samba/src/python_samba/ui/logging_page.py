@@ -22,6 +22,7 @@ from python_samba.ui.classic_widgets import (
     SciEdit,
     format_ui_number,
 )
+from python_samba.ui.record_plot import RecordPlotWindow
 
 try:
     from PySide6 import QtCore, QtGui, QtWidgets
@@ -44,84 +45,6 @@ class _LoggingBridge(QtCore.QObject):
     file_sample = QtCore.Signal(object, object, int)
     file_finished = QtCore.Signal(object, object, int)
     download_progress = QtCore.Signal(int, int)
-
-
-class TracePreview(QtWidgets.QWidget):
-    """Small dependency-free line preview for loaded records."""
-
-    COLORS = ("#1875a6", "#dc6b2f", "#3f9b55", "#8a5ab7", "#c43b62", "#6d7a86")
-
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self.setMinimumHeight(220)
-        self._series: list[tuple[str, list[tuple[float, float]]]] = []
-        self.setToolTip("Preview is decimated to keep large records responsive.")
-
-    def set_record(self, record: LoggingRecord) -> None:
-        self._series = []
-        if not record.headers or not record.rows:
-            self.update()
-            return
-        lower = [header.lower() for header in record.headers]
-        x_index = lower.index("elapsed_s") if "elapsed_s" in lower else -1
-        excluded = {x_index}
-        if "timestamp_utc" in lower:
-            excluded.add(lower.index("timestamp_utc"))
-        candidates = [index for index in range(len(record.headers)) if index not in excluded]
-        step = max(1, len(record.rows) // 1800)
-        for column in candidates[:6]:
-            points: list[tuple[float, float]] = []
-            for row_number in range(0, len(record.rows), step):
-                row = record.rows[row_number]
-                if column >= len(row):
-                    continue
-                try:
-                    x_value = float(row[x_index]) if x_index >= 0 and x_index < len(row) else float(row_number)
-                    y_value = float(row[column])
-                except (TypeError, ValueError):
-                    continue
-                points.append((x_value, y_value))
-            if points:
-                self._series.append((record.headers[column], points))
-        self.update()
-
-    def paintEvent(self, _event) -> None:  # noqa: N802
-        painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing)
-        painter.fillRect(self.rect(), QtGui.QColor("#fbfdfe"))
-        plot = self.rect().adjusted(52, 16, -18, -38)
-        painter.setPen(QtGui.QPen(QtGui.QColor("#9db6c5"), 1))
-        painter.drawRect(plot)
-        if not self._series or plot.width() <= 0 or plot.height() <= 0:
-            painter.setPen(QtGui.QColor("#6c7e89"))
-            painter.drawText(self.rect(), QtCore.Qt.AlignCenter, "Load a record to preview")
-            return
-        xs = [point[0] for _, points in self._series for point in points]
-        ys = [point[1] for _, points in self._series for point in points]
-        x_min, x_max = min(xs), max(xs)
-        y_min, y_max = min(ys), max(ys)
-        if x_max == x_min:
-            x_max = x_min + 1.0
-        if y_max == y_min:
-            y_max = y_min + 1.0
-        painter.setPen(QtGui.QColor("#607987"))
-        painter.drawText(4, plot.top() + 6, format_ui_number(y_max))
-        painter.drawText(4, plot.bottom(), format_ui_number(y_min))
-        painter.drawText(plot.left(), self.height() - 12, format_ui_number(x_min))
-        painter.drawText(plot.right() - 55, self.height() - 12, format_ui_number(x_max))
-        for series_index, (name, points) in enumerate(self._series):
-            color = QtGui.QColor(self.COLORS[series_index % len(self.COLORS)])
-            painter.setPen(QtGui.QPen(color, 1.4))
-            path = QtGui.QPainterPath()
-            for index, (x_value, y_value) in enumerate(points):
-                x_pos = plot.left() + (x_value - x_min) * plot.width() / (x_max - x_min)
-                y_pos = plot.bottom() - (y_value - y_min) * plot.height() / (y_max - y_min)
-                if index == 0:
-                    path.moveTo(x_pos, y_pos)
-                else:
-                    path.lineTo(x_pos, y_pos)
-            painter.drawPath(path)
-            painter.drawText(plot.left() + series_index * 130, self.height() - 12, name[:18])
 
 
 class LoggingPage(QtWidgets.QWidget):
@@ -269,16 +192,15 @@ class LoggingPage(QtWidgets.QWidget):
         self.auxiliary_panel.hide()
         root.addWidget(self.auxiliary_panel, 2)
 
-        self.records_window = QtWidgets.QDialog(self.host)
-        self.records_window.setObjectName("loggingRecordsWindow")
-        self.records_window.setWindowTitle("Logging Records / Plot")
-        self.records_window.setWindowModality(QtCore.Qt.NonModal)
-        self.records_window.setAttribute(QtCore.Qt.WA_DeleteOnClose, False)
-        self.records_window.setMinimumSize(760, 520)
-        self.records_window.resize(1100, 720)
-        records_layout = QtWidgets.QVBoxLayout(self.records_window)
-        records_layout.setContentsMargins(10, 10, 10, 10)
-        records_layout.addWidget(self._build_records_tab())
+        self.records_window = RecordPlotWindow(self.host)
+        self.records_window.open_record_requested.connect(self.open_record_dialog)
+        # Compatibility aliases retained for the existing main-window tests
+        # and helpers while the standalone window owns the plotting UI.
+        self.record_path = self.records_window.record_path
+        self.btn_record_browse = self.records_window.btn_record_browse
+        self.record_summary = self.records_window.record_summary
+        self.record_plot = self.records_window.plot_widget
+        self.record_table = self.records_window.record_table
 
         self.btn_internal_start.clicked.connect(self.start_internal)
         self.btn_file_start.clicked.connect(self.start_file_logging)
@@ -366,31 +288,24 @@ class LoggingPage(QtWidgets.QWidget):
         if available <= 0:
             return
 
-        # Use logical pixels rather than font metrics here.  On high-DPI
-        # Windows displays the global application font is already scaled;
-        # feeding those scaled metrics back into the section widths can make
-        # the #/Live columns consume most of this compact table.
-        number_width = 38
-        live_width = 68
-        minimum_signal = 88
-        signal_total = max(
-            minimum_signal * 2,
-            available - (number_width + live_width) * 2,
-        )
-        first_signal = signal_total // 2
-        widths = (
-            number_width,
-            first_signal,
-            live_width,
-            number_width,
-            signal_total - first_signal,
-            live_width,
-        )
+        number_width = 40
+        live_width = 62
+        minimum_signal = 110
+        minimum_total = (number_width + live_width + minimum_signal) * 2
         header = table.horizontalHeader()
         header.setStretchLastSection(False)
-        for column, width in enumerate(widths):
+        for column in (0, 3):
             header.setSectionResizeMode(column, QtWidgets.QHeaderView.Fixed)
-            table.setColumnWidth(column, width)
+            table.setColumnWidth(column, number_width)
+        for column in (2, 5):
+            header.setSectionResizeMode(column, QtWidgets.QHeaderView.Fixed)
+            table.setColumnWidth(column, live_width)
+        for column in (1, 4):
+            if available >= minimum_total:
+                header.setSectionResizeMode(column, QtWidgets.QHeaderView.Stretch)
+            else:
+                header.setSectionResizeMode(column, QtWidgets.QHeaderView.Fixed)
+                table.setColumnWidth(column, minimum_signal)
 
     def _build_monitor_tab(self) -> QtWidgets.QWidget:
         page = GroupPanel("Monitor Signals Definition")
@@ -436,7 +351,7 @@ class LoggingPage(QtWidgets.QWidget):
             signal_button = FlatPush(
                 IOSignalButton.format_io_signal(self.monitor_definitions[channel])
             )
-            signal_button.setMinimumWidth(48)
+            signal_button.setMinimumWidth(0)
             signal_button.setSizePolicy(
                 QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed
             )
@@ -720,33 +635,6 @@ class LoggingPage(QtWidgets.QWidget):
         self.btn_file_browse.clicked.connect(self.browse_file_output)
         self.btn_file_check.clicked.connect(self.check_file_rate)
         self.btn_file_stop.clicked.connect(self.stop_file_logging)
-        return page
-
-    def _build_records_tab(self) -> QtWidgets.QWidget:
-        page = QtWidgets.QWidget()
-        root = QtWidgets.QVBoxLayout(page)
-        toolbar = QtWidgets.QHBoxLayout()
-        self.record_path = QtWidgets.QLineEdit()
-        self.record_path.setPlaceholderText(
-            "CSV/TSV or legacy .LoggRecJson/.LoggRecXml/.ILogRecJson/.ILogRecXml"
-        )
-        self.btn_record_browse = FlatPush("Open record…")
-        self.record_summary = QtWidgets.QLabel("No record loaded")
-        toolbar.addWidget(self.record_path, 1)
-        toolbar.addWidget(self.btn_record_browse)
-        toolbar.addWidget(self.record_summary)
-        root.addLayout(toolbar)
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        self.record_plot = TracePreview()
-        self.record_table = QtWidgets.QTableWidget()
-        self.record_table.setAlternatingRowColors(True)
-        self.record_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        splitter.addWidget(self.record_plot)
-        splitter.addWidget(self.record_table)
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 1)
-        root.addWidget(splitter, 1)
-        self.btn_record_browse.clicked.connect(self.open_record_dialog)
         return page
 
     def _build_analysis_tab(self) -> QtWidgets.QWidget:
@@ -1524,22 +1412,7 @@ class LoggingPage(QtWidgets.QWidget):
         self._show_record(record)
 
     def _show_record(self, record: LoggingRecord) -> None:
-        self.record_plot.set_record(record)
-        preview = record.rows[:1000]
-        self.record_table.setColumnCount(len(record.headers))
-        self.record_table.setHorizontalHeaderLabels(record.headers)
-        self.record_table.setRowCount(len(preview))
-        for row_index, row in enumerate(preview):
-            for column, value in enumerate(row[: len(record.headers)]):
-                self.record_table.setItem(
-                    row_index, column, QtWidgets.QTableWidgetItem(format_ui_number(value))
-                )
-        self.record_table.resizeColumnsToContents()
-        suffix = " (first 1000 shown)" if len(record.rows) > 1000 else ""
-        self.record_summary.setText(
-            f"{len(record.rows)} samples · {len(record.signal_names)} signals{suffix}"
-        )
-        self.record_path.setText(record.source)
+        self.records_window.set_record(record)
 
     def refresh(self) -> None:
         """Called by the main page refresh dispatcher."""
@@ -1568,8 +1441,15 @@ class LoggingPage(QtWidgets.QWidget):
         self.file_toolbar_elapsed.setText("0 s elapsed")
         self.page_status.setText("Ready")
 
-    def shutdown(self) -> None:
-        """Request worker cancellation before the shared serial session closes."""
+    def shutdown(self, *, timeout: float = 5.0) -> bool:
+        """Cancel logging work and drain controller tasks before session close.
+
+        ControllerSession transports serialize each request, so closing the
+        shared session while one of these workers still owns an exchange can
+        race the underlying socket/COM handle.  Trace and file workers receive
+        their normal cancellation signals first; short parameter reads are
+        then allowed to finish within the bounded disconnect grace period.
+        """
         self._generation += 1
         self._shutdown = True
         self._definitions_loading = False
@@ -1578,3 +1458,16 @@ class LoggingPage(QtWidgets.QWidget):
         self.records_window.hide()
         if self.file_service:
             self.file_service.stop(wait=True, timeout=1.0)
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        current = threading.current_thread()
+        for thread in tuple(self._task_threads):
+            if thread is current or not thread.is_alive():
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                break
+            thread.join(remaining)
+        self._task_threads = {
+            thread for thread in self._task_threads if thread.is_alive()
+        }
+        return not self._task_threads

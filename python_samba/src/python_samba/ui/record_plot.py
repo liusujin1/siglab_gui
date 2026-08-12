@@ -1,0 +1,1562 @@
+"""Interactive, standalone viewer for completed logging records."""
+
+from __future__ import annotations
+
+from collections import deque
+from pathlib import Path
+from typing import Any, Callable
+
+from python_samba.logging_tools.models import LoggingRecord
+from python_samba.ui.classic_widgets import FlatPush, GroupPanel, format_ui_number
+
+try:
+    from PySide6 import QtCore, QtGui, QtWidgets
+except ImportError as exc:  # pragma: no cover
+    raise ImportError("PySide6 required for GUI: pip install python-samba[gui]") from exc
+
+
+_ANALYSIS_IMPORT_ERROR: ImportError | None = None
+try:
+    import numpy as np
+    import pyqtgraph as pg
+
+    from python_samba.logging_tools.record_analysis import (
+        NumericCurve,
+        RecordAnalysisSession,
+    )
+except ImportError as exc:  # pragma: no cover - exercised by minimal installs
+    _ANALYSIS_IMPORT_ERROR = exc
+    np = None  # type: ignore[assignment]
+    pg = None  # type: ignore[assignment]
+    NumericCurve = Any  # type: ignore[misc,assignment]
+    RecordAnalysisSession = Any  # type: ignore[misc,assignment]
+
+
+PLOT_BACKGROUND = "#fbfdfe"
+PLOT_FOREGROUND = "#31566c"
+CURVE_COLORS = (
+    "#1875a6",
+    "#dc6b2f",
+    "#3f9b55",
+    "#8a5ab7",
+    "#c43b62",
+    "#287d8e",
+    "#bd8a22",
+    "#526fb4",
+    "#8b6f47",
+    "#1c9b8e",
+    "#b44c9b",
+    "#6d7a86",
+)
+
+
+def _short_number(value: float) -> str:
+    """Readable plot text without exponent notation."""
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if np is not None and not np.isfinite(number):
+        return "—"
+    absolute = abs(number)
+    if absolute >= 1_000_000_000.0:
+        return f"{number / 1_000_000_000.0:.6f}".rstrip("0").rstrip(".") + "G"
+    if absolute >= 1_000_000.0:
+        return f"{number / 1_000_000.0:.6f}".rstrip("0").rstrip(".") + "M"
+    if absolute >= 1_000.0:
+        return f"{number / 1_000.0:.6f}".rstrip("0").rstrip(".") + "k"
+    decimals = 9 if 0.0 < absolute < 1.0 else 6
+    return f"{number:.{decimals}f}".rstrip("0").rstrip(".") or "0"
+
+
+if pg is not None:
+
+    class PlainAxisItem(pg.AxisItem):
+        """Axis labels that avoid scientific notation."""
+
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            if hasattr(self, "enableAutoSIPrefix"):
+                self.enableAutoSIPrefix(False)
+
+        def tickStrings(self, values, scale, spacing):  # noqa: N802
+            labels: list[str] = []
+            if self.logMode:
+                for value in values:
+                    linear = (10.0 ** float(value)) * float(scale)
+                    if not np.isfinite(linear) or linear <= 0.0:
+                        labels.append("")
+                        continue
+                    exponent = np.log10(linear)
+                    labels.append(_short_number(linear) if abs(exponent - round(exponent)) < 1e-6 else "")
+                return labels
+            return [_short_number(float(value) * float(scale)) for value in values]
+
+
+    class InteractiveViewBox(pg.ViewBox):
+        """VNA-style pointer handling: left tool, right zoom, middle pan."""
+
+        def __init__(
+            self,
+            *args,
+            on_left_drag: Callable[[Any], None] | None = None,
+            on_right_zoom: Callable[[Any, Any], None] | None = None,
+            on_navigation_start: Callable[[], None] | None = None,
+            **kwargs,
+        ) -> None:
+            super().__init__(*args, **kwargs)
+            self._on_left_drag = on_left_drag
+            self._on_right_zoom = on_right_zoom
+            self._on_navigation_start = on_navigation_start
+            self._navigation_started = False
+            self._zoom_box = QtWidgets.QGraphicsRectItem()
+            self._zoom_box.setPen(
+                pg.mkPen("#2a9aab", width=1.6, style=QtCore.Qt.DashLine)
+            )
+            self._zoom_box.setBrush(pg.mkBrush(42, 154, 171, 48))
+            self._zoom_box.setZValue(35)
+            self._zoom_box.hide()
+            self.addItem(self._zoom_box, ignoreBounds=True)
+            self.setMouseMode(pg.ViewBox.PanMode)
+
+        def mouseDragEvent(self, event, axis=None) -> None:  # noqa: N802
+            button = event.button()
+            if button == QtCore.Qt.LeftButton and self._on_left_drag is not None:
+                event.accept()
+                self._on_left_drag(event.scenePos())
+                return
+            if button == QtCore.Qt.RightButton and self._on_right_zoom is not None:
+                event.accept()
+                start = self.mapSceneToView(
+                    event.buttonDownScenePos(QtCore.Qt.RightButton)
+                )
+                stop = self.mapSceneToView(event.scenePos())
+                if event.isFinish():
+                    self._zoom_box.hide()
+                    self._on_right_zoom(start, stop)
+                    return
+                self._zoom_box.setRect(QtCore.QRectF(start, stop).normalized())
+                self._zoom_box.show()
+                return
+            if button == QtCore.Qt.MiddleButton and event.isStart():
+                if self._on_navigation_start is not None:
+                    self._on_navigation_start()
+            super().mouseDragEvent(event, axis=axis)
+
+        def wheelEvent(self, event, axis=None) -> None:  # noqa: N802
+            if self._on_navigation_start is not None:
+                self._on_navigation_start()
+            super().wheelEvent(event, axis=axis)
+
+
+    class DataTipPoint(pg.ScatterPlotItem):
+        def __init__(self, *args, on_drag=None, on_menu=None, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self._on_drag = on_drag
+            self._on_menu = on_menu
+
+        def mouseClickEvent(self, event) -> None:  # noqa: N802
+            if event.button() == QtCore.Qt.RightButton and self._on_menu is not None:
+                event.accept()
+                self._on_menu(event.screenPos())
+                return
+            super().mouseClickEvent(event)
+
+        def mouseDragEvent(self, event) -> None:  # noqa: N802
+            if event.button() != QtCore.Qt.LeftButton or self._on_drag is None:
+                event.ignore()
+                return
+            event.accept()
+            self._on_drag(event.scenePos())
+
+
+    class DataTipText(pg.TextItem):
+        def __init__(self, *args, on_drag=None, on_menu=None, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self._on_drag = on_drag
+            self._on_menu = on_menu
+
+        def mouseClickEvent(self, event) -> None:  # noqa: N802
+            if event.button() == QtCore.Qt.RightButton and self._on_menu is not None:
+                event.accept()
+                self._on_menu(event.screenPos())
+                return
+            super().mouseClickEvent(event)
+
+        def mouseDragEvent(self, event) -> None:  # noqa: N802
+            if event.button() != QtCore.Qt.LeftButton or self._on_drag is None:
+                event.ignore()
+                return
+            event.accept()
+            self._on_drag(event.scenePos())
+
+
+class RecordPlotWindow(QtWidgets.QDialog):
+    """Non-modal curve viewer and analysis workbench for one logging record."""
+
+    open_record_requested = QtCore.Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("loggingRecordsWindow")
+        self.setWindowTitle("Logging Records / Plot")
+        self.setWindowModality(QtCore.Qt.NonModal)
+        self.setAttribute(QtCore.Qt.WA_DeleteOnClose, False)
+        self.setMinimumSize(900, 620)
+        self.resize(1280, 820)
+
+        self.analysis_session: RecordAnalysisSession | None = None
+        self._populating_curves = False
+        self._visible_ids: set[str] = set()
+        self._curve_items: dict[str, Any] = {}
+        self._curve_colors: dict[str, str] = {}
+        self._display_cache: dict[tuple[Any, ...], tuple[Any, Any, Any]] = {}
+        self._zoom_history = {"time": deque(maxlen=5), "frequency": deque(maxlen=5)}
+        self._last_saved_range: dict[str, tuple[tuple[float, float], tuple[float, float]] | None] = {
+            "time": None,
+            "frequency": None,
+        }
+        self._cursor_state: dict[str, dict[str, Any]] = {}
+        self._data_tips: dict[int, dict[str, Any]] = {}
+        self._tip_counter = 0
+        self._markers: dict[str, dict[str, dict[str, Any]]] = {
+            "time": {},
+            "frequency": {},
+        }
+        self._moving_marker = False
+
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(7)
+        root.addLayout(self._build_file_toolbar())
+
+        if _ANALYSIS_IMPORT_ERROR is None:
+            root.addLayout(self._build_plot_toolbar())
+            root.addWidget(self._build_analysis_workspace(), 1)
+        else:  # pragma: no cover - minimal optional-dependency installation
+            root.addWidget(self._build_dependency_fallback(), 1)
+
+        self.status_label = QtWidgets.QLabel("Open a logging record to begin.")
+        self.status_label.setObjectName("recordPlotStatus")
+        self.status_label.setStyleSheet(
+            "QLabel#recordPlotStatus { background:#e7f3f9; border:1px solid #a9c7d7;"
+            " border-radius:6px; padding:5px 9px; color:#31566c; }"
+        )
+        root.addWidget(self.status_label)
+
+    def _build_file_toolbar(self) -> QtWidgets.QHBoxLayout:
+        toolbar = QtWidgets.QHBoxLayout()
+        self.record_path = QtWidgets.QLineEdit()
+        self.record_path.setPlaceholderText(
+            "CSV/TSV or legacy .LoggRecJson/.LoggRecXml/.ILogRecJson/.ILogRecXml"
+        )
+        self.btn_record_browse = FlatPush("Open record…")
+        self.record_summary = QtWidgets.QLabel("No record loaded")
+        self.record_summary.setMinimumWidth(180)
+        self.record_summary.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        toolbar.addWidget(self.record_path, 1)
+        toolbar.addWidget(self.btn_record_browse)
+        toolbar.addWidget(self.record_summary)
+        self.btn_record_browse.clicked.connect(self.open_record_requested.emit)
+        return toolbar
+
+    def _build_plot_toolbar(self) -> QtWidgets.QHBoxLayout:
+        toolbar = QtWidgets.QHBoxLayout()
+        self.btn_auto_range = FlatPush("Auto fit")
+        self.btn_previous_zoom = FlatPush("Previous zoom")
+        self.btn_cursor = FlatPush("Cursor")
+        self.btn_cursor.setCheckable(True)
+        self.btn_cursor.setChecked(True)
+        self.btn_data_tip = FlatPush("Data tip")
+        self.btn_data_tip.setCheckable(True)
+        self.btn_marker_a = FlatPush("Set A")
+        self.btn_marker_b = FlatPush("Set B")
+        self.btn_clear_annotations = FlatPush("Clear annotations")
+        self.btn_copy_plot = FlatPush("Copy image")
+        self.btn_export_curves = FlatPush("Export selected")
+        for button in (
+            self.btn_auto_range,
+            self.btn_previous_zoom,
+            self.btn_cursor,
+            self.btn_data_tip,
+            self.btn_marker_a,
+            self.btn_marker_b,
+            self.btn_clear_annotations,
+            self.btn_copy_plot,
+            self.btn_export_curves,
+        ):
+            button.setMinimumHeight(30)
+            toolbar.addWidget(button)
+        self.marker_readout = QtWidgets.QLabel("A —   B —   Δ —")
+        self.marker_readout.setMinimumWidth(260)
+        self.marker_readout.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        toolbar.addWidget(self.marker_readout, 1)
+
+        self.btn_auto_range.clicked.connect(self.auto_range)
+        self.btn_previous_zoom.clicked.connect(self.previous_zoom)
+        self.btn_cursor.clicked.connect(lambda checked: self._set_pointer_tool("cursor", checked))
+        self.btn_data_tip.clicked.connect(lambda checked: self._set_pointer_tool("data-tip", checked))
+        self.btn_marker_a.clicked.connect(lambda: self.set_marker("A"))
+        self.btn_marker_b.clicked.connect(lambda: self.set_marker("B"))
+        self.btn_clear_annotations.clicked.connect(self.clear_annotations)
+        self.btn_copy_plot.clicked.connect(self.copy_active_plot)
+        self.btn_export_curves.clicked.connect(self.export_selected_dialog)
+        return toolbar
+
+    def _build_analysis_workspace(self) -> QtWidgets.QWidget:
+        workspace = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        workspace.setChildrenCollapsible(False)
+        workspace.addWidget(self._build_curve_and_processing_panel())
+
+        right = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        right.setChildrenCollapsible(False)
+        self.plot_tabs = QtWidgets.QTabWidget()
+        self.time_plot = self._create_plot("time")
+        self.frequency_plot = self._create_plot("frequency")
+        self.plot_tabs.addTab(self.time_plot, "Time domain")
+        self.plot_tabs.addTab(self.frequency_plot, "Frequency domain")
+        self.plot_tabs.currentChanged.connect(self._active_plot_changed)
+        right.addWidget(self.plot_tabs)
+
+        table_panel = GroupPanel("Raw record (first 1000 rows)")
+        table_layout = QtWidgets.QVBoxLayout(table_panel)
+        table_layout.setContentsMargins(6, 8, 6, 6)
+        self.record_table = QtWidgets.QTableWidget()
+        self.record_table.setAlternatingRowColors(True)
+        self.record_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.record_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        table_layout.addWidget(self.record_table)
+        right.addWidget(table_panel)
+        right.setStretchFactor(0, 3)
+        right.setStretchFactor(1, 1)
+        right.setSizes([590, 190])
+        workspace.addWidget(right)
+        workspace.setStretchFactor(0, 0)
+        workspace.setStretchFactor(1, 1)
+        workspace.setSizes([325, 925])
+        self.plot_widget = self.time_plot
+        return workspace
+
+    def _build_dependency_fallback(self) -> QtWidgets.QWidget:
+        panel = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(panel)
+        message = QtWidgets.QLabel(
+            "Interactive plotting requires NumPy, SciPy and pyqtgraph.\n"
+            "Install the GUI dependencies with:\n\n"
+            "python -m pip install -e .[gui]\n\n"
+            f"Import error: {_ANALYSIS_IMPORT_ERROR}"
+        )
+        message.setWordWrap(True)
+        message.setAlignment(QtCore.Qt.AlignCenter)
+        layout.addWidget(message)
+        self.record_table = QtWidgets.QTableWidget()
+        self.record_table.setAlternatingRowColors(True)
+        self.record_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        layout.addWidget(self.record_table, 1)
+        self.plot_widget = message
+        return panel
+
+    def _build_curve_and_processing_panel(self) -> QtWidgets.QWidget:
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setMinimumWidth(290)
+        scroll.setMaximumWidth(410)
+        panel = QtWidgets.QWidget()
+        root = QtWidgets.QVBoxLayout(panel)
+        root.setContentsMargins(2, 2, 5, 2)
+        root.setSpacing(7)
+
+        curves_group = GroupPanel("Curves")
+        curves_layout = QtWidgets.QVBoxLayout(curves_group)
+        curves_layout.setContentsMargins(6, 8, 6, 6)
+        self.curve_tree = QtWidgets.QTreeWidget()
+        self.curve_tree.setHeaderLabels(["Show", "Curve", "Domain", "Kind"])
+        self.curve_tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.curve_tree.setRootIsDecorated(False)
+        self.curve_tree.setAlternatingRowColors(True)
+        self.curve_tree.setMinimumHeight(220)
+        curve_header = self.curve_tree.header()
+        curve_header.setSectionResizeMode(0, QtWidgets.QHeaderView.Fixed)
+        curve_header.resizeSection(0, 48)
+        curve_header.setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+        curve_header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
+        curve_header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeToContents)
+        curves_layout.addWidget(self.curve_tree, 1)
+        curve_actions = QtWidgets.QHBoxLayout()
+        self.btn_rename_curve = FlatPush("Rename")
+        self.btn_delete_curve = FlatPush("Delete derived")
+        curve_actions.addWidget(self.btn_rename_curve)
+        curve_actions.addWidget(self.btn_delete_curve)
+        curves_layout.addLayout(curve_actions)
+        root.addWidget(curves_group, 2)
+
+        sampling_group = GroupPanel("Sampling")
+        sampling_form = QtWidgets.QFormLayout(sampling_group)
+        self.sample_rate = QtWidgets.QDoubleSpinBox()
+        self.sample_rate.setRange(0.0, 1_000_000_000.0)
+        self.sample_rate.setDecimals(6)
+        self.sample_rate.setSuffix(" Hz")
+        self.sample_rate.setSpecialValueText("Not set")
+        self.sample_rate.setKeyboardTracking(False)
+        self.sampling_state = QtWidgets.QLabel("—")
+        self.sampling_state.setWordWrap(True)
+        self.btn_resample = FlatPush("Resample selected")
+        sampling_form.addRow("Sample rate", self.sample_rate)
+        sampling_form.addRow("State", self.sampling_state)
+        sampling_form.addRow(self.btn_resample)
+        root.addWidget(sampling_group)
+
+        detrend_group = GroupPanel("Detrend")
+        detrend_layout = QtWidgets.QHBoxLayout(detrend_group)
+        self.btn_remove_mean = FlatPush("Remove mean")
+        self.btn_linear_detrend = FlatPush("Linear")
+        detrend_layout.addWidget(self.btn_remove_mean)
+        detrend_layout.addWidget(self.btn_linear_detrend)
+        root.addWidget(detrend_group)
+
+        smooth_group = GroupPanel("Moving Average")
+        smooth_layout = QtWidgets.QHBoxLayout(smooth_group)
+        self.smooth_window = QtWidgets.QSpinBox()
+        self.smooth_window.setRange(3, 1001)
+        self.smooth_window.setSingleStep(2)
+        self.smooth_window.setValue(5)
+        self.btn_smooth = FlatPush("Apply")
+        smooth_layout.addWidget(QtWidgets.QLabel("Window"))
+        smooth_layout.addWidget(self.smooth_window, 1)
+        smooth_layout.addWidget(self.btn_smooth)
+        root.addWidget(smooth_group)
+
+        filter_group = GroupPanel("Butterworth Filter")
+        filter_form = QtWidgets.QFormLayout(filter_group)
+        self.filter_type = QtWidgets.QComboBox()
+        self.filter_type.addItem("Low-pass", "lowpass")
+        self.filter_type.addItem("High-pass", "highpass")
+        self.filter_type.addItem("Band-pass", "bandpass")
+        self.filter_low = QtWidgets.QDoubleSpinBox()
+        self.filter_high = QtWidgets.QDoubleSpinBox()
+        for control in (self.filter_low, self.filter_high):
+            control.setRange(0.000001, 1_000_000_000.0)
+            control.setDecimals(6)
+            control.setSuffix(" Hz")
+            control.setKeyboardTracking(False)
+        self.filter_low.setValue(1.0)
+        self.filter_high.setValue(40.0)
+        self.filter_order = QtWidgets.QSpinBox()
+        self.filter_order.setRange(1, 12)
+        self.filter_order.setValue(4)
+        self.btn_filter = FlatPush("Create filtered curve")
+        filter_form.addRow("Type", self.filter_type)
+        filter_form.addRow("Low cutoff", self.filter_low)
+        filter_form.addRow("High cutoff", self.filter_high)
+        filter_form.addRow("Order", self.filter_order)
+        filter_form.addRow(self.btn_filter)
+        root.addWidget(filter_group)
+
+        spectrum_group = GroupPanel("Spectrum")
+        spectrum_form = QtWidgets.QFormLayout(spectrum_group)
+        self.psd_block = QtWidgets.QComboBox()
+        for size in (64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384):
+            self.psd_block.addItem(str(size), size)
+        self.psd_block.setCurrentIndex(self.psd_block.findData(4096))
+        spectrum_buttons = QtWidgets.QHBoxLayout()
+        self.btn_fft = FlatPush("FFT")
+        self.btn_psd = FlatPush("Welch PSD")
+        spectrum_buttons.addWidget(self.btn_fft)
+        spectrum_buttons.addWidget(self.btn_psd)
+        spectrum_form.addRow("PSD block", self.psd_block)
+        spectrum_form.addRow(spectrum_buttons)
+        root.addWidget(spectrum_group)
+
+        display_group = GroupPanel("Frequency Display")
+        display_layout = QtWidgets.QHBoxLayout(display_group)
+        self.frequency_x_log = QtWidgets.QCheckBox("Log X")
+        self.frequency_db = QtWidgets.QCheckBox("dB Y")
+        display_layout.addWidget(self.frequency_x_log)
+        display_layout.addWidget(self.frequency_db)
+        display_layout.addStretch(1)
+        root.addWidget(display_group)
+        root.addStretch(1)
+        scroll.setWidget(panel)
+
+        self.curve_tree.itemChanged.connect(self._curve_visibility_changed)
+        self.curve_tree.itemSelectionChanged.connect(self._curve_selection_changed)
+        self.btn_rename_curve.clicked.connect(self.rename_selected_curve)
+        self.btn_delete_curve.clicked.connect(self.delete_selected_curves)
+        self.sample_rate.editingFinished.connect(self._sample_rate_edited)
+        self.btn_resample.clicked.connect(self.resample_selected)
+        self.btn_remove_mean.clicked.connect(lambda: self.detrend_selected("constant"))
+        self.btn_linear_detrend.clicked.connect(lambda: self.detrend_selected("linear"))
+        self.btn_smooth.clicked.connect(self.smooth_selected)
+        self.filter_type.currentIndexChanged.connect(self._filter_type_changed)
+        self.btn_filter.clicked.connect(self.filter_selected)
+        self.btn_fft.clicked.connect(self.fft_selected)
+        self.btn_psd.clicked.connect(self.psd_selected)
+        self.frequency_x_log.toggled.connect(self._frequency_display_changed)
+        self.frequency_db.toggled.connect(self._frequency_display_changed)
+        self._filter_type_changed()
+        return scroll
+
+    def _create_plot(self, domain: str):
+        view_box = InteractiveViewBox(
+            on_left_drag=lambda position, selected=domain: self._handle_pointer(
+                selected, position, dragging=True
+            ),
+            on_right_zoom=lambda start, stop, selected=domain: self._rubber_zoom(
+                selected, start, stop
+            ),
+            on_navigation_start=lambda selected=domain: self._remember_range(selected),
+        )
+        axes = {
+            "left": PlainAxisItem(orientation="left"),
+            "bottom": PlainAxisItem(orientation="bottom"),
+        }
+        plot = pg.PlotWidget(viewBox=view_box, axisItems=axes)
+        plot.setBackground(PLOT_BACKGROUND)
+        plot.getPlotItem().showGrid(x=True, y=True, alpha=0.22)
+        plot.getPlotItem().setMenuEnabled(False)
+        plot.getPlotItem().setLabel(
+            "bottom", "Time (s)" if domain == "time" else "Frequency (Hz)"
+        )
+        plot.getPlotItem().setLabel("left", "Value")
+        legend = plot.getPlotItem().addLegend(offset=(8, 8))
+        legend.setZValue(10)
+        plot._record_domain = domain
+        plot._record_view_box = view_box
+        plot._record_legend = legend
+        plot.scene().sigMouseClicked.connect(
+            lambda event, selected=domain: self._plot_scene_clicked(selected, event)
+        )
+        return plot
+
+    def set_record(self, record: LoggingRecord) -> None:
+        """Replace the viewer contents with one completed logging record."""
+
+        self._populate_raw_table(record)
+        suffix = " (first 1000 shown)" if len(record.rows) > 1000 else ""
+        if _ANALYSIS_IMPORT_ERROR is not None:  # pragma: no cover
+            self.record_summary.setText(
+                f"{len(record.rows)} samples · plotting dependencies unavailable{suffix}"
+            )
+            self.record_path.setText(record.source)
+            self.status_label.setText(
+                f"Plotting unavailable: {_ANALYSIS_IMPORT_ERROR}. Raw rows remain accessible."
+            )
+            return
+
+        self.clear_annotations(all_domains=True)
+        self._remove_all_curve_items()
+        self.analysis_session = RecordAnalysisSession.from_record(record)
+        self._curve_colors.clear()
+        self._display_cache.clear()
+        self._visible_ids = {
+            curve.curve_id for curve in self.analysis_session.curves_for_domain("time")[:6]
+        }
+        self._zoom_history["time"].clear()
+        self._zoom_history["frequency"].clear()
+        self._last_saved_range = {"time": None, "frequency": None}
+        self._refresh_curve_tree()
+        self._update_sampling_controls()
+        self._refresh_plots(auto_range=True)
+        self.record_summary.setText(
+            f"{len(record.rows)} samples · {len(self.analysis_session.curves_for_domain('time'))} numeric signals{suffix}"
+        )
+        self.record_path.setText(record.source)
+        if self.analysis_session.curves:
+            self.status_label.setText(
+                "Record loaded. Select curves on the left; the first six numeric channels are visible."
+            )
+        else:
+            self.status_label.setText("The record contains no numeric signal columns.")
+
+    def _remove_all_curve_items(self) -> None:
+        if _ANALYSIS_IMPORT_ERROR is not None or not hasattr(self, "time_plot"):
+            self._curve_items.clear()
+            return
+        for domain, plot in (("time", self.time_plot), ("frequency", self.frequency_plot)):
+            for item in list(self._curve_items.get(domain, {}).values()):
+                try:
+                    plot._record_view_box.removeItem(item)
+                except (RuntimeError, ValueError):
+                    pass
+            plot._record_legend.clear()
+        self._curve_items.clear()
+
+    def _populate_raw_table(self, record: LoggingRecord) -> None:
+        preview = record.rows[:1000]
+        self.record_table.setUpdatesEnabled(False)
+        try:
+            self.record_table.clear()
+            self.record_table.setColumnCount(len(record.headers))
+            self.record_table.setHorizontalHeaderLabels(record.headers)
+            self.record_table.setRowCount(len(preview))
+            for row_index, row in enumerate(preview):
+                for column, value in enumerate(row[: len(record.headers)]):
+                    self.record_table.setItem(
+                        row_index,
+                        column,
+                        QtWidgets.QTableWidgetItem(format_ui_number(value)),
+                    )
+            self.record_table.resizeColumnsToContents()
+        finally:
+            self.record_table.setUpdatesEnabled(True)
+
+    def _refresh_curve_tree(
+        self,
+        *,
+        select_ids: set[str] | None = None,
+        make_visible: set[str] | None = None,
+    ) -> None:
+        if self.analysis_session is None:
+            return
+        previous_selection = set(select_ids or self.selected_curve_ids())
+        if make_visible:
+            self._visible_ids.update(make_visible)
+        self._populating_curves = True
+        self.curve_tree.clear()
+        try:
+            for index, curve in enumerate(self.analysis_session.curves):
+                color = self._curve_colors.setdefault(
+                    curve.curve_id, CURVE_COLORS[index % len(CURVE_COLORS)]
+                )
+                item = QtWidgets.QTreeWidgetItem(
+                    [
+                        "",
+                        curve.name,
+                        "Time" if curve.domain == "time" else "Frequency",
+                        "Derived" if curve.derived else "Original",
+                    ]
+                )
+                item.setData(0, QtCore.Qt.UserRole, curve.curve_id)
+                item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
+                item.setCheckState(
+                    0,
+                    QtCore.Qt.Checked
+                    if curve.curve_id in self._visible_ids
+                    else QtCore.Qt.Unchecked,
+                )
+                item.setForeground(1, QtGui.QBrush(QtGui.QColor(color)))
+                if curve.derived:
+                    font = item.font(1)
+                    font.setItalic(True)
+                    item.setFont(1, font)
+                self.curve_tree.addTopLevelItem(item)
+                if curve.curve_id in previous_selection:
+                    item.setSelected(True)
+            if not self.curve_tree.selectedItems() and self.curve_tree.topLevelItemCount():
+                first_visible = next(
+                    (
+                        self.curve_tree.topLevelItem(row)
+                        for row in range(self.curve_tree.topLevelItemCount())
+                        if self.curve_tree.topLevelItem(row).checkState(0)
+                        == QtCore.Qt.Checked
+                    ),
+                    self.curve_tree.topLevelItem(0),
+                )
+                first_visible.setSelected(True)
+                self.curve_tree.setCurrentItem(first_visible)
+        finally:
+            self._populating_curves = False
+        self._curve_selection_changed()
+
+    def selected_curve_ids(self, domain: str | None = None) -> list[str]:
+        if _ANALYSIS_IMPORT_ERROR is not None or not hasattr(self, "curve_tree"):
+            return []
+        result: list[str] = []
+        for item in self.curve_tree.selectedItems():
+            curve_id = str(item.data(0, QtCore.Qt.UserRole))
+            if self.analysis_session is None:
+                continue
+            try:
+                curve = self.analysis_session.get_curve(curve_id)
+            except KeyError:
+                # The tree is rebuilt after replacing a record or deleting a
+                # derived subtree; stale selected items are ignored.
+                continue
+            if domain is None or curve.domain == domain:
+                result.append(curve_id)
+        return result
+
+    def _curve_visibility_changed(self, item, column: int) -> None:
+        if self._populating_curves or column != 0:
+            return
+        curve_id = str(item.data(0, QtCore.Qt.UserRole))
+        if item.checkState(0) == QtCore.Qt.Checked:
+            self._visible_ids.add(curve_id)
+        else:
+            self._visible_ids.discard(curve_id)
+        self._refresh_plots()
+
+    def _curve_selection_changed(self) -> None:
+        if self._populating_curves or self.analysis_session is None:
+            return
+        selected = self.selected_curve_ids()
+        derived = [
+            curve_id
+            for curve_id in selected
+            if self.analysis_session.get_curve(curve_id).derived
+        ]
+        self.btn_rename_curve.setEnabled(len(derived) == 1 and len(selected) == 1)
+        self.btn_delete_curve.setEnabled(bool(derived))
+
+    def _display_data(self, curve: NumericCurve) -> tuple[Any, Any, Any]:
+        sample_rate = (
+            self.analysis_session.sampling.sample_rate_hz
+            if self.analysis_session is not None
+            else None
+        )
+        cache_key = (
+            curve.curve_id,
+            bool(self.frequency_x_log.isChecked()),
+            bool(self.frequency_db.isChecked()),
+            sample_rate if curve.x_unit == "samples" else None,
+        )
+        cached = self._display_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        x_values = curve.x
+        if curve.domain == "time" and curve.x_unit == "samples" and sample_rate:
+            x_values = curve.x / sample_rate
+        if curve.domain == "frequency" and self.frequency_x_log.isChecked():
+            x_values = np.full(curve.x.shape, np.nan, dtype=np.float64)
+            positive = curve.x > 0.0
+            x_values[positive] = np.log10(curve.x[positive])
+        y_values = self.analysis_session.displayed_y(
+            curve,
+            decibels=curve.domain == "frequency" and self.frequency_db.isChecked(),
+        )
+        finite_indices = np.flatnonzero(np.isfinite(x_values) & np.isfinite(y_values))
+        result = (x_values, y_values, finite_indices)
+        self._display_cache[cache_key] = result
+        return result
+
+    def _display_arrays(self, curve: NumericCurve) -> tuple[Any, Any]:
+        x_values, y_values, _finite_indices = self._display_data(curve)
+        return x_values, y_values
+
+    def _semantic_x_value(self, curve: NumericCurve, index: int) -> float:
+        value = float(curve.x[index])
+        if (
+            curve.domain == "time"
+            and curve.x_unit == "samples"
+            and self.analysis_session is not None
+            and self.analysis_session.sampling.sample_rate_hz
+        ):
+            value /= self.analysis_session.sampling.sample_rate_hz
+        return value
+
+    def _refresh_plots(self, *, auto_range: bool = False) -> None:
+        if self.analysis_session is None:
+            return
+        selected = set(self.selected_curve_ids())
+        for domain, plot in (("time", self.time_plot), ("frequency", self.frequency_plot)):
+            view_box = plot._record_view_box
+            for item in list(self._curve_items.get(domain, {}).values()):
+                view_box.removeItem(item)
+            self._curve_items[domain] = {}
+            plot._record_legend.clear()
+            for curve in self.analysis_session.curves_for_domain(domain):
+                if curve.curve_id not in self._visible_ids:
+                    continue
+                x_values, y_values = self._display_arrays(curve)
+                width = 2.2 if curve.curve_id in selected else 1.45
+                pen = pg.mkPen(self._curve_colors[curve.curve_id], width=width)
+                item = pg.PlotDataItem(x_values, y_values, pen=pen, name=curve.name)
+                item.setZValue(0)
+                view_box.addItem(item)
+                # Enable view-dependent optimisations after the item has a
+                # ViewBox parent.  pyqtgraph 0.14 queries that parent
+                # immediately when auto-downsampling is switched on.
+                item.setDownsampling(auto=True, method="peak")
+                item.setClipToView(True)
+                plot._record_legend.addItem(item, curve.name)
+                self._curve_items[domain][curve.curve_id] = item
+        if auto_range:
+            self.time_plot.getPlotItem().autoRange()
+            self.frequency_plot.getPlotItem().autoRange()
+
+    def _frequency_display_changed(self) -> None:
+        if self.analysis_session is None:
+            return
+        self._display_cache.clear()
+        axis = self.frequency_plot.getPlotItem().getAxis("bottom")
+        axis.setLogMode(self.frequency_x_log.isChecked())
+        self.frequency_plot.getPlotItem().setLabel(
+            "left", "Level (dB)" if self.frequency_db.isChecked() else "Value"
+        )
+        self.clear_annotations(domain="frequency")
+        self._refresh_plots()
+        self.frequency_plot.getPlotItem().autoRange()
+
+    def _active_domain(self) -> str:
+        return "frequency" if self.plot_tabs.currentIndex() == 1 else "time"
+
+    def _active_plot(self):
+        return self.frequency_plot if self._active_domain() == "frequency" else self.time_plot
+
+    def _active_plot_changed(self, _index: int) -> None:
+        self._update_marker_readout(self._active_domain())
+
+    def _set_pointer_tool(self, tool: str, checked: bool) -> None:
+        if tool == "cursor":
+            if checked:
+                self.btn_data_tip.setChecked(False)
+            elif not self.btn_data_tip.isChecked():
+                self.btn_cursor.setChecked(True)
+        else:
+            if checked:
+                self.btn_cursor.setChecked(False)
+            elif not self.btn_cursor.isChecked():
+                self.btn_cursor.setChecked(True)
+
+    def _pointer_tool(self) -> str:
+        return "data-tip" if self.btn_data_tip.isChecked() else "cursor"
+
+    def _candidate_curves(self, domain: str, only_curve_id: str | None = None):
+        if self.analysis_session is None:
+            return []
+        if only_curve_id:
+            curve = self.analysis_session.get_curve(only_curve_id)
+            return [curve] if curve.domain == domain else []
+        selected = set(self.selected_curve_ids(domain))
+        visible = [
+            curve
+            for curve in self.analysis_session.curves_for_domain(domain)
+            if curve.curve_id in self._visible_ids
+        ]
+        selected_visible = [curve for curve in visible if curve.curve_id in selected]
+        return selected_visible or visible
+
+    def _nearest_point(
+        self,
+        domain: str,
+        scene_position,
+        *,
+        only_curve_id: str | None = None,
+    ) -> tuple[NumericCurve, int, float, float, float, float] | None:
+        plot = self.frequency_plot if domain == "frequency" else self.time_plot
+        view_box = plot._record_view_box
+        if not view_box.sceneBoundingRect().contains(scene_position):
+            return None
+        point = view_box.mapSceneToView(scene_position)
+        x_range, y_range = view_box.viewRange()
+        x_span = max(abs(x_range[1] - x_range[0]), 1e-12)
+        y_span = max(abs(y_range[1] - y_range[0]), 1e-12)
+        best = None
+        best_distance = float("inf")
+        for curve in self._candidate_curves(domain, only_curve_id):
+            x_values, y_values, indices = self._display_data(curve)
+            if not len(indices):
+                continue
+            candidate_x = x_values[indices]
+            if len(candidate_x) > 1 and np.all(np.diff(candidate_x) >= 0.0):
+                insertion = int(np.searchsorted(candidate_x, point.x()))
+                local = {
+                    max(0, min(insertion, len(indices) - 1)),
+                    max(0, min(insertion - 1, len(indices) - 1)),
+                }
+                candidates = [indices[position] for position in local]
+            else:
+                candidates = [indices[int(np.argmin(np.abs(candidate_x - point.x())))]]
+            for index in candidates:
+                plot_x = float(x_values[index])
+                plot_y = float(y_values[index])
+                distance = ((plot_x - point.x()) / x_span) ** 2 + (
+                    (plot_y - point.y()) / y_span
+                ) ** 2
+                if distance < best_distance:
+                    best_distance = distance
+                    best = (
+                        curve,
+                        int(index),
+                        self._semantic_x_value(curve, int(index)),
+                        float(curve.y[index]),
+                        plot_x,
+                        plot_y,
+                    )
+        return best
+
+    def _nearest_for_view_x(
+        self, domain: str, curve_id: str, view_x: float
+    ) -> tuple[NumericCurve, int, float, float, float, float] | None:
+        if self.analysis_session is None:
+            return None
+        curve = self.analysis_session.get_curve(curve_id)
+        x_values, y_values, indices = self._display_data(curve)
+        if not len(indices):
+            return None
+        candidates = x_values[indices]
+        if len(candidates) > 1 and np.all(np.diff(candidates) >= 0.0):
+            insertion = int(np.searchsorted(candidates, view_x))
+            choices = [
+                max(0, min(insertion, len(indices) - 1)),
+                max(0, min(insertion - 1, len(indices) - 1)),
+            ]
+            local = min(choices, key=lambda item: abs(float(candidates[item]) - view_x))
+            index = int(indices[local])
+        else:
+            index = int(indices[int(np.argmin(np.abs(candidates - view_x)))])
+        return (
+            curve,
+            index,
+            self._semantic_x_value(curve, index),
+            float(curve.y[index]),
+            float(x_values[index]),
+            float(y_values[index]),
+        )
+
+    def _plot_scene_clicked(self, domain: str, event) -> None:
+        if event.button() == QtCore.Qt.RightButton:
+            self._show_plot_menu(domain, event.screenPos())
+            return
+        if event.button() == QtCore.Qt.LeftButton:
+            self._handle_pointer(domain, event.scenePos(), dragging=False)
+
+    def _handle_pointer(self, domain: str, scene_position, *, dragging: bool) -> None:
+        nearest = self._nearest_point(domain, scene_position)
+        if nearest is None:
+            return
+        if self._pointer_tool() == "data-tip":
+            if not dragging:
+                self._add_data_tip(domain, nearest)
+        else:
+            self._update_cursor(domain, nearest)
+
+    def _format_point_label(self, prefix: str, nearest) -> str:
+        curve, _index, x_value, _y_value, _plot_x, _plot_y = nearest
+        shown_y = self._displayed_point_y(nearest)
+        y_suffix = " dB" if curve.domain == "frequency" and self.frequency_db.isChecked() else ""
+        return (
+            f"{prefix}{curve.name}\n"
+            f"X {_short_number(x_value)}\nY {_short_number(shown_y)}{y_suffix}"
+        )
+
+    def _displayed_point_y(self, nearest) -> float:
+        curve = nearest[0]
+        if curve.domain == "frequency" and self.frequency_db.isChecked():
+            return float(nearest[5])
+        return float(nearest[3])
+
+    def _update_cursor(self, domain: str, nearest) -> None:
+        plot = self.frequency_plot if domain == "frequency" else self.time_plot
+        view_box = plot._record_view_box
+        state = self._cursor_state.get(domain)
+        if state is None:
+            line = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("#0f4c81", width=1.2))
+            point = pg.ScatterPlotItem(
+                size=9,
+                pen=pg.mkPen("#071827", width=1.0),
+                brush=pg.mkBrush("#fff176"),
+            )
+            label = pg.TextItem(
+                color="#071827",
+                fill=pg.mkBrush(255, 245, 157, 225),
+                border=pg.mkPen("#071827", width=0.8),
+                anchor=(0.0, 1.0),
+            )
+            line.setZValue(30)
+            point.setZValue(31)
+            label.setZValue(32)
+            view_box.addItem(line, ignoreBounds=True)
+            view_box.addItem(point, ignoreBounds=True)
+            view_box.addItem(label, ignoreBounds=True)
+            state = {"line": line, "point": point, "label": label, "nearest": None}
+            self._cursor_state[domain] = state
+        curve, index, _x, _y, plot_x, plot_y = nearest
+        state["line"].setValue(plot_x)
+        state["point"].setData([plot_x], [plot_y])
+        state["label"].setText(self._format_point_label("", nearest))
+        state["label"].setPos(plot_x, plot_y)
+        state["nearest"] = nearest
+        shown_y = self._displayed_point_y(nearest)
+        suffix = " dB" if curve.domain == "frequency" and self.frequency_db.isChecked() else ""
+        self.status_label.setText(
+            f"Cursor · {curve.name} · sample {index + 1} · X {_short_number(nearest[2])} · Y {_short_number(shown_y)}{suffix}"
+        )
+
+    def _add_data_tip(self, domain: str, nearest) -> None:
+        plot = self.frequency_plot if domain == "frequency" else self.time_plot
+        view_box = plot._record_view_box
+        self._tip_counter += 1
+        tip_id = self._tip_counter
+        curve, _index, _x, _y, plot_x, plot_y = nearest
+        color = self._curve_colors.get(curve.curve_id, "#1875a6")
+        point = DataTipPoint(
+            [plot_x],
+            [plot_y],
+            size=10,
+            pen=pg.mkPen("#071827", width=1.0),
+            brush=pg.mkBrush(color),
+            on_drag=lambda scene, selected=tip_id: self._drag_data_tip(selected, scene),
+            on_menu=lambda screen, selected=tip_id: self._show_tip_menu(selected, screen),
+        )
+        label = DataTipText(
+            self._format_point_label("", nearest),
+            color="#071827",
+            fill=pg.mkBrush(255, 255, 255, 232),
+            border=pg.mkPen(color, width=1.0),
+            anchor=(-0.05, 1.05),
+            on_drag=lambda scene, selected=tip_id: self._drag_tip_label(selected, scene),
+            on_menu=lambda screen, selected=tip_id: self._show_tip_menu(selected, screen),
+        )
+        point.setZValue(40)
+        label.setZValue(41)
+        label.setPos(plot_x, plot_y)
+        view_box.addItem(point, ignoreBounds=True)
+        view_box.addItem(label, ignoreBounds=True)
+        self._data_tips[tip_id] = {
+            "domain": domain,
+            "curve_id": curve.curve_id,
+            "nearest": nearest,
+            "point": point,
+            "label": label,
+        }
+        self.status_label.setText(f"Data tip added to {curve.name}.")
+
+    def _drag_data_tip(self, tip_id: int, scene_position) -> None:
+        tip = self._data_tips.get(tip_id)
+        if tip is None:
+            return
+        nearest = self._nearest_point(
+            tip["domain"], scene_position, only_curve_id=tip["curve_id"]
+        )
+        if nearest is None:
+            return
+        tip["nearest"] = nearest
+        tip["point"].setData([nearest[4]], [nearest[5]])
+        tip["label"].setText(self._format_point_label("", nearest))
+        tip["label"].setPos(nearest[4], nearest[5])
+
+    def _drag_tip_label(self, tip_id: int, scene_position) -> None:
+        tip = self._data_tips.get(tip_id)
+        if tip is None:
+            return
+        plot = self.frequency_plot if tip["domain"] == "frequency" else self.time_plot
+        mouse = plot._record_view_box.mapSceneToView(scene_position)
+        nearest = tip["nearest"]
+        right = mouse.x() >= nearest[4]
+        above = mouse.y() >= nearest[5]
+        tip["label"].setAnchor(
+            (-0.05 if right else 1.05, 1.05 if above else -0.05)
+        )
+        tip["label"].setPos(nearest[4], nearest[5])
+
+    def _show_tip_menu(self, tip_id: int, screen_position) -> None:
+        menu = QtWidgets.QMenu(self)
+        remove = menu.addAction("Delete this data tip")
+        clear = menu.addAction("Clear all data tips")
+        action = menu.exec(self._screen_point(screen_position))
+        if action == remove:
+            self._remove_data_tip(tip_id)
+        elif action == clear:
+            self.clear_data_tips()
+
+    def _remove_data_tip(self, tip_id: int) -> None:
+        tip = self._data_tips.pop(tip_id, None)
+        if tip is None:
+            return
+        plot = self.frequency_plot if tip["domain"] == "frequency" else self.time_plot
+        plot._record_view_box.removeItem(tip["point"])
+        plot._record_view_box.removeItem(tip["label"])
+
+    def clear_data_tips(self, domain: str | None = None) -> None:
+        for tip_id, tip in list(self._data_tips.items()):
+            if domain is None or tip["domain"] == domain:
+                self._remove_data_tip(tip_id)
+
+    def _remove_cursor(self, domain: str) -> None:
+        state = self._cursor_state.pop(domain, None)
+        if not state:
+            return
+        plot = self.frequency_plot if domain == "frequency" else self.time_plot
+        for key in ("line", "point", "label"):
+            plot._record_view_box.removeItem(state[key])
+
+    def set_marker(self, name: str) -> None:
+        domain = self._active_domain()
+        candidates = self._candidate_curves(domain)
+        if not candidates:
+            self.status_label.setText("Show and select a curve before setting a marker.")
+            return
+        curve = candidates[0]
+        cursor = self._cursor_state.get(domain, {}).get("nearest")
+        if cursor is not None and cursor[0].curve_id == curve.curve_id:
+            nearest = cursor
+        else:
+            plot = self._active_plot()
+            x_range = plot._record_view_box.viewRange()[0]
+            nearest = self._nearest_for_view_x(
+                domain, curve.curve_id, (x_range[0] + x_range[1]) / 2.0
+            )
+        if nearest is None:
+            return
+        self._remove_marker(domain, name)
+        plot = self._active_plot()
+        view_box = plot._record_view_box
+        color = "#e64a19" if name == "A" else "#7b1fa2"
+        line = pg.InfiniteLine(
+            pos=nearest[4], angle=90, movable=True, pen=pg.mkPen(color, width=1.6)
+        )
+        point = pg.ScatterPlotItem(
+            [nearest[4]],
+            [nearest[5]],
+            size=10,
+            pen=pg.mkPen("#ffffff", width=1.0),
+            brush=pg.mkBrush(color),
+        )
+        label = pg.TextItem(
+            self._format_point_label(f"{name} · ", nearest),
+            color="#071827",
+            fill=pg.mkBrush(255, 255, 255, 232),
+            border=pg.mkPen(color, width=1.0),
+            anchor=(0.0, 1.0),
+        )
+        line.setZValue(20)
+        point.setZValue(21)
+        label.setZValue(22)
+        label.setPos(nearest[4], nearest[5])
+        view_box.addItem(line, ignoreBounds=True)
+        view_box.addItem(point, ignoreBounds=True)
+        view_box.addItem(label, ignoreBounds=True)
+        marker = {
+            "curve_id": curve.curve_id,
+            "nearest": nearest,
+            "line": line,
+            "point": point,
+            "label": label,
+        }
+        self._markers[domain][name] = marker
+        line.sigPositionChanged.connect(
+            lambda _line=None, selected_domain=domain, selected_name=name: self._marker_moved(
+                selected_domain, selected_name, False
+            )
+        )
+        line.sigPositionChangeFinished.connect(
+            lambda _line=None, selected_domain=domain, selected_name=name: self._marker_moved(
+                selected_domain, selected_name, True
+            )
+        )
+        self._update_marker_readout(domain)
+
+    def _marker_moved(self, domain: str, name: str, finished: bool) -> None:
+        if self._moving_marker:
+            return
+        marker = self._markers.get(domain, {}).get(name)
+        if marker is None:
+            return
+        nearest = self._nearest_for_view_x(
+            domain, marker["curve_id"], float(marker["line"].value())
+        )
+        if nearest is None:
+            return
+        marker["nearest"] = nearest
+        marker["point"].setData([nearest[4]], [nearest[5]])
+        marker["label"].setText(self._format_point_label(f"{name} · ", nearest))
+        marker["label"].setPos(nearest[4], nearest[5])
+        if finished:
+            self._moving_marker = True
+            try:
+                marker["line"].setValue(nearest[4])
+            finally:
+                self._moving_marker = False
+        self._update_marker_readout(domain)
+
+    def _remove_marker(self, domain: str, name: str) -> None:
+        marker = self._markers.get(domain, {}).pop(name, None)
+        if marker is None:
+            return
+        plot = self.frequency_plot if domain == "frequency" else self.time_plot
+        for key in ("line", "point", "label"):
+            plot._record_view_box.removeItem(marker[key])
+
+    def _update_marker_readout(self, domain: str) -> None:
+        markers = self._markers.get(domain, {})
+        a = markers.get("A", {}).get("nearest")
+        b = markers.get("B", {}).get("nearest")
+        a_text = "—" if a is None else f"{_short_number(a[2])}, {_short_number(self._displayed_point_y(a))}"
+        b_text = "—" if b is None else f"{_short_number(b[2])}, {_short_number(self._displayed_point_y(b))}"
+        if a is not None and b is not None:
+            delta = (
+                f"{_short_number(b[2] - a[2])}, "
+                f"{_short_number(self._displayed_point_y(b) - self._displayed_point_y(a))}"
+            )
+        else:
+            delta = "—"
+        suffix = " dB" if domain == "frequency" and self.frequency_db.isChecked() else ""
+        self.marker_readout.setText(f"A {a_text}{suffix}   B {b_text}{suffix}   Δ {delta}{suffix}")
+
+    def clear_annotations(
+        self, _checked: bool = False, *, domain: str | None = None, all_domains: bool = False
+    ) -> None:
+        if _ANALYSIS_IMPORT_ERROR is not None or not hasattr(self, "time_plot"):
+            return
+        domains = (
+            ("time", "frequency")
+            if all_domains or domain is None and _checked is False
+            else (domain or self._active_domain(),)
+        )
+        if not all_domains and domain is None:
+            domains = (self._active_domain(),)
+        for selected in domains:
+            self.clear_data_tips(selected)
+            self._remove_cursor(selected)
+            for marker_name in list(self._markers[selected]):
+                self._remove_marker(selected, marker_name)
+            self._update_marker_readout(selected)
+
+    @staticmethod
+    def _screen_point(position) -> QtCore.QPoint:
+        if hasattr(position, "toPoint"):
+            return position.toPoint()
+        return QtCore.QPoint(int(position.x()), int(position.y()))
+
+    def _show_plot_menu(self, domain: str, screen_position) -> None:
+        menu = QtWidgets.QMenu(self)
+        previous = menu.addAction("Previous zoom")
+        auto = menu.addAction("Auto fit")
+        menu.addSeparator()
+        cursor = menu.addAction("Cursor")
+        cursor.setCheckable(True)
+        cursor.setChecked(self._pointer_tool() == "cursor")
+        data_tip = menu.addAction("Data tip")
+        data_tip.setCheckable(True)
+        data_tip.setChecked(self._pointer_tool() == "data-tip")
+        clear_tips = menu.addAction("Clear data tips")
+        marker_a = menu.addAction("Set marker A")
+        marker_b = menu.addAction("Set marker B")
+        clear_annotations = menu.addAction("Clear annotations")
+        menu.addSeparator()
+        copy_image = menu.addAction("Copy image")
+        export = menu.addAction("Export selected curves")
+        action = menu.exec(self._screen_point(screen_position))
+        if action == previous:
+            self.previous_zoom(domain=domain)
+        elif action == auto:
+            self.auto_range(domain=domain)
+        elif action == cursor:
+            self.btn_cursor.setChecked(True)
+            self.btn_data_tip.setChecked(False)
+        elif action == data_tip:
+            self.btn_cursor.setChecked(False)
+            self.btn_data_tip.setChecked(True)
+        elif action == clear_tips:
+            self.clear_data_tips(domain)
+        elif action == marker_a:
+            self.plot_tabs.setCurrentIndex(1 if domain == "frequency" else 0)
+            self.set_marker("A")
+        elif action == marker_b:
+            self.plot_tabs.setCurrentIndex(1 if domain == "frequency" else 0)
+            self.set_marker("B")
+        elif action == clear_annotations:
+            self.clear_annotations(domain=domain)
+        elif action == copy_image:
+            self.copy_active_plot()
+        elif action == export:
+            self.export_selected_dialog()
+
+    def _remember_range(self, domain: str) -> None:
+        if _ANALYSIS_IMPORT_ERROR is not None:
+            return
+        plot = self.frequency_plot if domain == "frequency" else self.time_plot
+        ranges = plot._record_view_box.viewRange()
+        snapshot = (
+            (float(ranges[0][0]), float(ranges[0][1])),
+            (float(ranges[1][0]), float(ranges[1][1])),
+        )
+        if self._last_saved_range[domain] == snapshot:
+            return
+        self._zoom_history[domain].append(snapshot)
+        self._last_saved_range[domain] = snapshot
+
+    def _rubber_zoom(self, domain: str, start, stop) -> None:
+        if abs(stop.x() - start.x()) < 1e-12 or abs(stop.y() - start.y()) < 1e-12:
+            return
+        self._remember_range(domain)
+        plot = self.frequency_plot if domain == "frequency" else self.time_plot
+        plot._record_view_box.setRange(
+            xRange=sorted((float(start.x()), float(stop.x()))),
+            yRange=sorted((float(start.y()), float(stop.y()))),
+            padding=0.0,
+        )
+
+    def auto_range(self, _checked: bool = False, *, domain: str | None = None) -> None:
+        if _ANALYSIS_IMPORT_ERROR is not None:
+            return
+        selected = domain or self._active_domain()
+        self._remember_range(selected)
+        plot = self.frequency_plot if selected == "frequency" else self.time_plot
+        plot.getPlotItem().autoRange()
+
+    def previous_zoom(self, _checked: bool = False, *, domain: str | None = None) -> None:
+        if _ANALYSIS_IMPORT_ERROR is not None:
+            return
+        selected = domain or self._active_domain()
+        if not self._zoom_history[selected]:
+            self.status_label.setText("No previous zoom range is available.")
+            return
+        x_range, y_range = self._zoom_history[selected].pop()
+        plot = self.frequency_plot if selected == "frequency" else self.time_plot
+        plot._record_view_box.setRange(xRange=x_range, yRange=y_range, padding=0.0)
+        self._last_saved_range[selected] = None
+
+    def copy_active_plot(self) -> bool:
+        if _ANALYSIS_IMPORT_ERROR is not None:
+            return False
+        pixmap = self._active_plot().grab()
+        if pixmap.isNull():
+            self.status_label.setText("The plot image could not be copied.")
+            return False
+        QtWidgets.QApplication.clipboard().setPixmap(pixmap, QtGui.QClipboard.Clipboard)
+        self.status_label.setText("Active plot copied to the clipboard.")
+        return True
+
+    def _sample_rate_edited(self) -> None:
+        if self.analysis_session is None:
+            return
+        if self.sample_rate.value() <= 0.0:
+            self.status_label.setText("Enter a positive sample rate.")
+            return
+        try:
+            self.analysis_session.set_sample_rate(self.sample_rate.value())
+        except ValueError as exc:
+            self._show_error(str(exc))
+            return
+        self._display_cache.clear()
+        self._update_sampling_controls()
+        self._refresh_plots(auto_range=True)
+
+    def _update_sampling_controls(self) -> None:
+        if self.analysis_session is None:
+            return
+        sampling = self.analysis_session.sampling
+        self.sample_rate.blockSignals(True)
+        try:
+            if sampling.sample_rate_hz is not None:
+                self.sample_rate.setValue(sampling.sample_rate_hz)
+            else:
+                self.sample_rate.setValue(0.0)
+        finally:
+            self.sample_rate.blockSignals(False)
+        self.time_plot.getPlotItem().setLabel("bottom", sampling.x_label)
+        state = "Regular" if sampling.regular else "Irregular — resample before processing"
+        jitter = (
+            f" · jitter {_short_number(sampling.jitter_ratio * 100.0)}%"
+            if np.isfinite(sampling.jitter_ratio)
+            else ""
+        )
+        self.sampling_state.setText(
+            f"{state}{jitter}\nSource: {sampling.source}\n{sampling.reason}"
+        )
+        if sampling.sample_rate_hz is not None:
+            nyquist = sampling.sample_rate_hz / 2.0
+            self.filter_low.setMaximum(max(0.000001, nyquist * 0.999999))
+            self.filter_high.setMaximum(max(0.000001, nyquist * 0.999999))
+            if self.filter_high.value() >= nyquist:
+                self.filter_high.setValue(max(0.000001, nyquist * 0.8))
+
+    def _selected_time_ids(self) -> list[str]:
+        selected = self.selected_curve_ids("time")
+        if not selected:
+            self.status_label.setText("Select one or more time-domain curves first.")
+        return selected
+
+    def _run_derivation(
+        self,
+        label: str,
+        operation: Callable[[str], NumericCurve],
+        *,
+        switch_to_frequency: bool = False,
+    ) -> list[NumericCurve]:
+        if self.analysis_session is None:
+            return []
+        source_ids = self._selected_time_ids()
+        if not source_ids:
+            return []
+        created: list[NumericCurve] = []
+        errors: list[str] = []
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            for curve_id in source_ids:
+                try:
+                    created.append(operation(curve_id))
+                except MemoryError:
+                    errors.append(
+                        f"{self.analysis_session.get_curve(curve_id).name}: operation needs too much memory"
+                    )
+                except (ValueError, RuntimeError) as exc:
+                    errors.append(f"{self.analysis_session.get_curve(curve_id).name}: {exc}")
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        created_ids = {curve.curve_id for curve in created}
+        if created:
+            self._display_cache.clear()
+            self._refresh_curve_tree(select_ids=created_ids, make_visible=created_ids)
+            self._refresh_plots(auto_range=True)
+            if switch_to_frequency:
+                self.plot_tabs.setCurrentIndex(1)
+            self.status_label.setText(f"{label}: created {len(created)} derived curve(s).")
+        if errors:
+            self._show_error("\n".join(errors))
+        return created
+
+    def resample_selected(self) -> list[NumericCurve]:
+        rate = self.sample_rate.value()
+        return self._run_derivation(
+            "Resample",
+            lambda curve_id: self.analysis_session.resample_curve(curve_id, rate),
+        )
+
+    def detrend_selected(self, mode: str) -> list[NumericCurve]:
+        return self._run_derivation(
+            "Detrend", lambda curve_id: self.analysis_session.detrend_curve(curve_id, mode)
+        )
+
+    def smooth_selected(self) -> list[NumericCurve]:
+        window = self.smooth_window.value()
+        if window % 2 == 0:
+            window += 1
+            self.smooth_window.setValue(window)
+        return self._run_derivation(
+            "Moving average",
+            lambda curve_id: self.analysis_session.smooth_curve(curve_id, window),
+        )
+
+    def _filter_type_changed(self, _index: int = -1) -> None:
+        kind = str(self.filter_type.currentData())
+        self.filter_low.setEnabled(kind in {"highpass", "bandpass"})
+        self.filter_high.setEnabled(kind in {"lowpass", "bandpass"})
+
+    def filter_selected(self) -> list[NumericCurve]:
+        kind = str(self.filter_type.currentData())
+        return self._run_derivation(
+            "Filter",
+            lambda curve_id: self.analysis_session.filter_curve(
+                curve_id,
+                kind,
+                low_hz=self.filter_low.value(),
+                high_hz=self.filter_high.value(),
+                order=self.filter_order.value(),
+            ),
+        )
+
+    def fft_selected(self) -> list[NumericCurve]:
+        return self._run_derivation(
+            "FFT", self.analysis_session.fft_curve, switch_to_frequency=True
+        )
+
+    def psd_selected(self) -> list[NumericCurve]:
+        block = int(self.psd_block.currentData())
+        return self._run_derivation(
+            "Welch PSD",
+            lambda curve_id: self.analysis_session.psd_curve(curve_id, block),
+            switch_to_frequency=True,
+        )
+
+    def rename_selected_curve(self) -> None:
+        if self.analysis_session is None:
+            return
+        selected = self.selected_curve_ids()
+        if len(selected) != 1:
+            return
+        curve = self.analysis_session.get_curve(selected[0])
+        if not curve.derived:
+            self.status_label.setText("Original curves cannot be renamed.")
+            return
+        name, accepted = QtWidgets.QInputDialog.getText(
+            self, "Rename derived curve", "Curve name", text=curve.name
+        )
+        if not accepted:
+            return
+        try:
+            updated = self.analysis_session.rename_curve(curve.curve_id, name)
+        except ValueError as exc:
+            self._show_error(str(exc))
+            return
+        self._refresh_curve_tree(select_ids={updated.curve_id})
+        self._refresh_plots()
+
+    def delete_selected_curves(self) -> None:
+        if self.analysis_session is None:
+            return
+        selected = [
+            curve_id
+            for curve_id in self.selected_curve_ids()
+            if self.analysis_session.get_curve(curve_id).derived
+        ]
+        errors: list[str] = []
+        for curve_id in reversed(selected):
+            try:
+                self.analysis_session.delete_curve(curve_id)
+                self._visible_ids.discard(curve_id)
+            except KeyError:
+                # A selected parent removes its complete derived subtree.
+                continue
+            except ValueError as exc:
+                errors.append(str(exc))
+        self._prune_annotations()
+        self._display_cache.clear()
+        self._refresh_curve_tree()
+        self._refresh_plots(auto_range=True)
+        if errors:
+            self._show_error("\n".join(errors))
+
+    def _prune_annotations(self) -> None:
+        if self.analysis_session is None:
+            return
+        valid = {curve.curve_id for curve in self.analysis_session.curves}
+        self._visible_ids.intersection_update(valid)
+        for tip_id, tip in list(self._data_tips.items()):
+            if tip["curve_id"] not in valid:
+                self._remove_data_tip(tip_id)
+        for domain in ("time", "frequency"):
+            cursor = self._cursor_state.get(domain)
+            nearest = cursor.get("nearest") if cursor else None
+            if nearest is not None and nearest[0].curve_id not in valid:
+                self._remove_cursor(domain)
+            for name, marker in list(self._markers[domain].items()):
+                if marker["curve_id"] not in valid:
+                    self._remove_marker(domain, name)
+
+    def export_selected_to(self, path: str | Path) -> Path:
+        if self.analysis_session is None:
+            raise ValueError("no record is loaded")
+        selected = self.selected_curve_ids()
+        if not selected:
+            raise ValueError("select at least one curve to export")
+        return self.analysis_session.export_curves(
+            path,
+            selected,
+            frequency_decibels=self.frequency_db.isChecked(),
+        )
+
+    def export_selected_dialog(self) -> None:
+        if self.analysis_session is None:
+            self.status_label.setText("Open a record before exporting curves.")
+            return
+        selected = self.selected_curve_ids()
+        if not selected:
+            self.status_label.setText("Select one or more curves to export.")
+            return
+        source = Path(self.analysis_session.record.source) if self.analysis_session.record.source else Path("logging_record.csv")
+        proposed = source.with_name(f"{source.stem}_analysis.csv")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export selected curves",
+            str(proposed),
+            "CSV (*.csv);;All files (*.*)",
+        )
+        if not path:
+            return
+        if not Path(path).suffix:
+            path += ".csv"
+        try:
+            output = self.export_selected_to(path)
+        except (OSError, ValueError) as exc:
+            self._show_error(str(exc))
+            return
+        self.status_label.setText(f"Exported selected curves to {output}")
+
+    def _show_error(self, message: str) -> None:
+        self.status_label.setText(str(message).replace("\n", " · "))
+        QtWidgets.QMessageBox.critical(self, "Records / Plot", str(message))

@@ -1,14 +1,15 @@
 # Hardware validation
 
-Validation was completed against a SAMBA controller running firmware
-V3.3.122 (library 103) over COM1 at 57600 baud.  Hostnames, user accounts,
-private controller configuration files, and raw device snapshots are kept out
-of the repository.
+Core endpoint/action validation was completed against firmware V3.3.122
+(library 103); the current Logging and interactive-record validation was run
+against firmware V3.3.127 (library 103).  Both used COM1 at 57600 baud.
+Hostnames, user accounts, private controller configuration files, and raw
+device snapshots are kept out of the repository.
 
 ## Final results
 
-- Current local Samba suite: **157 tests passed** (118 regular tests plus the
-  39-test Qt-heavy page file run in isolated processes).  The shared-server
+- Current local Samba suite: **175 tests passed**, with Qt-heavy files run
+  sequentially.  The shared-server
   hardware run also passed remote `compileall`, 107 non-page Samba tests, and
   all 131 SIDMAT tests available at that validation point.
 - Supported read-only endpoint inventory: **315 passed** before and after
@@ -22,6 +23,31 @@ of the repository.
   sensor names, Used ADC mapping (`7` displayed as `40`), motor offsets,
   position SI conversion, pneumatic status/timers, FF/PFF controls, velocity
   stages, and non-scientific numeric display.
+
+## Logging and Records / Plot
+
+- The local GUI connected to the hardware through the remote Communication
+  Server; no SSH-launched test process was used.
+- All 40 monitor definitions and live values were read through the Logging
+  page.  Channel 40 and the event settings were changed, read back, and
+  restored.  A short Standard file log produced timestamp, elapsed time, and
+  all 40 signal columns.
+- A real 4096-sample, 3-channel controller trace was downloaded into the
+  standalone Records / Plot window.  Mean removal, Hann FFT, paired CSV export,
+  and its metadata sidecar all passed.  The final comparison reported
+  `restorable_changed=[]` and `writes_restored=true`.
+- Complete `DGLDA` responses can exceed the server/serial 64 KiB safety cap.
+  Trace downloads therefore use ordered 128-sample `DGLDV` batches: one WAN
+  request per batch while retaining bounded controller responses.
+- Firmware documentation states that starting DSSET or changing DSETP
+  invalidates saved traces.  The hardware probe now makes a complete backup
+  before any write and skips DSETP/DSSET whenever saved traces exist.
+
+Development incident: an earlier DSETP interface validation invalidated one
+saved 4096-sample trace before the preservation guard was added.  Its original
+waveform was not recoverable.  A replacement Standard trace was captured,
+restored to `SavedTraceNum=1`, downloaded in full, and backed up locally; the
+replacement is not claimed to reproduce the lost waveform.
 
 ## Save/Load Setup
 

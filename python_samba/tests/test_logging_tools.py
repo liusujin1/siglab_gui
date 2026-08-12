@@ -111,6 +111,32 @@ def test_trace_download_uses_actual_logged_sample_count():
         assert progress[-1] == (8, 8)
 
 
+def test_trace_download_batches_sample_requests(monkeypatch):
+    with open_mock() as session:
+        state = session.transport.state
+        state.logged_traces[0] = [
+            [float(sample), float(-sample)] for sample in range(300)
+        ]
+        state.event_trace_params[1] = "300"
+        state.event_trace_params[2] = "2"
+        state.event_trace_info[2] = "1"
+        state.event_trace_info[4] = "300"
+        batch_lengths: list[int] = []
+        original = session.transact_many
+
+        def tracked(frames):
+            frame_list = list(frames)
+            batch_lengths.append(len(frame_list))
+            return original(frame_list)
+
+        monkeypatch.setattr(session, "transact_many", tracked)
+        rows = session.download_logged_trace(0)
+
+        assert len(rows) == 300
+        assert rows[-1] == pytest.approx([299.0, -299.0])
+        assert batch_lengths == [128, 128, 44]
+
+
 def test_logging_page_is_primary_and_exposes_40_channels():
     pytest.importorskip("PySide6")
     from PySide6 import QtWidgets
@@ -142,11 +168,18 @@ def test_logging_page_is_primary_and_exposes_40_channels():
         assert widths[1] > widths[2]
         assert widths[4] > widths[5]
         assert abs(sum(widths) - page.monitor_table.viewport().width()) <= 2
-        assert all(
+        resize_modes = [
             page.monitor_table.horizontalHeader().sectionResizeMode(index)
-            == QtWidgets.QHeaderView.Fixed
             for index in range(6)
-        )
+        ]
+        assert resize_modes == [
+            QtWidgets.QHeaderView.Fixed,
+            QtWidgets.QHeaderView.Stretch,
+            QtWidgets.QHeaderView.Fixed,
+            QtWidgets.QHeaderView.Fixed,
+            QtWidgets.QHeaderView.Stretch,
+            QtWidgets.QHeaderView.Fixed,
+        ]
         assert page.records_window.isHidden()
         page.btn_show_records.click()
         app.processEvents()
@@ -286,6 +319,34 @@ def test_logging_page_can_cancel_while_monitor_definitions_are_preparing():
         assert page.file_state.text() == "Cancelled"
     finally:
         page.read_monitor_definitions = original_read
+        window.close()
+        app.processEvents()
+
+
+def test_logging_shutdown_drains_in_flight_page_worker_before_disconnect():
+    pytest.importorskip("PySide6")
+    from PySide6 import QtWidgets
+    from python_samba.ui.main_window import MainWindow
+    import threading
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow()
+    page = window.logging_page_widget
+    started = threading.Event()
+
+    def short_read():
+        started.set()
+        time.sleep(0.05)
+        return "done"
+
+    try:
+        page._submit("Short background read", short_read)
+        assert started.wait(1.0)
+        assert page.serial_worker_active
+        assert page.shutdown(timeout=1.0)
+        assert not page.serial_worker_active
+        app.processEvents()
+    finally:
         window.close()
         app.processEvents()
 
@@ -438,8 +499,11 @@ def test_hardware_logging_interface_probe_restores_mock_state(tmp_path: Path, mo
     import sys
     from _review import hardware_logging_interface_probe as probe
 
+    mock_session = open_mock(readonly=False)
+    mock_session.transport.state.event_trace_info[2] = "1"
+    mock_session.transport.state.event_trace_info[4] = "8"
     monkeypatch.setattr(
-        probe, "open_serial", lambda *_args, **_kwargs: open_mock(readonly=False)
+        probe, "open_serial", lambda *_args, **_kwargs: mock_session
     )
     monkeypatch.setattr(
         sys,
@@ -458,3 +522,10 @@ def test_hardware_logging_interface_probe_restores_mock_state(tmp_path: Path, mo
     assert report["writes_restored"] is True
     assert report["restorable_changed"] == []
     assert all(check["status"] != "FAIL" for check in report["checks"])
+    trace_check = next(
+        check
+        for check in report["checks"]
+        if check["name"] == "Download saved trace into interactive Records / Plot"
+    )
+    assert trace_check["detail"]["rows_read"] == 8
+    assert Path(trace_check["detail"]["analysis_export"]).exists()

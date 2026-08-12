@@ -4608,7 +4608,11 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         self._refresh_timer.stop()
         logging_page = getattr(self, "logging_page_widget", None)
         if logging_page is not None:
-            logging_page.shutdown()
+            if not logging_page.shutdown():
+                self.log_msg(
+                    "Logging workers did not finish within the disconnect grace period; "
+                    "closing the session to cancel the remaining exchange"
+                )
         live_session = getattr(self, "_remote_live_session", None)
         if live_session is not None and live_session is not self.session:
             try:

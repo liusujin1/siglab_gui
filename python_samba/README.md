@@ -47,8 +47,8 @@ py -3 -m python_samba.cli discover
 # 仅诊断时绕过服务器、独占直连
 py -3 -m python_samba.cli connect --backend serial --port COM1 --baud 57600
 
-# GUI（需 PySide6）
-py -3 -m pip install PySide6
+# GUI（PySide6 + 记录曲线分析依赖）
+py -3 -m pip install -e .[gui]
 py -3 -m python_samba.cli gui
 # 或
 py -3 -m python_samba.app
@@ -108,6 +108,11 @@ Update Page/回路状态/连接区，以及右侧页面内容和水平二级页�
 Feed Forward、Pneum. SFF、Save/Load、Logging 和 Special。参数密集页面自动提供
 横向或纵向滚动，不会因小屏幕裁掉控制项。
 
+Logging 页的 **Records / Plot** 会打开独立的非模态图窗。图窗支持 40 通道曲线
+显隐、时域/频域切换、游标、数据提示、A/B 标记、框选缩放、平移、图片复制和曲线
+导出；去趋势、移动平均、Butterworth 滤波、FFT 与 Welch PSD 均生成不修改原始记录的
+内存派生曲线。不规则时间轴会先提示重采样，关闭图窗后派生曲线不会自动写回记录文件。
+
 当前页面注册表中的可见功能均已接入 RCI 读写链路，覆盖系统回路、性能监视、切换条件、
 电机保护、速度/位置矩阵与滤波器、气浮、FF/PFF、诊断、DAC/ADC、事件记录、
 NVRAM 和 Raw RCI。正式 GUI 启动时会校验扩展页面加载结果，CI/打包检查可用
@@ -148,7 +153,7 @@ NVRAM 和 Raw RCI。正式 GUI 启动时会校验扩展页面加载结果，CI/�
 
 - 帧编解码、共享服务/串口/mock 三种传输、CLI、会话和安全写入链路已贯通。
 - 23 个可见主/子页面均有对应 RCI 读写或状态刷新入口；Mock 回归用于防止重构断链。
-- Samba 自动化回归共 157 项，SIDMAT 共 133 项；真实 V3.3.127 控制器已完成远程界面刷新、Logging 启停及 5000 点 DGTBB 采集验收。
+- Samba 自动化回归共 175 项，SIDMAT 共 133 项；真实 V3.3.127 控制器已完成远程界面刷新、40 通道 Logging、4096 点记录下载/交互分析及 5000 点 DGTBB 采集验收。
 - GUI 已完成原版层级布局适配，并保留 `main_tabs` 兼容接口供扩展页面使用。
 - 运行时页面扩展有明确加载报告；测试可用严格模式检查每个模块是否真正绑定。
 

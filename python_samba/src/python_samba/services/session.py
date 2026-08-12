@@ -740,15 +740,32 @@ class ControllerSession:
         if max_samples is not None:
             buff_len = min(buff_len, max_samples)
         rows: list[list[float]] = []
-        for sample in range(buff_len):
+        # DGLDA can exceed both the controller server's response limit and the
+        # serial transport's 64 KiB safety cap for ordinary multi-channel
+        # traces.  Keep using bounded DGLDV responses, but group them into one
+        # transport transaction.  A CommServer backend then crosses the WAN
+        # once per group while the server still talks to the controller in
+        # strict sample order; serial/mock transports retain their sequential
+        # fallback.  Keep the group comfortably below the server's 256-item
+        # protocol limit and small enough for responsive cancellation.
+        batch_size = 128
+        for first_sample in range(0, buff_len, batch_size):
             if cancel_event is not None and cancel_event.is_set():
                 break
-            vals = self.get_logged_sample(trace_num, sample)
-            if mon_n and len(vals) > mon_n:
-                vals = vals[:mon_n]
-            rows.append(vals)
-            if progress_callback is not None:
-                progress_callback(sample + 1, buff_len)
+            last_sample = min(buff_len, first_sample + batch_size)
+            sample_numbers = list(range(first_sample, last_sample))
+            responses = self.transact_many(
+                [self.encoder.dgldv(trace_num, sample) for sample in sample_numbers]
+            )
+            for sample, response in zip(sample_numbers, responses):
+                if cancel_event is not None and cancel_event.is_set():
+                    return rows
+                vals = self.encoder.decode_dgldv(response)
+                if mon_n and len(vals) > mon_n:
+                    vals = vals[:mon_n]
+                rows.append(vals)
+                if progress_callback is not None:
+                    progress_callback(sample + 1, buff_len)
         return rows
 
     def get_monitor_values(self, index1: int = 0, index2: int = 3) -> list[float]:
