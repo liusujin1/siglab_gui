@@ -13,7 +13,7 @@ pytest.importorskip("PySide6")
 pytest.importorskip("pyqtgraph")
 pytest.importorskip("scipy")
 
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtTest, QtWidgets
 
 from python_samba.logging_tools.models import LoggingRecord
 from python_samba.ui.record_plot import RecordPlotWindow
@@ -178,12 +178,11 @@ def test_processing_replaces_selected_curve_without_adding_rows(tmp_path: Path):
         assert window.curve_tree.topLevelItemCount() == original_count
         assert window.curve_tree.topLevelItem(0).text(2) == "Time + Spectrum"
 
-        window.frequency_db.setChecked(True)
         nearest = window._nearest_for_view_x("frequency", spectra[0].curve_id, 10.0)
         window._update_cursor("frequency", nearest)
         window.set_marker("A")
-        assert "dB" in window.marker_readout.text()
-        assert "dB" in window.status_label.text()
+        assert "dB" not in window.marker_readout.text()
+        assert "dB" not in window.status_label.text()
 
         output = window.export_selected_to(tmp_path / "selected.csv")
         assert output.exists()
@@ -203,6 +202,9 @@ def test_frequency_defaults_cutoffs_and_auto_fit_are_usable():
 
         assert window.frequency_x_log.isChecked()
         assert window.frequency_db.isChecked()
+        assert window.frequency_db.text() == "Log Y"
+        assert window.frequency_plot.getPlotItem().getAxis("bottom").logMode
+        assert window.frequency_plot.getPlotItem().getAxis("left").logMode
         assert window.filter_low.value() == pytest.approx(100.0)
         assert window.filter_high.value() == pytest.approx(5.0)
         assert window.filter_low.isEnabled()
@@ -223,7 +225,89 @@ def test_frequency_defaults_cutoffs_and_auto_fit_are_usable():
 
         x_range, y_range = window.frequency_plot._record_view_box.viewRange()
         assert np.all(np.isfinite([*x_range, *y_range]))
-        assert y_range[1] - y_range[0] < 135.0
+        assert y_range[1] > y_range[0]
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_enter_in_editors_does_not_trigger_open_record():
+    app = _application()
+    window = RecordPlotWindow()
+    opened = []
+    window.open_record_requested.connect(lambda: opened.append(True))
+    try:
+        window.show()
+        app.processEvents()
+        for editor in (
+            window.sample_rate,
+            window.smooth_window,
+            window.filter_low,
+            window.filter_high,
+            window.filter_order,
+        ):
+            editor.setFocus()
+            QtTest.QTest.keyClick(editor, QtCore.Qt.Key_Return)
+            app.processEvents()
+        assert opened == []
+        assert not window.btn_record_browse.autoDefault()
+        assert not window.btn_record_browse.isDefault()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_remove_mean_and_linear_detrend_have_distinct_results():
+    app = _application()
+    window = RecordPlotWindow()
+    sample_rate = 100.0
+    time_values = np.arange(500, dtype=np.float64) / sample_rate
+    values = 3.0 + 2.0 * time_values
+    record = LoggingRecord(
+        ["elapsed_s", "Ramp"],
+        np.column_stack((time_values, values)).tolist(),
+        metadata={"sample_rate_hz": sample_rate},
+    )
+    try:
+        window.set_record(record)
+        source_id = window.analysis_session.curves[0].curve_id
+        _select_curve(window, source_id)
+        mean_only = window.detrend_selected("constant")[0].y.copy()
+        mean_slope = np.polyfit(time_values, mean_only, 1)[0]
+
+        window.set_record(record)
+        source_id = window.analysis_session.curves[0].curve_id
+        _select_curve(window, source_id)
+        linear = window.detrend_selected("linear")[0].y.copy()
+        linear_slope = np.polyfit(time_values, linear, 1)[0]
+
+        assert mean_slope == pytest.approx(2.0, rel=1e-3)
+        assert abs(linear_slope) < 1e-10
+        assert not np.allclose(mean_only, linear)
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_psd_uses_linear_values_on_log_y_axis():
+    app = _application()
+    window = RecordPlotWindow()
+    try:
+        window.set_record(_record(channels=1, samples=4096))
+        source = window.analysis_session.curves[0]
+        _select_curve(window, source.curve_id)
+        psd = window.psd_selected()[0]
+        assert psd.operation["type"] == "psd"
+        assert window.frequency_db.isChecked()
+        assert window.frequency_plot.getPlotItem().getAxis("left").logMode
+        peak = int(np.argmax(psd.y))
+        nearest = window._nearest_for_view_x(
+            "frequency", psd.curve_id, float(np.log10(psd.x[peak]))
+        )
+        assert nearest is not None
+        assert window._displayed_point_y(nearest) == pytest.approx(psd.y[peak])
+        window._update_cursor("frequency", nearest)
+        assert "dB" not in window.status_label.text()
     finally:
         window.close()
         app.processEvents()

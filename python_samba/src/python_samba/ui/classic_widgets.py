@@ -129,6 +129,10 @@ class FlatPush(QtWidgets.QPushButton):
 
     def __init__(self, text: str = "", parent=None) -> None:
         super().__init__(text, parent)
+        # Dialog push buttons must never steal Enter from an active editor.
+        # Individual actions are explicit clicks throughout this UI.
+        self.setAutoDefault(False)
+        self.setDefault(False)
         self.setCursor(QtCore.Qt.PointingHandCursor)
         self.setMinimumHeight(30)
         self.setStyleSheet(

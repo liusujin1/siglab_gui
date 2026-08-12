@@ -418,8 +418,8 @@ class RecordPlotWindow(QtWidgets.QDialog):
 
         detrend_group = GroupPanel("Detrend")
         detrend_layout = QtWidgets.QHBoxLayout(detrend_group)
-        self.btn_remove_mean = FlatPush("Remove mean")
-        self.btn_linear_detrend = FlatPush("Linear")
+        self.btn_remove_mean = FlatPush("Remove mean only")
+        self.btn_linear_detrend = FlatPush("Remove linear trend")
         detrend_layout.addWidget(self.btn_remove_mean)
         detrend_layout.addWidget(self.btn_linear_detrend)
         detrend_layout.setContentsMargins(7, 8, 7, 6)
@@ -492,7 +492,7 @@ class RecordPlotWindow(QtWidgets.QDialog):
         display_group = GroupPanel("Frequency Display")
         display_layout = QtWidgets.QHBoxLayout(display_group)
         self.frequency_x_log = QtWidgets.QCheckBox("Log X")
-        self.frequency_db = QtWidgets.QCheckBox("dB Y")
+        self.frequency_db = QtWidgets.QCheckBox("Log Y")
         self.frequency_x_log.setChecked(True)
         self.frequency_db.setChecked(True)
         display_layout.addWidget(self.frequency_x_log)
@@ -544,8 +544,13 @@ class RecordPlotWindow(QtWidgets.QDialog):
             **{"font-size": f"{PLOT_FONT_POINTS}pt"},
         )
         plot.getPlotItem().setLabel(
-            "left", "Value", **{"font-size": f"{PLOT_FONT_POINTS}pt"}
+            "left",
+            "Value" if domain == "time" else "Amplitude / PSD",
+            **{"font-size": f"{PLOT_FONT_POINTS}pt"},
         )
+        if domain == "frequency":
+            axes["bottom"].setLogMode(True)
+            axes["left"].setLogMode(True)
         legend = plot.getPlotItem().addLegend(offset=(8, 8))
         legend.setZValue(10)
         legend.setBrush(pg.mkBrush(255, 255, 255, 228))
@@ -839,15 +844,11 @@ class RecordPlotWindow(QtWidgets.QDialog):
             x_values = np.full(curve.x.shape, np.nan, dtype=np.float64)
             positive = curve.x > 0.0
             x_values[positive] = np.log10(curve.x[positive])
-        y_values = self.analysis_session.displayed_y(
-            curve,
-            decibels=curve.domain == "frequency" and self.frequency_db.isChecked(),
-        )
+        y_values = curve.y
         if curve.domain == "frequency" and self.frequency_db.isChecked():
-            # Exact zeros have no logarithmic magnitude and otherwise expand
-            # auto-fit to roughly -6000 dB through the float tiny sentinel.
-            y_values = np.asarray(y_values, dtype=np.float64).copy()
-            y_values[np.asarray(curve.y) <= 0.0] = np.nan
+            y_values = np.full(curve.y.shape, np.nan, dtype=np.float64)
+            positive = curve.y > 0.0
+            y_values[positive] = np.log10(curve.y[positive])
         finite_indices = np.flatnonzero(np.isfinite(x_values) & np.isfinite(y_values))
         result = (x_values, y_values, finite_indices)
         self._display_cache[cache_key] = result
@@ -930,9 +931,6 @@ class RecordPlotWindow(QtWidgets.QDialog):
         y_values = np.concatenate(y_parts)
         x_low, x_high = float(np.min(x_values)), float(np.max(x_values))
         y_low, y_high = float(np.min(y_values)), float(np.max(y_values))
-        if domain == "frequency" and self.frequency_db.isChecked():
-            y_low = max(y_low, y_high - 120.0)
-
         def padded(low: float, high: float) -> tuple[float, float]:
             if high <= low:
                 margin = max(abs(low) * 0.05, 1.0)
@@ -952,9 +950,11 @@ class RecordPlotWindow(QtWidgets.QDialog):
         self._display_cache.clear()
         axis = self.frequency_plot.getPlotItem().getAxis("bottom")
         axis.setLogMode(self.frequency_x_log.isChecked())
+        y_axis = self.frequency_plot.getPlotItem().getAxis("left")
+        y_axis.setLogMode(self.frequency_db.isChecked())
         self.frequency_plot.getPlotItem().setLabel(
             "left",
-            "Level (dB)" if self.frequency_db.isChecked() else "Value",
+            "Amplitude / PSD",
             **{"font-size": f"{PLOT_FONT_POINTS}pt"},
         )
         self.clear_annotations(domain="frequency")
@@ -1111,16 +1111,13 @@ class RecordPlotWindow(QtWidgets.QDialog):
     def _format_point_label(self, prefix: str, nearest) -> str:
         curve, _index, x_value, _y_value, _plot_x, _plot_y = nearest
         shown_y = self._displayed_point_y(nearest)
-        y_suffix = " dB" if curve.domain == "frequency" and self.frequency_db.isChecked() else ""
         return (
             f"{prefix}{curve.name}\n"
-            f"X {_short_number(x_value)}\nY {_short_number(shown_y)}{y_suffix}"
+            f"X {_short_number(x_value)}\nY {_short_number(shown_y)}"
         )
 
     def _displayed_point_y(self, nearest) -> float:
         curve = nearest[0]
-        if curve.domain == "frequency" and self.frequency_db.isChecked():
-            return float(nearest[5])
         return float(nearest[3])
 
     def _update_cursor(self, domain: str, nearest) -> None:
@@ -1156,9 +1153,8 @@ class RecordPlotWindow(QtWidgets.QDialog):
         state["label"].setPos(plot_x, plot_y)
         state["nearest"] = nearest
         shown_y = self._displayed_point_y(nearest)
-        suffix = " dB" if curve.domain == "frequency" and self.frequency_db.isChecked() else ""
         self.status_label.setText(
-            f"Cursor · {curve.name} · sample {index + 1} · X {_short_number(nearest[2])} · Y {_short_number(shown_y)}{suffix}"
+            f"Cursor · {curve.name} · sample {index + 1} · X {_short_number(nearest[2])} · Y {_short_number(shown_y)}"
         )
 
     def _add_data_tip(self, domain: str, nearest) -> None:
@@ -1376,8 +1372,7 @@ class RecordPlotWindow(QtWidgets.QDialog):
             )
         else:
             delta = "—"
-        suffix = " dB" if domain == "frequency" and self.frequency_db.isChecked() else ""
-        self.marker_readout.setText(f"A {a_text}{suffix}   B {b_text}{suffix}   Δ {delta}{suffix}")
+        self.marker_readout.setText(f"A {a_text}   B {b_text}   Δ {delta}")
 
     def clear_annotations(
         self, _checked: bool = False, *, domain: str | None = None, all_domains: bool = False
@@ -1613,8 +1608,9 @@ class RecordPlotWindow(QtWidgets.QDialog):
         )
 
     def detrend_selected(self, mode: str) -> list[NumericCurve]:
+        label = "Remove mean" if mode == "constant" else "Remove linear trend"
         return self._run_derivation(
-            "Detrend", lambda curve_id: self.analysis_session.detrend_curve(curve_id, mode)
+            label, lambda curve_id: self.analysis_session.detrend_curve(curve_id, mode)
         )
 
     def smooth_selected(self) -> list[NumericCurve]:
@@ -1779,7 +1775,7 @@ class RecordPlotWindow(QtWidgets.QDialog):
         return self.analysis_session.export_curves(
             path,
             selected,
-            frequency_decibels=self.frequency_db.isChecked(),
+            frequency_decibels=False,
         )
 
     def export_selected_dialog(self) -> None:
