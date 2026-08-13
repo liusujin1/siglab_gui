@@ -104,7 +104,11 @@ def request_server_shutdown(
     token: str | None = None,
     timeout: float = 5.0,
 ) -> None:
-    """Request a graceful server shutdown without attaching to the serial port."""
+    """Request a graceful shutdown and wait until the listener is released.
+
+    The control connection performs only ``hello`` and ``shutdown``; it never
+    attaches to or configures the physical serial controller.
+    """
 
     host, port = parse_endpoint(endpoint)
     if token is None:
@@ -156,6 +160,22 @@ def request_server_shutdown(
             sock.close()
         except OSError:
             pass
+
+    deadline = time.monotonic() + max(0.1, float(timeout))
+    while time.monotonic() < deadline:
+        try:
+            probe = socket.create_connection(
+                (host, port),
+                timeout=min(0.2, max(0.05, deadline - time.monotonic())),
+            )
+        except OSError:
+            return
+        else:
+            probe.close()
+        time.sleep(0.05)
+    raise TransportError(
+        f"Communication Server acknowledged shutdown but {endpoint} is still listening"
+    )
 
 
 class CommServerTransport(Transport):

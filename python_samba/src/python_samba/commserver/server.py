@@ -216,6 +216,13 @@ class CommunicationServer:
             return [listener.getsockname()[:2] for listener in self._listeners]
 
     @property
+    def is_running(self) -> bool:
+        """Return whether the server still owns active listener sockets."""
+
+        with self._lock:
+            return bool(self._started and self._listeners)
+
+    @property
     def token_file(self) -> Path:
         return self._token_file
 

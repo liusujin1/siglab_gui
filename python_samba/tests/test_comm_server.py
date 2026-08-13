@@ -120,10 +120,12 @@ def test_shutdown_request_does_not_attach_serial() -> None:
     )
     server.start()
     endpoint = _endpoint(server)
+    assert server.is_running
 
     request_server_shutdown(endpoint, timeout=1.0)
 
     _wait_until(lambda: not server.addresses)
+    assert not server.is_running
     assert transports == []
 
 

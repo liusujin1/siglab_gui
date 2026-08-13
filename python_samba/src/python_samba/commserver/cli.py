@@ -128,6 +128,16 @@ def _run_tray(server: CommunicationServer, log_file: Path) -> int:
     timer = QtCore.QTimer()
 
     def refresh_tooltip() -> None:
+        # A protocol-level shutdown runs ``server.stop`` on a worker thread.
+        # Closing the listeners is not enough to end Qt's tray event loop, so
+        # explicitly leave it once the server has stopped.  This is especially
+        # important for PyInstaller one-file builds, whose parent process waits
+        # for the extracted child process to exit.
+        if not server.is_running:
+            timer.stop()
+            tray.hide()
+            app.quit()
+            return
         state = server.status()
         serial = state["serial"]
         tray.setToolTip(
@@ -138,7 +148,7 @@ def _run_tray(server: CommunicationServer, log_file: Path) -> int:
         )
 
     timer.timeout.connect(refresh_tooltip)
-    timer.start(1000)
+    timer.start(200)
     refresh_tooltip()
     tray.show()
     return int(app.exec())
