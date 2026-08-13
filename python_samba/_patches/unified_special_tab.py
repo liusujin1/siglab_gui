@@ -651,52 +651,6 @@ def _on_digio_read(self) -> None:
 
 
 # =========================================================================
-# View3D tab
-# =========================================================================
-def _build_view3d_tab(self) -> QtWidgets.QWidget:
-    w = QtWidgets.QWidget()
-    root = QtWidgets.QVBoxLayout(w)
-    root.setContentsMargins(6, 4, 6, 4)
-
-    has_3d = False
-    try:
-        import pyqtgraph.opengl as gl
-        has_3d = True
-    except ImportError:
-        pass
-
-    if has_3d:
-        try:
-            from pyqtgraph.opengl import GLViewWidget
-            gl_view = GLViewWidget()
-            root.addWidget(gl_view, 1)
-            g = gl.GLGridItem()
-            gl_view.addItem(g)
-        except Exception:
-            has_3d = False
-
-    if not has_3d:
-        msg = QtWidgets.QLabel(
-            "3D View\n\nTo enable 3D, install pyqtgraph:\n  pip install pyqtgraph\n\n"
-            "The original SAMBA19xUI loads '0002507.stl' using\nHelixToolkit.Wpf.\n\n"
-            "This placeholder provides the same tab structure."
-        )
-        msg.setWordWrap(True)
-        msg.setAlignment(QtCore.Qt.AlignCenter)
-        msg.setStyleSheet("color:#505050; font-size:13px; padding:40px;")
-        root.addWidget(msg, 1)
-
-    g_rot = GroupPanel("Rotation")
-    rot = QtWidgets.QHBoxLayout(g_rot)
-    btn_rot = FlatPush("Rotate 90 deg")
-    rot.addWidget(btn_rot)
-    rot.addStretch(1)
-    root.addWidget(g_rot)
-    root.addStretch(1)
-    return w
-
-
-# =========================================================================
 # Handler stubs
 # =========================================================================
 def on_safety_read(self) -> None:
@@ -844,7 +798,7 @@ def apply_patches(cls: type) -> None:
         "_build_special_tab", "_build_safety_tab", "_build_zms_tab",
         "_build_polynom_tab",
         "_build_signal_display_page",
-        "_build_digio_tab", "_build_view3d_tab",
+        "_build_digio_tab",
         "_apply_digio_words", "_on_digio_read", "_toggle_signal_monitoring",
         "on_safety_read", "on_safety_read_config", "on_safety_write_config",
         "on_zms_read", "on_zms_write",

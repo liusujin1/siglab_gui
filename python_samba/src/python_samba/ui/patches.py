@@ -33,13 +33,8 @@ class PatchReport:
 def _find_patches_dir() -> str:
     """Locate patches in a source checkout or an installed distribution."""
     source_dir = Path(__file__).resolve().parents[3] / "_patches"
-    if source_dir.is_dir():
-        return str(source_dir)
-
-    # setuptools installs ``data-files`` below the environment data root.
-    # ``pip --target`` instead places them directly in the target directory,
-    # which is present on sys.path but is not necessarily the distribution
-    # selected by importlib.metadata when another version is installed.
+    # Frozen and installed builds use one canonical data directory.  Search it
+    # first so the portable bundle does not need a duplicate ``_patches`` tree.
     candidates: list[Path] = []
     for entry in sys.path:
         if entry:
@@ -51,6 +46,10 @@ def _find_patches_dir() -> str:
     for candidate in candidates:
         if (candidate / "ff_filter_patch.py").is_file():
             return str(candidate.resolve())
+
+    # A source checkout keeps the editable patch modules at project root.
+    if source_dir.is_dir():
+        return str(source_dir)
 
     try:
         dist = distribution("python-samba")

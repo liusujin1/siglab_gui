@@ -7,7 +7,6 @@ scipy==1.18.0
 pyqtgraph==0.14.0
 pyserial==3.5
 psutil==7.2.2
-PyOpenGL==3.1.10
 pytest==9.0.2
 setuptools==83.0.0
 wheel==0.47.0

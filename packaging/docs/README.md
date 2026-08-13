@@ -1,4 +1,4 @@
-# SigLab TestKit 0.1.0-beta.2
+# SigLab TestKit 0.1.0-beta.3
 
 This is a portable Windows 10/11 x64 pilot package for SAMBA and SIDMAT. It
 does not require Python and does not install a Windows service.
@@ -22,7 +22,9 @@ Direct Serial mode is diagnostic-only and cannot share a COM port already
 owned by the server.
 
 Samba and SIDMAT are packaged together under `apps\SigLabSuite` and share one
-Python/Qt/NumPy/SciPy runtime. `apps\CommServer\PythonSambaCommServer.exe`
+Python/Qt/NumPy/SciPy runtime. The beta.3 runtime intentionally omits the
+unused 3D/OpenGL page and unused Qt modules, plugins, and translations; English
+and Simplified Chinese remain supported. `apps\CommServer\PythonSambaCommServer.exe`
 remains a self-contained single-file program and may be copied by itself to a
 different controller computer.
 

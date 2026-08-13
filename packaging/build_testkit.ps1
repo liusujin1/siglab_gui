@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '0.1.0-beta.2',
+    [string]$Version = '0.1.0-beta.3',
     [string]$PythonVersion = '3.12',
     [string]$OutputRoot = '',
     [switch]$SkipTests,
@@ -96,13 +96,70 @@ Copy-Item (Join-Path $repo 'packaging\scripts') (Join-Path $stage 'scripts') -Re
 Copy-Item (Join-Path $repo 'packaging\smoke_test.ps1') (Join-Path $stage 'scripts\smoke_test.ps1')
 Copy-Item (Join-Path $repo 'packaging\wrappers\*.bat') $stage
 
+# Validate the actual hook output, not just the spec's requested excludes.
+$guiInternal = Join-Path $stage 'apps\SigLabSuite\_internal'
+$blockedNames = @(
+    'opengl32sw.dll',
+    'qt6pdf.dll', 'qt6pdfwidgets.dll', 'qt6qml.dll', 'qt6qmlmeta.dll',
+    'qt6qmlmodels.dll', 'qt6qmlworkerscript.dll', 'qt6quick.dll',
+    'qt6quick3d.dll', 'qt6quickcontrols2.dll', 'qt6quickwidgets.dll',
+    'qt6test.dll', 'qt6virtualkeyboard.dll', 'qtpdf.pyd', 'qtpdfwidgets.pyd', 'qtqml.pyd',
+    'qtquick.pyd', 'qtquick3d.pyd', 'qtquickcontrols2.pyd',
+    'qtquickwidgets.pyd', 'qttest.pyd', 'qtvirtualkeyboard.pyd'
+)
+$blockedFiles = @(Get-ChildItem -LiteralPath $guiInternal -Recurse -File |
+    Where-Object { $blockedNames -contains $_.Name.ToLowerInvariant() })
+$blockedDirectories = @(
+    (Join-Path $guiInternal 'OpenGL'),
+    (Join-Path $guiInternal 'pyqtgraph\opengl'),
+    (Join-Path $guiInternal '_patches')
+) | Where-Object { Test-Path -LiteralPath $_ }
+if ($blockedFiles -or $blockedDirectories) {
+    throw "Slim GUI payload contains forbidden Qt/OpenGL/duplicate patch resources: $((@($blockedFiles.FullName) + @($blockedDirectories)) -join ', ')"
+}
+if (-not (Test-Path -LiteralPath (Join-Path $guiInternal 'python_samba_patches'))) {
+    throw 'Canonical python_samba_patches payload is missing.'
+}
+$translationRoot = Join-Path $guiInternal 'PySide6\translations'
+$unexpectedTranslations = @(Get-ChildItem -LiteralPath $translationRoot -Filter '*.qm' -File |
+    Where-Object { $_.Name.ToLowerInvariant() -notmatch '_(en|zh_cn)\.qm$' })
+if ($unexpectedTranslations) {
+    throw "Unexpected Qt translations remain: $($unexpectedTranslations.Name -join ', ')"
+}
+$platformRoot = Join-Path $guiInternal 'PySide6\plugins\platforms'
+$unexpectedPlatforms = @(Get-ChildItem -LiteralPath $platformRoot -File |
+    Where-Object { $_.Name.ToLowerInvariant() -notin @('qwindows.dll', 'qoffscreen.dll') })
+if ($unexpectedPlatforms) {
+    throw "Unexpected Qt platform plugins remain: $($unexpectedPlatforms.Name -join ', ')"
+}
+$imageRoot = Join-Path $guiInternal 'PySide6\plugins\imageformats'
+$unexpectedImages = @(Get-ChildItem -LiteralPath $imageRoot -File |
+    Where-Object { $_.Name.ToLowerInvariant() -notin @('qjpeg.dll', 'qico.dll') })
+if ($unexpectedImages) {
+    throw "Unexpected Qt image plugins remain: $($unexpectedImages.Name -join ', ')"
+}
+
+$archiveViewer = Join-Path $venv 'Scripts\pyi-archive_viewer.exe'
+$serverArchive = Join-Path $stage 'apps\CommServer\PythonSambaCommServer.exe'
+$serverListing = (& $archiveViewer --list --recursive --brief $serverArchive 2>&1) -join "`n"
+$serverForbidden = @(
+    'opengl32sw', 'Qt6Pdf', 'Qt6Qml', 'Qt6Quick',
+    'Qt6Test', 'Qt6VirtualKeyboard', 'pyqtgraph[/\\]opengl',
+    '(^|[/\\])OpenGL([/\\]|$)'
+)
+foreach ($pattern in $serverForbidden) {
+    if ($serverListing -match $pattern) {
+        throw "Standalone Communication Server contains forbidden payload matching: $pattern"
+    }
+}
+
 $commit = (& git -C $repo rev-parse HEAD).Trim()
 $branch = (& git -C $repo branch --show-current).Trim()
 $buildInfo = [ordered]@{
     schema = 1; suite_version = $Version; target = 'win-x64'
     build_utc = [DateTime]::UtcNow.ToString('o'); git_commit = $commit
     git_branch = $branch; python = (& $python --version 2>&1).ToString()
-    signed = $false; upx = $false
+    signed = $false; upx = $false; slimming_profile = 'qt-safe-v1'
 }
 $buildInfo | ConvertTo-Json | Set-Content (Join-Path $stage 'manifest\build-info.json') -Encoding UTF8
 @(

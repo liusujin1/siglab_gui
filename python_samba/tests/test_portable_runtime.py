@@ -21,6 +21,7 @@ from python_samba.transport.comm_server import (
     resolve_local_server_executable,
 )
 from python_samba.transport.serial_port import TransportError
+from python_samba.ui import patches as ui_patches
 
 
 def test_suite_config_sets_shared_environment(tmp_path, monkeypatch) -> None:
@@ -69,6 +70,15 @@ def test_suite_runtime_paths_are_partitioned(tmp_path, monkeypatch) -> None:
     assert default_recovery_directory() == (
         tmp_path / "recovery" / "monitor_slot_recovery"
     )
+
+
+def test_patch_loader_prefers_canonical_installed_directory(tmp_path, monkeypatch) -> None:
+    canonical = tmp_path / "python_samba_patches"
+    canonical.mkdir()
+    (canonical / "ff_filter_patch.py").write_text("# packaged patch\n", encoding="utf-8")
+    monkeypatch.setattr(ui_patches.sys, "path", [str(tmp_path)])
+
+    assert Path(ui_patches._find_patches_dir()) == canonical.resolve()
 
 
 def test_runtime_arguments_are_removed_before_qt(tmp_path, monkeypatch) -> None:

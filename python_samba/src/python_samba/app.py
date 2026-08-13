@@ -39,7 +39,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    from python_samba.ui.main_window import MainWindow
+    from python_samba.ui.main_window import LIVE_CURVE_IMPORT_ERROR, MainWindow
+
+    if os.environ.get("SIGLAB_SMOKE_TEST") == "1" and LIVE_CURVE_IMPORT_ERROR:
+        print(
+            f"Real-time Curve import failed in frozen runtime: {LIVE_CURVE_IMPORT_ERROR}",
+            file=sys.stderr,
+        )
+        return 2
 
     # Apply SAMBA19xUI gap patches BEFORE constructing the window
     # so that patched _build_* methods are used during __init__

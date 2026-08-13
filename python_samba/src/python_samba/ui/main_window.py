@@ -64,9 +64,13 @@ try:
 except ImportError as exc:  # pragma: no cover
     raise ImportError("PySide6 required for GUI: pip install python-samba[gui]") from exc
 
+LIVE_CURVE_IMPORT_ERROR: str | None = None
 try:
     from python_samba.ui.live_curve_window import LiveCurveWindow
-except ImportError as _live_curve_import_error:  # pragma: no cover - minimal GUI install
+except ImportError as exc:  # pragma: no cover - minimal GUI install
+    # Exception targets are cleared when the ``except`` block exits.  Keep a
+    # stable text copy for the placeholder's later constructor.
+    LIVE_CURVE_IMPORT_ERROR = str(exc)
 
     class LiveCurveWindow(QtWidgets.QDialog):
         """Dependency-safe placeholder; Logging and the main UI remain usable."""
@@ -85,7 +89,7 @@ except ImportError as _live_curve_import_error:  # pragma: no cover - minimal GU
                 "Real-time Curve requires NumPy and pyqtgraph.\n\n"
                 "Install the GUI dependencies with:\n"
                 "python -m pip install -e .[gui]\n\n"
-                f"Import error: {_live_curve_import_error}"
+                f"Import error: {LIVE_CURVE_IMPORT_ERROR}"
             )
             message.setAlignment(QtCore.Qt.AlignCenter)
             message.setWordWrap(True)

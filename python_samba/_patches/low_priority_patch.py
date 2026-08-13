@@ -1,8 +1,7 @@
-"""Low-priority patches: View3D, DigIOStatus, UIOptionWindow.
+"""Low-priority patches: DigIOStatus and UIOptionWindow.
 
 Module-level functions for monkey-patching:
   _build_special_tab     — adds DigIOStatus as sub-tab
-  _page_view3d           — 3D view page (placeholder)
   _page_digio            — Digital IO status page
   show_ui_options        — UI options dialog
 """
@@ -11,60 +10,6 @@ from __future__ import annotations
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from python_samba.ui.classic_widgets import FlatPush, GroupPanel, LedIndicator, SciEdit
-
-
-def _page_view3d(win) -> QtWidgets.QWidget:
-    """3D view page — loads STL model if available, otherwise shows placeholder.
-
-    The C# version uses HelixToolkit.Wpf to load '0002507.stl'.
-    We use pyqtgraph if available, otherwise show a message.
-    """
-    w = QtWidgets.QWidget()
-    root = QtWidgets.QVBoxLayout(w)
-    root.setContentsMargins(6, 4, 6, 4)
-
-    # Try to use pyqtgraph for 3D
-    has_3d = False
-    try:
-        import pyqtgraph.opengl as gl
-        has_3d = True
-    except ImportError:
-        pass
-
-    if has_3d:
-        try:
-            from pyqtgraph.opengl import GLViewWidget
-            gl_view = GLViewWidget()
-            root.addWidget(gl_view, 1)
-            # Add coordinate axes
-            g = gl.GLGridItem()
-            gl_view.addItem(g)
-            win._gl_view = gl_view
-        except Exception:
-            has_3d = False
-
-    if not has_3d:
-        msg = QtWidgets.QLabel(
-            "3D View\n\n"
-            "To enable 3D visualization, install pyqtgraph:\n"
-            "  pip install pyqtgraph\n\n"
-            "The original SAMBA19xUI loads '0002507.stl' using\n"
-            "HelixToolkit.Wpf (a .NET library).\n\n"
-            "This placeholder provides the same tab structure."
-        )
-        msg.setWordWrap(True)
-        msg.setAlignment(QtCore.Qt.AlignCenter)
-        msg.setStyleSheet("color:#505050; font-size:13px; padding:40px;")
-        root.addWidget(msg, 1)
-
-    g_rot = GroupPanel("Rotation")
-    rot = QtWidgets.QHBoxLayout(g_rot)
-    btn_rot = FlatPush("Rotate 90\xb0")
-    rot.addWidget(btn_rot)
-    rot.addStretch(1)
-    root.addWidget(g_rot)
-
-    return w
 
 
 def _page_digio(win) -> QtWidgets.QWidget:
@@ -199,7 +144,7 @@ def show_ui_options(win) -> None:
 
 
 def _build_special_tab(win) -> None:
-    """Replacement _build_special_tab that adds DigIOStatus and View3D."""
+    """Replacement _build_special_tab that adds DigIOStatus."""
     from python_samba.ui.main_window import SamTabWidget
 
     # Import the existing safety/zms/polynom builder from the patch
@@ -272,10 +217,6 @@ def _build_special_tab(win) -> None:
     digio_w = _page_digio(win)
     tabs.addTab(digio_w, "DigIO Status")
 
-    # View3D tab
-    view3d_w = _page_view3d(win)
-    tabs.addTab(view3d_w, "View3D")
-
     # Store in main tabs
     # Find the "Special" tab index and replace it
     for i in range(win.main_tabs.count()):
@@ -287,7 +228,7 @@ def _build_special_tab(win) -> None:
 
 def apply_patches(cls: type) -> None:
     """Apply all low-priority patches."""
-    for name in ["_page_view3d", "_page_digio", "_on_digio_read", "show_ui_options", "_build_special_tab"]:
+    for name in ["_page_digio", "_on_digio_read", "show_ui_options", "_build_special_tab"]:
         fn = globals()[name]
         setattr(cls, name, fn)
-    print("[patches] Applied low-priority patches (View3D, DigIO, UIOption)")
+    print("[patches] Applied low-priority patches (DigIO, UIOption)")

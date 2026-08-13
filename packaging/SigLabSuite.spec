@@ -3,12 +3,16 @@ from __future__ import annotations
 
 import filecmp
 from pathlib import Path
+import sys
 
 from PyInstaller.building.datastruct import normalize_toc
 from PyInstaller.utils.hooks import collect_submodules
 
 
 ROOT = Path(SPECPATH).parent.resolve()
+sys.path.insert(0, str(ROOT / "packaging"))
+from pyinstaller_slim import filter_testkit_entries
+
 SAMBA = ROOT / "python_samba"
 SIDMAT = ROOT / "python_sidmat"
 PATCHES = SAMBA / "_patches"
@@ -67,7 +71,7 @@ def _merged_toc(*parts):
 
 
 def _analysis(script, *, pathex, datas=None, hiddenimports=None):
-    return Analysis(
+    analysis = Analysis(
         [str(script)],
         pathex=[str(path) for path in pathex],
         binaries=[],
@@ -78,6 +82,11 @@ def _analysis(script, *, pathex, datas=None, hiddenimports=None):
         # embedding a second copy in each GUI executable.
         noarchive=True, optimize=1,
     )
+    # PySide6 hooks collect all Qt modules/plugins/translations.  Filter their
+    # final TOCs so excluded resources cannot leak back through hook data.
+    analysis.binaries = filter_testkit_entries(analysis.binaries)
+    analysis.datas = filter_testkit_entries(analysis.datas)
+    return analysis
 
 
 def _exe(analysis, name):
@@ -93,10 +102,9 @@ def _exe(analysis, name):
 samba_analysis = _analysis(
     ROOT / "packaging" / "entries" / "entry_samba.py",
     pathex=[SAMBA / "src"],
-    datas=[(str(PATCHES), "_patches"), (str(PATCHES), "python_samba_patches")],
+    datas=[(str(PATCHES), "python_samba_patches")],
     hiddenimports=(
-        ["pyqtgraph.opengl", "OpenGL", "OpenGL.GL", "OpenGL.GLU"]
-        + collect_submodules("python_samba.logging_tools")
+        collect_submodules("python_samba.logging_tools")
         + collect_submodules("python_samba.ui")
     ),
 )

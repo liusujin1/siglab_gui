@@ -1,10 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
+import sys
 
 from PyInstaller.utils.hooks import collect_submodules
 
 
 ROOT = Path(SPECPATH).parent.resolve()
+sys.path.insert(0, str(ROOT / "packaging"))
+from pyinstaller_slim import filter_testkit_entries
+
 SAMBA = ROOT / "python_samba"
 
 a = Analysis(
@@ -23,6 +27,8 @@ a = Analysis(
     excludes=["numpy", "scipy", "pyqtgraph", "matplotlib", "tkinter", "pytest"],
     noarchive=False, optimize=1,
 )
+a.binaries = filter_testkit_entries(a.binaries)
+a.datas = filter_testkit_entries(a.datas)
 pyz = PYZ(a.pure)
 exe = EXE(
     pyz, a.scripts, a.binaries, a.datas, [], name="PythonSambaCommServer",
