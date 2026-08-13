@@ -12,11 +12,10 @@ function Check([bool]$Ok, [string]$Text) {
 }
 Check ([Environment]::Is64BitOperatingSystem) 'Windows x64 operating system'
 Check ($PSVersionTable.PSVersion.Major -ge 5) 'PowerShell 5 or later'
-Check (Test-Path (Join-Path $root 'apps\Samba\Samba.exe')) 'Samba.exe present'
-Check (Test-Path (Join-Path $root 'apps\SIDMAT\SIDMAT.exe')) 'SIDMAT.exe present'
+Check (Test-Path (Join-Path $root 'apps\SigLabSuite\Samba.exe')) 'Samba.exe present'
+Check (Test-Path (Join-Path $root 'apps\SigLabSuite\SIDMAT.exe')) 'SIDMAT.exe present'
 Check (Test-Path (Join-Path $root 'apps\CommServer\PythonSambaCommServer.exe')) 'CommServer present'
-Check (Test-Path (Join-Path $root 'apps\Samba\_internal\PySide6\plugins\platforms\qwindows.dll')) 'Samba Qt platform plugin present'
-Check (Test-Path (Join-Path $root 'apps\SIDMAT\_internal\PySide6\plugins\platforms\qwindows.dll')) 'SIDMAT Qt platform plugin present'
+Check (Test-Path (Join-Path $root 'apps\SigLabSuite\_internal\PySide6\plugins\platforms\qwindows.dll')) 'Shared Qt platform plugin present'
 try {
     $probe = Join-Path $env:SIGLAB_LOCAL_DATA_ROOT 'preflight.write-test'
     [IO.File]::WriteAllText($probe, 'ok'); Remove-Item $probe -Force

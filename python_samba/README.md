@@ -95,7 +95,9 @@ Logging 准备期也可直接点击 **Stop** 取消；采集期点击 **Stop** �
 TestKit 使用 `%LOCALAPPDATA%\SigLabSuite\config`。
 
 便携 TestKit 中的冻结 SAMBA/SIDMAT 在本机 Server 连接被拒绝时，会优先定位套件内
-`apps\CommServer\PythonSambaCommServer.exe` 并自动启动；冻结环境找不到组件时会明确
+`apps\CommServer\PythonSambaCommServer.exe` 并自动启动。Samba 与 SIDMAT 位于同一个
+`apps\SigLabSuite` 目录并共享 `_internal` 运行库；Communication Server 仍是可单独
+复制到控制器电脑运行的单文件 EXE。冻结环境找不到组件时会明确
 报错，不会尝试调用目标机上的系统 Python。非回环远程地址不会触发本地自动启动。
 完整的 Windows x64 构建、启动、停止、预检和诊断方案见仓库根目录
 `packaging\README.md`。

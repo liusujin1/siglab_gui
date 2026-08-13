@@ -9,7 +9,8 @@
   release and reference an external token file.
 
 Command line `--comm-server-exe` takes priority over
-`SIGLAB_COMM_SERVER_EXE`, then the standard `apps\CommServer` location, then
+`SIGLAB_COMM_SERVER_EXE`, then the standard
+`apps\CommServer\PythonSambaCommServer.exe` location, then
 the GUI directory. A frozen client never calls a system Python interpreter.
 
 ## Upgrade and rollback

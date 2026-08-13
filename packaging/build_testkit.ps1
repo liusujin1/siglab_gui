@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '0.1.0-beta.1',
+    [string]$Version = '0.1.0-beta.2',
     [string]$PythonVersion = '3.12',
     [string]$OutputRoot = '',
     [switch]$SkipTests,
@@ -75,7 +75,7 @@ if (-not $SkipTests) {
 
 Remove-Item -LiteralPath $work, $dist, $stage -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $work, $dist | Out-Null
-foreach ($spec in @('Samba.spec', 'SIDMAT.spec', 'PythonSambaCommServer.spec')) {
+foreach ($spec in @('SigLabSuite.spec', 'PythonSambaCommServer.spec')) {
     Run $python @(
         '-m', 'PyInstaller', '--clean', '--noconfirm',
         '--workpath', (Join-Path $work ([IO.Path]::GetFileNameWithoutExtension($spec))),
@@ -86,8 +86,7 @@ foreach ($spec in @('Samba.spec', 'SIDMAT.spec', 'PythonSambaCommServer.spec')) 
 New-Item -ItemType Directory -Force -Path `
     (Join-Path $stage 'apps'), (Join-Path $stage 'apps\CommServer'),
     (Join-Path $stage 'manifest') | Out-Null
-Copy-Item (Join-Path $dist 'Samba') (Join-Path $stage 'apps\Samba') -Recurse
-Copy-Item (Join-Path $dist 'SIDMAT') (Join-Path $stage 'apps\SIDMAT') -Recurse
+Copy-Item (Join-Path $dist 'SigLabSuite') (Join-Path $stage 'apps\SigLabSuite') -Recurse
 Copy-Item (Join-Path $dist 'PythonSambaCommServer.exe') `
     (Join-Path $stage 'apps\CommServer\PythonSambaCommServer.exe')
 Copy-Item (Join-Path $repo 'packaging\config') (Join-Path $stage 'config') -Recurse

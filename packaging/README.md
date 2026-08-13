@@ -8,13 +8,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build_testkit.ps1
 ```
 
 The command runs the SAMBA and SIDMAT suites serially, compiles both source
-trees, builds the three frozen programs, runs offscreen executable smoke tests,
+trees, builds the two GUIs with one shared `_internal` runtime plus a standalone
+one-file Communication Server, runs offscreen executable smoke tests,
 scans staged text for known sensitive material, writes per-file SHA256 values,
 and creates:
 
 ```text
-release\SigLab-TestKit-0.1.0-beta.1-win-x64.zip
-release\SigLab-TestKit-0.1.0-beta.1-win-x64.zip.sha256
+release\SigLab-TestKit-0.1.0-beta.2-win-x64.zip
+release\SigLab-TestKit-0.1.0-beta.2-win-x64.zip.sha256
 ```
 
 Generated `.build`, `release`, PyInstaller `build/dist`, caches, egg-info,

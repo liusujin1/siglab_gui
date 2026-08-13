@@ -92,7 +92,7 @@ def test_runtime_arguments_are_removed_before_qt(tmp_path, monkeypatch) -> None:
 
 
 def test_frozen_server_resolution_search_order(tmp_path, monkeypatch) -> None:
-    samba_dir = tmp_path / "apps" / "Samba"
+    samba_dir = tmp_path / "apps" / "SigLabSuite"
     server_dir = tmp_path / "apps" / "CommServer"
     samba_dir.mkdir(parents=True)
     server_dir.mkdir(parents=True)
@@ -112,7 +112,7 @@ def test_frozen_server_resolution_search_order(tmp_path, monkeypatch) -> None:
 
 
 def test_frozen_missing_server_never_falls_back_to_python(tmp_path, monkeypatch) -> None:
-    samba = tmp_path / "apps" / "Samba" / "Samba.exe"
+    samba = tmp_path / "apps" / "SigLabSuite" / "Samba.exe"
     samba.parent.mkdir(parents=True)
     samba.write_bytes(b"MZ")
     monkeypatch.setattr(comm_server.sys, "executable", str(samba))

@@ -1,4 +1,4 @@
-# SigLab TestKit 0.1.0-beta.1
+# SigLab TestKit 0.1.0-beta.2
 
 This is a portable Windows 10/11 x64 pilot package for SAMBA and SIDMAT. It
 does not require Python and does not install a Windows service.
@@ -6,7 +6,8 @@ does not require Python and does not install a Windows service.
 ## First run
 
 1. Extract the complete ZIP to a user-writable directory. Do not run inside
-   the ZIP and do not copy only the EXE files.
+   the ZIP. Samba and SIDMAT must stay beside their shared
+   `apps\SigLabSuite\_internal` directory.
 2. Run `Preflight.bat`.
 3. Run `Start-Samba.bat`, `Start-SIDMAT.bat`, or `Start-TestKit.bat`.
 4. For a no-hardware check, pass the mock profile:
@@ -19,6 +20,11 @@ The Communication Server is the only owner of the physical serial port.
 SAMBA and SIDMAT must use the same server endpoint, COM port, and baudrate.
 Direct Serial mode is diagnostic-only and cannot share a COM port already
 owned by the server.
+
+Samba and SIDMAT are packaged together under `apps\SigLabSuite` and share one
+Python/Qt/NumPy/SciPy runtime. `apps\CommServer\PythonSambaCommServer.exe`
+remains a self-contained single-file program and may be copied by itself to a
+different controller computer.
 
 ## Stopping safely
 

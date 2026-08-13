@@ -55,11 +55,11 @@ function Wait-PackagedServerExit([string]$ServerExe, [string]$Endpoint) {
 }
 
 try {
-    Run-Smoke (Join-Path $root 'apps\Samba\Samba.exe')
-    Run-Smoke (Join-Path $root 'apps\SIDMAT\SIDMAT.exe')
-    foreach ($gui in @('Samba\Samba.exe', 'SIDMAT\SIDMAT.exe')) {
+    Run-Smoke (Join-Path $root 'apps\SigLabSuite\Samba.exe')
+    Run-Smoke (Join-Path $root 'apps\SigLabSuite\SIDMAT.exe')
+    foreach ($gui in @('Samba.exe', 'SIDMAT.exe')) {
         $endpoint = Get-FreeLoopbackEndpoint
-        $process = Start-Process -FilePath (Join-Path $root "apps\$gui") -ArgumentList @(
+        $process = Start-Process -FilePath (Join-Path $root "apps\SigLabSuite\$gui") -ArgumentList @(
             '--comm-server-autostart-smoke', $endpoint,
             '--comm-server-exe', ('"{0}"' -f $server)
         ) -WorkingDirectory $tempRoot -PassThru
@@ -73,6 +73,21 @@ try {
     ) -WorkingDirectory $tempRoot -PassThru
     if (-not $serverProcess.WaitForExit($TimeoutSeconds * 1000) -or
         $serverProcess.ExitCode -ne 0) { throw 'Communication Server smoke test failed.' }
+
+    # The server is intentionally a self-contained one-file program so it can
+    # be copied by itself to the controller PC. Verify that deployment shape,
+    # not merely execution beside the GUI suite.
+    $standaloneDir = Join-Path $tempRoot 'StandaloneCommServer'
+    New-Item -ItemType Directory -Force -Path $standaloneDir | Out-Null
+    $standaloneServer = Join-Path $standaloneDir 'PythonSambaCommServer.exe'
+    Copy-Item -LiteralPath $server -Destination $standaloneServer
+    $serverProcess = Start-Process -FilePath $standaloneServer -ArgumentList @(
+        '--no-auto-start', '--no-firewall-prompt', '--exit-after', '750'
+    ) -WorkingDirectory $standaloneDir -PassThru
+    if (-not $serverProcess.WaitForExit($TimeoutSeconds * 1000) -or
+        $serverProcess.ExitCode -ne 0) {
+        throw 'Standalone Communication Server smoke test failed.'
+    }
     Write-Host 'Frozen executable smoke tests passed.'
 } finally {
     Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
