@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '0.1.0-beta.3',
+    [string]$Version = '0.1.0-beta.4',
     [string]$PythonVersion = '3.12',
     [string]$OutputRoot = '',
     [switch]$SkipTests,
@@ -45,6 +45,21 @@ if (-not (Test-Path (Join-Path $venv 'Scripts\python.exe'))) {
 $python = Join-Path $venv 'Scripts\python.exe'
 Run $python @('-m', 'pip', 'install', '--disable-pip-version-check', '-r',
     (Join-Path $repo 'packaging\requirements-win-x64.lock'))
+# A reused build venv may still contain beta.3's SciPy.  Remove it explicitly
+# so tests and PyInstaller analysis prove the beta.4 runtime is independent.
+Run $python @('-m', 'pip', 'uninstall', '-y', 'scipy')
+$sitePackages = [IO.Path]::GetFullPath((& $python -c `
+    "import sysconfig; print(sysconfig.get_paths()['purelib'])").Trim())
+$venvRoot = [IO.Path]::GetFullPath($venv).TrimEnd('\') + '\'
+if (-not $sitePackages.StartsWith($venvRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to clean SciPy residue outside the build venv: $sitePackages"
+}
+$scipyResidue = Join-Path $sitePackages 'scipy'
+if (Test-Path -LiteralPath $scipyResidue) {
+    Remove-Item -LiteralPath $scipyResidue -Recurse -Force
+}
+Run $python @('-c',
+    "import importlib.util; assert importlib.util.find_spec('scipy') is None, 'SciPy residue remains in beta.4 build environment'")
 Run $python @('-m', 'pip', 'install', '--disable-pip-version-check', '--no-deps', '-e',
     (Join-Path $repo 'python_samba'), '-e', (Join-Path $repo 'python_sidmat'))
 
@@ -92,6 +107,8 @@ Copy-Item (Join-Path $dist 'PythonSambaCommServer.exe') `
 Copy-Item (Join-Path $repo 'packaging\config') (Join-Path $stage 'config') -Recurse
 Copy-Item (Join-Path $repo 'packaging\samples') (Join-Path $stage 'samples') -Recurse
 Copy-Item (Join-Path $repo 'packaging\docs') (Join-Path $stage 'docs') -Recurse
+Copy-Item (Join-Path $repo 'python_samba\THIRD_PARTY_NOTICES.md') `
+    (Join-Path $stage 'docs\THIRD_PARTY_NOTICES.md')
 Copy-Item (Join-Path $repo 'packaging\scripts') (Join-Path $stage 'scripts') -Recurse
 Copy-Item (Join-Path $repo 'packaging\smoke_test.ps1') (Join-Path $stage 'scripts\smoke_test.ps1')
 Copy-Item (Join-Path $repo 'packaging\wrappers\*.bat') $stage
@@ -112,7 +129,9 @@ $blockedFiles = @(Get-ChildItem -LiteralPath $guiInternal -Recurse -File |
 $blockedDirectories = @(
     (Join-Path $guiInternal 'OpenGL'),
     (Join-Path $guiInternal 'pyqtgraph\opengl'),
-    (Join-Path $guiInternal '_patches')
+    (Join-Path $guiInternal '_patches'),
+    (Join-Path $guiInternal 'scipy'),
+    (Join-Path $guiInternal 'scipy.libs')
 ) | Where-Object { Test-Path -LiteralPath $_ }
 if ($blockedFiles -or $blockedDirectories) {
     throw "Slim GUI payload contains forbidden Qt/OpenGL/duplicate patch resources: $((@($blockedFiles.FullName) + @($blockedDirectories)) -join ', ')"
@@ -159,7 +178,7 @@ $buildInfo = [ordered]@{
     schema = 1; suite_version = $Version; target = 'win-x64'
     build_utc = [DateTime]::UtcNow.ToString('o'); git_commit = $commit
     git_branch = $branch; python = (& $python --version 2>&1).ToString()
-    signed = $false; upx = $false; slimming_profile = 'qt-safe-v1'
+    signed = $false; upx = $false; slimming_profile = 'numpy-signal-mat-v5-v1'
 }
 $buildInfo | ConvertTo-Json | Set-Content (Join-Path $stage 'manifest\build-info.json') -Encoding UTF8
 @(

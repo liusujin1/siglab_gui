@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -314,3 +315,22 @@ def test_sidimat_mat_multiple_measurements():
     assert out[1].sig0_name == "A"
     assert out[1].ch0 == [1.0]
     assert out[1].ch1 == [2.0]
+
+
+def test_loads_scipy_mat_v5_golden_with_non_contiguous_rawdat_and_stale_count():
+    from python_sidmat.measurement.matfile import load_sidimat_raw
+
+    fixture = Path(__file__).with_name("fixtures") / "scipy_sidimat_v5.sidimat19x"
+    records = load_sidimat_raw(str(fixture))
+
+    assert len(records) == 2
+    assert records[0].sig0_name == "位移X"
+    assert records[0].sig1_name == "Y1FB"
+    assert records[0].sample_num == 4  # DataSet wins over stale SampleNumber=999.
+    assert records[0].ch1 == [0.0, 2.0, 4.0, 6.0]
+    assert records[1].sig0_name == ""
+    assert records[1].sig1_name == ""
+    assert records[1].sample_rate == 1000
+    assert records[1].undersample == 2
+    assert records[1].ch0 == [1.0, 2.0, 3.0]
+    assert records[1].ch1 == [10.0, 20.0, 30.0]

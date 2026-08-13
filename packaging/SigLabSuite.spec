@@ -18,7 +18,7 @@ SIDMAT = ROOT / "python_sidmat"
 PATCHES = SAMBA / "_patches"
 
 EXCLUDES = [
-    "IPython", "jupyter", "notebook", "pytest", "tkinter",
+    "IPython", "jupyter", "notebook", "pytest", "scipy", "tkinter",
     "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets",
     "PySide6.QtDesigner", "PySide6.QtHelp", "PySide6.QtMultimedia",
     "PySide6.QtMultimediaWidgets", "PySide6.QtNetworkAuth",
@@ -29,7 +29,7 @@ EXCLUDES = [
 
 COMMON_HIDDEN = [
     "PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets", "shiboken6",
-    "numpy", "scipy", "scipy.io", "scipy.signal", "pyqtgraph",
+    "numpy", "pyqtgraph",
     "serial", "serial.tools", "serial.tools.list_ports",
     "serial.tools.list_ports_windows", "psutil",
 ]

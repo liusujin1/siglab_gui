@@ -27,7 +27,7 @@ Files        .sidimat19x raw MAT files · .idefigure plot MAT files · CSV CLI
 
 ```bat
 cd D:\AI_test\claude\python_samba && pip install -e .      :: required dependency
-cd D:\AI_test\claude\python_sidmat && pip install -e .[gui,dev,mat]
+cd D:\AI_test\claude\python_sidmat && pip install -e .[gui,dev]
 ```
 
 Requires Python ≥ 3.11. `python_samba` must be installed editable so the

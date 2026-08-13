@@ -9,8 +9,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-pytest.importorskip("scipy")
-
 from python_samba.logging_tools.models import LoggingRecord
 from python_samba.logging_tools.record_analysis import RecordAnalysisSession
 

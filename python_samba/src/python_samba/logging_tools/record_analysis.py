@@ -1,8 +1,8 @@
 """Numerical analysis helpers for completed logging records.
 
 The controller and communication layers intentionally do not depend on this
-module.  It is loaded by the optional GUI record viewer, where NumPy and SciPy
-are available.
+module.  The optional GUI record viewer uses a compact NumPy-only numerical
+layer so the portable TestKit does not need the full SciPy runtime.
 """
 
 from __future__ import annotations
@@ -15,9 +15,15 @@ from pathlib import Path
 from typing import Any, Iterable, Literal, Mapping
 
 import numpy as np
-from scipy import signal as scipy_signal
 
 from python_samba.logging_tools.models import LoggingRecord
+from python_samba.logging_tools.numeric_signal import (
+    butter_sos,
+    detrend,
+    periodic_hann,
+    sosfiltfilt,
+    welch_psd,
+)
 
 
 TIME_HEADERS = {"timestamp_utc", "elapsed_s", "time", "elapsed"}
@@ -505,7 +511,7 @@ class RecordAnalysisSession:
         kind = str(mode).strip().lower()
         if kind not in {"constant", "linear"}:
             raise ValueError("detrend mode must be 'constant' or 'linear'")
-        values = scipy_signal.detrend(curve.y, type=kind)
+        values = detrend(curve.y, mode=kind)
         label = "Mean removed" if kind == "constant" else "Linear detrend"
         return self._add_derived(
             curve,
@@ -561,31 +567,25 @@ class RecordAnalysisSession:
             if high is None or high >= nyquist:
                 raise ValueError("low-pass cutoff must be below Nyquist")
             critical: float | list[float] = high
-            scipy_kind = "lowpass"
+            design_kind = "lowpass"
             description = f"LP {high:g} Hz O{filter_order}"
         elif kind == "highpass":
             if low is None or low >= nyquist:
                 raise ValueError("high-pass cutoff must be below Nyquist")
             critical = low
-            scipy_kind = "highpass"
+            design_kind = "highpass"
             description = f"HP {low:g} Hz O{filter_order}"
         elif kind == "bandpass":
             if low is None or high is None or not 0.0 < low < high < nyquist:
                 raise ValueError("band-pass cutoffs must satisfy 0 < low < high < Nyquist")
             critical = [low, high]
-            scipy_kind = "bandpass"
+            design_kind = "bandpass"
             description = f"BP {low:g}-{high:g} Hz O{filter_order}"
         else:
             raise ValueError("filter type must be lowpass, highpass, or bandpass")
-        sections = scipy_signal.butter(
-            filter_order,
-            critical,
-            btype=scipy_kind,
-            fs=rate,
-            output="sos",
-        )
+        sections = butter_sos(filter_order, critical, design_kind, rate)
         try:
-            values = scipy_signal.sosfiltfilt(sections, curve.y)
+            values = sosfiltfilt(sections, curve.y)
         except ValueError as exc:
             raise ValueError(f"not enough samples for zero-phase filtering: {exc}") from exc
         return self._add_derived(
@@ -608,7 +608,7 @@ class RecordAnalysisSession:
         sample_count = len(curve.y)
         if sample_count < 4:
             raise ValueError("at least four samples are required for FFT")
-        window = scipy_signal.windows.hann(sample_count, sym=False)
+        window = periodic_hann(sample_count)
         centered = curve.y - float(np.mean(curve.y))
         spectrum = np.fft.rfft(centered * window)
         scale = float(np.sum(window))
@@ -638,15 +638,7 @@ class RecordAnalysisSession:
         requested = max(8, int(block_size))
         maximum = min(requested, len(curve.y))
         nperseg = 1 << int(math.floor(math.log2(maximum)))
-        frequencies, density = scipy_signal.welch(
-            curve.y,
-            fs=rate,
-            window="hann",
-            nperseg=nperseg,
-            noverlap=nperseg // 2,
-            detrend="constant",
-            scaling="density",
-        )
+        frequencies, density = welch_psd(curve.y, rate, nperseg, overlap=0.5)
         return self._add_derived(
             curve,
             name=f"{curve.name} [PSD {nperseg}]",

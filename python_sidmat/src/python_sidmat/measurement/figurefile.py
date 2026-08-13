@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 import re
 
 import numpy as np
+from python_sidmat.measurement.mat_v5 import read_mat_v5, write_mat_v5
 
 __all__ = [
     "FigureSeries",
@@ -57,11 +58,6 @@ class IdeFigure:
 
 def save_idefigure(figure: IdeFigure, path: str) -> None:
     """Write an :class:`IdeFigure` using the original top-level field names."""
-    try:
-        from scipy.io import savemat
-    except ImportError as exc:
-        raise RuntimeError(".idefigure support requires SciPy") from exc
-
     payload: dict[str, object] = {
         "MeasurementType": MEASUREMENT_TYPE,
         "Version": np.array([VERSION]),
@@ -72,17 +68,12 @@ def save_idefigure(figure: IdeFigure, path: str) -> None:
     }
     for index, model in enumerate(figure.models):
         payload[f"Model{index}"] = _model_to_dict(model)
-    savemat(path, payload, do_compression=False, format="5")
+    write_mat_v5(path, payload)
 
 
 def load_idefigure(path: str) -> IdeFigure:
     """Read a C# or Python ``.idefigure`` MAT v5 file."""
-    try:
-        from scipy.io import loadmat
-    except ImportError as exc:
-        raise RuntimeError(".idefigure support requires SciPy") from exc
-
-    data = loadmat(path, squeeze_me=True, struct_as_record=False)
+    data = read_mat_v5(path)
     measurement_type = _text(data.get("MeasurementType", ""))
     if measurement_type and measurement_type != MEASUREMENT_TYPE:
         raise ValueError(f"unsupported figure type: {measurement_type}")

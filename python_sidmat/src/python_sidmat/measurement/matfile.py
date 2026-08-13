@@ -22,6 +22,7 @@ import numpy as np
 
 from python_sidmat.analysis.types import MeasurementRawData
 from python_sidmat.measurement.datafile import RawFile
+from python_sidmat.measurement.mat_v5 import read_mat_v5, write_mat_v5
 
 __all__ = ["MEASUREMENT_TYPE", "save_sidimat_raw", "load_sidimat_raw"]
 
@@ -37,30 +38,18 @@ def save_sidimat_raw(
     raws = _as_raw_files(entries)
     if not raws:
         raise ValueError("no measurements to save")
-    try:
-        from scipy.io import savemat
-    except ImportError as exc:
-        raise RuntimeError(
-            "MAT-file support requires SciPy; install with 'pip install scipy'"
-        ) from exc
     payload: dict[str, object] = {
         "MeasurementType": MEASUREMENT_TYPE,
         "Version": np.array([_VERSION]),
     }
     for i, rf in enumerate(raws, start=1):
         payload[f"RawDat{i}"] = _raw_dat_struct(rf)
-    savemat(path, payload, do_compression=False, format="5")
+    write_mat_v5(path, payload)
 
 
 def load_sidimat_raw(path: str) -> list[RawFile]:
     """Read a .sidimat19x file back into a list of RawFile."""
-    try:
-        from scipy.io import loadmat
-    except ImportError as exc:
-        raise RuntimeError(
-            "MAT-file support requires SciPy; install with 'pip install scipy'"
-        ) from exc
-    data = loadmat(path, mat_dtype=True)  # struct_as_record=True (default)
+    data = read_mat_v5(path)
     measurement_type = data.get("MeasurementType")
     if measurement_type is not None:
         t = _to_str(measurement_type)
@@ -71,12 +60,11 @@ def load_sidimat_raw(path: str) -> list[RawFile]:
         value = float(np.asarray(version).flat[0])
         if value < 1.0 or value > _VERSION:
             raise ValueError("unsupported .sidimat19x version")
-    raw_list: list[RawFile] = []
-    i = 1
-    while f"RawDat{i}" in data:
-        raw_list.append(_raw_dat_to_rawfile(data[f"RawDat{i}"]))
-        i += 1
-    return raw_list
+    names = sorted(
+        (name for name in data if name.startswith("RawDat") and name[6:].isdigit()),
+        key=lambda name: int(name[6:]),
+    )
+    return [_raw_dat_to_rawfile(data[name]) for name in names]
 
 
 # ---------------------------------------------------------------------------
@@ -139,12 +127,18 @@ def _raw_dat_struct(rf: RawFile) -> dict:
 
 
 def _raw_dat_to_rawfile(mls) -> RawFile:
-    rec = mls[0, 0] if getattr(mls, "ndim", 0) else mls
+    if isinstance(mls, dict):
+        record = mls
 
-    def field(name: str):
-        if not getattr(rec.dtype, "names", None):
-            return None
-        return rec[name]
+        def field(name: str):
+            return record.get(name)
+    else:
+        rec = mls[0, 0] if getattr(mls, "ndim", 0) else mls
+
+        def field(name: str):
+            if not getattr(rec.dtype, "names", None):
+                return None
+            return rec[name]
 
     rf = RawFile()
     v = field("SampleRate")
@@ -162,10 +156,19 @@ def _raw_dat_to_rawfile(mls) -> RawFile:
         rf.sample_num = per_average * max(1, rf.avg_num)
     v = field("SignalName")
     if v is not None:
-        names = []
-        sig = v[0, 0] if getattr(v, "ndim", 0) else v
-        for fn in (getattr(sig.dtype, "names", None) or ()):
-            names.append(_to_str(sig[fn]))
+        if isinstance(v, dict):
+            fields = sorted(
+                v,
+                key=lambda name: (0, int(name[3:]))
+                if name.startswith("Sig") and name[3:].isdigit()
+                else (1, name),
+            )
+            names = [_to_str(v[name]) for name in fields]
+        else:
+            names = []
+            sig = v[0, 0] if getattr(v, "ndim", 0) else v
+            for fn in (getattr(sig.dtype, "names", None) or ()):
+                names.append(_to_str(sig[fn]))
         if names:
             rf.sig0_name = names[0]
         if len(names) > 1:

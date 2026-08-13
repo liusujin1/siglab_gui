@@ -190,7 +190,7 @@ class RecordPlotWindow(QtWidgets.QDialog):
         panel = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(panel)
         message = QtWidgets.QLabel(
-            "Interactive plotting requires NumPy, SciPy and pyqtgraph.\n"
+            "Interactive plotting requires NumPy and pyqtgraph.\n"
             "Install the GUI dependencies with:\n\n"
             "python -m pip install -e .[gui]\n\n"
             f"Import error: {_ANALYSIS_IMPORT_ERROR}"

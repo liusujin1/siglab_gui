@@ -11,7 +11,6 @@ import pytest
 
 pytest.importorskip("PySide6")
 pytest.importorskip("pyqtgraph")
-pytest.importorskip("scipy")
 
 from PySide6 import QtCore, QtTest, QtWidgets
 

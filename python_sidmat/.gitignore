@@ -14,6 +14,8 @@ dist/
 *.mat
 *.sidimat19x
 *.idefigure
+!tests/fixtures/*.sidimat19x
+!tests/fixtures/*.idefigure
 
 # Local reverse-engineered reference sources and live-controller reports.
 /yuanma/
