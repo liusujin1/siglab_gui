@@ -15,6 +15,7 @@ from python_samba.logging_tools import (
     load_logging_record,
     save_trace_record,
 )
+from python_samba.runtime import runtime_data_root
 from python_samba.ui.classic_widgets import (
     FlatPush,
     GroupPanel,
@@ -535,7 +536,7 @@ class LoggingPage(QtWidgets.QWidget):
         self.trace_selector.addItem("Trace 0", 0)
         self.trace_event_time = QtWidgets.QLabel("Event time: —")
         self.trace_output = QtWidgets.QLineEdit(
-            str(Path.cwd() / "logs" / "controller_trace_0.csv")
+            str(runtime_data_root() / "Data" / "controller_trace_0.csv")
         )
         self.btn_trace_browse = FlatPush("Browse…")
         self.btn_trace_download = FlatPush("Download trace")
@@ -628,7 +629,9 @@ class LoggingPage(QtWidgets.QWidget):
         self.file_delimiter.addItem("Semicolon", ";")
         self.file_delimiter.addItem("Tab (TSV)", "\t")
         self.file_delimiter.addItem("Space", " ")
-        default_path = Path.cwd() / "logs" / datetime.now().strftime("samba_log_%Y%m%d_%H%M%S.csv")
+        default_path = runtime_data_root() / "Data" / datetime.now().strftime(
+            "samba_log_%Y%m%d_%H%M%S.csv"
+        )
         self.file_output = QtWidgets.QLineEdit(str(default_path))
         self.file_output.setMinimumWidth(0)
         self.file_output.setSizePolicy(

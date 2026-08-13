@@ -22,7 +22,7 @@ from python_samba.commserver.firewall import (
 )
 from python_samba.commserver.protocol import (
     DEFAULT_PORT,
-    default_data_dir,
+    default_config_file,
     default_log_file,
     format_endpoint,
 )
@@ -37,7 +37,7 @@ except ImportError as exc:  # pragma: no cover
     raise ImportError("PySide6 is required for the Communication Server app") from exc
 
 
-CONFIG_FILE = default_data_dir() / "communication_server.json"
+CONFIG_FILE = default_config_file()
 
 
 def _load_config(path: Path = CONFIG_FILE) -> dict[str, object]:

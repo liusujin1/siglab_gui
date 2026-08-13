@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "profile": "test-remote",
+  "backend": "server",
+  "server": "controller-host.example.invalid:47619",
+  "serial_port": "COM1",
+  "baudrate": 57600,
+  "comm_server_exe": null,
+  "token_file": "%USERPROFILE%\\.siglab-secrets\\communication_server.token",
+  "data_root": "%USERPROFILE%\\Documents\\SigLabSuite",
+  "local_data_root": "%LOCALAPPDATA%\\SigLabSuite"
+}

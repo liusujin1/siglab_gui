@@ -1,0 +1,13 @@
+# SigLab TestKit beta.1 build environment — CPython 3.12 x64
+PyInstaller==6.22.0
+PySide6==6.11.1
+shiboken6==6.11.1
+numpy==2.5.1
+scipy==1.18.0
+pyqtgraph==0.14.0
+pyserial==3.5
+psutil==7.2.2
+PyOpenGL==3.1.10
+pytest==9.0.2
+setuptools==83.0.0
+wheel==0.47.0

@@ -43,6 +43,11 @@ def _build_parser() -> argparse.ArgumentParser:
     common.add_argument("--timeout", type=float, default=2.0, help="Response timeout seconds")
     common.add_argument("--server", default="127.0.0.1:47619", help="Communication Server HOST:PORT")
     common.add_argument("--token-file", default=None, help="Access-token file for remote servers")
+    common.add_argument(
+        "--comm-server-exe",
+        default=None,
+        help="Packaged Communication Server executable for local auto-start",
+    )
     common.add_argument("--no-auto-start", action="store_true", help="Do not auto-start a local server")
     common.add_argument(
         "--write",
@@ -129,6 +134,7 @@ def _open_session(args: argparse.Namespace) -> ControllerSession:
             args.baud,
             server=args.server,
             token_file=args.token_file,
+            comm_server_exe=args.comm_server_exe,
             auto_start=not args.no_auto_start,
             client_name="python-samba-cli",
             readonly=readonly,

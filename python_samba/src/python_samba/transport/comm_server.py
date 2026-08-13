@@ -44,7 +44,118 @@ class CommServerConfig:
     token: str | None = None
     auto_start: bool = True
     client_name: str = "python_samba"
-    connect_timeout: float = 5.0
+    connect_timeout: float = 10.0
+    comm_server_exe: str | Path | None = None
+
+
+def _is_frozen() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+def resolve_local_server_executable(
+    explicit: str | Path | None = None,
+) -> Path | None:
+    """Locate the packaged Communication Server using the suite search order.
+
+    ``None`` is returned only for a source/Python process, where ``python -m``
+    remains a valid fallback.  A frozen client never falls back to a system
+    Python because the target machine is not required to have one installed.
+    """
+
+    candidates: list[tuple[str, Path]] = []
+    if explicit:
+        candidates.append(("--comm-server-exe", Path(explicit)))
+    environment_path = os.environ.get("SIGLAB_COMM_SERVER_EXE")
+    if environment_path:
+        candidates.append(("SIGLAB_COMM_SERVER_EXE", Path(environment_path)))
+
+    executable_dir = Path(sys.executable).resolve().parent
+    candidates.extend(
+        (
+            (
+                "suite component",
+                executable_dir.parent / "CommServer" / "PythonSambaCommServer.exe",
+            ),
+            ("application directory", executable_dir / "PythonSambaCommServer.exe"),
+        )
+    )
+    checked: list[str] = []
+    for source, raw_path in candidates:
+        path = Path(os.path.expandvars(os.path.expanduser(str(raw_path)))).resolve()
+        checked.append(f"{source}: {path}")
+        if path.is_file():
+            return path
+        if source in {"--comm-server-exe", "SIGLAB_COMM_SERVER_EXE"}:
+            raise TransportError(
+                "Communication Server component is missing: "
+                f"{source} points to {path}"
+            )
+    if _is_frozen():
+        raise TransportError(
+            "Communication Server component is missing. Checked: " + "; ".join(checked)
+        )
+    return None
+
+
+def request_server_shutdown(
+    endpoint: str = DEFAULT_ENDPOINT,
+    *,
+    token_file: str | Path | None = None,
+    token: str | None = None,
+    timeout: float = 5.0,
+) -> None:
+    """Request a graceful server shutdown without attaching to the serial port."""
+
+    host, port = parse_endpoint(endpoint)
+    if token is None:
+        path = Path(token_file) if token_file else default_token_file()
+        try:
+            token = path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            token = ""
+    sock = socket.create_connection((host, port), timeout=max(0.1, float(timeout)))
+    try:
+        configure_low_latency_socket(sock)
+        sock.settimeout(max(0.1, float(timeout)))
+        instance = str(uuid.uuid4())
+        send_message(
+            sock,
+            {
+                "id": 1,
+                "op": "hello",
+                "protocol": PROTOCOL_VERSION,
+                "name": "siglab-testkit-stop",
+                "pid": os.getpid(),
+                "instance": instance,
+                "token": token or "",
+            },
+        )
+        hello = recv_message(sock)
+        if not hello.get("ok"):
+            raise TransportError(f"Communication Server rejected shutdown hello: {hello}")
+        result = hello.get("result")
+        if not isinstance(result, dict) or not result.get("client_id"):
+            raise TransportError("Communication Server returned an invalid shutdown hello")
+        send_message(
+            sock,
+            {
+                "id": 2,
+                "op": "shutdown",
+                "client_id": str(result["client_id"]),
+            },
+        )
+        response = recv_message(sock)
+        if not response.get("ok"):
+            raise TransportError(f"Communication Server rejected shutdown: {response}")
+    except TransportError:
+        raise
+    except BaseException as exc:
+        raise TransportError(f"Communication Server shutdown failed: {exc}") from exc
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
 
 
 class CommServerTransport(Transport):
@@ -56,6 +167,7 @@ class CommServerTransport(Transport):
         self._client_id: str | None = None
         self._features: frozenset[str] = frozenset()
         self._open = False
+        self._open_lock = threading.RLock()
         self._rpc_lock = threading.RLock()
         self._next_id = 0
         self._pending_write: bytes | None = None
@@ -66,6 +178,10 @@ class CommServerTransport(Transport):
         return bool(self._open and self._socket is not None)
 
     def open(self) -> None:
+        with self._open_lock:
+            self._open_locked()
+
+    def _open_locked(self) -> None:
         if self.is_open:
             return
         host, _ = parse_endpoint(self.config.endpoint)
@@ -74,7 +190,7 @@ class CommServerTransport(Transport):
         last_error: BaseException | None = None
         while time.monotonic() < deadline:
             try:
-                self._connect_once()
+                self._connect_once(deadline=deadline)
                 return
             except BaseException as exc:
                 last_error = exc
@@ -89,7 +205,7 @@ class CommServerTransport(Transport):
                     started = True
                 elif not started or not is_loopback_host(host):
                     break
-                time.sleep(0.08)
+                time.sleep(0.2)
         raise TransportError(
             f"connect communication server {self.config.endpoint} failed: {last_error}"
         ) from last_error
@@ -236,21 +352,25 @@ class CommServerTransport(Transport):
         self._rpc("shutdown", rpc_timeout=5.0)
         self._drop_socket()
 
-    def _connect_once(self) -> None:
+    def _connect_once(self, *, deadline: float | None = None) -> None:
         host, port = parse_endpoint(self.config.endpoint)
+        remaining = (
+            max(0.1, deadline - time.monotonic())
+            if deadline is not None
+            else max(0.1, float(self.config.connect_timeout))
+        )
+        probe_timeout = min(1.0, remaining)
         try:
-            sock = socket.create_connection(
-                (host, port), timeout=max(0.1, float(self.config.connect_timeout))
-            )
+            sock = socket.create_connection((host, port), timeout=probe_timeout)
         except OSError as exc:
             raise _ServerUnavailable(str(exc)) from exc
         configure_low_latency_socket(sock)
-        sock.settimeout(max(0.1, float(self.config.connect_timeout)))
+        sock.settimeout(probe_timeout)
         self._socket = sock
         hello = self._rpc(
             "hello",
             include_base=False,
-            rpc_timeout=self.config.connect_timeout,
+            rpc_timeout=probe_timeout,
             protocol=PROTOCOL_VERSION,
             name=self.config.client_name,
             pid=os.getpid(),
@@ -267,9 +387,14 @@ class CommServerTransport(Transport):
             )
         else:
             self._features = frozenset()
+        remaining = (
+            max(0.1, deadline - time.monotonic())
+            if deadline is not None
+            else max(5.0, float(self.config.timeout) + 1.0)
+        )
         self._rpc(
             "attach",
-            rpc_timeout=max(5.0, float(self.config.timeout) + 1.0),
+            rpc_timeout=min(max(5.0, float(self.config.timeout) + 1.0), remaining),
             port=str(self.config.port).strip(),
             baudrate=int(self.config.baudrate),
         )
@@ -344,22 +469,36 @@ class CommServerTransport(Transport):
                 pass
 
     def _start_local_server(self) -> None:
-        python = Path(sys.executable)
-        pythonw = python.with_name("pythonw.exe") if os.name == "nt" else python
-        if not pythonw.exists():
-            pythonw = python
-        command = [
-            str(pythonw),
-            "-m",
-            "python_samba.commserver.cli",
-            "--tray",
-            "--listen",
-            self.config.endpoint,
-        ]
-        package_src = str(Path(__file__).resolve().parents[2])
-        env = os.environ.copy()
-        current_path = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = package_src + (os.pathsep + current_path if current_path else "")
+        server_executable = resolve_local_server_executable(self.config.comm_server_exe)
+        if server_executable is not None:
+            command = [
+                str(server_executable),
+                "--tray",
+                "--listen",
+                self.config.endpoint,
+            ]
+            env = os.environ.copy()
+        else:
+            # Development/source-tree fallback.  Frozen clients must have
+            # returned a packaged executable above and never enter this path.
+            python = Path(sys.executable)
+            pythonw = python.with_name("pythonw.exe") if os.name == "nt" else python
+            if not pythonw.exists():
+                pythonw = python
+            command = [
+                str(pythonw),
+                "-m",
+                "python_samba.commserver.cli",
+                "--tray",
+                "--listen",
+                self.config.endpoint,
+            ]
+            package_src = str(Path(__file__).resolve().parents[2])
+            env = os.environ.copy()
+            current_path = env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = package_src + (
+                os.pathsep + current_path if current_path else ""
+            )
         kwargs: dict[str, object] = {
             "stdin": subprocess.DEVNULL,
             "stdout": subprocess.DEVNULL,
@@ -371,4 +510,9 @@ class CommServerTransport(Transport):
             kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         else:
             kwargs["start_new_session"] = True
-        subprocess.Popen(command, **kwargs)  # noqa: S603
+        try:
+            subprocess.Popen(command, **kwargs)  # noqa: S603
+        except OSError as exc:
+            raise TransportError(
+                f"failed to start Communication Server component {command[0]}: {exc}"
+            ) from exc

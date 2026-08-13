@@ -2240,6 +2240,7 @@ def open_comm_server(
     token: str | None = None,
     auto_start: bool = True,
     client_name: str = "python_samba",
+    comm_server_exe: str | None = None,
     readonly: bool = True,
     timeout: float = 5.0,
 ) -> ControllerSession:
@@ -2258,6 +2259,7 @@ def open_comm_server(
             token=token,
             auto_start=auto_start,
             client_name=client_name,
+            comm_server_exe=comm_server_exe,
         )
     )
     return ControllerSession(

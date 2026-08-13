@@ -23,7 +23,7 @@ from typing import Callable, Iterable
 
 from python_samba.commserver.protocol import (
     PROTOCOL_VERSION,
-    default_data_dir,
+    default_identity_file,
     format_endpoint,
 )
 
@@ -198,7 +198,7 @@ def tailscale_peer_ips(timeout: float = 2.0) -> list[str]:
 def load_or_create_server_id(path: str | Path | None = None) -> str:
     """Return the stable discovery identity for this Windows/user profile."""
 
-    identity_file = Path(path) if path else default_data_dir() / "communication_server.id"
+    identity_file = Path(path) if path else default_identity_file()
     try:
         value = identity_file.read_text(encoding="utf-8").strip()
         uuid.UUID(value)

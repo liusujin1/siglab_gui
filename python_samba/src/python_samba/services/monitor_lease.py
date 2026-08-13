@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
+from python_samba.commserver.protocol import default_data_dir
+
 
 def controller_endpoint_identity(session) -> dict[str, Any]:
     """Return the stable endpoint fields used to guard a pending restore."""
@@ -30,9 +32,9 @@ def endpoint_key(identity: dict[str, Any]) -> str:
 
 
 def default_recovery_directory() -> Path:
-    base = os.environ.get("LOCALAPPDATA")
-    root = Path(base) if base else Path.home() / ".python_samba"
-    return root / "python_samba" / "monitor_slot_recovery"
+    if os.environ.get("SIGLAB_LOCAL_DATA_ROOT"):
+        return default_data_dir() / "recovery" / "monitor_slot_recovery"
+    return default_data_dir() / "monitor_slot_recovery"
 
 
 @dataclass(frozen=True, slots=True)

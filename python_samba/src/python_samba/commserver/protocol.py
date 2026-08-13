@@ -6,6 +6,7 @@ import base64
 import binascii
 import ipaddress
 import json
+import os
 import socket
 import struct
 from pathlib import Path
@@ -171,8 +172,9 @@ def send_message(
 
 
 def default_data_dir() -> Path:
-    import os
-
+    override = os.environ.get("SIGLAB_LOCAL_DATA_ROOT")
+    if override:
+        return Path(os.path.expandvars(os.path.expanduser(override))).resolve()
     root = os.environ.get("LOCALAPPDATA")
     if root:
         return Path(root) / "python_samba"
@@ -180,8 +182,36 @@ def default_data_dir() -> Path:
 
 
 def default_token_file() -> Path:
-    return default_data_dir() / "communication_server.token"
+    directory = (
+        default_data_dir() / "config"
+        if os.environ.get("SIGLAB_LOCAL_DATA_ROOT")
+        else default_data_dir()
+    )
+    return directory / "communication_server.token"
 
 
 def default_log_file() -> Path:
-    return default_data_dir() / "communication_server.log"
+    directory = (
+        default_data_dir() / "logs"
+        if os.environ.get("SIGLAB_LOCAL_DATA_ROOT")
+        else default_data_dir()
+    )
+    return directory / "communication_server.log"
+
+
+def default_config_file() -> Path:
+    directory = (
+        default_data_dir() / "config"
+        if os.environ.get("SIGLAB_LOCAL_DATA_ROOT")
+        else default_data_dir()
+    )
+    return directory / "communication_server.json"
+
+
+def default_identity_file() -> Path:
+    directory = (
+        default_data_dir() / "config"
+        if os.environ.get("SIGLAB_LOCAL_DATA_ROOT")
+        else default_data_dir()
+    )
+    return directory / "communication_server.id"

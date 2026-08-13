@@ -16,7 +16,11 @@ from python_samba.commserver.protocol import (
 )
 from python_samba.commserver.server import CommunicationServer, ServerAlreadyRunning
 from python_samba.services.session import open_comm_server
-from python_samba.transport.comm_server import CommServerConfig, CommServerTransport
+from python_samba.transport.comm_server import (
+    CommServerConfig,
+    CommServerTransport,
+    request_server_shutdown,
+)
 from python_samba.transport.mock import MockTransport
 from python_samba.transport.serial_port import SerialConfig, Transport, TransportError
 
@@ -101,6 +105,26 @@ def _wait_until(predicate, timeout: float = 2.0) -> None:
             return
         time.sleep(0.01)
     raise AssertionError("condition did not become true before timeout")
+
+
+def test_shutdown_request_does_not_attach_serial() -> None:
+    transports: list[RecordingTransport] = []
+
+    def factory(config: SerialConfig) -> RecordingTransport:
+        transport = RecordingTransport(config)
+        transports.append(transport)
+        return transport
+
+    server = CommunicationServer(
+        listen=[("127.0.0.1", 0)], transport_factory=factory
+    )
+    server.start()
+    endpoint = _endpoint(server)
+
+    request_server_shutdown(endpoint, timeout=1.0)
+
+    _wait_until(lambda: not server.addresses)
+    assert transports == []
 
 
 def test_protocol_handles_fragmented_and_invalid_messages() -> None:

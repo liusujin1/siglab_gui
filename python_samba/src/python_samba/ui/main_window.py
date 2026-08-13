@@ -1646,26 +1646,32 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         self.backend = QtWidgets.QComboBox()
         self.backend.addItems(["server", "serial", "mock"])
         saved_backend = str(
-            self._connection_settings.value("Connection/Backend", "server")
+            os.environ.get("SIGLAB_BACKEND")
+            or self._connection_settings.value("Connection/Backend", "server")
         )
         if saved_backend not in {"server", "serial", "mock"}:
             saved_backend = "server"
         self.backend.setCurrentText(saved_backend)
         self.port = QtWidgets.QLineEdit(
-            str(self._connection_settings.value("Connection/Port", "COM1"))
+            str(
+                os.environ.get("SIGLAB_SERIAL_PORT")
+                or self._connection_settings.value("Connection/Port", "COM1")
+            )
         )
         self.baud = QtWidgets.QComboBox()
         for b in (19200, 38400, 57600, 115200, 230400):
             self.baud.addItem(str(b), b)
         saved_baud = str(
-            self._connection_settings.value("Connection/Baudrate", "57600")
+            os.environ.get("SIGLAB_BAUDRATE")
+            or self._connection_settings.value("Connection/Baudrate", "57600")
         )
         self.baud.setCurrentText(
             saved_baud if self.baud.findText(saved_baud) >= 0 else "57600"
         )
         self.server_endpoint = QtWidgets.QLineEdit(
             str(
-                self._connection_settings.value(
+                os.environ.get("SIGLAB_SERVER_ENDPOINT")
+                or self._connection_settings.value(
                     "Connection/Server", "127.0.0.1:47619"
                 )
             )
@@ -4618,6 +4624,8 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
                         self.port.text().strip(),
                         int(self.baud.currentData()),
                         server=self.server_endpoint.text().strip(),
+                        token_file=os.environ.get("SIGLAB_TOKEN_FILE") or None,
+                        comm_server_exe=os.environ.get("SIGLAB_COMM_SERVER_EXE") or None,
                         auto_start=True,
                         client_name="python_samba-gui",
                         readonly=False,
@@ -4706,6 +4714,8 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
                 port=self.port.text().strip(),
                 baudrate=int(self.baud.currentData()),
                 endpoint=self.server_endpoint.text().strip(),
+                token_file=os.environ.get("SIGLAB_TOKEN_FILE") or None,
+                comm_server_exe=os.environ.get("SIGLAB_COMM_SERVER_EXE") or None,
                 auto_start=True,
                 client_name="python_samba-server-admin",
             )

@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "source": "synthetic-testkit-sample",
+  "sample_rate_hz": 10.0,
+  "contains_hardware_data": false
+}

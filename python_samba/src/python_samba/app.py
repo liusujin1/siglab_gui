@@ -16,8 +16,21 @@ os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "0")
 
 
 def main(argv: list[str] | None = None) -> int:
+    from python_samba.runtime import consume_runtime_arguments
+
+    app_argv = consume_runtime_arguments(sys.argv if argv is None else argv)
+    autostart_smoke = os.environ.get("SIGLAB_COMM_SERVER_AUTOSTART_SMOKE")
+    if autostart_smoke:
+        from python_samba.runtime import run_comm_server_autostart_smoke
+
+        try:
+            run_comm_server_autostart_smoke(autostart_smoke)
+            return 0
+        except BaseException as exc:
+            print(f"Communication Server auto-start smoke failed: {exc}", file=sys.stderr)
+            return 3
     try:
-        from PySide6 import QtGui, QtWidgets
+        from PySide6 import QtCore, QtGui, QtWidgets
     except ImportError:
         print(
             "PySide6 is required for the GUI.\n"
@@ -40,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[patches] Error: patch application failed: {exc}", file=sys.stderr)
         return 2
 
-    app = QtWidgets.QApplication(sys.argv if argv is None else argv)
+    app = QtWidgets.QApplication(app_argv)
     app.setStyle("Fusion")
     # Use a readable fallback before MainWindow applies its monitor-aware font
     # scale.  Arial keeps the metrics close to the supplied SAMBA19xUI captures.
@@ -50,6 +63,8 @@ def main(argv: list[str] | None = None) -> int:
     window.show()
     window.raise_()
     window.activateWindow()
+    if os.environ.get("SIGLAB_SMOKE_TEST") == "1":
+        QtCore.QTimer.singleShot(750, app.quit)
     return app.exec()
 
 

@@ -75,7 +75,8 @@ py -3 -m pytest -q
   `python-samba-comm-server --listen 127.0.0.1:47619 --listen 100.x.y.z:47619 --tray`。
   非回环连接强制使用 `%LOCALAPPDATA%\python_samba\communication_server.token`；
   客户端通过 `--token-file` 指定安全复制后的令牌。服务器拒绝普通局域网/公网监听地址。
-- 轮转日志位于 `%LOCALAPPDATA%\python_samba\communication_server.log`。
+- 源码模式的轮转日志默认位于 `%LOCALAPPDATA%\python_samba\communication_server.log`；
+  TestKit 启动器将其重定向到 `%LOCALAPPDATA%\SigLabSuite\logs`。
 
 ### 高延迟远程连接
 
@@ -90,7 +91,14 @@ Logging 准备期也可直接点击 **Stop** 取消；采集期点击 **Stop** �
 运行 `build_comm_server.bat` 可生成单文件
 `dist\PythonSambaCommServer.exe`。把该文件复制到连接控制器的任意 Windows 电脑并
 双击运行即可；程序会按 USB 硬件身份恢复串口、自动启动共享服务、广播自身并缩入系统
-托盘。配置保存在 `%LOCALAPPDATA%\python_samba\communication_server.json`。
+托盘。源码模式配置保存在 `%LOCALAPPDATA%\python_samba\communication_server.json`；
+TestKit 使用 `%LOCALAPPDATA%\SigLabSuite\config`。
+
+便携 TestKit 中的冻结 SAMBA/SIDMAT 在本机 Server 连接被拒绝时，会优先定位套件内
+`apps\CommServer\PythonSambaCommServer.exe` 并自动启动；冻结环境找不到组件时会明确
+报错，不会尝试调用目标机上的系统 Python。非回环远程地址不会触发本地自动启动。
+完整的 Windows x64 构建、启动、停止、预检和诊断方案见仓库根目录
+`packaging\README.md`。
 
 独立程序默认使用 **Trusted LAN / Tailscale** 模式：只接受回环、RFC1918 局域网和
 Tailscale `100.64.0.0/10` 来源，但不校验用户身份。同一局域网中的其他用户也能控制

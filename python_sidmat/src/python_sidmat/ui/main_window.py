@@ -379,7 +379,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.backend_cbx = QtWidgets.QComboBox()
         self.backend_cbx.addItems(["server", "serial", "mock"])
         backend = str(
-            self._connection_settings.value("Connection/Backend", "server")
+            os.environ.get("SIGLAB_BACKEND")
+            or self._connection_settings.value("Connection/Backend", "server")
         )
         self.backend_cbx.setCurrentText(
             backend if backend in {"server", "serial", "mock"} else "server"
@@ -407,13 +408,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.port_cbx = QtWidgets.QComboBox()
         self.port_cbx.setEditable(True)
         self.port_cbx.addItem(
-            str(self._connection_settings.value("Connection/Port", "COM1"))
+            str(
+                os.environ.get("SIGLAB_SERIAL_PORT")
+                or self._connection_settings.value("Connection/Port", "COM1")
+            )
         )
         self.port_cbx.setFixedWidth(110)
         self.baud_cbx = QtWidgets.QComboBox()
         self.baud_cbx.addItems(["19200", "38400", "57600", "115200", "230400"])
         saved_baud = str(
-            self._connection_settings.value("Connection/Baudrate", "57600")
+            os.environ.get("SIGLAB_BAUDRATE")
+            or self._connection_settings.value("Connection/Baudrate", "57600")
         )
         self.baud_cbx.setCurrentText(
             saved_baud if self.baud_cbx.findText(saved_baud) >= 0 else "57600"
@@ -427,7 +432,8 @@ class MainWindow(QtWidgets.QMainWindow):
         server_row = QtWidgets.QHBoxLayout()
         self.server_endpoint_edit = QtWidgets.QLineEdit(
             str(
-                self._connection_settings.value(
+                os.environ.get("SIGLAB_SERVER_ENDPOINT")
+                or self._connection_settings.value(
                     "Connection/Server", "127.0.0.1:47619"
                 )
             )
@@ -885,6 +891,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.port_cbx.currentText().strip(),
                     baudrate=baud,
                     server=self.server_endpoint_edit.text().strip(),
+                    token_file=os.environ.get("SIGLAB_TOKEN_FILE") or None,
+                    comm_server_exe=os.environ.get("SIGLAB_COMM_SERVER_EXE") or None,
                     auto_start=True,
                     readonly=False,
                 )
@@ -1018,6 +1026,8 @@ class MainWindow(QtWidgets.QMainWindow):
                         port=self.port_cbx.currentText().strip(),
                         baudrate=int(self.baud_cbx.currentText()),
                         endpoint=self.server_endpoint_edit.text().strip(),
+                        token_file=os.environ.get("SIGLAB_TOKEN_FILE") or None,
+                        comm_server_exe=os.environ.get("SIGLAB_COMM_SERVER_EXE") or None,
                         auto_start=True,
                         client_name="python_sidmat-server-admin",
                     )

@@ -10,9 +10,12 @@ __pycache__/
 !PythonVNAConverter.spec
 !PythonVNA_diag.spec
 !PythonVNA_Suite.spec
+!packaging/*.spec
 *.egg-info/
 build/
 dist/
+.build/
+release/
 .worktrees/
 
 # MATLAB transient artifacts

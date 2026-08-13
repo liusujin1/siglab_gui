@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from python_samba.commserver.protocol import default_data_dir
 from python_samba.protocol.commands import FilterStage
 from python_samba.services.session import ControllerSession
 
@@ -59,7 +61,12 @@ class SafetyGate:
     def __init__(self, session: ControllerSession, snapshot_dir: Path | None = None) -> None:
         self.session = session
         self.unlocked = not session.readonly
-        self.snapshot_dir = snapshot_dir or Path.home() / ".python_samba" / "snapshots"
+        if snapshot_dir is not None:
+            self.snapshot_dir = snapshot_dir
+        elif os.environ.get("SIGLAB_LOCAL_DATA_ROOT"):
+            self.snapshot_dir = default_data_dir() / "recovery" / "snapshots"
+        else:
+            self.snapshot_dir = Path.home() / ".python_samba" / "snapshots"
         self.pending: list[ParamChange] = []
 
     def unlock(self) -> None:

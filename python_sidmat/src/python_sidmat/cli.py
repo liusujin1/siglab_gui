@@ -30,6 +30,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--baud", type=int, default=57600, help="baud rate")
     parser.add_argument("--server", default="127.0.0.1:47619")
     parser.add_argument("--token-file", default=None)
+    parser.add_argument("--comm-server-exe", default=None)
     parser.add_argument("--no-auto-start", action="store_true")
     parser.add_argument("--ch0", default="0 0 0", help="ch0 IO 'Type Main Sub'")
     parser.add_argument("--ch1", default="0 1 0", help="ch1 IO 'Type Main Sub'")
@@ -75,6 +76,7 @@ def main(argv: list[str] | None = None) -> int:
             baudrate=args.baud,
             server=args.server,
             token_file=args.token_file,
+            comm_server_exe=args.comm_server_exe,
             auto_start=not args.no_auto_start,
         )
     else:

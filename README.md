@@ -53,3 +53,9 @@ process owns the physical serial port while complete RCI exchanges from both
 clients are executed through a global FIFO. A standalone Windows server and
 LAN/Tailscale discovery let both GUIs find and connect to the controller host
 without entering a fixed IP address; see the SAMBA README for setup details.
+
+The first portable Windows pilot is built with
+[`packaging/build_testkit.ps1`](packaging/build_testkit.ps1). It produces the
+two onedir GUIs plus the single-file Communication Server, launcher/preflight/
+diagnostic scripts, profiles, documentation, manifests, and a SHA256 sidecar.
+See [`packaging/README.md`](packaging/README.md) for the reproducible build.
