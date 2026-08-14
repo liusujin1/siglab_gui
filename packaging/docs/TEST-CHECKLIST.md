@@ -6,6 +6,10 @@
 - [ ] ZIP SHA256 matches the published sidecar.
 - [ ] Extracted into a path containing spaces and Chinese characters.
 - [ ] `Preflight.bat` passes; 100%, 125%, and 150% DPI checked.
+- [ ] At 100% and 200% scaling, Samba and SIDMAT remain inside the work area;
+      fonts are readable without a second automatic Qt enlargement.
+- [ ] `Samba.exe`, `SIDMAT.exe`, and `PythonSambaCommServer.exe` each show a
+      different expected icon; `assets\*.ico` matches the executable name.
 - [ ] Windows Defender scan completes without a detection.
 
 ## Mock

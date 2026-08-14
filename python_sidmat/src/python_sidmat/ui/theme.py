@@ -7,9 +7,43 @@ reintroduce the old green/gray ad-hoc styling.
 
 from __future__ import annotations
 
+import re
+
 from PySide6 import QtWidgets
 
-__all__ = ["SAMBA_UI_STYLESHEET", "apply_samba_theme"]
+__all__ = [
+    "SAMBA_UI_STYLESHEET",
+    "apply_samba_theme",
+    "scale_font_stylesheet",
+]
+
+
+_FONT_SIZE_PATTERN = re.compile(r"(?P<prefix>font-size\s*:\s*)(?P<size>[0-9]+(?:\.[0-9]+)?)px")
+
+
+def _scaled_font_pixels(size: float, scale: float) -> int:
+    """Scale authored CSS fonts without allowing pathological values."""
+
+    if size > 22:
+        return max(1, int(round(size)))
+    return max(12, min(24, int(round(size * scale))))
+
+
+def scale_font_stylesheet(stylesheet: str, font_scale: float) -> str:
+    """Return ``stylesheet`` with its pixel font sizes monitor-aware.
+
+    Dimensions, paddings, and control indicators stay in the reference
+    layout's pixel units; only text is scaled.  This mirrors Samba's existing
+    policy and avoids the double scaling that caused oversized controls.
+    """
+
+    scale = max(0.75, min(3.0, float(font_scale)))
+
+    def replace(match: re.Match[str]) -> str:
+        size = float(match.group("size"))
+        return f"{match.group('prefix')}{_scaled_font_pixels(size, scale)}px"
+
+    return _FONT_SIZE_PATTERN.sub(replace, stylesheet)
 
 
 SAMBA_UI_STYLESHEET = r"""
@@ -372,11 +406,15 @@ QDialog {
 """
 
 
-def apply_samba_theme(app: QtWidgets.QApplication | None = None) -> None:
+def apply_samba_theme(
+    app: QtWidgets.QApplication | None = None,
+    *,
+    font_scale: float = 1.0,
+) -> None:
     """Apply the common SAMBA UI palette to an application instance."""
 
     application = app or QtWidgets.QApplication.instance()
     if application is None:
         raise RuntimeError("apply_samba_theme requires a QApplication")
     application.setStyle("Fusion")
-    application.setStyleSheet(SAMBA_UI_STYLESHEET)
+    application.setStyleSheet(scale_font_stylesheet(SAMBA_UI_STYLESHEET, font_scale))

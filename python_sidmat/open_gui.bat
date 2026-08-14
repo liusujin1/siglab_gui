@@ -42,7 +42,7 @@ if not defined PYEXE (
   echo ERROR: no usable Python installation was found.
   echo Install Python 3.11+ then run:
   echo   py -3 -m pip install -e "%SAMBA_ROOT%"
-  echo   py -3 -m pip install -e "%SIDMAT_ROOT%[gui,dev,mat]"
+  echo   py -3 -m pip install -e "%SIDMAT_ROOT%[gui,dev]"
   pause
   exit /b 1
 )
@@ -70,7 +70,7 @@ if errorlevel 1 (
 "%PYEXE%" -c "import PySide6, pyqtgraph, numpy" >nul 2>&1
 if errorlevel 1 (
   echo MISSING dependency: PySide6 / pyqtgraph / numpy
-  echo Run:  "%PYEXE%" -m pip install "PySide6>=6.6" "pyqtgraph>=0.13" "numpy>=1.24" "scipy>=1.10"
+  echo Run:  "%PYEXE%" -m pip install "PySide6>=6.6" "pyqtgraph>=0.13" "numpy>=1.24"
   pause
   exit /b 1
 )

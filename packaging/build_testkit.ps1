@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '0.1.0-beta.4',
+    [string]$Version = '0.1.0-beta.5',
     [string]$PythonVersion = '3.12',
     [string]$OutputRoot = '',
     [switch]$SkipTests,
@@ -46,7 +46,7 @@ $python = Join-Path $venv 'Scripts\python.exe'
 Run $python @('-m', 'pip', 'install', '--disable-pip-version-check', '-r',
     (Join-Path $repo 'packaging\requirements-win-x64.lock'))
 # A reused build venv may still contain beta.3's SciPy.  Remove it explicitly
-# so tests and PyInstaller analysis prove the beta.4 runtime is independent.
+# so tests and PyInstaller analysis prove the beta.5 runtime is independent.
 Run $python @('-m', 'pip', 'uninstall', '-y', 'scipy')
 $sitePackages = [IO.Path]::GetFullPath((& $python -c `
     "import sysconfig; print(sysconfig.get_paths()['purelib'])").Trim())
@@ -59,7 +59,7 @@ if (Test-Path -LiteralPath $scipyResidue) {
     Remove-Item -LiteralPath $scipyResidue -Recurse -Force
 }
 Run $python @('-c',
-    "import importlib.util; assert importlib.util.find_spec('scipy') is None, 'SciPy residue remains in beta.4 build environment'")
+    "import importlib.util; assert importlib.util.find_spec('scipy') is None, 'SciPy residue remains in beta.5 build environment'")
 Run $python @('-m', 'pip', 'install', '--disable-pip-version-check', '--no-deps', '-e',
     (Join-Path $repo 'python_samba'), '-e', (Join-Path $repo 'python_sidmat'))
 
@@ -88,6 +88,13 @@ if (-not $SkipTests) {
         (Join-Path $repo 'python_samba\src'), (Join-Path $repo 'python_sidmat\src'))
 }
 
+# Generate reproducible, per-application PE icons before PyInstaller reads
+# either spec. The generator uses only the Python standard library.
+Run $python @(
+    (Join-Path $repo 'packaging\generate_testkit_icons.py'),
+    '--output', (Join-Path $repo 'packaging\assets')
+)
+
 Remove-Item -LiteralPath $work, $dist, $stage -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $work, $dist | Out-Null
 foreach ($spec in @('SigLabSuite.spec', 'PythonSambaCommServer.spec')) {
@@ -105,6 +112,7 @@ Copy-Item (Join-Path $dist 'SigLabSuite') (Join-Path $stage 'apps\SigLabSuite') 
 Copy-Item (Join-Path $dist 'PythonSambaCommServer.exe') `
     (Join-Path $stage 'apps\CommServer\PythonSambaCommServer.exe')
 Copy-Item (Join-Path $repo 'packaging\config') (Join-Path $stage 'config') -Recurse
+Copy-Item (Join-Path $repo 'packaging\assets') (Join-Path $stage 'assets') -Recurse
 Copy-Item (Join-Path $repo 'packaging\samples') (Join-Path $stage 'samples') -Recurse
 Copy-Item (Join-Path $repo 'packaging\docs') (Join-Path $stage 'docs') -Recurse
 Copy-Item (Join-Path $repo 'python_samba\THIRD_PARTY_NOTICES.md') `

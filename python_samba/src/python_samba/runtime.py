@@ -26,6 +26,45 @@ _CONFIG_ENVIRONMENT = {
 }
 
 
+def configure_qt_dpi_environment() -> None:
+    """Set the shared Qt DPI policy before either GUI imports PySide6.
+
+    Samba and SIDMAT use pixel-authored layouts and perform their own
+    monitor-aware font/geometry calculations.  Letting Qt apply a second
+    automatic scale makes those fixed dimensions grow twice on some Windows
+    machines.  ``setdefault`` deliberately preserves an operator's explicit
+    Qt scale override; the applications still clamp their geometry and font
+    size when such an override is present.
+    """
+
+    os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "0")
+
+
+def runtime_asset_path(name: str) -> Path | None:
+    """Locate a bundled or source-tree asset without requiring Qt.
+
+    PyInstaller onedir places shared assets under ``_internal/assets`` and a
+    one-file server extracts them under ``sys._MEIPASS``.  Source checkouts
+    keep the canonical artwork in ``packaging/assets``.  Returning ``None``
+    is intentional so a missing optional icon can fall back to Qt's standard
+    icon instead of preventing the application from starting.
+    """
+
+    filename = Path(name).name
+    candidates: list[Path] = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass) / "assets" / filename)
+    executable_dir = Path(sys.executable).resolve().parent
+    candidates.append(executable_dir / "assets" / filename)
+    source_root = Path(__file__).resolve().parents[3]
+    candidates.append(source_root / "packaging" / "assets" / filename)
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def expand_runtime_path(value: str | os.PathLike[str]) -> Path:
     """Expand environment variables/user markers and return an absolute path."""
 

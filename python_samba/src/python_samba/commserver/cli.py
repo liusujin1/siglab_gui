@@ -19,6 +19,7 @@ from python_samba.commserver.discovery import (
     load_or_create_server_id,
 )
 from python_samba.commserver.server import CommunicationServer, ServerAlreadyRunning
+from python_samba.runtime import configure_qt_dpi_environment, runtime_asset_path
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -61,6 +62,7 @@ def _listen_endpoints(values: list[str]) -> list[tuple[str, int]]:
 
 
 def _run_tray(server: CommunicationServer, log_file: Path) -> int:
+    configure_qt_dpi_environment()
     try:
         from PySide6 import QtCore, QtGui, QtWidgets
     except ImportError:
@@ -69,7 +71,10 @@ def _run_tray(server: CommunicationServer, log_file: Path) -> int:
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv[:1])
     app.setQuitOnLastWindowClosed(False)
-    icon = app.style().standardIcon(QtWidgets.QStyle.SP_ComputerIcon)
+    icon_path = runtime_asset_path("commserver_icon.ico")
+    icon = QtGui.QIcon(str(icon_path)) if icon_path is not None else app.style().standardIcon(
+        QtWidgets.QStyle.SP_ComputerIcon
+    )
     tray = QtWidgets.QSystemTrayIcon(icon)
     menu = QtWidgets.QMenu()
     status_action = menu.addAction("Show Communication Server Status")

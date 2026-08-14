@@ -15,10 +15,15 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import xml.etree.ElementTree as ET
 from dataclasses import replace
 
 import numpy as np
+
+from python_samba.runtime import configure_qt_dpi_environment
+
+configure_qt_dpi_environment()
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from python_samba.transport.comm_server import CommServerConfig, CommServerTransport
@@ -179,9 +184,17 @@ def _measurement_stage_labels(filter_count: int) -> list[str]:
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
+        screen = QtGui.QGuiApplication.primaryScreen()
+        self._display_scale = self._screen_scale_factor(screen)
+        self._font_scale = self._font_scale_for_display(self._display_scale)
+        application = QtWidgets.QApplication.instance()
+        if application is not None:
+            font = QtGui.QFont("Segoe UI")
+            font.setPointSizeF(12.0 * self._font_scale)
+            application.setFont(font)
         # Keep Sidmat visually consistent with the current python_samba UI,
         # including GUI tests that construct MainWindow directly.
-        apply_samba_theme(QtWidgets.QApplication.instance())
+        apply_samba_theme(application, font_scale=self._font_scale)
         self.setObjectName("sidmatMainWindow")
         self.setWindowTitle("python_sidmat — SiDiMaT")
         self._apply_startup_size()
@@ -213,6 +226,32 @@ class MainWindow(QtWidgets.QMainWindow):
         self._axis_timer.setInterval(1000)
         self._axis_timer.timeout.connect(self._refresh_axis_leds)
 
+    @staticmethod
+    def _screen_scale_factor(screen: QtGui.QScreen | None) -> float:
+        """Return the largest reliable monitor scale, matching SambaUI."""
+
+        if screen is None:
+            return 1.0
+        candidates = [
+            float(screen.devicePixelRatio()),
+            float(screen.logicalDotsPerInch()) / 96.0,
+        ]
+        if sys.platform == "win32":
+            try:
+                import ctypes
+
+                scale = int(ctypes.windll.shcore.GetScaleFactorForDevice(0)) / 100.0
+                candidates.append(scale)
+            except (AttributeError, OSError, TypeError, ValueError):
+                pass
+        return max(0.75, min(3.0, max(candidates)))
+
+    @staticmethod
+    def _font_scale_for_display(display_scale: float) -> float:
+        """Keep text readable while preventing high-DPI runaway growth."""
+
+        return max(1.15, min(1.40, float(display_scale)))
+
     def _apply_startup_size(self) -> None:
         """Pick a compact default size that fits the primary screen.
 
@@ -222,10 +261,19 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         screen = QtGui.QGuiApplication.primaryScreen()
         geo = screen.availableGeometry() if screen else QtCore.QRect(0, 0, 1366, 768)
-        w = min(1240, max(760, geo.width() - 24))
-        h = min(780, max(560, geo.height() - 48))
-        self.resize(w, h)
-        self.setMinimumSize(720, 540)
+        margin = max(12, int(round(24 * self._display_scale)))
+        usable_width = max(1, geo.width() - margin * 2)
+        usable_height = max(1, geo.height() - margin * 2)
+
+        # Keep the reference minimum on normal screens, but never request a
+        # window larger than the logical work area on 125/150/200% displays.
+        minimum_width = min(720, usable_width)
+        minimum_height = min(540, usable_height)
+        width = max(minimum_width, min(1240, usable_width))
+        height = max(minimum_height, min(780, usable_height))
+
+        self.setMinimumSize(minimum_width, minimum_height)
+        self.resize(min(width, usable_width), min(height, usable_height))
 
     # ====================================================================
     # Menu bar

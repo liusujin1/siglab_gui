@@ -19,6 +19,10 @@ import re
 import sys
 import time
 
+from python_samba.runtime import configure_qt_dpi_environment
+
+configure_qt_dpi_environment()
+
 from python_samba.protocol.codes import FilterType, SystemStatus, filter_small_name
 from python_samba.protocol.commands import FilterStage
 from python_samba.services.safety import SafetyGate

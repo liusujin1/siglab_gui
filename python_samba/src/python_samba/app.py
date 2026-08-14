@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import sys
 
+from python_samba.runtime import configure_qt_dpi_environment
+
 
 # The original SAMBA19xUI is pixel-oriented and its supplied reference
 # screenshots use physical pixels.  Qt's automatic high-DPI scaling doubled
@@ -12,11 +14,11 @@ import sys
 # sidebar and all filter matrices much larger than the reference layout.
 # Disable that implicit scaling before importing PySide6; the stylesheet and
 # the widget dimensions below are already authored in physical pixels.
-os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "0")
+configure_qt_dpi_environment()
 
 
 def main(argv: list[str] | None = None) -> int:
-    from python_samba.runtime import consume_runtime_arguments
+    from python_samba.runtime import consume_runtime_arguments, runtime_asset_path
 
     app_argv = consume_runtime_arguments(sys.argv if argv is None else argv)
     autostart_smoke = os.environ.get("SIGLAB_COMM_SERVER_AUTOSTART_SMOKE")
@@ -62,6 +64,9 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QtWidgets.QApplication(app_argv)
     app.setStyle("Fusion")
+    icon_path = runtime_asset_path("samba_icon.ico")
+    if icon_path is not None:
+        app.setWindowIcon(QtGui.QIcon(str(icon_path)))
     # Use a readable fallback before MainWindow applies its monitor-aware font
     # scale.  Arial keeps the metrics close to the supplied SAMBA19xUI captures.
     font = QtGui.QFont("Arial", 14)

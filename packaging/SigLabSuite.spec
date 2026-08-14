@@ -16,6 +16,7 @@ from pyinstaller_slim import filter_testkit_entries
 SAMBA = ROOT / "python_samba"
 SIDMAT = ROOT / "python_sidmat"
 PATCHES = SAMBA / "_patches"
+ASSETS = ROOT / "packaging" / "assets"
 
 EXCLUDES = [
     "IPython", "jupyter", "notebook", "pytest", "scipy", "tkinter",
@@ -93,6 +94,7 @@ def _exe(analysis, name):
     return EXE(
         PYZ(analysis.pure), analysis.scripts, [], exclude_binaries=True,
         name=name, contents_directory="_internal",
+        icon=str(ASSETS / f"{name.lower()}_icon.ico"),
         debug=False, bootloader_ignore_signals=False, strip=False, upx=False,
         console=False, disable_windowed_traceback=False, argv_emulation=False,
         target_arch=None, codesign_identity=None, entitlements_file=None,
@@ -102,7 +104,7 @@ def _exe(analysis, name):
 samba_analysis = _analysis(
     ROOT / "packaging" / "entries" / "entry_samba.py",
     pathex=[SAMBA / "src"],
-    datas=[(str(PATCHES), "python_samba_patches")],
+    datas=[(str(PATCHES), "python_samba_patches"), (str(ASSETS), "assets")],
     hiddenimports=(
         collect_submodules("python_samba.logging_tools")
         + collect_submodules("python_samba.ui")
@@ -111,6 +113,7 @@ samba_analysis = _analysis(
 sidmat_analysis = _analysis(
     ROOT / "packaging" / "entries" / "entry_sidmat.py",
     pathex=[SIDMAT / "src", SAMBA / "src"],
+    datas=[(str(ASSETS), "assets")],
     hiddenimports=(
         collect_submodules("python_sidmat")
         + collect_submodules("python_samba.commserver")

@@ -30,6 +30,9 @@ from python_samba.commserver.server import (
     CommunicationServer,
     ServerAlreadyRunning,
 )
+from python_samba.runtime import configure_qt_dpi_environment, runtime_asset_path
+
+configure_qt_dpi_environment()
 
 try:
     from PySide6 import QtCore, QtGui, QtWidgets
@@ -271,7 +274,12 @@ class CommunicationServerWindow(QtWidgets.QMainWindow):
         )
 
     def _build_tray(self) -> None:
-        icon = self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ComputerIcon)
+        icon_path = runtime_asset_path("commserver_icon.ico")
+        icon = (
+            QtGui.QIcon(str(icon_path))
+            if icon_path is not None
+            else self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ComputerIcon)
+        )
         self.setWindowIcon(icon)
         self.tray = QtWidgets.QSystemTrayIcon(icon, self)
         menu = QtWidgets.QMenu(self)

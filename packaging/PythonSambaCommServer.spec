@@ -10,10 +10,11 @@ sys.path.insert(0, str(ROOT / "packaging"))
 from pyinstaller_slim import filter_testkit_entries
 
 SAMBA = ROOT / "python_samba"
+ASSETS = ROOT / "packaging" / "assets"
 
 a = Analysis(
     [str(SAMBA / "entry_comm_server.py")],
-    pathex=[str(SAMBA / "src")], binaries=[], datas=[],
+    pathex=[str(SAMBA / "src")], binaries=[], datas=[(str(ASSETS), "assets")],
     hiddenimports=(
         [
             "PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets",
@@ -32,6 +33,7 @@ a.datas = filter_testkit_entries(a.datas)
 pyz = PYZ(a.pure)
 exe = EXE(
     pyz, a.scripts, a.binaries, a.datas, [], name="PythonSambaCommServer",
+    icon=str(ASSETS / "commserver_icon.ico"),
     debug=False, bootloader_ignore_signals=False, strip=False, upx=False,
     console=False, disable_windowed_traceback=False, argv_emulation=False,
     target_arch=None, codesign_identity=None, entitlements_file=None,
