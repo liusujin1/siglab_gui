@@ -21,6 +21,10 @@ SAMBA and SIDMAT must use the same server endpoint, COM port, and baudrate.
 Direct Serial mode is diagnostic-only and cannot share a COM port already
 owned by the server.
 
+The packaged GUI removes inherited `QT_SCALE_FACTOR` overrides to prevent a
+developer-machine setting from being applied twice. Set
+`SIGLAB_RESPECT_QT_SCALE=1` only when an intentional Qt override is required.
+
 Samba and SIDMAT are packaged together under `apps\SigLabSuite` and share one
 Python/Qt/NumPy runtime. The beta.5 runtime keeps beta.4's Qt/OpenGL trimming,
 adds monitor-aware DPI/font bounds to both GUIs, and includes the latest

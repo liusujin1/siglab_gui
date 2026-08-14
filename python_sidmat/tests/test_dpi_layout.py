@@ -48,6 +48,7 @@ app.processEvents()
             ),
             "QT_QPA_PLATFORM": "offscreen",
             "QT_SCALE_FACTOR": scale,
+            "SIGLAB_RESPECT_QT_SCALE": "1",
         }
     )
     for key in (

@@ -32,11 +32,20 @@ def configure_qt_dpi_environment() -> None:
     Samba and SIDMAT use pixel-authored layouts and perform their own
     monitor-aware font/geometry calculations.  Letting Qt apply a second
     automatic scale makes those fixed dimensions grow twice on some Windows
-    machines.  ``setdefault`` deliberately preserves an operator's explicit
-    Qt scale override; the applications still clamp their geometry and font
-    size when such an override is present.
+    machines.  Packaged launches clear developer-machine Qt scale overrides
+    by default because they would be applied in addition to native Windows
+    scaling.  Set ``SIGLAB_RESPECT_QT_SCALE=1`` to intentionally keep them.
     """
 
+    respect_override = os.environ.get("SIGLAB_RESPECT_QT_SCALE", "").strip().lower()
+    if respect_override not in {"1", "true", "yes", "on"}:
+        for key in (
+            "QT_SCALE_FACTOR",
+            "QT_SCREEN_SCALE_FACTORS",
+            "QT_AUTO_SCREEN_SCALE_FACTOR",
+            "QT_SCALE_FACTOR_ROUNDING_POLICY",
+        ):
+            os.environ.pop(key, None)
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "0")
 
 
