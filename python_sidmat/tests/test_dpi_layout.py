@@ -81,5 +81,40 @@ app.processEvents()
     assert 0 < window_h <= screen_h
     assert 0 < minimum_w <= screen_w
     assert 0 < minimum_h <= screen_h
-    assert payload["font_pixel_size"] == 13
+    assert payload["font_pixel_size"] == 12
     assert payload["font_scale"] == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("package", ["samba", "sidmat"])
+def test_1080p_100_percent_uses_compact_default_window(package: str, monkeypatch) -> None:
+    """The common 1920x1080/100% workstation must not open near full-screen."""
+
+    pytest.importorskip("PySide6")
+    from PySide6 import QtCore, QtGui
+
+    if package == "samba":
+        from python_samba.ui.main_window import MainWindow
+    else:
+        from python_sidmat.ui.main_window import MainWindow
+
+    class Screen1080p:
+        @staticmethod
+        def availableGeometry():
+            # Typical 1080p work area with a 40-pixel Windows taskbar.
+            return QtCore.QRect(0, 0, 1920, 1040)
+
+        @staticmethod
+        def devicePixelRatio():
+            return 1.0
+
+        @staticmethod
+        def logicalDotsPerInch():
+            return 96.0
+
+    monkeypatch.setattr(QtGui.QGuiApplication, "primaryScreen", lambda: Screen1080p())
+    available, initial, minimum, _scale = MainWindow._initial_window_metrics()
+    assert available.size() == QtCore.QSize(1920, 1040)
+    assert initial == QtCore.QSize(1280, 800)
+    assert minimum == QtCore.QSize(960, 640)
+    assert initial.width() <= int(available.width() * 0.75)
+    assert initial.height() <= int(available.height() * 0.80)

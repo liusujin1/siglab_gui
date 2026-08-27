@@ -248,7 +248,7 @@ def test_window_initial_geometry_is_screen_aware_and_resizable():
 
     assert 0.75 <= win._display_scale <= 3.0
     assert win._font_scale == 1.0
-    assert app.font().pixelSize() == 13
+    assert app.font().pixelSize() == 12
     assert win.minimumWidth() <= win.width()
     assert win.minimumHeight() <= win.height()
     assert win._size_grip.parent() is win

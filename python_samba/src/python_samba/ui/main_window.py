@@ -647,8 +647,12 @@ class MainNavigation(QtWidgets.QFrame):
 class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
     """Main window matching SAMBA19xUI tab structure."""
 
-    _DESIGN_WINDOW_SIZE = (1840, 1240)
-    _DESIGN_MINIMUM_SIZE = (1180, 760)
+    # A 1280x800 logical-pixel window leaves useful desktop space on the
+    # common 1920x1080/100% test workstation.  Content-heavy legacy pages are
+    # already hosted in scroll areas and must not force the shell near full
+    # screen.
+    _DESIGN_WINDOW_SIZE = (1280, 800)
+    _DESIGN_MINIMUM_SIZE = (960, 640)
     _FONT_SIZE_PATTERN = re.compile(
         r"(font-size\s*:\s*)(\d+(?:\.\d+)?)px", re.IGNORECASE
     )
@@ -657,11 +661,9 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
     def _screen_scale_factor(screen) -> float:
         """Return the monitor scale used for the initial window geometry.
 
-        The application intentionally keeps Qt's automatic high-DPI scaling
-        disabled because the reference layout uses pixel-authored controls.
-        On Windows, ``GetScaleFactorForDevice`` therefore provides the real
-        user zoom (100/125/150/200%).  Qt's DPI/device-ratio values are useful
-        fallbacks on other platforms and in headless test environments.
+        Qt returns logical screen geometry under the packaged Per-Monitor-V2
+        policy.  This value is diagnostic only; it must not be applied to the
+        logical window or font dimensions a second time.
         """
 
         candidates: list[float] = []
@@ -710,7 +712,9 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
             # Large titles/readouts are already legible and often live in
             # tightly sized cards; leave those display fonts unchanged.
             return int(round(value))
-        return min(24, max(11, int(round(value))))
+        if value <= 13:
+            return 12
+        return min(20, max(12, int(round(value * 0.85))))
 
     def _scale_font_stylesheet(self, stylesheet: str) -> str:
         if not stylesheet:
@@ -729,7 +733,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         font = QtGui.QFont("Segoe UI")
         # Pixel size is deliberate: point sizes are multiplied by the target
         # machine's logical DPI and caused the cross-computer enlargement.
-        font.setPixelSize(13)
+        font.setPixelSize(12)
         app.setFont(font)
 
     def _scale_existing_inline_fonts(self) -> None:
@@ -763,9 +767,8 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
             available = screen.availableGeometry()
             scale = cls._screen_scale_factor(screen)
 
-        # The process uses physical-pixel widgets.  Scale the desktop margin
-        # so a 150%/200% display keeps a comfortable border around the window.
-        margin = max(18, int(round(24.0 * scale)))
+        # availableGeometry() is already expressed in Qt logical pixels.
+        margin = 24
         usable_width = max(1, available.width() - margin * 2)
         usable_height = max(1, available.height() - margin * 2)
 
@@ -777,11 +780,11 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         )
         initial_width = max(
             minimum_width,
-            min(cls._DESIGN_WINDOW_SIZE[0], int(round(usable_width * 0.94))),
+            min(cls._DESIGN_WINDOW_SIZE[0], int(round(usable_width * 0.90))),
         )
         initial_height = max(
             minimum_height,
-            min(cls._DESIGN_WINDOW_SIZE[1], int(round(usable_height * 0.94))),
+            min(cls._DESIGN_WINDOW_SIZE[1], int(round(usable_height * 0.90))),
         )
 
         # A very small virtual screen can be narrower than the fallback

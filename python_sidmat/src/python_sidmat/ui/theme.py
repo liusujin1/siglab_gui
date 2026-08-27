@@ -569,7 +569,9 @@ def _font_pixel_size(original: float, font_scale: float) -> int:
     value = float(original)
     if value > 22:
         return int(round(value))
-    return min(24, max(12, int(round(value * font_scale))))
+    if value <= 13:
+        return 12
+    return min(20, max(12, int(round(value * 0.85 * font_scale))))
 
 
 def _scaled_stylesheet(stylesheet: str, font_scale: float) -> str:
@@ -598,6 +600,6 @@ def apply_samba_theme(
     application.setProperty("python_samba_font_scale", font_scale)
     application.setStyle("Fusion")
     font = QtGui.QFont("Segoe UI")
-    font.setPixelSize(13)
+    font.setPixelSize(12)
     application.setFont(font)
     application.setStyleSheet(_scaled_stylesheet(SAMBA_UI_STYLESHEET, font_scale))

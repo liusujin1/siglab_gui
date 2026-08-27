@@ -260,8 +260,8 @@ def _measurement_stage_labels(filter_count: int) -> list[str]:
 
 
 class MainWindow(QtWidgets.QMainWindow):
-    _DESIGN_WINDOW_SIZE = (1840, 1240)
-    _DESIGN_MINIMUM_SIZE = (1180, 760)
+    _DESIGN_WINDOW_SIZE = (1280, 800)
+    _DESIGN_MINIMUM_SIZE = (960, 640)
 
     def __init__(self):
         super().__init__()
@@ -359,7 +359,8 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             available = screen.availableGeometry()
             scale = cls._screen_scale_factor(screen)
-        margin = max(18, int(round(24.0 * scale)))
+        # Qt's Per-Monitor-V2 geometry is already in logical pixels.
+        margin = 24
         usable_width = max(1, available.width() - margin * 2)
         usable_height = max(1, available.height() - margin * 2)
         minimum_width = min(
@@ -370,11 +371,11 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         initial_width = max(
             minimum_width,
-            min(cls._DESIGN_WINDOW_SIZE[0], int(round(usable_width * 0.94))),
+            min(cls._DESIGN_WINDOW_SIZE[0], int(round(usable_width * 0.90))),
         )
         initial_height = max(
             minimum_height,
-            min(cls._DESIGN_WINDOW_SIZE[1], int(round(usable_height * 0.94))),
+            min(cls._DESIGN_WINDOW_SIZE[1], int(round(usable_height * 0.90))),
         )
         initial_width = min(initial_width, usable_width)
         initial_height = min(initial_height, usable_height)
@@ -463,8 +464,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # ---- Left column ------------------------------------------------
         left_wrap = QtWidgets.QWidget()
         left_wrap.setObjectName("sidmatSidebar")
-        left_wrap.setMinimumWidth(300)
-        left_wrap.setMaximumWidth(420)
+        left_wrap.setMinimumWidth(260)
+        left_wrap.setMaximumWidth(360)
         left_lo = QtWidgets.QVBoxLayout(left_wrap)
         left_lo.setContentsMargins(0, 0, 0, 0)
         left_lo.setSpacing(0)
@@ -503,7 +504,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # graph (TimeSpecBtn / FRFBtn toggle which is visible).
         right_wrap = QtWidgets.QWidget()
         right_wrap.setObjectName("sidmatWorkspace")
-        right_wrap.setMinimumWidth(380)
+        right_wrap.setMinimumWidth(320)
         right_lo = QtWidgets.QVBoxLayout(right_wrap)
         right_lo.setContentsMargins(0, 0, 0, 0)
         right_lo.setSpacing(2)
@@ -544,14 +545,14 @@ class MainWindow(QtWidgets.QMainWindow):
         splitter.setStretchFactor(1, 1)
         # Keep the operator panel compact while leaving the plot workspace
         # dominant.  The sidebar can still be dragged wider when needed.
-        initial_left = min(360, max(300, int(self.width() * 0.27)))
-        splitter.setSizes([initial_left, max(380, self.width() - initial_left)])
+        initial_left = min(320, max(260, int(self.width() * 0.25)))
+        splitter.setSizes([initial_left, max(320, self.width() - initial_left)])
         hbox.addWidget(splitter, 1)
 
     def _build_application_header(self, parent: QtWidgets.QVBoxLayout) -> None:
         header = _ApplicationHeader(self)
         header.setObjectName("applicationHeader")
-        header.setFixedHeight(59)
+        header.setFixedHeight(52)
         row = QtWidgets.QHBoxLayout(header)
         row.setContentsMargins(5, 2, 5, 2)
         row.setSpacing(8)
@@ -559,7 +560,7 @@ class MainWindow(QtWidgets.QMainWindow):
         brand = QtWidgets.QLabel("SiD\nMaT")
         brand.setObjectName("brandMark")
         brand.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        brand.setFixedSize(60, 54)
+        brand.setFixedSize(52, 46)
         row.addWidget(brand)
 
         title = QtWidgets.QLabel(
@@ -573,7 +574,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.header_connection_lbl.setObjectName("connectionStateLabel")
         self.header_connection_lbl.setProperty("connected", False)
         self.header_connection_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self.header_connection_lbl.setFixedSize(112, 34)
+        self.header_connection_lbl.setFixedSize(100, 30)
         row.addWidget(self.header_connection_lbl)
 
         system_btn = QtWidgets.QToolButton()
@@ -583,7 +584,7 @@ class MainWindow(QtWidgets.QMainWindow):
         system_btn.setPopupMode(
             QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup
         )
-        system_btn.setFixedSize(92, 36)
+        system_btn.setFixedSize(80, 32)
         row.addWidget(system_btn)
 
         controls = (
@@ -596,8 +597,8 @@ class MainWindow(QtWidgets.QMainWindow):
             btn.setObjectName("windowControlButton")
             btn.setProperty("closeButton", is_close)
             btn.setIcon(self.style().standardIcon(icon_id))
-            btn.setIconSize(QtCore.QSize(18, 18))
-            btn.setFixedSize(42, 36)
+            btn.setIconSize(QtCore.QSize(16, 16))
+            btn.setFixedSize(36, 32)
             btn.clicked.connect(slot)
             row.addWidget(btn)
         parent.addWidget(header, 0)
@@ -621,7 +622,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_left_toolbar(self, parent: QtWidgets.QVBoxLayout) -> None:
         host = QtWidgets.QWidget()
         host.setObjectName("sidmatActionBar")
-        host.setFixedHeight(108)
+        host.setFixedHeight(94)
         outer = QtWidgets.QVBoxLayout(host)
         outer.setContentsMargins(8, 6, 8, 7)
         outer.setSpacing(4)

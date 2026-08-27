@@ -31,12 +31,11 @@ _DLL_DIRECTORY_HANDLES: list[Any] = []
 def configure_qt_dpi_environment() -> None:
     """Set the shared Qt DPI policy before either GUI imports PySide6.
 
-    Samba and SIDMAT use pixel-authored layouts and perform their own
-    monitor-aware font/geometry calculations.  Letting Qt apply a second
-    automatic scale makes those fixed dimensions grow twice on some Windows
-    machines.  Packaged launches clear developer-machine Qt scale overrides
-    by default because they would be applied in addition to native Windows
-    scaling.  Set ``SIGLAB_RESPECT_QT_SCALE=1`` to intentionally keep them.
+    Qt 6 and the Windows Per-Monitor-V2 manifest own DPI conversion.  The UI
+    uses logical pixels, so disabling Qt high-DPI support changes the desktop
+    coordinate space and can make both applications nearly fill a 1080p
+    display.  Frozen launches therefore clear inherited Qt scale overrides
+    and use Qt's native policy.
     """
 
     # A frozen release must be deterministic.  In particular, do not inherit
@@ -51,9 +50,9 @@ def configure_qt_dpi_environment() -> None:
             "QT_SCREEN_SCALE_FACTORS",
             "QT_AUTO_SCREEN_SCALE_FACTOR",
             "QT_SCALE_FACTOR_ROUNDING_POLICY",
+            "QT_ENABLE_HIGHDPI_SCALING",
         ):
             os.environ.pop(key, None)
-    os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "0"
 
     # PySide 6.11 ships ICU beside the frozen Python runtime while Qt6Core is
     # under PySide6.  On Windows' safe DLL search mode the parent directory is

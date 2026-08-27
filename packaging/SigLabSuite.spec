@@ -17,6 +17,7 @@ SAMBA = ROOT / "python_samba"
 SIDMAT = ROOT / "python_sidmat"
 PATCHES = SAMBA / "_patches"
 ASSETS = ROOT / "packaging" / "assets"
+WINDOWS_MANIFEST = ROOT / "packaging" / "windows-per-monitor-v2.manifest"
 
 EXCLUDES = [
     "IPython", "jupyter", "notebook", "pytest", "scipy", "tkinter",
@@ -95,6 +96,7 @@ def _exe(analysis, name):
         PYZ(analysis.pure), analysis.scripts, [], exclude_binaries=True,
         name=name, contents_directory="_internal",
         icon=str(ASSETS / f"{name.lower()}_icon.ico"),
+        manifest=str(WINDOWS_MANIFEST),
         debug=False, bootloader_ignore_signals=False, strip=False, upx=False,
         console=False, disable_windowed_traceback=False, argv_emulation=False,
         target_arch=None, codesign_identity=None, entitlements_file=None,

@@ -1,5 +1,20 @@
 # SigLab TestKit release notes
 
+## 0.1.0-beta.7 — 2026-08-27
+
+- Component versions: Samba/Communication Server `0.1.2`, SIDMAT `0.1.2`.
+- Fixed the beta.6 shared scaling regression: Qt 6 now owns high-DPI
+  conversion and all frozen executables declare Windows Per-Monitor-V2.
+- Changed both GUI defaults from `1840x1240` to `1280x800` logical pixels,
+  with a `960x640` minimum, specifically validated for a
+  `1920x1080` desktop at 100% scaling.
+- Reduced the shared font baseline to 12 logical pixels and compacted the
+  updated SIDMAT header, workflow sidebar and fixed control geometry while
+  retaining the latest layout and plot interactions.
+
+Validation: 1920x1080/100% geometry regression tests, cross-package DPI tests,
+full Samba/SIDMAT test gate, compileall and frozen executable smoke.
+
 ## 0.1.0-beta.6 — 2026-08-27
 
 - Component versions: Samba/Communication Server `0.1.1`, SIDMAT `0.1.1`.

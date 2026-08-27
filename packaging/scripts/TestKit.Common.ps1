@@ -23,14 +23,13 @@ function Import-SigLabProfile([string]$ProfilePath) {
 }
 
 function Set-SigLabEnvironment($Profile, [string]$SuiteRoot) {
-    # Do not inherit developer/legacy Qt scale overrides.  Both GUIs use one
-    # deterministic pixel-based policy so Samba and SIDMAT render consistently.
+    # Do not inherit developer/legacy Qt scale overrides.  Qt 6 and the
+    # Per-Monitor-V2 executable manifest own logical-to-physical conversion.
     foreach ($name in @(
         'QT_SCALE_FACTOR', 'QT_SCREEN_SCALE_FACTORS',
         'QT_AUTO_SCREEN_SCALE_FACTOR', 'QT_SCALE_FACTOR_ROUNDING_POLICY',
-        'SIGLAB_RESPECT_QT_SCALE'
+        'QT_ENABLE_HIGHDPI_SCALING', 'SIGLAB_RESPECT_QT_SCALE'
     )) { Remove-Item "Env:$name" -ErrorAction SilentlyContinue }
-    $env:QT_ENABLE_HIGHDPI_SCALING = '0'
     $env:SIGLAB_SUITE_ROOT = $SuiteRoot
     $env:SIGLAB_SUITE_CONFIG = $Profile._path
     $env:SIGLAB_BACKEND = [string]$Profile.backend

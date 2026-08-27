@@ -11,6 +11,7 @@ from pyinstaller_slim import filter_testkit_entries
 
 SAMBA = ROOT / "python_samba"
 ASSETS = ROOT / "packaging" / "assets"
+WINDOWS_MANIFEST = ROOT / "packaging" / "windows-per-monitor-v2.manifest"
 
 a = Analysis(
     [str(SAMBA / "entry_comm_server.py")],
@@ -34,6 +35,7 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz, a.scripts, a.binaries, a.datas, [], name="PythonSambaCommServer",
     icon=str(ASSETS / "commserver_icon.ico"),
+    manifest=str(WINDOWS_MANIFEST),
     debug=False, bootloader_ignore_signals=False, strip=False, upx=False,
     console=False, disable_windowed_traceback=False, argv_emulation=False,
     target_arch=None, codesign_identity=None, entitlements_file=None,
