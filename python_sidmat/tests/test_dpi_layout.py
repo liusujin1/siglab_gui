@@ -81,8 +81,8 @@ app.processEvents()
     assert 0 < window_h <= screen_h
     assert 0 < minimum_w <= screen_w
     assert 0 < minimum_h <= screen_h
-    assert payload["font_pixel_size"] == 12
-    assert payload["font_scale"] == pytest.approx(1.0)
+    assert 10 <= payload["font_pixel_size"] <= 13
+    assert 0.85 <= payload["font_scale"] <= 1.10
 
 
 @pytest.mark.parametrize("package", ["samba", "sidmat"])
@@ -114,7 +114,32 @@ def test_1080p_100_percent_uses_compact_default_window(package: str, monkeypatch
     monkeypatch.setattr(QtGui.QGuiApplication, "primaryScreen", lambda: Screen1080p())
     available, initial, minimum, _scale = MainWindow._initial_window_metrics()
     assert available.size() == QtCore.QSize(1920, 1040)
-    assert initial == QtCore.QSize(1280, 800)
+    assert initial == QtCore.QSize(1240, 780)
     assert minimum == QtCore.QSize(960, 640)
     assert initial.width() <= int(available.width() * 0.75)
     assert initial.height() <= int(available.height() * 0.80)
+
+
+@pytest.mark.parametrize("package", ["samba", "sidmat"])
+def test_local_200_percent_logical_work_area_is_compact(package: str, monkeypatch) -> None:
+    """A 2880x1800 panel at 200% exposes 1440x852 logical pixels."""
+
+    pytest.importorskip("PySide6")
+    from PySide6 import QtCore, QtGui
+
+    if package == "samba":
+        from python_samba.ui.main_window import MainWindow
+    else:
+        from python_sidmat.ui.main_window import MainWindow
+
+    class LocalScreen:
+        @staticmethod
+        def availableGeometry():
+            return QtCore.QRect(0, 0, 1440, 852)
+
+    monkeypatch.setattr(QtGui.QGuiApplication, "primaryScreen", lambda: LocalScreen())
+    available, initial, minimum, density = MainWindow._initial_window_metrics()
+    assert available.size() == QtCore.QSize(1440, 852)
+    assert initial == QtCore.QSize(930, 585)
+    assert minimum == QtCore.QSize(800, 520)
+    assert density == pytest.approx(0.75)

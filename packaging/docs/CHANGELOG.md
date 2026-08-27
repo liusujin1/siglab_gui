@@ -1,5 +1,20 @@
 # SigLab TestKit release notes
 
+## 0.1.0-beta.8 — 2026-08-27
+
+- Component versions: Samba/Communication Server `0.1.3`, SIDMAT `0.1.3`.
+- Replaced the beta.7 fixed window with one shared logical-work-area metrics
+  engine used by Samba and SIDMAT. Window, minimum size, font and primary
+  shell density now adapt without multiplying the Windows DPI ratio.
+- On the local `2880x1800` panel at 200% (`1440x852` Qt work area), both GUIs
+  start at `930x585`; on `1920x1080` at 100%, both start at `1240x780`.
+- Made Samba navigation, loop-state panel and title controls compact on smaller
+  logical desktops; compacted SIDMAT header/sidebar and shortened its title
+  only when the available logical width requires it.
+
+Validation: pure sizing matrix, real local Qt screen geometry, local rendered
+GUI screenshots, cross-package GUI tests, full source gate and frozen smoke.
+
 ## 0.1.0-beta.7 — 2026-08-27
 
 - Component versions: Samba/Communication Server `0.1.2`, SIDMAT `0.1.2`.

@@ -60,10 +60,6 @@ QLabel#applicationSubtitle {
     font-weight: 500;
 }
 QToolButton#windowControlButton {
-    min-width: 42px;
-    max-width: 42px;
-    min-height: 36px;
-    max-height: 36px;
     color: #ffffff;
     background: rgba(10, 30, 45, 150);
     border: 1px solid #9cc7dc;
@@ -567,11 +563,10 @@ def _font_pixel_size(original: float, font_scale: float) -> int:
     """Use the same normal-text scaling and caps as current python_samba."""
 
     value = float(original)
-    if value > 22:
-        return int(round(value))
-    if value <= 13:
-        return 12
-    return min(20, max(12, int(round(value * 0.85 * font_scale))))
+    compact = value if value > 22 else (12.0 if value <= 13 else value * 0.85)
+    floor = 10 if value <= 22 else 18
+    ceiling = 22 if value <= 22 else 36
+    return min(ceiling, max(floor, int(round(compact * font_scale))))
 
 
 def _scaled_stylesheet(stylesheet: str, font_scale: float) -> str:
@@ -596,10 +591,10 @@ def apply_samba_theme(
         raise RuntimeError("apply_samba_theme requires a QApplication")
     if font_scale is None:
         font_scale = float(application.property("python_samba_font_scale") or 1.0)
-    font_scale = 1.0
+    font_scale = min(1.10, max(0.85, float(font_scale)))
     application.setProperty("python_samba_font_scale", font_scale)
     application.setStyle("Fusion")
     font = QtGui.QFont("Segoe UI")
-    font.setPixelSize(12)
+    font.setPixelSize(min(13, max(10, int(round(12 * font_scale)))))
     application.setFont(font)
     application.setStyleSheet(_scaled_stylesheet(SAMBA_UI_STYLESHEET, font_scale))

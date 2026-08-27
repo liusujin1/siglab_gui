@@ -38,12 +38,12 @@ def test_window_uses_samba_metrics_font_scale_and_resize_grip():
 
     app = _app()
     win = MainWindow()
-    assert win._DESIGN_WINDOW_SIZE == (1280, 800)
+    assert win._DESIGN_WINDOW_SIZE == (1240, 780)
     assert win._DESIGN_MINIMUM_SIZE == (960, 640)
-    assert win._font_scale == 1.0
+    assert 0.85 <= win._font_scale <= 1.10
     assert app.property("python_samba_font_scale") == pytest.approx(win._font_scale)
     assert win._size_grip.size() == QtCore.QSize(18, 18)
-    expected_base = 12
+    expected_base = app.font().pixelSize()
     assert f"font-size: {expected_base}px" in app.styleSheet()
     _available, initial, minimum, _scale = win._initial_window_metrics()
     assert win.size() == initial

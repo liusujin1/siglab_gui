@@ -34,6 +34,7 @@ from python_samba.services.session import (
 )
 from python_samba.transport.comm_server import CommServerConfig, CommServerTransport
 from python_samba.transport.serial_port import TransportError
+from python_samba.ui.adaptive_metrics import metrics_for_work_area
 from python_samba.ui.classic_widgets import (
     ClassicExpander,
     ClassicFilterPanel,
@@ -312,12 +313,15 @@ def _motor_disable_flag_token(enabled: bool) -> str:
 class SidebarLoopButton(QtWidgets.QToolButton):
     """Compact ON/OFF rocker used by the persistent classic sidebar."""
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, *, density: float = 1.0) -> None:
         super().__init__(parent)
         self.setObjectName("sidebarLoopButton")
         self.setText("OFF")
         self.setCursor(QtCore.Qt.PointingHandCursor)
-        self.setFixedSize(58, 48)
+        self.setFixedSize(
+            max(42, int(round(58 * density))),
+            max(34, int(round(48 * density))),
+        )
 
     def set_on(self, on: bool, _color: str | None = None) -> None:
         self.setText("ON" if on else "OFF")
@@ -333,10 +337,10 @@ class SidebarLoopButton(QtWidgets.QToolButton):
 class LoopStatesWidget(QtWidgets.QFrame):
     """Persistent loop-state panel used in the main navigation sidebar."""
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, *, density: float = 1.0) -> None:
         super().__init__(parent)
         self.setObjectName("loopStatesPanel")
-        self.setFixedHeight(362)
+        self.setFixedHeight(max(250, int(round(362 * density))))
         self.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
         column = QtWidgets.QVBoxLayout(self)
         column.setContentsMargins(7, 4, 7, 6)
@@ -358,7 +362,7 @@ class LoopStatesWidget(QtWidgets.QFrame):
         ):
             lbl = QtWidgets.QLabel(name)
             lbl.setObjectName("loopName")
-            state = SidebarLoopButton()
+            state = SidebarLoopButton(density=density)
             state.setToolTip(f"Click to toggle {name} loop")
             state.clicked.connect(lambda _checked=False, k=key: self._on_loop_click(k))
             self.loop_btns[key] = state
@@ -564,9 +568,12 @@ class MainNavigation(QtWidgets.QFrame):
         self,
         entries: list[tuple[int, str]],
         parent=None,
+        *,
+        density: float = 1.0,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("mainNavigation")
+        self.setProperty("uiDensity", density)
         # The navigation is hosted by a resizable scroll-area viewport.  A
         # fixed 265 px child inside a 265 px sidebar (which also has margins)
         # clipped the right edge of every button at the default window size.
@@ -592,7 +599,7 @@ class MainNavigation(QtWidgets.QFrame):
             button.setCheckable(True)
             button.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
             button.setCursor(QtCore.Qt.PointingHandCursor)
-            button.setFixedHeight(56)
+            button.setFixedHeight(max(40, int(round(56 * density))))
             button.setMinimumWidth(0)
             button.setSizePolicy(
                 QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed
@@ -628,7 +635,8 @@ class MainNavigation(QtWidgets.QFrame):
         button.setCheckable(False)
         button.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
         button.setCursor(QtCore.Qt.PointingHandCursor)
-        button.setFixedHeight(56)
+        density = float(self.property("uiDensity") or 1.0)
+        button.setFixedHeight(max(40, int(round(56 * density))))
         button.setMinimumWidth(0)
         button.setSizePolicy(
             QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed
@@ -647,11 +655,7 @@ class MainNavigation(QtWidgets.QFrame):
 class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
     """Main window matching SAMBA19xUI tab structure."""
 
-    # A 1280x800 logical-pixel window leaves useful desktop space on the
-    # common 1920x1080/100% test workstation.  Content-heavy legacy pages are
-    # already hosted in scroll areas and must not force the shell near full
-    # screen.
-    _DESIGN_WINDOW_SIZE = (1280, 800)
+    _DESIGN_WINDOW_SIZE = (1240, 780)
     _DESIGN_MINIMUM_SIZE = (960, 640)
     _FONT_SIZE_PATTERN = re.compile(
         r"(font-size\s*:\s*)(\d+(?:\.\d+)?)px", re.IGNORECASE
@@ -695,26 +699,18 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
 
     @staticmethod
     def _font_scale_for_display(display_scale: float) -> float:
-        """Keep the pixel-authored UI at one font scale on every monitor.
+        """Scale visual density from the logical work area, not Windows DPI."""
 
-        Windows/Qt already applies the selected display policy.  Applying the
-        monitor factor again here made Samba text substantially larger than
-        SIDMAT on 125--200% desktops.
-        """
-
-        return 1.0
+        return min(1.10, max(0.85, float(display_scale)))
 
     def _font_pixel_size(self, original: float) -> int:
         """Scale normal UI text and enforce a legible matrix-label floor."""
 
         value = float(original)
-        if value > 22:
-            # Large titles/readouts are already legible and often live in
-            # tightly sized cards; leave those display fonts unchanged.
-            return int(round(value))
-        if value <= 13:
-            return 12
-        return min(20, max(12, int(round(value * 0.85))))
+        compact = value if value > 22 else (12.0 if value <= 13 else value * 0.85)
+        floor = 10 if value <= 22 else 18
+        ceiling = 22 if value <= 22 else 36
+        return min(ceiling, max(floor, int(round(compact * self._font_scale))))
 
     def _scale_font_stylesheet(self, stylesheet: str) -> str:
         if not stylesheet:
@@ -733,8 +729,13 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         font = QtGui.QFont("Segoe UI")
         # Pixel size is deliberate: point sizes are multiplied by the target
         # machine's logical DPI and caused the cross-computer enlargement.
-        font.setPixelSize(12)
+        font.setPixelSize(min(13, max(10, int(round(12 * self._font_scale)))))
         app.setFont(font)
+
+    def _ui_px(self, base: int, floor: int = 1) -> int:
+        """Scale shell chrome with logical-work-area density."""
+
+        return max(floor, int(round(base * self._display_density)))
 
     def _scale_existing_inline_fonts(self) -> None:
         """Scale styles supplied by page patches and classic child widgets."""
@@ -760,44 +761,17 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         """
 
         screen = QtGui.QGuiApplication.primaryScreen()
-        if screen is None:
-            available = QtCore.QRect(0, 0, *cls._DESIGN_WINDOW_SIZE)
-            scale = 1.0
-        else:
-            available = screen.availableGeometry()
-            scale = cls._screen_scale_factor(screen)
-
-        # availableGeometry() is already expressed in Qt logical pixels.
-        margin = 24
-        usable_width = max(1, available.width() - margin * 2)
-        usable_height = max(1, available.height() - margin * 2)
-
-        minimum_width = min(
-            cls._DESIGN_MINIMUM_SIZE[0], max(760, usable_width)
+        available = (
+            screen.availableGeometry()
+            if screen is not None
+            else QtCore.QRect(0, 0, 1920, 1040)
         )
-        minimum_height = min(
-            cls._DESIGN_MINIMUM_SIZE[1], max(540, usable_height)
-        )
-        initial_width = max(
-            minimum_width,
-            min(cls._DESIGN_WINDOW_SIZE[0], int(round(usable_width * 0.90))),
-        )
-        initial_height = max(
-            minimum_height,
-            min(cls._DESIGN_WINDOW_SIZE[1], int(round(usable_height * 0.90))),
-        )
-
-        # A very small virtual screen can be narrower than the fallback
-        # minimum; never request a geometry outside the available work area.
-        initial_width = min(initial_width, usable_width)
-        initial_height = min(initial_height, usable_height)
-        minimum_width = min(minimum_width, initial_width)
-        minimum_height = min(minimum_height, initial_height)
+        metrics = metrics_for_work_area(available.width(), available.height())
         return (
             available,
-            QtCore.QSize(initial_width, initial_height),
-            QtCore.QSize(minimum_width, minimum_height),
-            scale,
+            QtCore.QSize(metrics.initial_width, metrics.initial_height),
+            QtCore.QSize(metrics.minimum_width, metrics.minimum_height),
+            metrics.density,
         )
 
     def __init__(self) -> None:
@@ -805,10 +779,12 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         self._label_load_warnings = _load_saved_runtime_labels()
         self.setWindowTitle("SAMBA19xUI RC06-Alpha02 V1.9.0.14 — python_samba")
         self.setWindowFlag(QtCore.Qt.FramelessWindowHint, True)
-        available, initial_size, minimum_size, self._display_scale = (
+        available, initial_size, minimum_size, self._display_density = (
             self._initial_window_metrics()
         )
-        self._font_scale = self._font_scale_for_display(self._display_scale)
+        screen = QtGui.QGuiApplication.primaryScreen()
+        self._display_scale = self._screen_scale_factor(screen) if screen is not None else 1.0
+        self._font_scale = self._font_scale_for_display(self._display_density)
         self._apply_application_font_scale()
         self.setMinimumSize(minimum_size)
         self.resize(initial_size)
@@ -864,8 +840,8 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         self.main_tabs.tabBar().hide()
 
         # Persistent status panel in the lower part of the sidebar.
-        self.loop_states = LoopStatesWidget()
-        self.loop_states.setFixedWidth(250)
+        self.loop_states = LoopStatesWidget(density=self._display_density)
+        self.loop_states.setFixedWidth(self._ui_px(250, 210))
         self.loop_states.set_main_window(self)
 
         # Activity console is available on demand instead of permanently
@@ -1005,7 +981,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
     def _build_header(self) -> QtWidgets.QFrame:
         header = QtWidgets.QFrame()
         header.setObjectName("applicationHeader")
-        header.setFixedHeight(59)
+        header.setFixedHeight(self._ui_px(59, 46))
         row = QtWidgets.QHBoxLayout(header)
         row.setContentsMargins(5, 0, 3, 0)
         row.setSpacing(5)
@@ -1013,7 +989,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         brand = QtWidgets.QLabel("UI\n19x")
         brand.setObjectName("brandMark")
         brand.setAlignment(QtCore.Qt.AlignCenter)
-        brand.setFixedSize(60, 54)
+        brand.setFixedSize(self._ui_px(60, 48), self._ui_px(54, 42))
         row.addWidget(brand)
 
         title = QtWidgets.QLabel("SAMBA19xUI RC06-Alpha02 V1.9.0.14")
@@ -1043,6 +1019,9 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         self.minimize_button.setObjectName("windowControlButton")
         self.minimize_button.setText("—")
         self.minimize_button.setToolTip("Minimize")
+        self.minimize_button.setFixedSize(
+            self._ui_px(42, 32), self._ui_px(36, 28)
+        )
         self.minimize_button.clicked.connect(self.showMinimized)
         row.addWidget(self.minimize_button)
 
@@ -1051,6 +1030,9 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         self.close_button.setProperty("closeButton", True)
         self.close_button.setText("×")
         self.close_button.setToolTip("Close")
+        self.close_button.setFixedSize(
+            self._ui_px(42, 32), self._ui_px(36, 28)
+        )
         self.close_button.clicked.connect(self.close)
         row.addWidget(self.close_button)
         return header
@@ -1058,7 +1040,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
     def _build_sidebar(self) -> QtWidgets.QFrame:
         sidebar = QtWidgets.QFrame()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(265)
+        sidebar.setFixedWidth(self._ui_px(265, 220))
         layout = QtWidgets.QVBoxLayout(sidebar)
         layout.setContentsMargins(4, 0, 4, 0)
         layout.setSpacing(0)
@@ -1071,7 +1053,9 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
             (i, display_names.get(self.main_tabs.tabText(i), self.main_tabs.tabText(i)))
             for i in range(self.main_tabs.count())
         ]
-        self.main_navigation = MainNavigation(entries)
+        self.main_navigation = MainNavigation(
+            entries, density=self._display_density
+        )
         self.nav_buttons = self.main_navigation.buttons
         self.realtime_curve_nav_button = self.main_navigation.addActionAfter(
             "Real-time curve",
@@ -1098,9 +1082,9 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         self.update_page_btn.setObjectName("updatePageButton")
         self.update_page_btn.clicked.connect(self._request_page_refresh)
         layout.addWidget(self.update_page_btn)
-        layout.addSpacing(30)
+        layout.addSpacing(self._ui_px(30, 18))
         layout.addWidget(self.loop_states)
-        self.loop_states.conn_lbl.setFixedHeight(60)
+        self.loop_states.conn_lbl.setFixedHeight(self._ui_px(60, 44))
         layout.addWidget(self.loop_states.conn_lbl)
         return sidebar
 
@@ -1998,10 +1982,6 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
                 background: transparent;
             }
             QToolButton#windowControlButton {
-                min-width: 42px;
-                max-width: 42px;
-                min-height: 36px;
-                max-height: 36px;
                 color: white;
                 background: rgba(10, 30, 45, 150);
                 border: 1px solid #9cc7dc;
