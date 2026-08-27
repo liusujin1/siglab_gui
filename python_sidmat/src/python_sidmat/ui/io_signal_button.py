@@ -33,6 +33,14 @@ class IOSignalButton(QtWidgets.QToolButton):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("ioSelectorButton")
+        # Signal names are descriptive and can be wider than the compact
+        # measurement sidebar.  Let the button follow its cell width; the
+        # tooltip/menu still expose the complete signal name.
+        self.setMinimumWidth(0)
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
         self._io = io if io is not None else IOType()
         self._supported_types = (
             tuple(IO_TYPE_NAMES.keys())

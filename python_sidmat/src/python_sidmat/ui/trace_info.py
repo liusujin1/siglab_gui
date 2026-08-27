@@ -29,6 +29,11 @@ class TraceInfoWidget(QtWidgets.QGroupBox):
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__("Trace", parent)
+        self.setMinimumWidth(0)
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
         self.trace = TraceParameters()
         self._build_ui()
         self._measuring = False
@@ -37,56 +42,57 @@ class TraceInfoWidget(QtWidgets.QGroupBox):
 
     def _build_ui(self) -> None:
         grid = QtWidgets.QGridLayout(self)
-        grid.setContentsMargins(3, 3, 3, 3)
-        grid.setSpacing(2)
+        grid.setContentsMargins(6, 5, 6, 6)
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(4)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
 
         grid.addWidget(QtWidgets.QLabel("Ch0"), 0, 0)
         self.ch0_btn = IOSignalButton(IOType(0, 0, 0))
-        grid.addWidget(self.ch0_btn, 0, 1)
+        grid.addWidget(self.ch0_btn, 0, 1, 1, 3)
 
         grid.addWidget(QtWidgets.QLabel("Ch1"), 1, 0)
         self.ch1_btn = IOSignalButton(IOType(0, 1, 0))
-        grid.addWidget(self.ch1_btn, 1, 1)
+        grid.addWidget(self.ch1_btn, 1, 1, 1, 3)
 
         grid.addWidget(QtWidgets.QLabel("Length"), 2, 0)
         self.length_edit = QtWidgets.QLineEdit("100")
         self.length_edit.setValidator(_int_validator(2, 8192))
         grid.addWidget(self.length_edit, 2, 1)
 
-        grid.addWidget(QtWidgets.QLabel("Undersample"), 3, 0)
+        grid.addWidget(QtWidgets.QLabel("Under-sample"), 2, 2)
         self.undersample_edit = QtWidgets.QLineEdit("1")
         self.undersample_edit.setValidator(_int_validator(1, 65534))
-        grid.addWidget(self.undersample_edit, 3, 1)
+        grid.addWidget(self.undersample_edit, 2, 3)
 
-        grid.addWidget(QtWidgets.QLabel("Anti-alias"), 4, 0)
-        self.aa_check = QtWidgets.QCheckBox("Disable filter")
+        self.aa_check = QtWidgets.QCheckBox("Disable anti-alias")
         # TraceParameters and the original controller default to flag 0:
         # anti-aliasing enabled.  The checkbox represents the inverse flag.
         self.aa_check.setChecked(False)
-        grid.addWidget(self.aa_check, 4, 1)
+        grid.addWidget(self.aa_check, 4, 0, 1, 2)
 
-        grid.addWidget(QtWidgets.QLabel("Averages"), 5, 0)
+        grid.addWidget(QtWidgets.QLabel("Averages"), 3, 0)
         self.avg_edit = QtWidgets.QLineEdit("3")
         self.avg_edit.setValidator(_int_validator(1, 1000))
-        grid.addWidget(self.avg_edit, 5, 1)
+        grid.addWidget(self.avg_edit, 3, 1)
 
-        grid.addWidget(QtWidgets.QLabel("Fast Data Load"), 6, 0)
-        self.fast_load_check = QtWidgets.QCheckBox("")
+        self.fast_load_check = QtWidgets.QCheckBox("Fast data load")
         self.fast_load_check.setToolTip(
             "Fast binary DGTBB data loading (up to 40 sample pairs per read).")
-        grid.addWidget(self.fast_load_check, 6, 1)
+        grid.addWidget(self.fast_load_check, 4, 2, 1, 2)
 
-        grid.addWidget(QtWidgets.QLabel("Sample Freq"), 7, 0)
+        grid.addWidget(QtWidgets.QLabel("Sample Freq"), 3, 2)
         self.sample_freq_edit = QtWidgets.QLineEdit("-")
         self.sample_freq_edit.setValidator(_int_validator(1, 200000))
-        grid.addWidget(self.sample_freq_edit, 7, 1)
+        grid.addWidget(self.sample_freq_edit, 3, 3)
 
         self.start_btn = QtWidgets.QPushButton(" Start")
         self.start_btn.setObjectName("primaryAction")
         self.start_btn.setIcon(self.style().standardIcon(
             QtWidgets.QStyle.StandardPixmap.SP_MediaPlay))
         self.start_btn.clicked.connect(self._on_start_clicked)
-        grid.addWidget(self.start_btn, 8, 0, 1, 2)
+        grid.addWidget(self.start_btn, 5, 0, 1, 4)
 
     # -- public API -------------------------------------------------------
 

@@ -30,6 +30,8 @@ def test_qt_payload_filter_keeps_only_supported_runtime_assets() -> None:
         "PySide6/translations/qtbase_zh_CN.qm",
     ]
     removed = [
+        "icuuc.dll",
+        "icudt78.dll",
         "PySide6/opengl32sw.dll",
         "PySide6/Qt6Qml.dll",
         "PySide6/Qt6Quick.dll",

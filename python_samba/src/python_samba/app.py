@@ -33,9 +33,9 @@ def main(argv: list[str] | None = None) -> int:
             return 3
     try:
         from PySide6 import QtCore, QtGui, QtWidgets
-    except ImportError:
+    except ImportError as exc:
         print(
-            "PySide6 is required for the GUI.\n"
+            f"PySide6 is required for the GUI: {exc}\n"
             '  py -3 -m pip install "python-samba[gui]"',
             file=sys.stderr,
         )

@@ -25,8 +25,10 @@ def test_packaged_layout_fits_logical_work_area(package: str, scale: str) -> Non
         import_line = "from python_sidmat.ui.main_window import MainWindow"
     script = f"""
 import json
-from PySide6 import QtWidgets
+import sys
+sys.frozen = True
 {import_line}
+from PySide6 import QtWidgets
 app = QtWidgets.QApplication([])
 window = MainWindow()
 screen = app.primaryScreen()
@@ -36,6 +38,8 @@ print(json.dumps({{
     'screen': [geo.width(), geo.height()],
     'window': [window.width(), window.height()],
     'minimum': [window.minimumWidth(), window.minimumHeight()],
+    'font_pixel_size': app.font().pixelSize(),
+    'font_scale': window._font_scale,
 }}))
 window.close()
 app.processEvents()
@@ -48,7 +52,6 @@ app.processEvents()
             ),
             "QT_QPA_PLATFORM": "offscreen",
             "QT_SCALE_FACTOR": scale,
-            "SIGLAB_RESPECT_QT_SCALE": "1",
         }
     )
     for key in (
@@ -78,3 +81,5 @@ app.processEvents()
     assert 0 < window_h <= screen_h
     assert 0 < minimum_w <= screen_w
     assert 0 < minimum_h <= screen_h
+    assert payload["font_pixel_size"] == 13
+    assert payload["font_scale"] == pytest.approx(1.0)

@@ -1,14 +1,11 @@
 """SiDiMaT main window — layout from a live UI Automation dump of the
 original SiDiMaT19xA.exe, every button wired to a real backend call.
 
-Layout (mirrors the original):
-  Menu bar   : 系统 (Exit / About)
-  Left column: emoji toolbar row + 8 collapsible groups
-      ☏ Connection | 🔊 Excitation/Diag | 📈 Trace Setting
-      📂💾 Open/Save Setting | 🔧 System Setting
-      📉🖑 Measuring Helping Hand & Offline Tuner | 🔃 Convert to json | ❓ Help
-  Right panel : plot toolbar (3 segments) + 2×2 plot matrix
-  Status bar  : progress / messages
+Layout:
+  Samba-style application header and monitor-aware frameless window
+  Left column: fixed measurement actions + ordered collapsible workflow groups
+  Right panel: Records/Plot interaction toolbar + time or FRF plot workspace
+  Status bar: measurement progress, cursor values and operation feedback
 """
 
 from __future__ import annotations
@@ -27,6 +24,14 @@ configure_qt_dpi_environment()
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from python_samba.transport.comm_server import CommServerConfig, CommServerTransport
+from python_samba.ui.plot_interactions import (
+    CURVE_COLORS,
+    InteractiveViewBox,
+    PLOT_BACKGROUND,
+    PLOT_FONT_POINTS,
+    PLOT_FOREGROUND,
+    PlainAxisItem,
+)
 from python_samba.ui.server_discovery import choose_communication_server
 
 from python_sidmat.analysis.pwelch import pwelch
@@ -62,6 +67,7 @@ from python_sidmat.measurement.figurefile import (
 )
 from python_sidmat.measurement.trace import TraceParameters
 from python_sidmat.ui.excitation import ExcitationWidget
+from python_sidmat.ui.plot_controller import SidmatPlotInteractionController
 from python_sidmat.ui.trace_info import TraceInfoWidget
 from python_sidmat.ui.theme import apply_samba_theme
 
@@ -111,11 +117,70 @@ class _MeasurementWorker(QtCore.QThread):
             self._engine.stop()
 
 
+class _ApplicationHeader(QtWidgets.QFrame):
+    """Draggable SAMBA-style application header for the frameless window."""
+
+    def __init__(self, window: QtWidgets.QMainWindow) -> None:
+        super().__init__(window)
+        self._window = window
+        self._drag_offset: QtCore.QPoint | None = None
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            child = self.childAt(event.position().toPoint())
+            if not isinstance(child, QtWidgets.QAbstractButton):
+                handle = self._window.windowHandle()
+                if handle is not None and handle.startSystemMove():
+                    event.accept()
+                    return
+                self._drag_offset = (
+                    event.globalPosition().toPoint()
+                    - self._window.frameGeometry().topLeft()
+                )
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
+        if (
+            self._drag_offset is not None
+            and event.buttons() & QtCore.Qt.MouseButton.LeftButton
+            and not self._window.isMaximized()
+        ):
+            self._window.move(event.globalPosition().toPoint() - self._drag_offset)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
+        self._drag_offset = None
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent) -> None:
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self._window._toggle_maximized()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+
 class CollapsibleGroup(QtWidgets.QWidget):
     """WPF-Expander style collapsible group (as seen in the original UI)."""
 
+    expandedChanged = QtCore.Signal(bool)
+
     def __init__(self, title: str, *, collapsed: bool = False, parent=None):
         super().__init__(parent)
+        self.setObjectName("sidmatSection")
+        # The sidebar is intentionally narrower than the preferred size of a
+        # few long labels.  Ignore those hints so the section follows the
+        # scroll viewport instead of creating an unusable hidden horizontal
+        # overflow.
+        self.setMinimumWidth(0)
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
         self._toggle = QtWidgets.QToolButton()
         self._toggle.setObjectName("sectionHeader")
         self._toggle.setText(title)
@@ -129,13 +194,19 @@ class CollapsibleGroup(QtWidgets.QWidget):
             QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
 
         self._content = QtWidgets.QWidget()
+        self._content.setObjectName("sidmatSectionContent")
+        self._content.setMinimumWidth(0)
+        self._content.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
         self._content_lo = QtWidgets.QVBoxLayout(self._content)
-        self._content_lo.setContentsMargins(8, 2, 4, 4)
+        self._content_lo.setContentsMargins(8, 3, 8, 4)
         self._content_lo.setSpacing(3)
 
         line = QtWidgets.QFrame()
+        line.setObjectName("sectionDivider")
         line.setFrameShape(QtWidgets.QFrame.Shape.HLine)
-        line.setStyleSheet("color: #486a7d;")
 
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -151,6 +222,13 @@ class CollapsibleGroup(QtWidgets.QWidget):
         self._content.setVisible(checked)
         self._toggle.setArrowType(
             QtCore.Qt.ArrowType.DownArrow if checked else QtCore.Qt.ArrowType.RightArrow)
+        self.expandedChanged.emit(checked)
+
+    def setExpanded(self, expanded: bool) -> None:
+        self._toggle.setChecked(bool(expanded))
+
+    def isExpanded(self) -> bool:
+        return self._toggle.isChecked()
 
     def addWidget(self, w: QtWidgets.QWidget) -> None:
         self._content_lo.addWidget(w)
@@ -182,22 +260,20 @@ def _measurement_stage_labels(filter_count: int) -> list[str]:
 
 
 class MainWindow(QtWidgets.QMainWindow):
+    _DESIGN_WINDOW_SIZE = (1840, 1240)
+    _DESIGN_MINIMUM_SIZE = (1180, 760)
+
     def __init__(self):
         super().__init__()
-        screen = QtGui.QGuiApplication.primaryScreen()
-        self._display_scale = self._screen_scale_factor(screen)
-        self._font_scale = self._font_scale_for_display(self._display_scale)
-        application = QtWidgets.QApplication.instance()
-        if application is not None:
-            font = QtGui.QFont("Segoe UI")
-            font.setPointSizeF(12.0 * self._font_scale)
-            application.setFont(font)
-        # Keep Sidmat visually consistent with the current python_samba UI,
-        # including GUI tests that construct MainWindow directly.
-        apply_samba_theme(application, font_scale=self._font_scale)
+        self.setWindowFlag(QtCore.Qt.WindowType.FramelessWindowHint, True)
         self.setObjectName("sidmatMainWindow")
         self.setWindowTitle("python_sidmat — SiDiMaT")
         self._apply_startup_size()
+        # Keep Sidmat visually consistent with the current python_samba UI,
+        # including GUI tests that construct MainWindow directly.
+        apply_samba_theme(
+            QtWidgets.QApplication.instance(), font_scale=self._font_scale
+        )
 
         self.controller: Controller | None = None
         self.worker: _MeasurementWorker | None = None
@@ -222,58 +298,119 @@ class MainWindow(QtWidgets.QMainWindow):
         self._build_central()
         self._connect_signals()
 
+        # Match SambaUI's frameless resize affordance.  QMainWindow's status
+        # grip is platform-dependent; this explicit grip is always available.
+        self.statusBar().setSizeGripEnabled(False)
+        self._size_grip = QtWidgets.QSizeGrip(self)
+        self._size_grip.setObjectName("windowSizeGrip")
+        self._size_grip.setToolTip("Drag to resize window")
+        self._size_grip.setFixedSize(18, 18)
+        self._position_size_grip()
+
         self._axis_timer = QtCore.QTimer(self)
         self._axis_timer.setInterval(1000)
         self._axis_timer.timeout.connect(self._refresh_axis_leds)
 
     @staticmethod
-    def _screen_scale_factor(screen: QtGui.QScreen | None) -> float:
-        """Return the largest reliable monitor scale, matching SambaUI."""
+    def _screen_scale_factor(screen) -> float:
+        """Return the same physical-display scale used by python_samba."""
 
-        if screen is None:
-            return 1.0
-        candidates = [
-            float(screen.devicePixelRatio()),
-            float(screen.logicalDotsPerInch()) / 96.0,
-        ]
-        if sys.platform == "win32":
+        candidates: list[float] = []
+        for value in (
+            getattr(screen, "devicePixelRatio", lambda: 1.0)(),
+            getattr(screen, "logicalDotsPerInch", lambda: 96.0)() / 96.0,
+        ):
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                continue
+            if number > 0:
+                candidates.append(number)
+        if sys.platform.startswith("win"):
             try:
                 import ctypes
 
-                scale = int(ctypes.windll.shcore.GetScaleFactorForDevice(0)) / 100.0
-                candidates.append(scale)
+                get_scale = ctypes.windll.shcore.GetScaleFactorForDevice
+                get_scale.argtypes = [ctypes.c_int]
+                get_scale.restype = ctypes.c_int
+                windows_scale = float(get_scale(0)) / 100.0
+                if windows_scale > 0:
+                    candidates.append(windows_scale)
             except (AttributeError, OSError, TypeError, ValueError):
                 pass
-        return max(0.75, min(3.0, max(candidates)))
+        return min(max(max(candidates, default=1.0), 0.75), 3.0)
 
     @staticmethod
     def _font_scale_for_display(display_scale: float) -> float:
-        """Keep text readable while preventing high-DPI runaway growth."""
+        # Qt/Windows owns monitor scaling; the stylesheet is already authored
+        # in pixels and must not be multiplied a second time.
+        return 1.0
 
-        return max(1.15, min(1.40, float(display_scale)))
+    @classmethod
+    def _initial_window_metrics(
+        cls,
+    ) -> tuple[QtCore.QRect, QtCore.QSize, QtCore.QSize, float]:
+        """Calculate SambaUI-compatible initial and minimum window sizes."""
+
+        screen = QtGui.QGuiApplication.primaryScreen()
+        if screen is None:
+            available = QtCore.QRect(0, 0, *cls._DESIGN_WINDOW_SIZE)
+            scale = 1.0
+        else:
+            available = screen.availableGeometry()
+            scale = cls._screen_scale_factor(screen)
+        margin = max(18, int(round(24.0 * scale)))
+        usable_width = max(1, available.width() - margin * 2)
+        usable_height = max(1, available.height() - margin * 2)
+        minimum_width = min(
+            cls._DESIGN_MINIMUM_SIZE[0], max(760, usable_width)
+        )
+        minimum_height = min(
+            cls._DESIGN_MINIMUM_SIZE[1], max(540, usable_height)
+        )
+        initial_width = max(
+            minimum_width,
+            min(cls._DESIGN_WINDOW_SIZE[0], int(round(usable_width * 0.94))),
+        )
+        initial_height = max(
+            minimum_height,
+            min(cls._DESIGN_WINDOW_SIZE[1], int(round(usable_height * 0.94))),
+        )
+        initial_width = min(initial_width, usable_width)
+        initial_height = min(initial_height, usable_height)
+        minimum_width = min(minimum_width, initial_width)
+        minimum_height = min(minimum_height, initial_height)
+        return (
+            available,
+            QtCore.QSize(initial_width, initial_height),
+            QtCore.QSize(minimum_width, minimum_height),
+            scale,
+        )
 
     def _apply_startup_size(self) -> None:
-        """Pick a compact default size that fits the primary screen.
+        available, initial_size, minimum_size, self._display_scale = (
+            self._initial_window_metrics()
+        )
+        self._font_scale = self._font_scale_for_display(self._display_scale)
+        self.setMinimumSize(minimum_size)
+        self.resize(initial_size)
+        frame = self.frameGeometry()
+        frame.moveCenter(available.center())
+        self.move(frame.topLeft())
 
-        High-DPI scaling shrinks the logical desktop, so a hard-coded
-        1500x900 can overflow it.  Clamp the window to the available screen
-        area while keeping a usable minimum.
-        """
-        screen = QtGui.QGuiApplication.primaryScreen()
-        geo = screen.availableGeometry() if screen else QtCore.QRect(0, 0, 1366, 768)
-        margin = max(12, int(round(24 * self._display_scale)))
-        usable_width = max(1, geo.width() - margin * 2)
-        usable_height = max(1, geo.height() - margin * 2)
+    def _position_size_grip(self) -> None:
+        grip = getattr(self, "_size_grip", None)
+        if grip is None:
+            return
+        grip.move(
+            max(0, self.width() - grip.width()),
+            max(0, self.height() - grip.height()),
+        )
+        grip.raise_()
 
-        # Keep the reference minimum on normal screens, but never request a
-        # window larger than the logical work area on 125/150/200% displays.
-        minimum_width = min(720, usable_width)
-        minimum_height = min(540, usable_height)
-        width = max(minimum_width, min(1240, usable_width))
-        height = max(minimum_height, min(780, usable_height))
-
-        self.setMinimumSize(minimum_width, minimum_height)
-        self.resize(min(width, usable_width), min(height, usable_height))
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._position_size_grip()
 
     # ====================================================================
     # Menu bar
@@ -281,10 +418,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _build_menus(self) -> None:
         menubar = self.menuBar()
-        sys_menu = menubar.addMenu("系统")
-        sys_menu.addAction("关于", self._show_about)
-        sys_menu.addSeparator()
-        sys_menu.addAction("退出", self.close)
+        self._system_menu = QtWidgets.QMenu("System", self)
+        self._system_menu.addAction("Help", self._show_help)
+        self._system_menu.addAction("About", self._show_about)
+        self._system_menu.addSeparator()
+        self._system_menu.addAction("Exit", self.close)
+        # The current Samba shell uses an in-window header instead of a native
+        # menu strip.  Keep QMenuBar allocated for compatibility, but expose
+        # its commands through the header's System button.
+        menubar.hide()
 
     # ====================================================================
     # Status bar
@@ -294,7 +436,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_lbl = QtWidgets.QLabel(" Ready")
         self.status_lbl.setObjectName("statusMessage")
         self.status_lbl.setContentsMargins(6, 0, 0, 0)
-        self.statusBar().addWidget(self.status_lbl, 1)
+        status_bar = self.statusBar()
+        status_bar.setSizeGripEnabled(False)
+        status_bar.addWidget(self.status_lbl, 1)
 
     # ====================================================================
     # Central widget
@@ -304,14 +448,23 @@ class MainWindow(QtWidgets.QMainWindow):
         central = QtWidgets.QWidget()
         central.setObjectName("sidmatRoot")
         self.setCentralWidget(central)
-        hbox = QtWidgets.QHBoxLayout(central)
+        root_lo = QtWidgets.QVBoxLayout(central)
+        root_lo.setContentsMargins(0, 0, 0, 0)
+        root_lo.setSpacing(0)
+        self._build_application_header(root_lo)
+
+        body = QtWidgets.QWidget()
+        body.setObjectName("sidmatBody")
+        hbox = QtWidgets.QHBoxLayout(body)
         hbox.setContentsMargins(0, 0, 0, 0)
         hbox.setSpacing(0)
+        root_lo.addWidget(body, 1)
 
         # ---- Left column ------------------------------------------------
         left_wrap = QtWidgets.QWidget()
         left_wrap.setObjectName("sidmatSidebar")
-        left_wrap.setMinimumWidth(340)
+        left_wrap.setMinimumWidth(300)
+        left_wrap.setMaximumWidth(420)
         left_lo = QtWidgets.QVBoxLayout(left_wrap)
         left_lo.setContentsMargins(0, 0, 0, 0)
         left_lo.setSpacing(0)
@@ -323,11 +476,23 @@ class MainWindow(QtWidgets.QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
+        scroll.setSizeAdjustPolicy(
+            QtWidgets.QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored
+        )
+        scroll.verticalScrollBar().setSingleStep(42)
+        self.left_scroll = scroll
         stack = QtWidgets.QWidget()
         stack.setObjectName("sidmatLeftStack")
+        stack.setMinimumWidth(0)
+        stack.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
         stack_lo = QtWidgets.QVBoxLayout(stack)
-        stack_lo.setContentsMargins(4, 4, 4, 4)
-        stack_lo.setSpacing(3)
+        stack_lo.setContentsMargins(5, 5, 5, 8)
+        stack_lo.setSpacing(5)
         self._build_left_groups(stack_lo)
         stack_lo.addStretch(1)
         scroll.setWidget(stack)
@@ -338,7 +503,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # graph (TimeSpecBtn / FRFBtn toggle which is visible).
         right_wrap = QtWidgets.QWidget()
         right_wrap.setObjectName("sidmatWorkspace")
-        right_wrap.setMinimumWidth(440)
+        right_wrap.setMinimumWidth(380)
         right_lo = QtWidgets.QVBoxLayout(right_wrap)
         right_lo.setContentsMargins(0, 0, 0, 0)
         right_lo.setSpacing(2)
@@ -348,6 +513,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.frf_plot = self._make_plot_widget("FRF  |H1| (dB)")
         self.phase_plot = self._make_plot_widget("FRF Phase")
         self.coh_plot = self._make_plot_widget("Coherence γ²")
+        self._plot_controller = SidmatPlotInteractionController(
+            self,
+            self._plot_widgets(),
+            cursor_button=self.plot_cursor_btn,
+            data_tip_button=self.plot_data_tip_btn,
+            marker_readout=self.plot_marker_readout,
+        )
 
         self.plot_stack = QtWidgets.QStackedWidget()
         self.plot_stack.addWidget(self.time_plot)                    # view 0
@@ -363,44 +535,163 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # ---- Splitter: user-draggable left/right divide -----------------
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        splitter.setObjectName("sidmatMainSplitter")
         splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(3)
         splitter.addWidget(left_wrap)
         splitter.addWidget(right_wrap)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([400, 860])
+        # Keep the operator panel compact while leaving the plot workspace
+        # dominant.  The sidebar can still be dragged wider when needed.
+        initial_left = min(360, max(300, int(self.width() * 0.27)))
+        splitter.setSizes([initial_left, max(380, self.width() - initial_left)])
         hbox.addWidget(splitter, 1)
 
+    def _build_application_header(self, parent: QtWidgets.QVBoxLayout) -> None:
+        header = _ApplicationHeader(self)
+        header.setObjectName("applicationHeader")
+        header.setFixedHeight(59)
+        row = QtWidgets.QHBoxLayout(header)
+        row.setContentsMargins(5, 2, 5, 2)
+        row.setSpacing(8)
+
+        brand = QtWidgets.QLabel("SiD\nMaT")
+        brand.setObjectName("brandMark")
+        brand.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        brand.setFixedSize(60, 54)
+        row.addWidget(brand)
+
+        title = QtWidgets.QLabel(
+            "SiDiMaT — Measurement & Frequency Response Analysis"
+        )
+        title.setObjectName("applicationTitle")
+        title.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        row.addWidget(title, 1)
+
+        self.header_connection_lbl = QtWidgets.QLabel("OFFLINE")
+        self.header_connection_lbl.setObjectName("connectionStateLabel")
+        self.header_connection_lbl.setProperty("connected", False)
+        self.header_connection_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.header_connection_lbl.setFixedSize(112, 34)
+        row.addWidget(self.header_connection_lbl)
+
+        system_btn = QtWidgets.QToolButton()
+        system_btn.setObjectName("headerMenuButton")
+        system_btn.setText("System")
+        system_btn.setMenu(self._system_menu)
+        system_btn.setPopupMode(
+            QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup
+        )
+        system_btn.setFixedSize(92, 36)
+        row.addWidget(system_btn)
+
+        controls = (
+            (QtWidgets.QStyle.StandardPixmap.SP_TitleBarMinButton, self.showMinimized, False),
+            (QtWidgets.QStyle.StandardPixmap.SP_TitleBarMaxButton, self._toggle_maximized, False),
+            (QtWidgets.QStyle.StandardPixmap.SP_TitleBarCloseButton, self.close, True),
+        )
+        for icon_id, slot, is_close in controls:
+            btn = QtWidgets.QToolButton()
+            btn.setObjectName("windowControlButton")
+            btn.setProperty("closeButton", is_close)
+            btn.setIcon(self.style().standardIcon(icon_id))
+            btn.setIconSize(QtCore.QSize(18, 18))
+            btn.setFixedSize(42, 36)
+            btn.clicked.connect(slot)
+            row.addWidget(btn)
+        parent.addWidget(header, 0)
+
+    def _toggle_maximized(self) -> None:
+        self.showNormal() if self.isMaximized() else self.showMaximized()
+
+    def _set_connection_badge(self, connected: bool, text: str | None = None) -> None:
+        if not hasattr(self, "header_connection_lbl"):
+            return
+        self.header_connection_lbl.setText(text or ("CONNECTED" if connected else "OFFLINE"))
+        self.header_connection_lbl.setProperty("connected", bool(connected))
+        self.header_connection_lbl.style().unpolish(self.header_connection_lbl)
+        self.header_connection_lbl.style().polish(self.header_connection_lbl)
+        self.header_connection_lbl.update()
+
     # ------------------------------------------------------------------
-    # Left column: top toolbar (emoji buttons)
+    # Left column: fixed workflow controls
     # ------------------------------------------------------------------
 
     def _build_left_toolbar(self, parent: QtWidgets.QVBoxLayout) -> None:
-        row = QtWidgets.QHBoxLayout()
-        row.setSpacing(2)
-        row.setContentsMargins(2, 2, 2, 4)
-        specs = [
-            ("📊", "TimeSpec", self._toggle_time_plot),
-            ("📉", "FRF", self._toggle_frf_plot),
-            ("➕", "Cache data", self._cache_current),
-            ("✂", "Clear", self._clear_measurement),
-            ("+📄", "Add raw to plot", self._add_raw),
-            ("📄", "Open raw .sidimat19x", self._open_raw),
-            ("💾", "Save raw .sidimat19x", self._save_raw),
-            ("AM", "Start measurement", self._start_measurement),
-        ]
-        for glyph, tip, slot in specs:
-            btn = QtWidgets.QToolButton()
-            btn.setObjectName("toolbarButton")
-            btn.setText(glyph)
+        host = QtWidgets.QWidget()
+        host.setObjectName("sidmatActionBar")
+        host.setFixedHeight(108)
+        outer = QtWidgets.QVBoxLayout(host)
+        outer.setContentsMargins(8, 6, 8, 7)
+        outer.setSpacing(4)
+
+        caption = QtWidgets.QLabel("MEASUREMENT CONTROL")
+        caption.setObjectName("actionBarTitle")
+        outer.addWidget(caption)
+
+        primary = QtWidgets.QHBoxLayout()
+        primary.setSpacing(4)
+        self.time_view_btn = QtWidgets.QPushButton("TIME")
+        self.frf_view_btn = QtWidgets.QPushButton("FRF")
+        for btn in (self.time_view_btn, self.frf_view_btn):
+            btn.setObjectName("runViewButton")
+            btn.setCheckable(True)
+            primary.addWidget(btn, 1)
+        self.time_view_btn.setChecked(True)
+        self._view_button_group = QtWidgets.QButtonGroup(self)
+        self._view_button_group.setExclusive(True)
+        self._view_button_group.addButton(self.time_view_btn, 0)
+        self._view_button_group.addButton(self.frf_view_btn, 1)
+        self.time_view_btn.clicked.connect(self._toggle_time_plot)
+        self.frf_view_btn.clicked.connect(self._toggle_frf_plot)
+
+        self.quick_start_btn = QtWidgets.QPushButton("START")
+        self.quick_start_btn.setObjectName("quickStartButton")
+        self.quick_start_btn.clicked.connect(self._on_quick_start_clicked)
+        primary.addWidget(self.quick_start_btn, 2)
+        outer.addLayout(primary)
+
+        secondary = QtWidgets.QHBoxLayout()
+        secondary.setSpacing(4)
+        for text, tip, slot in (
+            ("CACHE", "Cache the current measurement", self._cache_current),
+            ("ADD", "Add cached raw data to the plot", self._add_raw),
+            ("CLEAR", "Clear plots and cached measurement data", self._clear_measurement),
+        ):
+            btn = QtWidgets.QPushButton(text)
+            btn.setObjectName("runSecondaryButton")
             btn.setToolTip(tip)
-            btn.setFixedHeight(22)
-            btn.setAutoRaise(False)
-            if slot:
-                btn.clicked.connect(slot)
-            row.addWidget(btn)
-        row.addStretch(1)
-        parent.addLayout(row)
+            btn.clicked.connect(slot)
+            secondary.addWidget(btn, 1)
+
+        raw_btn = QtWidgets.QToolButton()
+        raw_btn.setObjectName("runMenuButton")
+        raw_btn.setText("RAW")
+        raw_btn.setToolTip("Open or save .sidimat19x raw measurement data")
+        raw_menu = QtWidgets.QMenu(raw_btn)
+        raw_menu.addAction("Open raw data…", self._open_raw)
+        raw_menu.addAction("Save raw data…", self._save_raw)
+        raw_btn.setMenu(raw_menu)
+        raw_btn.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
+        secondary.addWidget(raw_btn, 1)
+        outer.addLayout(secondary)
+        parent.addWidget(host, 0)
+
+    def _on_quick_start_clicked(self) -> None:
+        if self.worker is not None and self.worker.isRunning():
+            self._stop_measurement()
+        else:
+            self._start_measurement()
+
+    def _set_measuring_ui(self, measuring: bool) -> None:
+        self.trace_info.set_measuring(measuring)
+        if hasattr(self, "quick_start_btn"):
+            self.quick_start_btn.setText("STOP" if measuring else "START")
+            self.quick_start_btn.setProperty("measuring", bool(measuring))
+            self.quick_start_btn.style().unpolish(self.quick_start_btn)
+            self.quick_start_btn.style().polish(self.quick_start_btn)
+            self.quick_start_btn.update()
 
     # ------------------------------------------------------------------
     # Left column: collapsible groups
@@ -408,16 +699,41 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _build_left_groups(self, parent: QtWidgets.QVBoxLayout) -> None:
         self._build_conn_group(parent)
-        self._build_excitation_group(parent)
         self._build_trace_group(parent)
+        self._build_excitation_group(parent)
         self._build_open_save_group(parent)
-        self._build_system_group(parent)
         self._build_measuring_group(parent)
+        self._build_system_group(parent)
         self._build_convert_group(parent)
         self._build_help_group(parent)
+        self._sidebar_groups = [
+            self.connection_group,
+            self.trace_group,
+            self.excitation_group,
+            self.open_save_group,
+            self.measuring_group,
+            self.system_group,
+            self.convert_group,
+            self.help_group,
+        ]
+        for group in self._sidebar_groups:
+            group.expandedChanged.connect(
+                lambda expanded, current=group: self._sidebar_group_changed(
+                    current, expanded
+                )
+            )
+
+    def _sidebar_group_changed(
+        self, group: CollapsibleGroup, expanded: bool
+    ) -> None:
+        if expanded:
+            QtCore.QTimer.singleShot(
+                0, lambda: self.left_scroll.ensureWidgetVisible(group, 0, 10)
+            )
 
     def _build_conn_group(self, parent: QtWidgets.QVBoxLayout) -> None:
-        conn = CollapsibleGroup("☏ Connection")
+        conn = CollapsibleGroup("1  CONNECTION")
+        self.connection_group = conn
         self._connection_settings = QtCore.QSettings("python_samba", "SiDiMaT")
 
         # Backend selector on its own row; keeping the actions below prevents
@@ -427,8 +743,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.backend_cbx = QtWidgets.QComboBox()
         self.backend_cbx.addItems(["server", "serial", "mock"])
         backend = str(
-            os.environ.get("SIGLAB_BACKEND")
-            or self._connection_settings.value("Connection/Backend", "server")
+            self._connection_settings.value("Connection/Backend", "server")
         )
         self.backend_cbx.setCurrentText(
             backend if backend in {"server", "serial", "mock"} else "server"
@@ -451,22 +766,23 @@ class MainWindow(QtWidgets.QMainWindow):
         actions.addStretch(1)
         conn.addLayout(actions)
 
-        # Port (editable combo: type or pick from the enumerated list) + baud.
-        r2 = QtWidgets.QHBoxLayout()
+        # Backend-specific settings are wrapped so irrelevant rows can be
+        # hidden instead of consuming disabled vertical space.
+        self.serial_settings_row = QtWidgets.QWidget()
+        r2 = QtWidgets.QHBoxLayout(self.serial_settings_row)
+        r2.setContentsMargins(0, 0, 0, 0)
+        r2.setSpacing(3)
         self.port_cbx = QtWidgets.QComboBox()
         self.port_cbx.setEditable(True)
         self.port_cbx.addItem(
-            str(
-                os.environ.get("SIGLAB_SERIAL_PORT")
-                or self._connection_settings.value("Connection/Port", "COM1")
-            )
+            str(self._connection_settings.value("Connection/Port", "COM1"))
         )
-        self.port_cbx.setFixedWidth(110)
+        self.port_cbx.setFixedWidth(96)
         self.baud_cbx = QtWidgets.QComboBox()
+        self.baud_cbx.setFixedWidth(96)
         self.baud_cbx.addItems(["19200", "38400", "57600", "115200", "230400"])
         saved_baud = str(
-            os.environ.get("SIGLAB_BAUDRATE")
-            or self._connection_settings.value("Connection/Baudrate", "57600")
+            self._connection_settings.value("Connection/Baudrate", "57600")
         )
         self.baud_cbx.setCurrentText(
             saved_baud if self.baud_cbx.findText(saved_baud) >= 0 else "57600"
@@ -475,43 +791,50 @@ class MainWindow(QtWidgets.QMainWindow):
         r2.addWidget(self.port_cbx)
         r2.addWidget(QtWidgets.QLabel("Baud:"))
         r2.addWidget(self.baud_cbx)
-        conn.addLayout(r2)
+        conn.addWidget(self.serial_settings_row)
 
-        server_row = QtWidgets.QHBoxLayout()
+        self.server_settings_row = QtWidgets.QWidget()
+        server_row = QtWidgets.QHBoxLayout(self.server_settings_row)
+        server_row.setContentsMargins(0, 0, 0, 0)
+        server_row.setSpacing(3)
         self.server_endpoint_edit = QtWidgets.QLineEdit(
             str(
-                os.environ.get("SIGLAB_SERVER_ENDPOINT")
-                or self._connection_settings.value(
+                self._connection_settings.value(
                     "Connection/Server", "127.0.0.1:47619"
                 )
             )
         )
         server_row.addWidget(QtWidgets.QLabel("Server:"))
         server_row.addWidget(self.server_endpoint_edit, 1)
-        conn.addLayout(server_row)
+        conn.addWidget(self.server_settings_row)
+
+        advanced = CollapsibleGroup("ADVANCED / DEVICE INFO", collapsed=True)
+        self.connection_advanced_group = advanced
 
         self.discover_server_btn = QtWidgets.QPushButton("Discover Server")
         self.discover_server_btn.setToolTip(
             "Find Communication Servers on the local network and Tailscale"
         )
         self.discover_server_btn.clicked.connect(self._discover_server)
-        conn.addWidget(self.discover_server_btn)
+        advanced.addWidget(self.discover_server_btn)
 
-        self.update_ports_btn = QtWidgets.QPushButton("Update Comm Ports List")
+        self.update_ports_btn = QtWidgets.QPushButton("Update Ports")
+        self.update_ports_btn.setToolTip("Update Communication Ports List")
         self.update_ports_btn.clicked.connect(self._update_ports)
         self.terminate_btn = QtWidgets.QPushButton(
-            "Communication Server Status / Reopen"
+            "Server Status"
         )
+        self.terminate_btn.setToolTip("Communication Server Status / Reopen")
         self.terminate_btn.clicked.connect(self._terminate_and_connect)
-        conn.addWidget(self.update_ports_btn)
-        conn.addWidget(self.terminate_btn)
+        advanced.addWidget(self.update_ports_btn)
+        advanced.addWidget(self.terminate_btn)
 
         self.server_status_lbl = QtWidgets.QLabel(
             "Shared mode: requests use a global FIFO; the last parameter write wins."
         )
         self.server_status_lbl.setWordWrap(True)
         self.server_status_lbl.setObjectName("sidebarText")
-        conn.addWidget(self.server_status_lbl)
+        advanced.addWidget(self.server_status_lbl)
 
         # Firmware Version Info (inline, filled after connect).
         fw = QtWidgets.QGroupBox("Firmware Version Info")
@@ -521,7 +844,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.version_lbl.setWordWrap(True)
         self.version_lbl.setObjectName("sidebarText")
         fw_lo.addWidget(self.version_lbl)
-        conn.addWidget(fw)
+        advanced.addWidget(fw)
 
         # System Config Info (inline, filled after connect).
         sc = QtWidgets.QGroupBox("System Config Info")
@@ -531,23 +854,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.system_config_lbl.setWordWrap(True)
         self.system_config_lbl.setObjectName("sidebarText")
         sc_lo.addWidget(self.system_config_lbl)
-        conn.addWidget(sc)
+        advanced.addWidget(sc)
 
         self.sample_freq_lbl = QtWidgets.QLabel("Sample Freq: —")
         self.sample_freq_lbl.setObjectName("sidebarText")
-        conn.addWidget(self.sample_freq_lbl)
+        advanced.addWidget(self.sample_freq_lbl)
 
         self.output_limit_lbl = QtWidgets.QLabel("Output Limit: —")
         self.output_limit_lbl.setObjectName("sidebarText")
-        conn.addWidget(self.output_limit_lbl)
+        advanced.addWidget(self.output_limit_lbl)
 
         self.system_info_btn = QtWidgets.QPushButton("System Config Info")
         self.system_info_btn.clicked.connect(self._show_system_info)
-        conn.addWidget(self.system_info_btn)
+        advanced.addWidget(self.system_info_btn)
 
         self.about_btn = QtWidgets.QPushButton("About")
         self.about_btn.clicked.connect(self._show_about)
-        conn.addWidget(self.about_btn)
+        advanced.addWidget(self.about_btn)
+        conn.addWidget(advanced)
         parent.addWidget(conn)
         self.backend_cbx.currentTextChanged.connect(self._sync_backend_controls)
         self._sync_backend_controls(self.backend_cbx.currentText())
@@ -556,6 +880,8 @@ class MainWindow(QtWidgets.QMainWindow):
         physical = backend in {"server", "serial"}
         connected = bool(self.controller and self.controller.connected)
         self.backend_cbx.setEnabled(not connected)
+        self.serial_settings_row.setVisible(physical)
+        self.server_settings_row.setVisible(backend == "server")
         self.port_cbx.setEnabled(physical and not connected)
         self.baud_cbx.setEnabled(physical and not connected)
         self.server_endpoint_edit.setEnabled(backend == "server" and not connected)
@@ -571,7 +897,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.connect_btn.blockSignals(False)
 
     def _build_excitation_group(self, parent: QtWidgets.QVBoxLayout) -> None:
-        exc = CollapsibleGroup("🔊 Excitation / Diag")
+        exc = CollapsibleGroup("3  EXCITATION / DIAGNOSTICS", collapsed=True)
+        self.excitation_group = exc
         self.excitation_widget = ExcitationWidget()
         exc.addWidget(self.excitation_widget)
 
@@ -595,13 +922,13 @@ class MainWindow(QtWidgets.QMainWindow):
         parent.addWidget(exc)
 
     def _build_trace_group(self, parent: QtWidgets.QVBoxLayout) -> None:
-        tr = CollapsibleGroup("📈 Trace Setting")
+        tr = CollapsibleGroup("2  TRACE / MEASUREMENT", collapsed=True)
+        self.trace_group = tr
         self.trace_info = TraceInfoWidget()
-        tr.addWidget(self.trace_info)
 
         cfg = QtWidgets.QGridLayout()
-        cfg.setHorizontalSpacing(3)
-        cfg.setVerticalSpacing(2)
+        cfg.setHorizontalSpacing(6)
+        cfg.setVerticalSpacing(4)
         cfg.addWidget(QtWidgets.QLabel("Loop:"), 0, 0)
         self.loop_type_cbx = QtWidgets.QComboBox()
         self.loop_type_cbx.addItems(["Velocity", "Position"])
@@ -613,13 +940,15 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         cfg.addWidget(self.meas_type_cbx, 0, 3)
         tr.addLayout(cfg)
+        tr.addWidget(self.trace_info)
         parent.addWidget(tr)
 
     def _build_open_save_group(self, parent: QtWidgets.QVBoxLayout) -> None:
-        os = CollapsibleGroup("📂💾 Open / Save Setting", collapsed=True)
+        os = CollapsibleGroup("4  SETTINGS FILES", collapsed=True)
+        self.open_save_group = os
         row = QtWidgets.QHBoxLayout()
-        self.open_cfg_btn = QtWidgets.QPushButton("📂 Open")
-        self.save_cfg_btn = QtWidgets.QPushButton("💾 Save")
+        self.open_cfg_btn = QtWidgets.QPushButton("Open")
+        self.save_cfg_btn = QtWidgets.QPushButton("Save")
         self.open_cfg_btn.clicked.connect(self._open_trace_config)
         self.save_cfg_btn.clicked.connect(self._save_trace_config)
         row.addWidget(self.open_cfg_btn)
@@ -628,7 +957,11 @@ class MainWindow(QtWidgets.QMainWindow):
         parent.addWidget(os)
 
     def _build_system_group(self, parent: QtWidgets.QVBoxLayout) -> None:
-        sys = CollapsibleGroup("🔧 System Setting")
+        # Axis status is useful during commissioning but not needed for the
+        # common connect → configure → measure path.  Start collapsed to keep
+        # the operator scroll range short; the section remains one click away.
+        sys = CollapsibleGroup("6  AXIS STATUS", collapsed=True)
+        self.system_group = sys
         sys.addWidget(QtWidgets.QLabel("Velocity Individual Loop Status"))
         self._build_velocity_leds(sys)
         parent.addWidget(sys)
@@ -657,7 +990,8 @@ class MainWindow(QtWidgets.QMainWindow):
         group.addWidget(grid_w)
 
     def _build_measuring_group(self, parent: QtWidgets.QVBoxLayout) -> None:
-        mt = CollapsibleGroup("📉 Measuring / Offline Tuner")
+        mt = CollapsibleGroup("5  OFFLINE / HELPING HAND", collapsed=True)
+        self.measuring_group = mt
 
         row = QtWidgets.QGridLayout()
         row.setHorizontalSpacing(3)
@@ -714,11 +1048,13 @@ class MainWindow(QtWidgets.QMainWindow):
         parent.addWidget(mt)
 
     def _build_convert_group(self, parent: QtWidgets.QVBoxLayout) -> None:
-        cv = CollapsibleGroup("🔃 Convert to json", collapsed=True)
+        cv = CollapsibleGroup("7  UTILITIES", collapsed=True)
+        self.convert_group = cv
         row = QtWidgets.QHBoxLayout()
         self.xml2json_btn = QtWidgets.QPushButton("xml → json")
         self.xml2json_btn.clicked.connect(self._xml_to_json)
-        self.check_dirs_btn = QtWidgets.QPushButton("Check double directives")
+        self.check_dirs_btn = QtWidgets.QPushButton("Check Directives")
+        self.check_dirs_btn.setToolTip("Check double directives in an XML file")
         self.check_dirs_btn.clicked.connect(self._check_double_directives)
         row.addWidget(self.xml2json_btn)
         row.addWidget(self.check_dirs_btn)
@@ -726,7 +1062,8 @@ class MainWindow(QtWidgets.QMainWindow):
         parent.addWidget(cv)
 
     def _build_help_group(self, parent: QtWidgets.QVBoxLayout) -> None:
-        hp = CollapsibleGroup("❓ Help", collapsed=True)
+        hp = CollapsibleGroup("HELP", collapsed=True)
+        self.help_group = hp
         hp.addWidget(QtWidgets.QLabel("python_sidmat — SiDiMaT reconstruction"))
         hp.addWidget(QtWidgets.QLabel("选 mock 后端 → Connect → 点 Start 测量 → 四图出曲线"))
         parent.addWidget(hp)
@@ -736,46 +1073,133 @@ class MainWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------
 
     def _build_plot_toolbar(self, parent: QtWidgets.QVBoxLayout) -> None:
-        bar = QtWidgets.QHBoxLayout()
-        bar.setSpacing(2)
-        bar.setContentsMargins(2, 2, 2, 2)
-        groups = [
-            [("🔃", "Refresh all", self._refresh_all),
-             ("▤", "Fullscreen", self._fullscreen_active_plot),
-             ("📂F", "Open .idefigure", self._open_figure),
-             ("💾F", "Save .idefigure", self._save_figure),
-             ("📂", "Open image", self._open_image),
-             ("💾", "Save image", self._save_image)],
-            [("📋", "Copy to clipboard", self._copy_active_plot),
-             ("🌷", "Snapshot", self._snapshot),
-             ("▦ Grid", "Toggle grid", self._toggle_grid),
-             ("▤", "Zoom fit", self._zoom_fit),
-             ("❔ Help", "Help", self._show_help)],
-            [("🌑", "Dark theme", lambda: self._set_theme(True)),
-             ("🌓", "Light theme", lambda: self._set_theme(False))],
+        host = QtWidgets.QWidget()
+        host.setObjectName("sidmatPlotToolbar")
+        outer = QtWidgets.QVBoxLayout(host)
+        outer.setSpacing(2)
+        outer.setContentsMargins(5, 4, 5, 4)
+
+        def add_button(
+            row: QtWidgets.QHBoxLayout,
+            text: str,
+            tip: str,
+            slot=None,
+            *,
+            checkable: bool = False,
+            checked: bool = False,
+            menu_specs=None,
+        ) -> QtWidgets.QToolButton:
+            btn = QtWidgets.QToolButton()
+            btn.setObjectName("plotToolButton")
+            btn.setText(text)
+            btn.setToolTip(tip)
+            btn.setFixedHeight(30)
+            btn.setMinimumWidth(0)
+            btn.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Preferred,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
+            btn.setAutoRaise(False)
+            btn.setCheckable(checkable)
+            btn.setChecked(checked)
+            if slot is not None:
+                btn.clicked.connect(slot)
+            if menu_specs:
+                menu = QtWidgets.QMenu(btn)
+                for action_text, action_slot in menu_specs:
+                    menu.addAction(action_text, action_slot)
+                btn.setMenu(menu)
+                btn.setPopupMode(
+                    QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup
+                )
+            row.addWidget(btn)
+            return btn
+
+        # Records/Plot navigation and annotation tools remain pinned above the
+        # graph.  Left drag operates the selected pointer tool, right drag
+        # rubber-zooms, middle drag pans, and the wheel zooms with history.
+        interaction_row = QtWidgets.QHBoxLayout()
+        interaction_row.setSpacing(3)
+        add_button(interaction_row, "Auto fit", "Fit visible curves", self._zoom_fit)
+        add_button(
+            interaction_row,
+            "Previous",
+            "Restore previous zoom",
+            self._previous_zoom,
+        )
+        self.plot_cursor_btn = add_button(
+            interaction_row,
+            "Cursor",
+            "Snap a cursor to the nearest curve point",
+            lambda checked: self._set_plot_pointer_tool("cursor", checked),
+            checkable=True,
+            checked=True,
+        )
+        self.plot_data_tip_btn = add_button(
+            interaction_row,
+            "Data tip",
+            "Click to add a movable data tip",
+            lambda checked: self._set_plot_pointer_tool("data-tip", checked),
+            checkable=True,
+        )
+        add_button(interaction_row, "Set A", "Set marker A", lambda: self._set_plot_marker("A"))
+        add_button(interaction_row, "Set B", "Set marker B", lambda: self._set_plot_marker("B"))
+        add_button(
+            interaction_row,
+            "Clear",
+            "Clear cursor, data tips and A/B markers",
+            self._clear_plot_annotations,
+        )
+        interaction_row.addStretch(1)
+        outer.addLayout(interaction_row)
+
+        command_specs = [
+            ("Refresh", "Refresh all", self._refresh_all, None),
+            ("Full", "Fullscreen", self._fullscreen_active_plot, None),
+            ("Copy", "Copy image", self._copy_active_plot, None),
+            ("Grid", "Toggle grid", self._toggle_grid, None),
+            ("Figure", "Open or save .idefigure", None, [
+                ("Open figure…", self._open_figure),
+                ("Save figure…", self._save_figure),
+            ]),
+            ("Image", "Open or save plot image", None, [
+                ("Open image…", self._open_image),
+                ("Save image…", self._save_image),
+                ("Quick snapshot", self._snapshot),
+            ]),
+            ("Theme", "Plot color theme", None, [
+                ("Dark", lambda: self._set_theme(True)),
+                ("Light", lambda: self._set_theme(False)),
+            ]),
+            ("Export", "Export active plot curves", self._export_plot_curves, None),
         ]
-        for gi, group in enumerate(groups):
-            if gi:
-                sep = QtWidgets.QFrame()
-                sep.setFrameShape(QtWidgets.QFrame.Shape.VLine)
-                sep.setStyleSheet("color: #486a7d;")
-                sep.setFixedHeight(22)
-                bar.addWidget(sep)
-            for glyph, tip, slot in group:
-                btn = QtWidgets.QToolButton()
-                btn.setObjectName("toolbarButton")
-                btn.setText(glyph)
-                btn.setToolTip(tip)
-                btn.setFixedHeight(22)
-                btn.setAutoRaise(False)
-                if slot:
-                    btn.clicked.connect(slot)
-                bar.addWidget(btn)
-        bar.addStretch(1)
-        parent.addLayout(bar)
+        command_row = QtWidgets.QHBoxLayout()
+        command_row.setSpacing(3)
+        for text, tip, slot, menu_specs in command_specs:
+            add_button(command_row, text, tip, slot, menu_specs=menu_specs)
+        command_row.addStretch(1)
+        outer.addLayout(command_row)
+
+        self.plot_marker_readout = QtWidgets.QLabel("A —   B —   Δ —")
+        self.plot_marker_readout.setObjectName("plotMarkerReadout")
+        self.plot_marker_readout.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignRight
+            | QtCore.Qt.AlignmentFlag.AlignVCenter
+        )
+        self.plot_marker_readout.setMinimumHeight(24)
+        outer.addWidget(self.plot_marker_readout)
+        parent.addWidget(host, 0)
 
     def _make_plot_widget(self, title: str) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
+        key = {
+            "Time Spec": "time",
+            "FRF  |H1| (dB)": "frf",
+            "FRF Phase": "phase",
+            "Coherence γ²": "coherence",
+        }[title]
+        setattr(w, "_plot_key", key)
+        setattr(w, "_plot_title", title)
         lo = QtWidgets.QVBoxLayout(w)
         lo.setContentsMargins(0, 0, 0, 0)
         lo.setSpacing(0)
@@ -785,30 +1209,64 @@ class MainWindow(QtWidgets.QMainWindow):
         lo.addWidget(lbl)
         import pyqtgraph as pg
 
-        pw = pg.PlotWidget()
+        view_box = InteractiveViewBox(
+            on_left_drag=lambda position, view=w: self._plot_pointer_drag(
+                view, position
+            ),
+            on_right_zoom=lambda start, stop, view=w: self._plot_rubber_zoom(
+                view, start, stop
+            ),
+            on_navigation_start=lambda view=w: self._plot_navigation_start(view),
+        )
+        axes = {
+            "left": PlainAxisItem(orientation="left"),
+            "bottom": PlainAxisItem(orientation="bottom"),
+        }
+        pw = pg.PlotWidget(viewBox=view_box, axisItems=axes)
         pw.setObjectName("sidmatPlot")
-        pw.setBackground("w")
-        pw.showGrid(x=True, y=True, alpha=0.3)
+        pw.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
+        pw.setBackground(PLOT_BACKGROUND)
+        pw.showGrid(x=True, y=True, alpha=0.22)
+        pw.getPlotItem().setMenuEnabled(False)
         # Large traces are common on real controllers.  Let pyqtgraph reduce
         # off-screen/detail points instead of repainting every sample.
         pw.getPlotItem().setDownsampling(auto=True, mode="peak")
         pw.getPlotItem().setClipToView(True)
-        legend = pw.addLegend(offset=(6, 6), labelTextSize="8pt")
-        legend.setBrush(QtGui.QColor(255, 255, 255, 220))
-        legend.setPen(QtGui.QColor("#c8d0d8"))
+        legend = pw.addLegend(offset=(8, 8))
+        legend.setZValue(10)
+        legend.setBrush(pg.mkBrush(255, 255, 255, 228))
+        legend.setPen(pg.mkPen("#7595a7", width=1.0))
+        if hasattr(legend, "setLabelTextColor"):
+            legend.setLabelTextColor(PLOT_FOREGROUND)
         legend.hide()
         if title == "Time Spec":
-            pw.setLabel("bottom", "Time", units="s")
+            pw.setLabel(
+                "bottom", "Time (s)", **{"font-size": f"{PLOT_FONT_POINTS}pt"}
+            )
         else:
             pw.setLogMode(x=True, y=False)
-            pw.setLabel("bottom", "Frequency", units="Hz")
+            pw.setLabel(
+                "bottom",
+                "Frequency (Hz)",
+                **{"font-size": f"{PLOT_FONT_POINTS}pt"},
+            )
         if title.startswith("Coherence"):
-            pw.setLabel("left", "Coherence")
+            pw.setLabel(
+                "left", "Coherence", **{"font-size": f"{PLOT_FONT_POINTS}pt"}
+            )
             pw.setYRange(0.0, 1.05, padding=0)
             pw.setLimits(yMin=0.0, yMax=1.05)
+        for axis_name in ("left", "bottom"):
+            axis = pw.getAxis(axis_name)
+            axis.setPen(pg.mkPen("#7595a7", width=1.0))
+            axis.setTextPen(pg.mkPen(PLOT_FOREGROUND))
         lo.addWidget(pw)
         setattr(w, "_pw", pw)
         setattr(w, "_legend", legend)
+        setattr(w, "_view_box", view_box)
+        pw.scene().sigMouseClicked.connect(
+            lambda event, view=w: self._plot_scene_clicked(view, event)
+        )
         return w
 
     def _plot_widgets(self) -> list:
@@ -939,8 +1397,6 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.port_cbx.currentText().strip(),
                     baudrate=baud,
                     server=self.server_endpoint_edit.text().strip(),
-                    token_file=os.environ.get("SIGLAB_TOKEN_FILE") or None,
-                    comm_server_exe=os.environ.get("SIGLAB_COMM_SERVER_EXE") or None,
                     auto_start=True,
                     readonly=False,
                 )
@@ -951,6 +1407,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.connect_btn.blockSignals(True)
             self.connect_btn.setChecked(False)
             self.connect_btn.blockSignals(False)
+            self.connect_btn.setText("Connect")
+            self._set_connection_badge(False, "CONNECT FAILED")
             QtWidgets.QMessageBox.critical(self, "Connect failed", str(exc))
             return
         self.controller = ctrl
@@ -996,6 +1454,7 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             self.output_limit_lbl.setText("Output Limit: —")
         self.connect_btn.setChecked(True)
+        self.connect_btn.setText("Connected")
         self.disconnect_btn.setEnabled(True)
         self._refresh_controller()
         self._refresh_excitation_readback()
@@ -1016,6 +1475,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.server_status_lbl.setText(self._format_server_status(state))
         else:
             self.status_lbl.setText("Connected")
+        self._set_connection_badge(True, f"{backend.upper()} ONLINE")
+        self.connection_group.setExpanded(False)
+        self.trace_group.setExpanded(True)
+        QtCore.QTimer.singleShot(
+            0, lambda: self.left_scroll.ensureWidgetVisible(self.trace_group, 0, 10)
+        )
 
     def _disconnect(self) -> bool:
         if not self._stop_measurement():
@@ -1036,6 +1501,9 @@ class MainWindow(QtWidgets.QMainWindow):
             "Shared mode: requests use a global FIFO; the last parameter write wins."
         )
         self.disconnect_btn.setEnabled(False)
+        self.connect_btn.setText("Connect")
+        self._set_connection_badge(False)
+        self.connection_group.setExpanded(True)
         self.status_lbl.setText("Disconnected")
         for led in self.axis_leds:
             led.setChecked(False)
@@ -1074,8 +1542,6 @@ class MainWindow(QtWidgets.QMainWindow):
                         port=self.port_cbx.currentText().strip(),
                         baudrate=int(self.baud_cbx.currentText()),
                         endpoint=self.server_endpoint_edit.text().strip(),
-                        token_file=os.environ.get("SIGLAB_TOKEN_FILE") or None,
-                        comm_server_exe=os.environ.get("SIGLAB_COMM_SERVER_EXE") or None,
                         auto_start=True,
                         client_name="python_sidmat-server-admin",
                     )
@@ -1463,7 +1929,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._axis_timer.start()
             self.status_lbl.setText(f"Trace write failed: {exc}")
             return
-        self.trace_info.set_measuring(True)
+        self._set_measuring_ui(True)
         self.status_lbl.setText("Measuring...")
         self.worker = _MeasurementWorker(
             self.controller, trace, self._sample_frequency, parent=self,
@@ -1491,13 +1957,13 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.status_lbl.setText("Stopping measurement...")
                     return False
             self.worker = None
-        self.trace_info.set_measuring(False)
+        self._set_measuring_ui(False)
         return True
 
     def _on_measurement_done(self, raw) -> None:
         if self.controller and self.controller.connected:
             self._axis_timer.start()
-        self.trace_info.set_measuring(False)
+        self._set_measuring_ui(False)
         self.status_lbl.setText("Done")
         self.worker = None
         self._last_raw = raw
@@ -1525,14 +1991,14 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_measurement_failed(self, msg: str) -> None:
         if self.controller and self.controller.connected:
             self._axis_timer.start()
-        self.trace_info.set_measuring(False)
+        self._set_measuring_ui(False)
         self.worker = None
         self.status_lbl.setText(f"Fail: {msg}")
 
     def _on_measurement_cancelled(self) -> None:
         if self.controller and self.controller.connected:
             self._axis_timer.start()
-        self.trace_info.set_measuring(False)
+        self._set_measuring_ui(False)
         self.worker = None
         self.status_lbl.setText("Measurement cancelled")
 
@@ -1555,6 +2021,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_pwelch = result
         self._offline_filtered = None
         self._offline_cl = None
+        for view in self._plot_widgets():
+            self._prepare_plot_refresh(view)
         for view in (self.frf_plot, self.phase_plot, self.coh_plot):
             view._legend.hide()
         freq = result.freq
@@ -1564,31 +2032,38 @@ class MainWindow(QtWidgets.QMainWindow):
         pw.clear()
         dt = 1.0 / fs if fs else 1.0
         t = np.arange(len(ch0), dtype=float) * dt
-        pw.plot(t, ch0, pen="b", name=name0 or "Ch0")
-        pw.plot(t, ch1, pen="r", name=name1 or "Ch1")
+        pw.plot(t, ch0, pen=CURVE_COLORS[0], name=name0 or "Ch0")
+        pw.plot(t, ch1, pen=CURVE_COLORS[1], name=name1 or "Ch1")
         self.time_plot._legend.show()
         pw.setLabel("bottom", "Time", units="s")
 
         pw2 = self.frf_plot._pw
         pw2.clear()
         mag_db = 20.0 * np.log10(np.maximum(result.amplitude, 1e-30))
-        pw2.plot(freq[mask], mag_db[mask], pen="b", name="|H1| (dB)")
+        pw2.plot(
+            freq[mask], mag_db[mask], pen=CURVE_COLORS[0], name="|H1| (dB)"
+        )
         pw2.setLabel("bottom", "Frequency", units="Hz")
         pw2.setLabel("left", "Mag (dB)")
 
         pw3 = self.phase_plot._pw
         pw3.clear()
-        pw3.plot(freq[mask], result.phase_deg[mask], pen="b", name="Phase")
+        pw3.plot(
+            freq[mask], result.phase_deg[mask], pen=CURVE_COLORS[0], name="Phase"
+        )
         pw3.setLabel("bottom", "Frequency", units="Hz")
         pw3.setLabel("left", "Phase (deg)")
 
         pw4 = self.coh_plot._pw
         pw4.clear()
-        pw4.plot(freq[mask], result.coherence[mask], pen="b", name="γ²")
+        pw4.plot(
+            freq[mask], result.coherence[mask], pen=CURVE_COLORS[0], name="γ²"
+        )
         pw4.setLabel("bottom", "Frequency", units="Hz")
         pw4.setLabel("left", "Coherence")
         pw4.setYRange(0.0, 1.05, padding=0)
         self._set_theme(self._dark)
+        self._finish_plot_refresh(*self._plot_widgets(), auto_fit=True)
 
     def _accept_offline_filter(self) -> None:
         """Apply the four controller filter stages to the last measured TF."""
@@ -1641,27 +2116,33 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         freq = np.asarray(result.freq)
         mask = freq > 0
+        self._prepare_plot_refresh(self.frf_plot)
+        self._prepare_plot_refresh(self.phase_plot)
         pw = self.frf_plot._pw
         pw.clear()
         original = result.re + 1j * result.im
         pw.plot(
             freq[mask],
             20.0 * np.log10(np.maximum(np.abs(original[mask]), 1e-30)),
-            pen="b",
+            pen=CURVE_COLORS[0],
             name="Original |H1| (dB)",
         )
         if self._offline_filtered is not None:
             pw.plot(
                 freq[mask],
                 20.0 * np.log10(np.maximum(np.abs(self._offline_filtered[mask]), 1e-30)),
-                pen="g",
+                pen=CURVE_COLORS[2],
                 name="Filtered OL (dB)",
             )
         if self._offline_cl is not None:
             pw.plot(
                 freq[mask],
                 20.0 * np.log10(np.maximum(np.abs(self._offline_cl[mask]), 1e-30)),
-                pen=QtGui.QPen(QtGui.QColor("#d62728"), 1, QtCore.Qt.PenStyle.DashLine),
+                pen=QtGui.QPen(
+                    QtGui.QColor(CURVE_COLORS[4]),
+                    1,
+                    QtCore.Qt.PenStyle.DashLine,
+                ),
                 name="Closed loop (dB)",
             )
         self.frf_plot._legend.show()
@@ -1670,25 +2151,37 @@ class MainWindow(QtWidgets.QMainWindow):
 
         phase = self.phase_plot._pw
         phase.clear()
-        phase.plot(freq[mask], np.angle(original[mask], deg=True), pen="b", name="Original phase")
+        phase.plot(
+            freq[mask],
+            np.angle(original[mask], deg=True),
+            pen=CURVE_COLORS[0],
+            name="Original phase",
+        )
         if self._offline_filtered is not None:
             phase.plot(
                 freq[mask],
                 np.angle(self._offline_filtered[mask], deg=True),
-                pen="g",
+                pen=CURVE_COLORS[2],
                 name="Filtered OL phase",
             )
         if self._offline_cl is not None:
             phase.plot(
                 freq[mask],
                 np.angle(self._offline_cl[mask], deg=True),
-                pen=QtGui.QPen(QtGui.QColor("#d62728"), 1, QtCore.Qt.PenStyle.DashLine),
+                pen=QtGui.QPen(
+                    QtGui.QColor(CURVE_COLORS[4]),
+                    1,
+                    QtCore.Qt.PenStyle.DashLine,
+                ),
                 name="Closed loop phase",
             )
         self.phase_plot._legend.show()
         phase.setLabel("bottom", "Frequency", units="Hz")
         phase.setLabel("left", "Phase (deg)")
         self._set_theme(self._dark)
+        self._finish_plot_refresh(
+            self.frf_plot, self.phase_plot, auto_fit=True
+        )
 
     @staticmethod
     def _pick_nfft(n: int) -> int:
@@ -1739,10 +2232,11 @@ class MainWindow(QtWidgets.QMainWindow):
             if x is not None and len(x):
                 base = max(base, float(x[-1]) + dt)
         t = base + np.arange(len(ch0), dtype=float) * dt
-        pw.plot(t, ch0, pen="g", name="Cached Ch0")
-        pw.plot(t, ch1, pen="m", name="Cached Ch1")
+        pw.plot(t, ch0, pen=CURVE_COLORS[2], name="Cached Ch0")
+        pw.plot(t, ch1, pen=CURVE_COLORS[3], name="Cached Ch1")
         self.time_plot._legend.show()
         self._set_theme(self._dark)
+        self._finish_plot_refresh(self.time_plot)
         self.status_lbl.setText("Added cached raw to time plot")
 
     def _open_raw(self) -> None:
@@ -1801,6 +2295,7 @@ class MainWindow(QtWidgets.QMainWindow):
         n = max(len(ch0), len(ch1))
         if n == 0:
             for view in (self.time_plot, self.frf_plot, self.phase_plot, self.coh_plot):
+                self._prepare_plot_refresh(view)
                 view._pw.clear()
                 view._legend.hide()
             self.status_lbl.setText("Loaded file contains no samples")
@@ -1828,6 +2323,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     rf.sig1_name or "Ch1",
                 )
                 return
+        for view in self._plot_widgets():
+            self._prepare_plot_refresh(view)
         for view in (self.frf_plot, self.phase_plot, self.coh_plot):
             view._pw.clear()
             view._legend.hide()
@@ -1835,11 +2332,12 @@ class MainWindow(QtWidgets.QMainWindow):
         pw.clear()
         dt = 1.0 / fs if fs else 1.0
         t = np.arange(n, dtype=float) * dt
-        pw.plot(t, ch0, pen="b", name=rf.sig0_name or "Ch0")
-        pw.plot(t, ch1, pen="r", name=rf.sig1_name or "Ch1")
+        pw.plot(t, ch0, pen=CURVE_COLORS[0], name=rf.sig0_name or "Ch0")
+        pw.plot(t, ch1, pen=CURVE_COLORS[1], name=rf.sig1_name or "Ch1")
         self.time_plot._legend.show()
         pw.setLabel("bottom", "Time", units="s")
         self._set_theme(self._dark)
+        self._finish_plot_refresh(*self._plot_widgets(), auto_fit=True)
 
     def _open_trace_config(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -2164,6 +2662,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _active_plot(self):
         """Return the focused visible plot, or the current view's primary plot."""
+        controller = getattr(self, "_plot_controller", None)
+        if controller is not None:
+            active = controller.active_view()
+            if active.isVisibleTo(self.plot_stack):
+                return active
         visible = (
             [self.time_plot]
             if self.plot_stack.currentIndex() == 0
@@ -2178,38 +2681,107 @@ class MainWindow(QtWidgets.QMainWindow):
     def _toggle_time_plot(self) -> None:
         """TimeSpec button — show the time-spec graph only."""
         self.plot_stack.setCurrentIndex(0)
+        if hasattr(self, "_plot_controller"):
+            self._plot_controller.activate_key("time")
+        if hasattr(self, "time_view_btn"):
+            self.time_view_btn.setChecked(True)
 
     def _toggle_frf_plot(self) -> None:
         """FRF button — show the FRF/coherence graph only."""
         self.plot_stack.setCurrentIndex(1)
+        if hasattr(self, "_plot_controller"):
+            self._plot_controller.activate_key("frf")
+        if hasattr(self, "frf_view_btn"):
+            self.frf_view_btn.setChecked(True)
+
+    def _plot_pointer_drag(self, view, position) -> None:
+        controller = getattr(self, "_plot_controller", None)
+        if controller is not None:
+            controller.handle_pointer(view, position, dragging=True)
+
+    def _plot_rubber_zoom(self, view, start, stop) -> None:
+        controller = getattr(self, "_plot_controller", None)
+        if controller is not None:
+            controller.rubber_zoom(view, start, stop)
+
+    def _plot_navigation_start(self, view) -> None:
+        controller = getattr(self, "_plot_controller", None)
+        if controller is not None:
+            controller.activate(view)
+            controller.remember_range(view)
+
+    def _plot_scene_clicked(self, view, event) -> None:
+        controller = getattr(self, "_plot_controller", None)
+        if controller is not None:
+            controller.scene_clicked(view, event)
+
+    def _set_plot_pointer_tool(self, tool: str, checked: bool) -> None:
+        controller = getattr(self, "_plot_controller", None)
+        if controller is not None:
+            controller.set_pointer_tool(tool, checked)
+
+    def _set_plot_marker(self, name: str) -> None:
+        controller = getattr(self, "_plot_controller", None)
+        if controller is not None:
+            controller.set_marker(name)
+
+    def _clear_plot_annotations(self) -> None:
+        controller = getattr(self, "_plot_controller", None)
+        if controller is not None:
+            controller.clear_annotations()
+            self.status_lbl.setText("Plot annotations cleared")
+
+    def _previous_zoom(self) -> None:
+        controller = getattr(self, "_plot_controller", None)
+        if controller is not None:
+            controller.previous_zoom()
+
+    def _export_plot_curves(self) -> None:
+        controller = getattr(self, "_plot_controller", None)
+        if controller is not None:
+            controller.export_active_dialog()
+
+    def _prepare_plot_refresh(self, view) -> None:
+        controller = getattr(self, "_plot_controller", None)
+        if controller is not None:
+            controller.prepare_refresh(view)
+
+    def _finish_plot_refresh(self, *views, auto_fit: bool = False) -> None:
+        controller = getattr(self, "_plot_controller", None)
+        if controller is None:
+            return
+        for view in views:
+            controller.finish_refresh(view, auto_fit=auto_fit)
 
     def _toggle_grid(self) -> None:
         self._grid_on = not getattr(self, "_grid_on", True)
         for w in self._plot_widgets():
-            w._pw.showGrid(x=self._grid_on, y=self._grid_on, alpha=0.3)
+            w._pw.showGrid(x=self._grid_on, y=self._grid_on, alpha=0.22)
 
     def _set_theme(self, dark: bool) -> None:
         self._dark = dark
-        bg = "#1e1e1e" if dark else "w"
-        fg = "#d8dee9" if dark else "#20252b"
+        bg = "#1e1e1e" if dark else PLOT_BACKGROUND
+        fg = "#d8dee9" if dark else PLOT_FOREGROUND
+        axis_pen = fg if dark else "#7595a7"
         for w in self._plot_widgets():
             w._pw.setBackground(bg)
             for name in ("left", "bottom", "top", "right"):
                 axis = w._pw.getAxis(name)
-                axis.setPen(fg)
+                axis.setPen(axis_pen)
                 axis.setTextPen(fg)
             legend = getattr(w, "_legend", None)
             if legend is not None:
                 legend.setBrush(
                     QtGui.QColor(30, 30, 30, 220)
-                    if dark else QtGui.QColor(255, 255, 255, 220)
+                    if dark else QtGui.QColor(255, 255, 255, 228)
                 )
-                legend.setPen(QtGui.QColor("#56616d" if dark else "#c8d0d8"))
+                legend.setPen(QtGui.QColor("#56616d" if dark else "#7595a7"))
                 for _sample, label in legend.items:
                     label.setText(label.text, color=fg)
 
     def _clear_measurement(self) -> None:
         for w in self._plot_widgets():
+            self._prepare_plot_refresh(w)
             w._pw.clear()
             w._legend.hide()
         self._raw_cache.clear()
@@ -2222,9 +2794,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_lbl.setText("Cleared")
 
     def _zoom_fit(self) -> None:
-        pw = self._active_plot()._pw
-        pw.getPlotItem().autoRange()
-        self.status_lbl.setText("Zoom fit")
+        controller = getattr(self, "_plot_controller", None)
+        if controller is not None:
+            controller.auto_range()
+        else:
+            self._active_plot()._pw.getPlotItem().autoRange()
+            self.status_lbl.setText("Zoom fit")
 
     def _save_image(self) -> None:
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
@@ -2343,13 +2918,19 @@ class MainWindow(QtWidgets.QMainWindow):
         views = self._plot_widgets()
         for index, view in enumerate(views):
             plot = view._pw
+            self._prepare_plot_refresh(view)
             plot.clear()
             if index >= len(figure.models):
                 view._legend.hide()
                 continue
             model = figure.models[index]
-            for item in model.series:
-                plot.plot(item.x, item.y, name=item.title or None)
+            for series_index, item in enumerate(model.series):
+                plot.plot(
+                    item.x,
+                    item.y,
+                    pen=CURVE_COLORS[series_index % len(CURVE_COLORS)],
+                    name=item.title or None,
+                )
             plot.setLogMode(x=model.log_x, y=model.log_y)
             plot.showGrid(
                 x=model.grid.lower() == "on",
@@ -2393,6 +2974,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._offline_filtered = None
         self._offline_cl = None
         self._set_theme(self._dark)
+        self._finish_plot_refresh(*views)
 
     def _open_image(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -2522,11 +3104,12 @@ class MainWindow(QtWidgets.QMainWindow):
             "帮助",
             "1. 后端选 mock（无硬件）、serial（独占真机）或 server（共享真机）\n"
             "2. Connect 连接\n"
-            "3. 📈 Trace Setting 设长度/平均/通道\n"
+            "3. TRACE / MEASUREMENT 设置长度、平均次数和通道\n"
             "4. 点 Start 开始测量\n"
             "5. 右区四图显示 时间 / FRF幅频 / 相频 / 相干性\n"
-            "6. 💾 Save raw 保存 .sidimat19x，📄 Open raw 导入\n"
-            "7. 工具栏 🔃 刷新、🌑/🌓 主题、📋 复制、🌷 快照",
+            "6. 左键使用 Cursor/Data tip；右键拖动框选缩放；中键拖动平移；滚轮缩放\n"
+            "7. Previous 恢复上一缩放，Set A/B 显示两点和差值；图上右键打开完整菜单\n"
+            "8. RAW 菜单导入/保存 .sidimat19x；Figure 菜单导入/保存图形",
         )
 
     # ====================================================================

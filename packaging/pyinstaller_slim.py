@@ -16,6 +16,11 @@ from typing import TypeVar
 TocEntry = TypeVar("TocEntry", bound=tuple)
 
 _BLOCKED_BASENAMES = {
+    # Qt 6.11 uses the Windows system ICU shim.  Do not let PyInstaller pick
+    # an unrelated icuuc/icudt pair from a developer PATH (for example a
+    # Poppler runtime); that produces WinError 127 while importing QtCore.
+    "icudt78.dll",
+    "icuuc.dll",
     "opengl32sw.dll",
     "qt6pdf.dll",
     "qt6pdfwidgets.dll",

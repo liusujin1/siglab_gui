@@ -116,7 +116,7 @@ def build_system_setting_page(self) -> QtWidgets.QWidget:
         dangerous (higher) values
     """
     w = QtWidgets.QWidget()
-    w.setStyleSheet("QLabel{font-size:25px;} QLineEdit,QComboBox{font-size:23px;}")
+    w.setStyleSheet("QLabel{font-size:16px;} QLineEdit,QComboBox{font-size:15px;}")
     root = QtWidgets.QVBoxLayout(w)
     root.setSpacing(6)
 

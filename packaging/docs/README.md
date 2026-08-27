@@ -1,4 +1,4 @@
-# SigLab TestKit 0.1.0-beta.5
+# SigLab TestKit 0.1.0-beta.6
 
 This is a portable Windows 10/11 x64 pilot package for SAMBA and SIDMAT. It
 does not require Python and does not install a Windows service.
@@ -21,14 +21,15 @@ SAMBA and SIDMAT must use the same server endpoint, COM port, and baudrate.
 Direct Serial mode is diagnostic-only and cannot share a COM port already
 owned by the server.
 
-The packaged GUI removes inherited `QT_SCALE_FACTOR` overrides to prevent a
-developer-machine setting from being applied twice. Set
-`SIGLAB_RESPECT_QT_SCALE=1` only when an intentional Qt override is required.
+The packaged GUI always removes inherited `QT_SCALE_FACTOR` overrides to
+prevent a machine-specific setting from being applied twice. Source-tree
+diagnostic runs may opt in with `SIGLAB_RESPECT_QT_SCALE=1`; frozen releases
+intentionally ignore that override.
 
 Samba and SIDMAT are packaged together under `apps\SigLabSuite` and share one
-Python/Qt/NumPy runtime. The beta.5 runtime keeps beta.4's Qt/OpenGL trimming,
-adds monitor-aware DPI/font bounds to both GUIs, and includes the latest
-SIDMAT eight-group/2x2-plot layout. It replaces the TestKit's SciPy dependency
+Python/Qt/NumPy runtime. The beta.6 runtime keeps beta.4's Qt/OpenGL trimming,
+uses a fixed 13-pixel font baseline and monitor-aware geometry bounds, and
+includes the latest SIDMAT workflow/interactive-plot layout. It replaces the TestKit's SciPy dependency
 with its tested internal signal and uncompressed MAT v5 layers; English and
 Simplified Chinese remain supported. Each executable has its own source and
 PE icon under `assets\` (`samba_icon`, `sidmat_icon`, `commserver_icon`).

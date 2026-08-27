@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '0.1.0-beta.5',
+    [string]$Version = '0.1.0-beta.6',
     [string]$PythonVersion = '3.12',
     [string]$OutputRoot = '',
     [switch]$SkipTests,
@@ -46,7 +46,7 @@ $python = Join-Path $venv 'Scripts\python.exe'
 Run $python @('-m', 'pip', 'install', '--disable-pip-version-check', '-r',
     (Join-Path $repo 'packaging\requirements-win-x64.lock'))
 # A reused build venv may still contain beta.3's SciPy.  Remove it explicitly
-# so tests and PyInstaller analysis prove the beta.5 runtime is independent.
+# so tests and PyInstaller analysis prove the beta.6 runtime is independent.
 Run $python @('-m', 'pip', 'uninstall', '-y', 'scipy')
 $sitePackages = [IO.Path]::GetFullPath((& $python -c `
     "import sysconfig; print(sysconfig.get_paths()['purelib'])").Trim())
@@ -59,7 +59,7 @@ if (Test-Path -LiteralPath $scipyResidue) {
     Remove-Item -LiteralPath $scipyResidue -Recurse -Force
 }
 Run $python @('-c',
-    "import importlib.util; assert importlib.util.find_spec('scipy') is None, 'SciPy residue remains in beta.5 build environment'")
+    "import importlib.util; assert importlib.util.find_spec('scipy') is None, 'SciPy residue remains in beta.6 build environment'")
 Run $python @('-m', 'pip', 'install', '--disable-pip-version-check', '--no-deps', '-e',
     (Join-Path $repo 'python_samba'), '-e', (Join-Path $repo 'python_sidmat'))
 

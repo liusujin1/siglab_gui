@@ -25,6 +25,8 @@ _CONFIG_ENVIRONMENT = {
     "local_data_root": "SIGLAB_LOCAL_DATA_ROOT",
 }
 
+_DLL_DIRECTORY_HANDLES: list[Any] = []
+
 
 def configure_qt_dpi_environment() -> None:
     """Set the shared Qt DPI policy before either GUI imports PySide6.
@@ -37,8 +39,13 @@ def configure_qt_dpi_environment() -> None:
     scaling.  Set ``SIGLAB_RESPECT_QT_SCALE=1`` to intentionally keep them.
     """
 
+    # A frozen release must be deterministic.  In particular, do not inherit
+    # per-user Qt variables from a development tool or an older application;
+    # those variables were the cause of machine-specific double scaling.
+    packaged = bool(getattr(sys, "frozen", False))
     respect_override = os.environ.get("SIGLAB_RESPECT_QT_SCALE", "").strip().lower()
-    if respect_override not in {"1", "true", "yes", "on"}:
+    respect_qt_scale = not packaged and respect_override in {"1", "true", "yes", "on"}
+    if not respect_qt_scale:
         for key in (
             "QT_SCALE_FACTOR",
             "QT_SCREEN_SCALE_FACTORS",
@@ -46,7 +53,26 @@ def configure_qt_dpi_environment() -> None:
             "QT_SCALE_FACTOR_ROUNDING_POLICY",
         ):
             os.environ.pop(key, None)
-    os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "0")
+    os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "0"
+
+    # PySide 6.11 ships ICU beside the frozen Python runtime while Qt6Core is
+    # under PySide6.  On Windows' safe DLL search mode the parent directory is
+    # not guaranteed to be searched, which made a clean frozen build fail to
+    # import QtCore.  Keep AddDllDirectory handles alive for the process.
+    if packaged and sys.platform.startswith("win"):
+        bundle = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+        candidates = (bundle, bundle / "PySide6", bundle / "shiboken6")
+        existing = [str(path) for path in candidates if path.is_dir()]
+        if existing:
+            current_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = os.pathsep.join([*existing, current_path])
+            add_directory = getattr(os, "add_dll_directory", None)
+            if add_directory is not None:
+                for directory in existing:
+                    try:
+                        _DLL_DIRECTORY_HANDLES.append(add_directory(directory))
+                    except OSError:
+                        continue
 
 
 def runtime_asset_path(name: str) -> Path | None:

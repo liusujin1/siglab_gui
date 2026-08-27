@@ -354,11 +354,11 @@ def _build_signal_display_page_reference(self) -> QtWidgets.QWidget:
         name = QtWidgets.QLabel("X1FB")
         name.setAlignment(QtCore.Qt.AlignCenter)
         name.setFixedHeight(59)
-        name.setStyleSheet("background:#cbbabb;font-size:27px;")
+        name.setStyleSheet("background:#cbbabb;font-size:16px;")
         value = QtWidgets.QLabel("0")
         value.setAlignment(QtCore.Qt.AlignCenter)
         value.setFixedHeight(132)
-        value.setStyleSheet(f"background:{colors[row]};color:white;font-size:58px;font-weight:300;")
+        value.setStyleSheet(f"background:{colors[row]};color:white;font-size:32px;font-weight:300;")
         selector.ioSignalChanged.connect(
             lambda _tokens, label=name, button=selector: label.setText(button.text())
         )

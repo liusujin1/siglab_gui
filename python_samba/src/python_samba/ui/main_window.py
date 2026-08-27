@@ -693,19 +693,14 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
 
     @staticmethod
     def _font_scale_for_display(display_scale: float) -> float:
-        """Return a readable font scale while retaining the pixel layout.
+        """Keep the pixel-authored UI at one font scale on every monitor.
 
-        Qt high-DPI geometry scaling is intentionally disabled for the legacy
-        pixel-authored pages.  Compensate the text separately: use a modest
-        15% accessibility increase at 100%, follow Windows scaling above that,
-        and cap the result before dense filter matrices become impractical.
+        Windows/Qt already applies the selected display policy.  Applying the
+        monitor factor again here made Samba text substantially larger than
+        SIDMAT on 125--200% desktops.
         """
 
-        try:
-            scale = float(display_scale)
-        except (TypeError, ValueError):
-            scale = 1.0
-        return min(1.40, max(1.15, scale))
+        return 1.0
 
     def _font_pixel_size(self, original: float) -> int:
         """Scale normal UI text and enforce a legible matrix-label floor."""
@@ -715,7 +710,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
             # Large titles/readouts are already legible and often live in
             # tightly sized cards; leave those display fonts unchanged.
             return int(round(value))
-        return min(24, max(12, int(round(value * self._font_scale))))
+        return min(24, max(11, int(round(value))))
 
     def _scale_font_stylesheet(self, stylesheet: str) -> str:
         if not stylesheet:
@@ -731,8 +726,10 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         if app is None:
             return
         app.setProperty("python_samba_font_scale", self._font_scale)
-        font = QtGui.QFont("Arial")
-        font.setPointSizeF(12.0 * self._font_scale)
+        font = QtGui.QFont("Segoe UI")
+        # Pixel size is deliberate: point sizes are multiplied by the target
+        # machine's logical DPI and caused the cross-computer enlargement.
+        font.setPixelSize(13)
         app.setFont(font)
 
     def _scale_existing_inline_fonts(self) -> None:
@@ -1967,7 +1964,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
             QMainWindow, QWidget {
                 color: #203443;
                 font-family: "Segoe UI", "Microsoft YaHei UI", "Arial", sans-serif;
-                font-size: 16px;
+                font-size: 13px;
             }
             QMainWindow, QWidget#applicationRoot, QWidget#workspaceBody,
             QTabWidget#mainPageStack, QTabWidget#mainPageStack > QWidget,

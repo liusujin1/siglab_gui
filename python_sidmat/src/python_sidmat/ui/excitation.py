@@ -95,6 +95,11 @@ class ExcitationWidget(QtWidgets.QGroupBox):
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__("Excitation", parent)
+        self.setMinimumWidth(0)
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
         self.excitation = ExcitationParameters()
         self._filter_stages = [
             FilterStage(0, index, 0, (1.0, 0.0, 0.0, 0.0, 0.0))
