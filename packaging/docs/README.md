@@ -1,4 +1,4 @@
-# SigLab TestKit 0.1.0-beta.10
+# SigLab TestKit 0.1.0-beta.11
 
 This is a portable Windows 10/11 x64 pilot package for SAMBA and SIDMAT. It
 does not require Python and does not install a Windows service.
@@ -27,9 +27,9 @@ Source-tree diagnostic runs may opt in with `SIGLAB_RESPECT_QT_SCALE=1`;
 frozen releases intentionally ignore that override.
 
 Samba and SIDMAT are packaged together under `apps\SigLabSuite` and share one
-Python/Qt/NumPy runtime. The beta.10 runtime keeps beta.4's Qt/OpenGL trimming,
-uniformly fits Samba's original 1840x1240 physical-pixel composition through
-the Windows display scale while SIDMAT keeps its own logical-work-area layout,
+Python/Qt/NumPy runtime. The beta.11 runtime keeps beta.4's Qt/OpenGL trimming,
+uniformly fits Samba's original 1840x1240 and SIDMAT's 1240x780 physical-pixel
+compositions through the Windows display scale,
 includes the latest SIDMAT workflow/interactive-plot layout. It replaces the TestKit's SciPy dependency
 with its tested internal signal and uncompressed MAT v5 layers; English and
 Simplified Chinese remain supported. Each executable has its own source and

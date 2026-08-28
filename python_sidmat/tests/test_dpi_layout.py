@@ -149,10 +149,45 @@ def test_local_200_percent_logical_work_area_is_compact(package: str, monkeypatc
         assert minimum == QtCore.QSize(640, 440)
         assert density == pytest.approx(0.5)
     else:
-        assert initial == QtCore.QSize(930, 585)
-        assert minimum == QtCore.QSize(800, 520)
-        assert density == pytest.approx(0.75)
+        assert initial == QtCore.QSize(620, 390)
+        assert minimum == QtCore.QSize(480, 320)
+        assert density == pytest.approx(0.5)
     assert MainWindow._font_scale_for_display(density) == pytest.approx(0.67)
+
+
+def test_sidmat_scales_fixed_content_with_physical_reference(monkeypatch) -> None:
+    pytest.importorskip("PySide6")
+    from PySide6 import QtCore, QtGui, QtWidgets
+    from python_sidmat.ui.main_window import MainWindow
+
+    class LocalScreen:
+        @staticmethod
+        def availableGeometry():
+            return QtCore.QRect(0, 0, 1440, 852)
+
+    monkeypatch.setattr(QtGui.QGuiApplication, "primaryScreen", lambda: LocalScreen())
+    monkeypatch.setattr(
+        MainWindow,
+        "_screen_scale_factor",
+        staticmethod(lambda _screen: 2.0),
+    )
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow()
+    window.show()
+    app.processEvents()
+    try:
+        assert window.size() == QtCore.QSize(620, 390)
+        assert window.minimumSize() == QtCore.QSize(480, 320)
+        assert app.property("python_samba_ui_scale") == pytest.approx(0.5)
+        assert window._left_toolbar_host.height() == 47
+        assert window._left_stack.layout().contentsMargins().left() == 2
+        assert window.port_cbx.maximumWidth() == 48
+        assert window.axis_buttons[0].maximumSize() == QtCore.QSize(23, 11)
+        assert window.plot_cursor_btn.maximumHeight() == 15
+        assert window._size_grip.size() == QtCore.QSize(9, 9)
+    finally:
+        window.close()
+        app.processEvents()
 
 
 @pytest.mark.parametrize(

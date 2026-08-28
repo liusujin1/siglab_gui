@@ -42,7 +42,9 @@ def test_window_uses_samba_metrics_font_scale_and_resize_grip():
     assert win._DESIGN_MINIMUM_SIZE == (960, 640)
     assert 0.67 <= win._font_scale <= 1.10
     assert app.property("python_samba_font_scale") == pytest.approx(win._font_scale)
-    assert win._size_grip.size() == QtCore.QSize(18, 18)
+    assert win._size_grip.size() == QtCore.QSize(
+        win._ui_px(18, 9), win._ui_px(18, 9)
+    )
     expected_base = app.font().pixelSize()
     assert f"font-size: {expected_base}px" in app.styleSheet()
     _available, initial, minimum, _scale = win._initial_window_metrics()

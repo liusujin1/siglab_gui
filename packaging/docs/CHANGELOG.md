@@ -1,5 +1,21 @@
 # SigLab TestKit release notes
 
+## 0.1.0-beta.11 — 2026-08-28
+
+- Component versions: Samba/Communication Server `0.1.5`, SIDMAT `0.1.5`.
+- Applied the same physical-reference DPI model to SIDMAT while retaining its
+  current workflow and plot layout. The `1240x780` reference remains unchanged
+  at 100% and becomes `620x390` Qt logical pixels at 200%.
+- Scaled SIDMAT's fixed controls, sidebar, plot toolbar, layout margins,
+  spacing, icons and stylesheet geometry together with the outer window, so a
+  smaller DPI-aware shell no longer contains oversized page content.
+- Kept normal and plot text on bounded logical-pixel fonts and added explicit
+  200% regression checks for fixed control sizes and horizontal overflow.
+
+Validation: SIDMAT rendered at `620x390` logical / `1240x780` physical pixels
+on the local 200% display, focused DPI and plot tests, full release gate,
+compileall and frozen executable smoke tests.
+
 ## 0.1.0-beta.10 — 2026-08-28
 
 - Component versions: Samba/Communication Server `0.1.5`, SIDMAT `0.1.4`.

@@ -45,3 +45,21 @@ def test_legacy_samba_reference_uniformly_fits_1080p_at_100_percent():
     assert (metrics.initial_width, metrics.initial_height) == (1484, 1000)
     assert metrics.density == 1000 / 1240
     assert metrics.font_scale == metrics.density
+
+
+def test_legacy_sidmat_reference_preserves_physical_size_at_200_percent():
+    metrics = metrics_for_legacy_reference(
+        1440,
+        852,
+        2.0,
+        design_width=1240,
+        design_height=780,
+        minimum_design_width=960,
+        minimum_design_height=640,
+        minimum_floor_width=480,
+        minimum_floor_height=320,
+    )
+    assert (metrics.initial_width, metrics.initial_height) == (620, 390)
+    assert (metrics.minimum_width, metrics.minimum_height) == (480, 320)
+    assert metrics.density == 0.5
+    assert metrics.font_scale == 0.67
