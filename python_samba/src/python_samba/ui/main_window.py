@@ -660,6 +660,14 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
     _FONT_SIZE_PATTERN = re.compile(
         r"(font-size\s*:\s*)(\d+(?:\.\d+)?)px", re.IGNORECASE
     )
+    _GEOMETRY_STYLE_PATTERN = re.compile(
+        r"((?:padding(?:-(?:left|right|top|bottom))?|"
+        r"margin(?:-(?:left|right|top|bottom))?|"
+        r"min-(?:width|height)|max-(?:width|height)|"
+        r"border-radius|left|right|top|bottom)\s*:\s*)([^;}]+)",
+        re.IGNORECASE,
+    )
+    _PIXEL_VALUE_PATTERN = re.compile(r"(\d+(?:\.\d+)?)px", re.IGNORECASE)
 
     @staticmethod
     def _screen_scale_factor(screen) -> float:
@@ -721,11 +729,36 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
 
         return self._FONT_SIZE_PATTERN.sub(replace, stylesheet)
 
+    def _scale_geometry_stylesheet(self, stylesheet: str) -> str:
+        """Scale stylesheet geometry with the logical-work-area density."""
+
+        if not stylesheet or self._display_density >= 0.999:
+            return stylesheet
+
+        def replace_declaration(match: re.Match[str]) -> str:
+            def replace_value(value_match: re.Match[str]) -> str:
+                value = float(value_match.group(1))
+                scaled = 0 if value == 0 else max(
+                    1, int(round(value * self._display_density))
+                )
+                return f"{scaled}px"
+
+            return (
+                f"{match.group(1)}"
+                f"{self._PIXEL_VALUE_PATTERN.sub(replace_value, match.group(2))}"
+            )
+
+        return self._GEOMETRY_STYLE_PATTERN.sub(replace_declaration, stylesheet)
+
+    def _scale_ui_stylesheet(self, stylesheet: str) -> str:
+        return self._scale_geometry_stylesheet(self._scale_font_stylesheet(stylesheet))
+
     def _apply_application_font_scale(self) -> None:
         app = QtWidgets.QApplication.instance()
         if app is None:
             return
         app.setProperty("python_samba_font_scale", self._font_scale)
+        app.setProperty("python_samba_ui_scale", min(1.0, self._display_density))
         font = QtGui.QFont("Segoe UI")
         # Pixel size is deliberate: point sizes are multiplied by the target
         # machine's logical DPI and caused the cross-computer enlargement.
@@ -744,9 +777,98 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
             stylesheet = widget.styleSheet()
             if not stylesheet:
                 continue
-            scaled = self._scale_font_stylesheet(stylesheet)
+            scaled = self._scale_ui_stylesheet(stylesheet)
             if scaled != stylesheet:
                 widget.setStyleSheet(scaled)
+
+    @staticmethod
+    def _scaled_geometry_value(value: int, factor: float) -> int:
+        if value <= 0:
+            return value
+        return max(1, int(round(value * factor)))
+
+    @classmethod
+    def _scaled_layout_spacing(cls, value: int, factor: float) -> int:
+        # Tiny gaps are functional separation, not design whitespace. Keep
+        # them intact so adjacent controls and expander rows never overlap.
+        if value <= 5:
+            return value
+        return cls._scaled_geometry_value(value, factor)
+
+    def _apply_content_geometry_scale(self) -> None:
+        """Scale fixed page geometry that Qt cannot infer from the font.
+
+        The legacy page builders contain many explicit widget sizes and layout
+        gaps. Shrinking only the top-level window left those values at their
+        1080p design size, producing a tiny font inside oversized controls and
+        horizontal overflow. Apply the same logical-work-area density to the
+        page tree once, while leaving the already-adaptive shell alone.
+        """
+
+        factor = min(1.0, self._display_density)
+        if factor >= 0.999 or getattr(self, "_content_geometry_scaled", False):
+            return
+        self._content_geometry_scaled = True
+        root = self.main_tabs
+        widgets = [root, *root.findChildren(QtWidgets.QWidget)]
+        # QWidget uses this sentinel for an unconstrained maximum size.
+        maximum_default = 16_777_215
+        for widget in widgets:
+            minimum = widget.minimumSize()
+            maximum = widget.maximumSize()
+            min_width = self._scaled_geometry_value(minimum.width(), factor)
+            min_height = self._scaled_geometry_value(minimum.height(), factor)
+            max_width = maximum.width()
+            max_height = maximum.height()
+            if 0 < max_width < maximum_default:
+                max_width = self._scaled_geometry_value(max_width, factor)
+            if 0 < max_height < maximum_default:
+                max_height = self._scaled_geometry_value(max_height, factor)
+            widget.setMinimumSize(min_width, min_height)
+            widget.setMaximumSize(max_width, max_height)
+            if (
+                isinstance(widget, QtWidgets.QAbstractButton)
+                and not widget.icon().isNull()
+            ):
+                icon_size = widget.iconSize()
+                if icon_size.isValid():
+                    widget.setIconSize(
+                        QtCore.QSize(
+                            self._scaled_geometry_value(icon_size.width(), factor),
+                            self._scaled_geometry_value(icon_size.height(), factor),
+                        )
+                    )
+            if isinstance(widget, QtWidgets.QSplitter):
+                widget.setHandleWidth(
+                    self._scaled_geometry_value(widget.handleWidth(), factor)
+                )
+
+        layouts = root.findChildren(QtWidgets.QLayout)
+        if root.layout() is not None and root.layout() not in layouts:
+            layouts.insert(0, root.layout())
+        for layout in layouts:
+            margins = layout.contentsMargins()
+            layout.setContentsMargins(
+                self._scaled_geometry_value(margins.left(), factor),
+                self._scaled_geometry_value(margins.top(), factor),
+                self._scaled_geometry_value(margins.right(), factor),
+                self._scaled_geometry_value(margins.bottom(), factor),
+            )
+            if isinstance(layout, (QtWidgets.QGridLayout, QtWidgets.QFormLayout)):
+                horizontal = layout.horizontalSpacing()
+                vertical = layout.verticalSpacing()
+                if horizontal >= 0:
+                    layout.setHorizontalSpacing(
+                        self._scaled_layout_spacing(horizontal, factor)
+                    )
+                if vertical >= 0:
+                    layout.setVerticalSpacing(
+                        self._scaled_layout_spacing(vertical, factor)
+                    )
+            elif layout.spacing() >= 0:
+                layout.setSpacing(
+                    self._scaled_layout_spacing(layout.spacing(), factor)
+                )
 
     @classmethod
     def _initial_window_metrics(cls) -> tuple[QtCore.QRect, QtCore.QSize, QtCore.QSize, float]:
@@ -891,6 +1013,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         )
 
         self._apply_theme()
+        self._apply_content_geometry_scale()
         self._build_context_menu()
 
         # The reference UI has no permanent console button in its title bar.
@@ -907,7 +1030,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         self._size_grip = QtWidgets.QSizeGrip(self)
         self._size_grip.setObjectName("windowSizeGrip")
         self._size_grip.setToolTip("Drag to resize window")
-        self._size_grip.setFixedSize(18, 18)
+        self._size_grip.setFixedSize(self._ui_px(18, 14), self._ui_px(18, 14))
         self._position_size_grip()
 
         # Refresh timer (1 second, like SAMBA19xUI)
@@ -2256,7 +2379,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
                 font-size: 12px;
             }
         """
-        self.setStyleSheet(self._scale_font_stylesheet(theme))
+        self.setStyleSheet(self._scale_ui_stylesheet(theme))
         self._scale_existing_inline_fonts()
 
     def _build_context_menu(self) -> None:
@@ -2696,8 +2819,13 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         root.setContentsMargins(14, 4, 6, 4)
         root.setSpacing(6)
 
-        top = QtWidgets.QHBoxLayout()
-        top.setSpacing(0)
+        # The reference placed all three axis groups in one very wide row.
+        # That required 1333 logical pixels before the sidebar and could not
+        # fit even the reference 1240 px window. Stack the axis groups beside
+        # the loop summary so the dashboard adapts without horizontal scroll.
+        top = QtWidgets.QGridLayout()
+        top.setHorizontalSpacing(12)
+        top.setVerticalSpacing(12)
         loop_group = GroupPanel("Loops Status")
         loop_group.setFixedSize(250, 360)
         loop_grid = QtWidgets.QGridLayout(loop_group)
@@ -2722,16 +2850,17 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
             )
             self.status_loop_badges[name] = badge
             loop_grid.addWidget(badge, row, 1)
-        top.addWidget(loop_group, 0, QtCore.Qt.AlignTop)
-        top.addSpacing(30)
-
-        axis_column = QtWidgets.QVBoxLayout()
+        top.addWidget(loop_group, 0, 0, 3, 1, QtCore.Qt.AlignTop)
 
         def axis_group(
             title: str, names: list[str], kind: str
         ) -> tuple[QtWidgets.QGroupBox, list[SidebarLoopButton]]:
             group = GroupPanel(title)
-            group.setFixedSize(490 if len(names) == 6 else 403, 140)
+            group.setFixedHeight(112)
+            group.setMinimumWidth(0)
+            group.setSizePolicy(
+                QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed
+            )
             row = QtWidgets.QHBoxLayout(group)
             lamps: list[SidebarLoopButton] = []
             for axis, name in enumerate(names):
@@ -2759,24 +2888,20 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
             ["Xtrans", "Zrot", "Ytrans", "Ztrans", "Yrot", "Xrot"],
             "velocity",
         )
-        axis_column.addWidget(velocity_group)
-        axis_column.addSpacing(28)
+        top.addWidget(velocity_group, 0, 1)
         position_group, self.status_position_axis_lamps = axis_group(
             "Position Individual Loop Status",
             ["Xrot", "Yrot", "Xtrans", "Ytrans", "Zrot", "Ztrans"],
             "position",
         )
-        axis_column.addWidget(position_group)
-        axis_column.addStretch(1)
-        top.addLayout(axis_column)
-        top.addSpacing(140)
+        top.addWidget(position_group, 1, 1)
         pneumatic_group, self.status_pneumatic_axis_lamps = axis_group(
             "Pneumatic Individual Loop Status",
             ["Ztpneu", "Yrpneu", "Xrpneu"],
             "pneumatic",
         )
-        top.addWidget(pneumatic_group, 0, QtCore.Qt.AlignTop)
-        top.addStretch(1)
+        top.addWidget(pneumatic_group, 2, 1)
+        top.setColumnStretch(1, 1)
         root.addLayout(top)
 
         event_group = GroupPanel("Event")

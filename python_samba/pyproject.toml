@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "python-samba"
-version = "0.1.4"
+version = "0.1.5"
 description = "Vendor-free host software for IDE TC-MFD / OPTICON active vibration isolation (pure RCI serial)."
 readme = "README.md"
 requires-python = ">=3.11"

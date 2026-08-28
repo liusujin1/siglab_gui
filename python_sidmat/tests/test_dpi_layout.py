@@ -144,3 +144,78 @@ def test_local_200_percent_logical_work_area_is_compact(package: str, monkeypatc
     assert minimum == QtCore.QSize(800, 520)
     assert density == pytest.approx(0.75)
     assert MainWindow._font_scale_for_display(density) == pytest.approx(0.67)
+
+
+@pytest.mark.parametrize(
+    ("work_width", "work_height", "expected_window"),
+    [
+        (1440, 852, (930, 585)),
+        (1920, 1040, (1240, 780)),
+    ],
+)
+def test_samba_status_dashboard_fits_without_horizontal_overflow(
+    monkeypatch,
+    work_width: int,
+    work_height: int,
+    expected_window: tuple[int, int],
+) -> None:
+    """Status controls must fit the actual initial window, not a larger test size."""
+
+    pytest.importorskip("PySide6")
+    from PySide6 import QtCore, QtGui, QtWidgets
+    from python_samba.ui.main_window import MainWindow
+    from python_samba.ui.patches import apply_all_patches
+
+    class FakeScreen:
+        @staticmethod
+        def availableGeometry():
+            return QtCore.QRect(0, 0, work_width, work_height)
+
+        @staticmethod
+        def devicePixelRatio():
+            return 1.0
+
+        @staticmethod
+        def logicalDotsPerInch():
+            return 96.0
+
+    class PatchedMainWindow(MainWindow):
+        pass
+
+    apply_all_patches(PatchedMainWindow, strict=True)
+    monkeypatch.setattr(QtGui.QGuiApplication, "primaryScreen", lambda: FakeScreen())
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = PatchedMainWindow()
+    window.show()
+    app.processEvents()
+    try:
+        assert (window.width(), window.height()) == expected_window
+        status_index = next(
+            index
+            for index in range(window.main_tabs.count())
+            if window.main_tabs.tabText(index) == "Status"
+        )
+        window.main_tabs.setCurrentIndex(status_index)
+        app.processEvents()
+        outer_scroll = window.main_tabs.widget(status_index)
+        status_tabs = outer_scroll.widget()
+        status_scroll = status_tabs.widget(0)
+        viewport = status_scroll.viewport()
+        app.processEvents()
+
+        assert status_scroll.horizontalScrollBar().maximum() == 0
+        assert status_scroll.widget().width() <= viewport.width()
+        controls = [
+            *window.status_loop_badges.values(),
+            *window.status_velocity_axis_lamps,
+            *window.status_position_axis_lamps,
+            *window.status_pneumatic_axis_lamps,
+            window.status_events,
+        ]
+        for control in controls:
+            top_left = control.mapTo(viewport, QtCore.QPoint(0, 0))
+            assert top_left.x() >= 0
+            assert top_left.x() + control.width() <= viewport.width()
+    finally:
+        window.close()
+        app.processEvents()

@@ -1,5 +1,22 @@
 # SigLab TestKit release notes
 
+## 0.1.0-beta.10 — 2026-08-28
+
+- Component versions: Samba/Communication Server `0.1.5`, SIDMAT `0.1.4`.
+- Extended Samba's adaptive sizing from the window shell and fonts to fixed
+  page controls, layout margins, spacing, icons and stylesheet geometry.
+- Reflowed the Status dashboard into a responsive two-column layout. The loop
+  summary stays on the left while velocity, position and pneumatic groups stack
+  on the right, removing the legacy 1333-pixel horizontal requirement.
+- On the local `1440x852` Qt work area, the initial `930x585` window now shows
+  the complete Status dashboard in a `710x507` viewport without horizontal or
+  vertical scrolling; `1920x1040` also fits without overflow.
+- Added explicit layout regression coverage for both logical work areas and
+  verifies every status lamp and the event table remain inside the viewport.
+
+Validation: adaptive layout tests, complete Samba page tests, rendered compact
+Status screenshot, compileall, full Samba/SIDMAT release gate and frozen smoke.
+
 ## 0.1.0-beta.9 — 2026-08-28
 
 - Component versions: Samba/Communication Server `0.1.4`, SIDMAT `0.1.4`.
