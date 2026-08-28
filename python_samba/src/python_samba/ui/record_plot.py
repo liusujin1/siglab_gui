@@ -16,10 +16,10 @@ from python_samba.ui.plot_interactions import (
     DataTipText,
     InteractiveViewBox,
     PLOT_BACKGROUND,
-    PLOT_FONT_POINTS,
     PLOT_FOREGROUND,
     PlainAxisItem,
     plot_font as _plot_font,
+    plot_font_pixel_size,
     short_number as _short_number,
 )
 
@@ -382,12 +382,12 @@ class RecordPlotWindow(QtWidgets.QDialog):
         plot.getPlotItem().setLabel(
             "bottom",
             "Time (s)" if domain == "time" else "Frequency (Hz)",
-            **{"font-size": f"{PLOT_FONT_POINTS}pt"},
+            **{"font-size": f"{plot_font_pixel_size()}px"},
         )
         plot.getPlotItem().setLabel(
             "left",
             "Value" if domain == "time" else "Amplitude / PSD",
-            **{"font-size": f"{PLOT_FONT_POINTS}pt"},
+            **{"font-size": f"{plot_font_pixel_size()}px"},
         )
         if domain == "frequency":
             axes["bottom"].setLogMode(True)
@@ -796,7 +796,7 @@ class RecordPlotWindow(QtWidgets.QDialog):
         self.frequency_plot.getPlotItem().setLabel(
             "left",
             "Amplitude / PSD",
-            **{"font-size": f"{PLOT_FONT_POINTS}pt"},
+            **{"font-size": f"{plot_font_pixel_size()}px"},
         )
         self.clear_annotations(domain="frequency")
         self._refresh_plots()

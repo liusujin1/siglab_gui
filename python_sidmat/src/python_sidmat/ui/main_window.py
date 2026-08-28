@@ -29,9 +29,9 @@ from python_samba.ui.plot_interactions import (
     CURVE_COLORS,
     InteractiveViewBox,
     PLOT_BACKGROUND,
-    PLOT_FONT_POINTS,
     PLOT_FOREGROUND,
     PlainAxisItem,
+    plot_font_pixel_size,
 )
 from python_samba.ui.server_discovery import choose_communication_server
 
@@ -344,7 +344,7 @@ class MainWindow(QtWidgets.QMainWindow):
     @staticmethod
     def _font_scale_for_display(display_scale: float) -> float:
         # The input is logical-work-area density, never the Windows DPI ratio.
-        return min(1.10, max(0.85, float(display_scale)))
+        return min(1.10, max(0.67, float(display_scale) ** 1.5))
 
     @classmethod
     def _initial_window_metrics(
@@ -1241,18 +1241,18 @@ class MainWindow(QtWidgets.QMainWindow):
         legend.hide()
         if title == "Time Spec":
             pw.setLabel(
-                "bottom", "Time (s)", **{"font-size": f"{PLOT_FONT_POINTS}pt"}
+                "bottom", "Time (s)", **{"font-size": f"{plot_font_pixel_size()}px"}
             )
         else:
             pw.setLogMode(x=True, y=False)
             pw.setLabel(
                 "bottom",
                 "Frequency (Hz)",
-                **{"font-size": f"{PLOT_FONT_POINTS}pt"},
+                **{"font-size": f"{plot_font_pixel_size()}px"},
             )
         if title.startswith("Coherence"):
             pw.setLabel(
-                "left", "Coherence", **{"font-size": f"{PLOT_FONT_POINTS}pt"}
+                "left", "Coherence", **{"font-size": f"{plot_font_pixel_size()}px"}
             )
             pw.setYRange(0.0, 1.05, padding=0)
             pw.setLimits(yMin=0.0, yMax=1.05)

@@ -14,7 +14,7 @@ def test_local_2880x1800_at_200_percent_is_compact():
     metrics = metrics_for_work_area(1440, 852)
     assert (metrics.initial_width, metrics.initial_height) == (930, 585)
     assert (metrics.minimum_width, metrics.minimum_height) == (800, 520)
-    assert metrics.font_scale == 0.85
+    assert metrics.font_scale == 0.67
 
 
 def test_metrics_grow_monotonically_and_remain_bounded():
@@ -26,4 +26,4 @@ def test_metrics_grow_monotonically_and_remain_bounded():
         assert 0 < item.minimum_width <= item.initial_width <= width
         assert 0 < item.minimum_height <= item.initial_height <= height
         assert 0.72 <= item.density <= 1.25
-        assert 0.85 <= item.font_scale <= 1.10
+        assert 0.67 <= item.font_scale <= 1.10

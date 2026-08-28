@@ -90,6 +90,8 @@ def test_record_window_lists_all_numeric_channels_and_shows_first_six():
 
 
 def test_plot_fonts_are_compact_and_default_window_is_not_oversized():
+    from python_samba.ui.plot_interactions import plot_font_pixel_size
+
     app = _application()
     window = RecordPlotWindow()
     try:
@@ -101,8 +103,8 @@ def test_plot_fonts_are_compact_and_default_window_is_not_oversized():
         for plot in (window.time_plot, window.frequency_plot):
             for side in ("bottom", "left"):
                 axis = plot.getPlotItem().getAxis(side)
-                assert axis.compact_tick_font.pointSize() == 9
-                assert axis.label.font().pointSize() == 9
+                assert axis.compact_tick_font.pixelSize() == plot_font_pixel_size()
+                assert axis.label.font().pixelSize() == plot_font_pixel_size()
     finally:
         window.close()
         app.processEvents()

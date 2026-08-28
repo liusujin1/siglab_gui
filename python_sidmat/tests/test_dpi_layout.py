@@ -81,8 +81,8 @@ app.processEvents()
     assert 0 < window_h <= screen_h
     assert 0 < minimum_w <= screen_w
     assert 0 < minimum_h <= screen_h
-    assert 10 <= payload["font_pixel_size"] <= 13
-    assert 0.85 <= payload["font_scale"] <= 1.10
+    assert 8 <= payload["font_pixel_size"] <= 13
+    assert 0.67 <= payload["font_scale"] <= 1.10
 
 
 @pytest.mark.parametrize("package", ["samba", "sidmat"])
@@ -143,3 +143,4 @@ def test_local_200_percent_logical_work_area_is_compact(package: str, monkeypatc
     assert initial == QtCore.QSize(930, 585)
     assert minimum == QtCore.QSize(800, 520)
     assert density == pytest.approx(0.75)
+    assert MainWindow._font_scale_for_display(density) == pytest.approx(0.67)

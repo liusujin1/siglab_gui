@@ -701,14 +701,14 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
     def _font_scale_for_display(display_scale: float) -> float:
         """Scale visual density from the logical work area, not Windows DPI."""
 
-        return min(1.10, max(0.85, float(display_scale)))
+        return min(1.10, max(0.67, float(display_scale) ** 1.5))
 
     def _font_pixel_size(self, original: float) -> int:
         """Scale normal UI text and enforce a legible matrix-label floor."""
 
         value = float(original)
         compact = value if value > 22 else (12.0 if value <= 13 else value * 0.85)
-        floor = 10 if value <= 22 else 18
+        floor = 8 if value <= 22 else 14
         ceiling = 22 if value <= 22 else 36
         return min(ceiling, max(floor, int(round(compact * self._font_scale))))
 
@@ -729,7 +729,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         font = QtGui.QFont("Segoe UI")
         # Pixel size is deliberate: point sizes are multiplied by the target
         # machine's logical DPI and caused the cross-computer enlargement.
-        font.setPixelSize(min(13, max(10, int(round(12 * self._font_scale)))))
+        font.setPixelSize(min(13, max(8, int(round(12 * self._font_scale)))))
         app.setFont(font)
 
     def _ui_px(self, base: int, floor: int = 1) -> int:

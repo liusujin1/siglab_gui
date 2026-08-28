@@ -97,7 +97,6 @@ class RockerButton(QtWidgets.QToolButton):
                 border: 2px solid #555;
                 border-radius: 6px;
                 font-weight: 700;
-                font-size: 11px;
                 padding-top: 18px;
             }}
             QToolButton:checked {{

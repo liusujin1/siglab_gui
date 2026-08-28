@@ -31,7 +31,10 @@ def metrics_for_work_area(width: int, height: int) -> AdaptiveUiMetrics:
     work_width = max(1, int(width))
     work_height = max(1, int(height))
     density = _clamp(min(work_width / 1920.0, work_height / 1040.0), 0.72, 1.25)
-    font_scale = _clamp(density, 0.85, 1.10)
+    # Font density needs a steeper response than window geometry.  A 200%
+    # laptop panel often exposes only ~75% of the 1080p logical workspace;
+    # using density directly still leaves text visually dominant.
+    font_scale = _clamp(density ** 1.5, 0.67, 1.10)
     margin = int(_clamp(round(20.0 * density), 12, 24))
     usable_width = max(1, work_width - margin * 2)
     usable_height = max(1, work_height - margin * 2)

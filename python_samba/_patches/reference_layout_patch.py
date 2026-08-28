@@ -31,6 +31,15 @@ VEL_OUTPUTS = [
 POS_INPUTS = ["Input1", "Input2", "Input3", "Input4", "Input5", "Input6"]
 POS_OUTPUTS = [f"Output{i}" for i in range(1, 9)]
 
+
+def _adaptive_font_px(base: int, floor: int = 7) -> int:
+    app = QtWidgets.QApplication.instance()
+    try:
+        scale = float(app.property("python_samba_font_scale") or 1.0) if app else 1.0
+    except (TypeError, ValueError):
+        scale = 1.0
+    return max(floor, int(round(base * scale)))
+
 REFERENCE_PAGE_STYLE = """
     QLabel { color:#28475b; font-size: 15px; }
     QComboBox {
@@ -420,7 +429,8 @@ class _StatusOrb(QtWidgets.QLabel):
             edge, center = "#24ae35", "#3bd34a"
         self.setStyleSheet(
             "QLabel{border:4px solid " + edge + ";border-radius:19px;"
-            "background:" + center + ";font-size:17px;font-weight:600;}"
+            "background:" + center + ";font-size:"
+            + str(_adaptive_font_px(17, 11)) + "px;font-weight:600;}"
         )
 
     def set_color(self, color: str) -> None:
@@ -440,7 +450,7 @@ class _StatusValue(QtWidgets.QLabel):
         self.setFixedSize(82, 38)
         self.setStyleSheet(
             "QLabel{border:2px solid #999;border-radius:3px;background:#f7f7f7;"
-            "font-size:17px;font-weight:600;}"
+            f"font-size:{_adaptive_font_px(17, 11)}px;font-weight:600;}}"
         )
 
     def set_value(self, value: int) -> None:
@@ -462,7 +472,8 @@ class _ReferenceToggle(QtWidgets.QToolButton):
         self.setStyleSheet(
             "QToolButton{background:qradialgradient(cx:.45,cy:.45,radius:.75,"
             "stop:0 #f8f8f8,stop:.55 #c5bfc0,stop:1 #8e898a);"
-            "border:3px solid #a89fa0;border-radius:7px;font-size:17px;"
+            "border:3px solid #a89fa0;border-radius:7px;font-size:"
+            + str(_adaptive_font_px(17, 11)) + "px;"
             "font-weight:800;color:#111;}"
             "QToolButton:checked{background:qradialgradient(cx:.5,cy:.5,radius:.62,"
             "stop:0 #efff15,stop:.38 #bde514,stop:.72 #3a8f15,stop:1 #0a5016);}"

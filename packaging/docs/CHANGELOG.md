@@ -1,5 +1,19 @@
 # SigLab TestKit release notes
 
+## 0.1.0-beta.9 — 2026-08-28
+
+- Component versions: Samba/Communication Server `0.1.4`, SIDMAT `0.1.4`.
+- Made font density respond more strongly than window geometry. On the local
+  `1440x852` Qt work area, both applications now use an 8-pixel normal font
+  instead of beta.8's 10-pixel floor; `1920x1040` remains at 12 pixels.
+- Converted shared pyqtgraph axes, labels, legends, cursors, data tips and
+  markers from fixed 9-point fonts to adaptive logical-pixel fonts.
+- Scaled SIDMAT excitation LEDs and Samba reference status/toggle labels, and
+  removed a runtime stylesheet that could restore an unscaled 11-pixel font.
+
+Validation: local real-screen render at `930x585` with 8px UI/plot fonts,
+adaptive font tests, full Samba/SIDMAT gate, compileall and frozen smoke.
+
 ## 0.1.0-beta.8 — 2026-08-27
 
 - Component versions: Samba/Communication Server `0.1.3`, SIDMAT `0.1.3`.

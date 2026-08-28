@@ -80,7 +80,12 @@ class _FilterLed(QtWidgets.QAbstractButton):
         # short label inside the circle, as the original LEDBtn shows
         painter.setPen(QtGui.QPen(QtGui.QColor("white"), 0))
         font = painter.font()
-        font.setPointSize(8)
+        app = QtWidgets.QApplication.instance()
+        try:
+            scale = float(app.property("python_samba_font_scale") or 1.0) if app else 1.0
+        except (TypeError, ValueError):
+            scale = 1.0
+        font.setPixelSize(min(11, max(7, int(round(10 * scale)))))
         font.setBold(True)
         painter.setFont(font)
         painter.drawText(self.rect(), QtCore.Qt.AlignmentFlag.AlignCenter,

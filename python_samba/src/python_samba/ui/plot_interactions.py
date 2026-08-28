@@ -36,9 +36,20 @@ CURVE_COLORS = (
 PLOT_FONT_POINTS = 9
 
 
+def plot_font_pixel_size(points: float = PLOT_FONT_POINTS) -> int:
+    """Return an adaptive logical-pixel plot font size."""
+
+    app = QtWidgets.QApplication.instance()
+    try:
+        scale = float(app.property("python_samba_font_scale") or 1.0) if app else 1.0
+    except (TypeError, ValueError):
+        scale = 1.0
+    return min(14, max(7, int(round(float(points) * (4.0 / 3.0) * scale))))
+
+
 def plot_font(*, bold: bool = False) -> QtGui.QFont:
-    font = QtGui.QFont()
-    font.setPointSize(PLOT_FONT_POINTS)
+    font = QtGui.QFont("Segoe UI")
+    font.setPixelSize(plot_font_pixel_size())
     font.setBold(bold)
     return font
 
@@ -73,7 +84,10 @@ if pg is not None:
             self.compact_tick_font = plot_font()
             self.setTickFont(self.compact_tick_font)
             self.label.setFont(self.compact_tick_font)
-            self.setStyle(tickTextHeight=15, autoExpandTextSpace=False)
+            self.setStyle(
+                tickTextHeight=max(11, plot_font_pixel_size() + 3),
+                autoExpandTextSpace=False,
+            )
             if hasattr(self, "enableAutoSIPrefix"):
                 self.enableAutoSIPrefix(False)
 
@@ -229,5 +243,6 @@ __all__ = [
     "PlainAxisItem",
     "copy_plot_image",
     "plot_font",
+    "plot_font_pixel_size",
     "short_number",
 ]

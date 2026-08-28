@@ -14,8 +14,8 @@ scans staged text for known sensitive material, writes per-file SHA256 values,
 and creates:
 
 ```text
-release\SigLab-TestKit-0.1.0-beta.8-win-x64.zip
-release\SigLab-TestKit-0.1.0-beta.8-win-x64.zip.sha256
+release\SigLab-TestKit-0.1.0-beta.9-win-x64.zip
+release\SigLab-TestKit-0.1.0-beta.9-win-x64.zip.sha256
 ```
 
 Generated `.build`, `release`, PyInstaller `build/dist`, caches, egg-info,

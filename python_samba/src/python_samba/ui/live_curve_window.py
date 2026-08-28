@@ -35,6 +35,7 @@ from python_samba.ui.plot_interactions import (
     PlainAxisItem,
     copy_plot_image,
     plot_font,
+    plot_font_pixel_size,
     short_number,
 )
 
@@ -414,7 +415,7 @@ class LiveCurveWindow(QtWidgets.QDialog):
         self._view_box = view_box
         self._view_box.sigRangeChanged.connect(self._view_range_changed)
         self._legend = self.plot_widget.addLegend(offset=(8, 8))
-        self._legend.setLabelTextSize("9pt")
+        self._legend.setLabelTextSize(f"{plot_font_pixel_size()}px")
         self._legend.setBrush(pg.mkBrush(255, 255, 255, 224))
         self._legend.setPen(pg.mkPen("#9bb4c2", width=0.8))
         self._legend.setZValue(20)
