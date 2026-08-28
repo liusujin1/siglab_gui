@@ -34,7 +34,10 @@ from python_samba.services.session import (
 )
 from python_samba.transport.comm_server import CommServerConfig, CommServerTransport
 from python_samba.transport.serial_port import TransportError
-from python_samba.ui.adaptive_metrics import metrics_for_legacy_reference
+from python_samba.ui.adaptive_metrics import (
+    UNIFIED_FONT_SCALE,
+    metrics_for_legacy_reference,
+)
 from python_samba.ui.classic_widgets import (
     ClassicExpander,
     ClassicFilterPanel,
@@ -707,9 +710,10 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
 
     @staticmethod
     def _font_scale_for_display(display_scale: float) -> float:
-        """Keep fonts readable while the legacy physical layout scales down."""
+        """Use one readable font scale on every monitor and in both GUIs."""
 
-        return min(1.0, max(0.67, float(display_scale)))
+        del display_scale
+        return UNIFIED_FONT_SCALE
 
     def _font_pixel_size(self, original: float) -> int:
         """Scale normal UI text and enforce a legible matrix-label floor."""
@@ -890,7 +894,11 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         )
         display_scale = cls._screen_scale_factor(screen) if screen is not None else 1.0
         metrics = metrics_for_legacy_reference(
-            available.width(), available.height(), display_scale
+            available.width(),
+            available.height(),
+            display_scale,
+            max_work_width_ratio=0.80,
+            max_work_height_ratio=0.84,
         )
         return (
             available,

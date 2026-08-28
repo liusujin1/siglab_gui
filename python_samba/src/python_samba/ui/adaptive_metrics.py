@@ -5,6 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+UNIFIED_FONT_SCALE = 0.92
+
+
 @dataclass(frozen=True)
 class AdaptiveUiMetrics:
     density: float
@@ -61,18 +64,16 @@ def metrics_for_legacy_reference(
     *,
     design_width: int = 1840,
     design_height: int = 1240,
-    minimum_design_width: int = 960,
-    minimum_design_height: int = 640,
-    minimum_floor_width: int = 640,
-    minimum_floor_height: int = 440,
+    max_work_width_ratio: float = 1.0,
+    max_work_height_ratio: float = 1.0,
 ) -> AdaptiveUiMetrics:
     """Fit a legacy physical-pixel layout into a Qt logical screen.
 
     Under a Per-Monitor-V2 process Qt exposes logical pixels, so the reference
     geometry must first be divided by the Windows display scale and then, if
-    necessary, reduced further to fit the available work area. Callers may
-    provide their own design and minimum canvases while retaining the same
-    physical-to-logical conversion.
+    necessary, reduced further to fit the available work area. Optional work
+    area ratios prevent a legacy canvas from opening almost full-screen on a
+    lower-resolution monitor.
     """
 
     work_width = max(1, int(width))
@@ -81,24 +82,20 @@ def metrics_for_legacy_reference(
     margin = int(_clamp(round(20.0 / monitor_scale), 8, 24))
     usable_width = max(1, work_width - margin * 2)
     usable_height = max(1, work_height - margin * 2)
+    capped_width = usable_width * _clamp(float(max_work_width_ratio), 0.1, 1.0)
+    capped_height = usable_height * _clamp(float(max_work_height_ratio), 0.1, 1.0)
     density = min(
         1.0 / monitor_scale,
-        usable_width / float(design_width),
-        usable_height / float(design_height),
+        capped_width / float(design_width),
+        capped_height / float(design_height),
         1.0,
     )
     density = max(0.01, density)
     font_scale = _clamp(density, 0.67, 1.0)
     initial_width = min(usable_width, max(1, round(design_width * density)))
     initial_height = min(usable_height, max(1, round(design_height * density)))
-    minimum_width = min(
-        initial_width,
-        max(int(minimum_floor_width), round(int(minimum_design_width) * density)),
-    )
-    minimum_height = min(
-        initial_height,
-        max(int(minimum_floor_height), round(int(minimum_design_height) * density)),
-    )
+    minimum_width = min(initial_width, max(640, round(960 * density)))
+    minimum_height = min(initial_height, max(440, round(640 * density)))
     return AdaptiveUiMetrics(
         density=density,
         font_scale=font_scale,

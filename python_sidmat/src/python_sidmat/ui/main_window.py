@@ -24,7 +24,7 @@ configure_qt_dpi_environment()
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from python_samba.transport.comm_server import CommServerConfig, CommServerTransport
-from python_samba.ui.adaptive_metrics import metrics_for_legacy_reference
+from python_samba.ui.adaptive_metrics import UNIFIED_FONT_SCALE, metrics_for_work_area
 from python_samba.ui.plot_interactions import (
     CURVE_COLORS,
     InteractiveViewBox,
@@ -273,9 +273,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Keep Sidmat visually consistent with the current python_samba UI,
         # including GUI tests that construct MainWindow directly.
         apply_samba_theme(
-            QtWidgets.QApplication.instance(),
-            font_scale=self._font_scale,
-            ui_scale=self._display_density,
+            QtWidgets.QApplication.instance(), font_scale=self._font_scale
         )
 
         self.controller: Controller | None = None
@@ -299,7 +297,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._build_menus()
         self._build_statusbar()
         self._build_central()
-        self._apply_content_geometry_scale()
         self._connect_signals()
 
         # Match SambaUI's frameless resize affordance.  QMainWindow's status
@@ -308,7 +305,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._size_grip = QtWidgets.QSizeGrip(self)
         self._size_grip.setObjectName("windowSizeGrip")
         self._size_grip.setToolTip("Drag to resize window")
-        self._size_grip.setFixedSize(self._ui_px(18, 9), self._ui_px(18, 9))
+        self._size_grip.setFixedSize(18, 18)
         self._position_size_grip()
 
         self._axis_timer = QtCore.QTimer(self)
@@ -346,34 +343,24 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @staticmethod
     def _font_scale_for_display(display_scale: float) -> float:
-        """Keep text readable while the physical reference canvas scales."""
+        """Use the same readable font scale as Samba on every monitor."""
 
-        return min(1.0, max(0.67, float(display_scale)))
+        del display_scale
+        return UNIFIED_FONT_SCALE
 
     @classmethod
     def _initial_window_metrics(
         cls,
     ) -> tuple[QtCore.QRect, QtCore.QSize, QtCore.QSize, float]:
-        """Convert SIDMAT's physical reference canvas to Qt logical pixels."""
+        """Calculate SambaUI-compatible initial and minimum window sizes."""
 
         screen = QtGui.QGuiApplication.primaryScreen()
         available = (
             screen.availableGeometry()
             if screen is not None
-            else QtCore.QRect(0, 0, *cls._DESIGN_WINDOW_SIZE)
+            else QtCore.QRect(0, 0, 1920, 1040)
         )
-        display_scale = cls._screen_scale_factor(screen) if screen is not None else 1.0
-        metrics = metrics_for_legacy_reference(
-            available.width(),
-            available.height(),
-            display_scale,
-            design_width=cls._DESIGN_WINDOW_SIZE[0],
-            design_height=cls._DESIGN_WINDOW_SIZE[1],
-            minimum_design_width=cls._DESIGN_MINIMUM_SIZE[0],
-            minimum_design_height=cls._DESIGN_MINIMUM_SIZE[1],
-            minimum_floor_width=480,
-            minimum_floor_height=320,
-        )
+        metrics = metrics_for_work_area(available.width(), available.height())
         return (
             available,
             QtCore.QSize(metrics.initial_width, metrics.initial_height),
@@ -395,90 +382,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.move(frame.topLeft())
 
     def _ui_px(self, base: int, floor: int = 1) -> int:
-        """Scale shell chrome with the physical-reference density."""
+        """Scale shell chrome with logical-work-area density."""
 
         return max(floor, int(round(base * self._display_density)))
-
-    @staticmethod
-    def _scaled_geometry_value(value: int, factor: float) -> int:
-        if value <= 0:
-            return value
-        return max(1, int(round(value * factor)))
-
-    @classmethod
-    def _scaled_layout_spacing(cls, value: int, factor: float) -> int:
-        if value <= 2:
-            return value
-        return cls._scaled_geometry_value(value, factor)
-
-    def _scale_content_root(self, root: QtWidgets.QWidget, factor: float) -> None:
-        """Scale fixed child geometry without rescaling an adaptive root."""
-
-        maximum_default = 16_777_215
-        for widget in root.findChildren(QtWidgets.QWidget):
-            minimum = widget.minimumSize()
-            maximum = widget.maximumSize()
-            min_width = self._scaled_geometry_value(minimum.width(), factor)
-            min_height = self._scaled_geometry_value(minimum.height(), factor)
-            max_width = maximum.width()
-            max_height = maximum.height()
-            if 0 < max_width < maximum_default:
-                max_width = self._scaled_geometry_value(max_width, factor)
-            if 0 < max_height < maximum_default:
-                max_height = self._scaled_geometry_value(max_height, factor)
-            widget.setMinimumSize(min_width, min_height)
-            widget.setMaximumSize(max_width, max_height)
-            if (
-                isinstance(widget, QtWidgets.QAbstractButton)
-                and not widget.icon().isNull()
-            ):
-                icon_size = widget.iconSize()
-                if icon_size.isValid():
-                    widget.setIconSize(
-                        QtCore.QSize(
-                            self._scaled_geometry_value(icon_size.width(), factor),
-                            self._scaled_geometry_value(icon_size.height(), factor),
-                        )
-                    )
-
-        layouts = root.findChildren(QtWidgets.QLayout)
-        if root.layout() is not None and root.layout() not in layouts:
-            layouts.insert(0, root.layout())
-        for layout in layouts:
-            margins = layout.contentsMargins()
-            layout.setContentsMargins(
-                self._scaled_geometry_value(margins.left(), factor),
-                self._scaled_geometry_value(margins.top(), factor),
-                self._scaled_geometry_value(margins.right(), factor),
-                self._scaled_geometry_value(margins.bottom(), factor),
-            )
-            if isinstance(layout, (QtWidgets.QGridLayout, QtWidgets.QFormLayout)):
-                horizontal = layout.horizontalSpacing()
-                vertical = layout.verticalSpacing()
-                if horizontal >= 0:
-                    layout.setHorizontalSpacing(
-                        self._scaled_layout_spacing(horizontal, factor)
-                    )
-                if vertical >= 0:
-                    layout.setVerticalSpacing(
-                        self._scaled_layout_spacing(vertical, factor)
-                    )
-            elif layout.spacing() >= 0:
-                layout.setSpacing(self._scaled_layout_spacing(layout.spacing(), factor))
-
-    def _apply_content_geometry_scale(self) -> None:
-        """Scale fixed SIDMAT controls together with the reference canvas."""
-
-        factor = min(1.0, self._display_density)
-        if factor >= 0.999 or getattr(self, "_content_geometry_scaled", False):
-            return
-        self._content_geometry_scaled = True
-        for root in (
-            self._left_toolbar_host,
-            self._left_stack,
-            self._right_wrap,
-        ):
-            self._scale_content_root(root, factor)
 
     def _position_size_grip(self) -> None:
         grip = getattr(self, "_size_grip", None)
@@ -517,7 +423,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_statusbar(self) -> None:
         self.status_lbl = QtWidgets.QLabel(" Ready")
         self.status_lbl.setObjectName("statusMessage")
-        self.status_lbl.setContentsMargins(self._ui_px(6), 0, 0, 0)
+        self.status_lbl.setContentsMargins(6, 0, 0, 0)
         status_bar = self.statusBar()
         status_bar.setSizeGripEnabled(False)
         status_bar.addWidget(self.status_lbl, 1)
@@ -545,8 +451,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # ---- Left column ------------------------------------------------
         left_wrap = QtWidgets.QWidget()
         left_wrap.setObjectName("sidmatSidebar")
-        left_minimum = self._ui_px(260, 120)
-        left_maximum = self._ui_px(360, 180)
+        left_minimum = self._ui_px(260, 220)
+        left_maximum = self._ui_px(360, 300)
         left_wrap.setMinimumWidth(left_minimum)
         left_wrap.setMaximumWidth(left_maximum)
         left_lo = QtWidgets.QVBoxLayout(left_wrap)
@@ -565,11 +471,10 @@ class MainWindow(QtWidgets.QMainWindow):
         scroll.setSizeAdjustPolicy(
             QtWidgets.QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored
         )
-        scroll.verticalScrollBar().setSingleStep(self._ui_px(42, 20))
+        scroll.verticalScrollBar().setSingleStep(42)
         self.left_scroll = scroll
         stack = QtWidgets.QWidget()
         stack.setObjectName("sidmatLeftStack")
-        self._left_stack = stack
         stack.setMinimumWidth(0)
         stack.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Ignored,
@@ -588,8 +493,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # graph (TimeSpecBtn / FRFBtn toggle which is visible).
         right_wrap = QtWidgets.QWidget()
         right_wrap.setObjectName("sidmatWorkspace")
-        self._right_wrap = right_wrap
-        right_minimum = self._ui_px(320, 160)
+        right_minimum = self._ui_px(320, 280)
         right_wrap.setMinimumWidth(right_minimum)
         right_lo = QtWidgets.QVBoxLayout(right_wrap)
         right_lo.setContentsMargins(0, 0, 0, 0)
@@ -624,7 +528,7 @@ class MainWindow(QtWidgets.QMainWindow):
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         splitter.setObjectName("sidmatMainSplitter")
         splitter.setChildrenCollapsible(False)
-        splitter.setHandleWidth(self._ui_px(3))
+        splitter.setHandleWidth(3)
         splitter.addWidget(left_wrap)
         splitter.addWidget(right_wrap)
         splitter.setStretchFactor(0, 0)
@@ -642,17 +546,15 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_application_header(self, parent: QtWidgets.QVBoxLayout) -> None:
         header = _ApplicationHeader(self)
         header.setObjectName("applicationHeader")
-        header.setFixedHeight(self._ui_px(52, 26))
+        header.setFixedHeight(self._ui_px(52, 44))
         row = QtWidgets.QHBoxLayout(header)
-        row.setContentsMargins(
-            self._ui_px(5), self._ui_px(2), self._ui_px(5), self._ui_px(2)
-        )
-        row.setSpacing(self._ui_px(8))
+        row.setContentsMargins(5, 2, 5, 2)
+        row.setSpacing(8)
 
         brand = QtWidgets.QLabel("SiD\nMaT")
         brand.setObjectName("brandMark")
         brand.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        brand.setFixedSize(self._ui_px(52, 26), self._ui_px(46, 23))
+        brand.setFixedSize(self._ui_px(52, 44), self._ui_px(46, 40))
         row.addWidget(brand)
 
         title_text = (
@@ -670,7 +572,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.header_connection_lbl.setProperty("connected", False)
         self.header_connection_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.header_connection_lbl.setFixedSize(
-            self._ui_px(100, 45), self._ui_px(30, 15)
+            self._ui_px(100, 82), self._ui_px(30, 26)
         )
         row.addWidget(self.header_connection_lbl)
 
@@ -681,7 +583,7 @@ class MainWindow(QtWidgets.QMainWindow):
         system_btn.setPopupMode(
             QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup
         )
-        system_btn.setFixedSize(self._ui_px(80, 40), self._ui_px(32, 16))
+        system_btn.setFixedSize(self._ui_px(80, 68), self._ui_px(32, 28))
         row.addWidget(system_btn)
 
         controls = (
@@ -695,9 +597,9 @@ class MainWindow(QtWidgets.QMainWindow):
             btn.setProperty("closeButton", is_close)
             btn.setIcon(self.style().standardIcon(icon_id))
             btn.setIconSize(
-                QtCore.QSize(self._ui_px(16, 8), self._ui_px(16, 8))
+                QtCore.QSize(self._ui_px(16, 14), self._ui_px(16, 14))
             )
-            btn.setFixedSize(self._ui_px(42, 20), self._ui_px(36, 18))
+            btn.setFixedSize(self._ui_px(42, 32), self._ui_px(36, 28))
             btn.clicked.connect(slot)
             row.addWidget(btn)
         parent.addWidget(header, 0)
@@ -721,8 +623,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_left_toolbar(self, parent: QtWidgets.QVBoxLayout) -> None:
         host = QtWidgets.QWidget()
         host.setObjectName("sidmatActionBar")
-        self._left_toolbar_host = host
-        host.setFixedHeight(self._ui_px(94, 45))
+        host.setFixedHeight(self._ui_px(94, 80))
         outer = QtWidgets.QVBoxLayout(host)
         outer.setContentsMargins(8, 6, 8, 7)
         outer.setSpacing(4)

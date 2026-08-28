@@ -557,16 +557,6 @@ QDialog {
 _FONT_SIZE_PATTERN = re.compile(
     r"(font-size\s*:\s*)(\d+(?:\.\d+)?)px", re.IGNORECASE
 )
-_GEOMETRY_STYLE_PATTERN = re.compile(
-    r"((?:padding(?:-(?:left|right|top|bottom))?|"
-    r"margin(?:-(?:left|right|top|bottom))?|"
-    r"min-(?:width|height)|max-(?:width|height)|width|height|"
-    r"border-radius|left|right|top|bottom)\s*:\s*)([^;}]+)",
-    re.IGNORECASE,
-)
-_PIXEL_VALUE_PATTERN = re.compile(r"(\d+(?:\.\d+)?)px", re.IGNORECASE)
-
-
 def _font_pixel_size(original: float, font_scale: float) -> int:
     """Use the same normal-text scaling and caps as current python_samba."""
 
@@ -587,29 +577,10 @@ def _scaled_stylesheet(stylesheet: str, font_scale: float) -> str:
     )
 
 
-def _scaled_geometry_stylesheet(stylesheet: str, ui_scale: float) -> str:
-    if not stylesheet or ui_scale >= 0.999:
-        return stylesheet
-
-    def replace_declaration(match: re.Match[str]) -> str:
-        def replace_value(value_match: re.Match[str]) -> str:
-            value = float(value_match.group(1))
-            scaled = 0 if value == 0 else max(1, int(round(value * ui_scale)))
-            return f"{scaled}px"
-
-        return (
-            f"{match.group(1)}"
-            f"{_PIXEL_VALUE_PATTERN.sub(replace_value, match.group(2))}"
-        )
-
-    return _GEOMETRY_STYLE_PATTERN.sub(replace_declaration, stylesheet)
-
-
 def apply_samba_theme(
     app: QtWidgets.QApplication | None = None,
     *,
     font_scale: float | None = None,
-    ui_scale: float | None = None,
 ) -> None:
     """Apply the Samba palette and its monitor-aware font scaling."""
 
@@ -619,14 +590,9 @@ def apply_samba_theme(
     if font_scale is None:
         font_scale = float(application.property("python_samba_font_scale") or 1.0)
     font_scale = min(1.10, max(0.67, float(font_scale)))
-    if ui_scale is None:
-        ui_scale = float(application.property("python_samba_ui_scale") or 1.0)
-    ui_scale = min(1.0, max(0.01, float(ui_scale)))
     application.setProperty("python_samba_font_scale", font_scale)
-    application.setProperty("python_samba_ui_scale", ui_scale)
     application.setStyle("Fusion")
     font = QtGui.QFont("Segoe UI")
     font.setPixelSize(min(13, max(8, int(round(12 * font_scale)))))
     application.setFont(font)
-    stylesheet = _scaled_stylesheet(SAMBA_UI_STYLESHEET, font_scale)
-    application.setStyleSheet(_scaled_geometry_stylesheet(stylesheet, ui_scale))
+    application.setStyleSheet(_scaled_stylesheet(SAMBA_UI_STYLESHEET, font_scale))

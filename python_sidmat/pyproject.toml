@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "python-sidmat"
-version = "0.1.5"
+version = "0.1.6"
 description = "Vendor-free SiDiMaT measurement software for IDE TC-MFD / OPTICON (pure RCI serial + Welch TF estimation)."
 readme = "README.md"
 requires-python = ">=3.11"

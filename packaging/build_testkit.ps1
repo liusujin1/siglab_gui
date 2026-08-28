@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '0.1.0-beta.11',
+    [string]$Version = '0.1.0-beta.12',
     [string]$PythonVersion = '3.12',
     [string]$OutputRoot = '',
     [switch]$SkipTests,
@@ -59,7 +59,7 @@ if (Test-Path -LiteralPath $scipyResidue) {
     Remove-Item -LiteralPath $scipyResidue -Recurse -Force
 }
 Run $python @('-c',
-    "import importlib.util; assert importlib.util.find_spec('scipy') is None, 'SciPy residue remains in beta.11 build environment'")
+    "import importlib.util; assert importlib.util.find_spec('scipy') is None, 'SciPy residue remains in beta.12 build environment'")
 Run $python @('-m', 'pip', 'install', '--disable-pip-version-check', '--no-deps', '-e',
     (Join-Path $repo 'python_samba'), '-e', (Join-Path $repo 'python_sidmat'))
 

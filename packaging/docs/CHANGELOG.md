@@ -1,7 +1,25 @@
 # SigLab TestKit release notes
 
+## 0.1.0-beta.12 — 2026-08-28
+
+- Component versions: Samba/Communication Server `0.1.5`, SIDMAT `0.1.6`.
+- Corrected beta.11's SIDMAT double DPI reduction. Packaged SIDMAT now uses the
+  same logical-work-area metrics as the source launch: `930x585` on the local
+  `1440x852` logical work area and `1240x780` at 1080p/100%.
+- Unified Samba, SIDMAT and shared plot text at an 11-pixel logical base so the
+  two applications no longer show different font sizes on the same monitor.
+- Capped Samba's 1080p/100% startup coverage at `1246x840` instead of the
+  nearly full-screen `1484x1000`, while retaining the original page layout.
+- Added regression checks for the common font scale, source/package-equivalent
+  SIDMAT metrics and Samba's compact 1080p coverage.
+
+Validation: source renders for both GUIs, simulated 100%/200% DPI layouts,
+complete Samba/SIDMAT release gate, compileall and frozen executable smoke.
+
 ## 0.1.0-beta.11 — 2026-08-28
 
+- Withdrawn: SIDMAT was reduced a second time for 200% DPI, producing a
+  `620x390` logical window that did not match the normal source launch.
 - Component versions: Samba/Communication Server `0.1.5`, SIDMAT `0.1.5`.
 - Applied the same physical-reference DPI model to SIDMAT while retaining its
   current workflow and plot layout. The `1240x780` reference remains unchanged
