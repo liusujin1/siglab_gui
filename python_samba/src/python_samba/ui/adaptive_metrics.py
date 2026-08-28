@@ -52,3 +52,49 @@ def metrics_for_work_area(width: int, height: int) -> AdaptiveUiMetrics:
         minimum_width=minimum_width,
         minimum_height=minimum_height,
     )
+
+
+def metrics_for_legacy_reference(
+    width: int,
+    height: int,
+    display_scale: float,
+    *,
+    design_width: int = 1840,
+    design_height: int = 1240,
+) -> AdaptiveUiMetrics:
+    """Fit the original physical-pixel Samba layout into a Qt logical screen.
+
+    The legacy UI was authored as a 1840x1240 physical-pixel canvas. Under a
+    Per-Monitor-V2 process Qt exposes logical pixels, so the reference geometry
+    must first be divided by the Windows display scale and then, if necessary,
+    reduced further to fit the available work area. This preserves the old
+    screenshot's proportions instead of shrinking only the outer window.
+    """
+
+    work_width = max(1, int(width))
+    work_height = max(1, int(height))
+    monitor_scale = _clamp(float(display_scale), 0.75, 3.0)
+    margin = int(_clamp(round(20.0 / monitor_scale), 8, 24))
+    usable_width = max(1, work_width - margin * 2)
+    usable_height = max(1, work_height - margin * 2)
+    density = min(
+        1.0 / monitor_scale,
+        usable_width / float(design_width),
+        usable_height / float(design_height),
+        1.0,
+    )
+    density = max(0.01, density)
+    font_scale = _clamp(density, 0.67, 1.0)
+    initial_width = min(usable_width, max(1, round(design_width * density)))
+    initial_height = min(usable_height, max(1, round(design_height * density)))
+    minimum_width = min(initial_width, max(640, round(960 * density)))
+    minimum_height = min(initial_height, max(440, round(640 * density)))
+    return AdaptiveUiMetrics(
+        density=density,
+        font_scale=font_scale,
+        margin=margin,
+        initial_width=initial_width,
+        initial_height=initial_height,
+        minimum_width=minimum_width,
+        minimum_height=minimum_height,
+    )

@@ -28,7 +28,8 @@ frozen releases intentionally ignore that override.
 
 Samba and SIDMAT are packaged together under `apps\SigLabSuite` and share one
 Python/Qt/NumPy runtime. The beta.10 runtime keeps beta.4's Qt/OpenGL trimming,
-derives its window, font, shell and page-content density from the Qt logical work area,
+uniformly fits Samba's original 1840x1240 physical-pixel composition through
+the Windows display scale while SIDMAT keeps its own logical-work-area layout,
 includes the latest SIDMAT workflow/interactive-plot layout. It replaces the TestKit's SciPy dependency
 with its tested internal signal and uncompressed MAT v5 layers; English and
 Simplified Chinese remain supported. Each executable has its own source and

@@ -1,4 +1,7 @@
-from python_samba.ui.adaptive_metrics import metrics_for_work_area
+from python_samba.ui.adaptive_metrics import (
+    metrics_for_legacy_reference,
+    metrics_for_work_area,
+)
 
 
 def test_reference_1080p_work_area_uses_reference_size():
@@ -27,3 +30,18 @@ def test_metrics_grow_monotonically_and_remain_bounded():
         assert 0 < item.minimum_height <= item.initial_height <= height
         assert 0.72 <= item.density <= 1.25
         assert 0.67 <= item.font_scale <= 1.10
+
+
+def test_legacy_samba_reference_preserves_physical_size_at_200_percent():
+    metrics = metrics_for_legacy_reference(1440, 852, 2.0)
+    assert (metrics.initial_width, metrics.initial_height) == (920, 620)
+    assert metrics.density == 0.5
+    assert metrics.font_scale == 0.67
+    assert metrics.margin == 10
+
+
+def test_legacy_samba_reference_uniformly_fits_1080p_at_100_percent():
+    metrics = metrics_for_legacy_reference(1920, 1040, 1.0)
+    assert (metrics.initial_width, metrics.initial_height) == (1484, 1000)
+    assert metrics.density == 1000 / 1240
+    assert metrics.font_scale == metrics.density

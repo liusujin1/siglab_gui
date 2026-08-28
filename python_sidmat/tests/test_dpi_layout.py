@@ -112,12 +112,15 @@ def test_1080p_100_percent_uses_compact_default_window(package: str, monkeypatch
             return 96.0
 
     monkeypatch.setattr(QtGui.QGuiApplication, "primaryScreen", lambda: Screen1080p())
+    monkeypatch.setattr(MainWindow, "_screen_scale_factor", staticmethod(lambda _screen: 1.0))
     available, initial, minimum, _scale = MainWindow._initial_window_metrics()
     assert available.size() == QtCore.QSize(1920, 1040)
-    assert initial == QtCore.QSize(1240, 780)
-    assert minimum == QtCore.QSize(960, 640)
-    assert initial.width() <= int(available.width() * 0.75)
-    assert initial.height() <= int(available.height() * 0.80)
+    if package == "samba":
+        assert initial == QtCore.QSize(1484, 1000)
+        assert minimum == QtCore.QSize(774, 516)
+    else:
+        assert initial == QtCore.QSize(1240, 780)
+        assert minimum == QtCore.QSize(960, 640)
 
 
 @pytest.mark.parametrize("package", ["samba", "sidmat"])
@@ -138,25 +141,32 @@ def test_local_200_percent_logical_work_area_is_compact(package: str, monkeypatc
             return QtCore.QRect(0, 0, 1440, 852)
 
     monkeypatch.setattr(QtGui.QGuiApplication, "primaryScreen", lambda: LocalScreen())
+    monkeypatch.setattr(MainWindow, "_screen_scale_factor", staticmethod(lambda _screen: 2.0))
     available, initial, minimum, density = MainWindow._initial_window_metrics()
     assert available.size() == QtCore.QSize(1440, 852)
-    assert initial == QtCore.QSize(930, 585)
-    assert minimum == QtCore.QSize(800, 520)
-    assert density == pytest.approx(0.75)
+    if package == "samba":
+        assert initial == QtCore.QSize(920, 620)
+        assert minimum == QtCore.QSize(640, 440)
+        assert density == pytest.approx(0.5)
+    else:
+        assert initial == QtCore.QSize(930, 585)
+        assert minimum == QtCore.QSize(800, 520)
+        assert density == pytest.approx(0.75)
     assert MainWindow._font_scale_for_display(density) == pytest.approx(0.67)
 
 
 @pytest.mark.parametrize(
-    ("work_width", "work_height", "expected_window"),
+    ("work_width", "work_height", "display_scale", "expected_window"),
     [
-        (1440, 852, (930, 585)),
-        (1920, 1040, (1240, 780)),
+        (1440, 852, 2.0, (920, 620)),
+        (1920, 1040, 1.0, (1484, 1000)),
     ],
 )
 def test_samba_status_dashboard_fits_without_horizontal_overflow(
     monkeypatch,
     work_width: int,
     work_height: int,
+    display_scale: float,
     expected_window: tuple[int, int],
 ) -> None:
     """Status controls must fit the actual initial window, not a larger test size."""
@@ -184,6 +194,11 @@ def test_samba_status_dashboard_fits_without_horizontal_overflow(
 
     apply_all_patches(PatchedMainWindow, strict=True)
     monkeypatch.setattr(QtGui.QGuiApplication, "primaryScreen", lambda: FakeScreen())
+    monkeypatch.setattr(
+        PatchedMainWindow,
+        "_screen_scale_factor",
+        staticmethod(lambda _screen: display_scale),
+    )
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     window = PatchedMainWindow()
     window.show()

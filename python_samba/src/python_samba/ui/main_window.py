@@ -34,7 +34,7 @@ from python_samba.services.session import (
 )
 from python_samba.transport.comm_server import CommServerConfig, CommServerTransport
 from python_samba.transport.serial_port import TransportError
-from python_samba.ui.adaptive_metrics import metrics_for_work_area
+from python_samba.ui.adaptive_metrics import metrics_for_legacy_reference
 from python_samba.ui.classic_widgets import (
     ClassicExpander,
     ClassicFilterPanel,
@@ -319,8 +319,8 @@ class SidebarLoopButton(QtWidgets.QToolButton):
         self.setText("OFF")
         self.setCursor(QtCore.Qt.PointingHandCursor)
         self.setFixedSize(
-            max(42, int(round(58 * density))),
-            max(34, int(round(48 * density))),
+            max(28, int(round(58 * density))),
+            max(24, int(round(48 * density))),
         )
 
     def set_on(self, on: bool, _color: str | None = None) -> None:
@@ -340,7 +340,7 @@ class LoopStatesWidget(QtWidgets.QFrame):
     def __init__(self, parent=None, *, density: float = 1.0) -> None:
         super().__init__(parent)
         self.setObjectName("loopStatesPanel")
-        self.setFixedHeight(max(250, int(round(362 * density))))
+        self.setFixedHeight(max(180, int(round(362 * density))))
         self.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
         column = QtWidgets.QVBoxLayout(self)
         column.setContentsMargins(7, 4, 7, 6)
@@ -599,7 +599,7 @@ class MainNavigation(QtWidgets.QFrame):
             button.setCheckable(True)
             button.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
             button.setCursor(QtCore.Qt.PointingHandCursor)
-            button.setFixedHeight(max(40, int(round(56 * density))))
+            button.setFixedHeight(max(28, int(round(56 * density))))
             button.setMinimumWidth(0)
             button.setSizePolicy(
                 QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed
@@ -636,7 +636,7 @@ class MainNavigation(QtWidgets.QFrame):
         button.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
         button.setCursor(QtCore.Qt.PointingHandCursor)
         density = float(self.property("uiDensity") or 1.0)
-        button.setFixedHeight(max(40, int(round(56 * density))))
+        button.setFixedHeight(max(28, int(round(56 * density))))
         button.setMinimumWidth(0)
         button.setSizePolicy(
             QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed
@@ -655,7 +655,7 @@ class MainNavigation(QtWidgets.QFrame):
 class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
     """Main window matching SAMBA19xUI tab structure."""
 
-    _DESIGN_WINDOW_SIZE = (1240, 780)
+    _DESIGN_WINDOW_SIZE = (1840, 1240)
     _DESIGN_MINIMUM_SIZE = (960, 640)
     _FONT_SIZE_PATTERN = re.compile(
         r"(font-size\s*:\s*)(\d+(?:\.\d+)?)px", re.IGNORECASE
@@ -707,9 +707,9 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
 
     @staticmethod
     def _font_scale_for_display(display_scale: float) -> float:
-        """Scale visual density from the logical work area, not Windows DPI."""
+        """Keep fonts readable while the legacy physical layout scales down."""
 
-        return min(1.10, max(0.67, float(display_scale) ** 1.5))
+        return min(1.0, max(0.67, float(display_scale)))
 
     def _font_pixel_size(self, original: float) -> int:
         """Scale normal UI text and enforce a legible matrix-label floor."""
@@ -886,9 +886,12 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         available = (
             screen.availableGeometry()
             if screen is not None
-            else QtCore.QRect(0, 0, 1920, 1040)
+            else QtCore.QRect(0, 0, *cls._DESIGN_WINDOW_SIZE)
         )
-        metrics = metrics_for_work_area(available.width(), available.height())
+        display_scale = cls._screen_scale_factor(screen) if screen is not None else 1.0
+        metrics = metrics_for_legacy_reference(
+            available.width(), available.height(), display_scale
+        )
         return (
             available,
             QtCore.QSize(metrics.initial_width, metrics.initial_height),
@@ -963,7 +966,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
 
         # Persistent status panel in the lower part of the sidebar.
         self.loop_states = LoopStatesWidget(density=self._display_density)
-        self.loop_states.setFixedWidth(self._ui_px(250, 210))
+        self.loop_states.setFixedWidth(self._ui_px(250, 120))
         self.loop_states.set_main_window(self)
 
         # Activity console is available on demand instead of permanently
@@ -1030,7 +1033,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         self._size_grip = QtWidgets.QSizeGrip(self)
         self._size_grip.setObjectName("windowSizeGrip")
         self._size_grip.setToolTip("Drag to resize window")
-        self._size_grip.setFixedSize(self._ui_px(18, 14), self._ui_px(18, 14))
+        self._size_grip.setFixedSize(self._ui_px(18, 9), self._ui_px(18, 9))
         self._position_size_grip()
 
         # Refresh timer (1 second, like SAMBA19xUI)
@@ -1104,7 +1107,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
     def _build_header(self) -> QtWidgets.QFrame:
         header = QtWidgets.QFrame()
         header.setObjectName("applicationHeader")
-        header.setFixedHeight(self._ui_px(59, 46))
+        header.setFixedHeight(self._ui_px(59, 28))
         row = QtWidgets.QHBoxLayout(header)
         row.setContentsMargins(5, 0, 3, 0)
         row.setSpacing(5)
@@ -1112,7 +1115,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         brand = QtWidgets.QLabel("UI\n19x")
         brand.setObjectName("brandMark")
         brand.setAlignment(QtCore.Qt.AlignCenter)
-        brand.setFixedSize(self._ui_px(60, 48), self._ui_px(54, 42))
+        brand.setFixedSize(self._ui_px(60, 28), self._ui_px(54, 26))
         row.addWidget(brand)
 
         title = QtWidgets.QLabel("SAMBA19xUI RC06-Alpha02 V1.9.0.14")
@@ -1143,7 +1146,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         self.minimize_button.setText("—")
         self.minimize_button.setToolTip("Minimize")
         self.minimize_button.setFixedSize(
-            self._ui_px(42, 32), self._ui_px(36, 28)
+            self._ui_px(42, 22), self._ui_px(36, 20)
         )
         self.minimize_button.clicked.connect(self.showMinimized)
         row.addWidget(self.minimize_button)
@@ -1154,7 +1157,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         self.close_button.setText("×")
         self.close_button.setToolTip("Close")
         self.close_button.setFixedSize(
-            self._ui_px(42, 32), self._ui_px(36, 28)
+            self._ui_px(42, 22), self._ui_px(36, 20)
         )
         self.close_button.clicked.connect(self.close)
         row.addWidget(self.close_button)
@@ -1163,7 +1166,7 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
     def _build_sidebar(self) -> QtWidgets.QFrame:
         sidebar = QtWidgets.QFrame()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(self._ui_px(265, 220))
+        sidebar.setFixedWidth(self._ui_px(265, 128))
         layout = QtWidgets.QVBoxLayout(sidebar)
         layout.setContentsMargins(4, 0, 4, 0)
         layout.setSpacing(0)
@@ -1205,9 +1208,9 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         self.update_page_btn.setObjectName("updatePageButton")
         self.update_page_btn.clicked.connect(self._request_page_refresh)
         layout.addWidget(self.update_page_btn)
-        layout.addSpacing(self._ui_px(30, 18))
+        layout.addSpacing(self._ui_px(30, 12))
         layout.addWidget(self.loop_states)
-        self.loop_states.conn_lbl.setFixedHeight(self._ui_px(60, 44))
+        self.loop_states.conn_lbl.setFixedHeight(self._ui_px(60, 28))
         layout.addWidget(self.loop_states.conn_lbl)
         return sidebar
 
@@ -2819,13 +2822,8 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
         root.setContentsMargins(14, 4, 6, 4)
         root.setSpacing(6)
 
-        # The reference placed all three axis groups in one very wide row.
-        # That required 1333 logical pixels before the sidebar and could not
-        # fit even the reference 1240 px window. Stack the axis groups beside
-        # the loop summary so the dashboard adapts without horizontal scroll.
-        top = QtWidgets.QGridLayout()
-        top.setHorizontalSpacing(12)
-        top.setVerticalSpacing(12)
+        top = QtWidgets.QHBoxLayout()
+        top.setSpacing(0)
         loop_group = GroupPanel("Loops Status")
         loop_group.setFixedSize(250, 360)
         loop_grid = QtWidgets.QGridLayout(loop_group)
@@ -2850,17 +2848,16 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
             )
             self.status_loop_badges[name] = badge
             loop_grid.addWidget(badge, row, 1)
-        top.addWidget(loop_group, 0, 0, 3, 1, QtCore.Qt.AlignTop)
+        top.addWidget(loop_group, 0, QtCore.Qt.AlignTop)
+        top.addSpacing(30)
+
+        axis_column = QtWidgets.QVBoxLayout()
 
         def axis_group(
             title: str, names: list[str], kind: str
         ) -> tuple[QtWidgets.QGroupBox, list[SidebarLoopButton]]:
             group = GroupPanel(title)
-            group.setFixedHeight(112)
-            group.setMinimumWidth(0)
-            group.setSizePolicy(
-                QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed
-            )
+            group.setFixedSize(490 if len(names) == 6 else 403, 140)
             row = QtWidgets.QHBoxLayout(group)
             lamps: list[SidebarLoopButton] = []
             for axis, name in enumerate(names):
@@ -2888,20 +2885,24 @@ class MainWindow(ExtraPagesMixin, QtWidgets.QMainWindow):
             ["Xtrans", "Zrot", "Ytrans", "Ztrans", "Yrot", "Xrot"],
             "velocity",
         )
-        top.addWidget(velocity_group, 0, 1)
+        axis_column.addWidget(velocity_group)
+        axis_column.addSpacing(28)
         position_group, self.status_position_axis_lamps = axis_group(
             "Position Individual Loop Status",
             ["Xrot", "Yrot", "Xtrans", "Ytrans", "Zrot", "Ztrans"],
             "position",
         )
-        top.addWidget(position_group, 1, 1)
+        axis_column.addWidget(position_group)
+        axis_column.addStretch(1)
+        top.addLayout(axis_column)
+        top.addSpacing(140)
         pneumatic_group, self.status_pneumatic_axis_lamps = axis_group(
             "Pneumatic Individual Loop Status",
             ["Ztpneu", "Yrpneu", "Xrpneu"],
             "pneumatic",
         )
-        top.addWidget(pneumatic_group, 2, 1)
-        top.setColumnStretch(1, 1)
+        top.addWidget(pneumatic_group, 0, QtCore.Qt.AlignTop)
+        top.addStretch(1)
         root.addLayout(top)
 
         event_group = GroupPanel("Event")

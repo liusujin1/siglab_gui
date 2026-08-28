@@ -3,14 +3,16 @@
 ## 0.1.0-beta.10 — 2026-08-28
 
 - Component versions: Samba/Communication Server `0.1.5`, SIDMAT `0.1.4`.
-- Extended Samba's adaptive sizing from the window shell and fonts to fixed
-  page controls, layout margins, spacing, icons and stylesheet geometry.
-- Reflowed the Status dashboard into a responsive two-column layout. The loop
-  summary stays on the left while velocity, position and pneumatic groups stack
-  on the right, removing the legacy 1333-pixel horizontal requirement.
-- On the local `1440x852` Qt work area, the initial `930x585` window now shows
-  the complete Status dashboard in a `710x507` viewport without horizontal or
-  vertical scrolling; `1920x1040` also fits without overflow.
+- Restored the original `1840x1240` Samba reference composition and scales the
+  complete canvas uniformly instead of changing individual page arrangements.
+- Converts the physical-pixel reference through the Windows display scale. At
+  200%, the reference becomes `920x620` Qt logical pixels, preserving the old
+  screenshot's title bar, sidebar, navigation and page-content proportions.
+- Extended adaptive sizing from fonts to fixed controls, layout margins,
+  spacing, icons and stylesheet geometry. The original horizontal Status
+  arrangement is retained and now fits inside the scaled content viewport.
+- At `1920x1040` and 100%, the full reference uniformly fits to `1484x1000`;
+  at the local `1440x852`/200% work area it opens at `920x620`.
 - Added explicit layout regression coverage for both logical work areas and
   verifies every status lamp and the event table remain inside the viewport.
 
