@@ -362,6 +362,8 @@ def apply_modal_processing(
     channel_index: dict[str, int],
     reference_name: str,
     modal: ModalProcessingConfig,
+    *,
+    reject_enabled: bool = True,
 ) -> tuple[BackendFrame, dict[str, bool]]:
     flags = {
         "double_hit_rejected": False,
@@ -370,7 +372,7 @@ def apply_modal_processing(
     }
     data = frame.data.copy()
 
-    if modal.reject_double_hit and reference_name in channel_index:
+    if reject_enabled and modal.reject_double_hit and reference_name in channel_index:
         ref_signal = data[channel_index[reference_name]]
         double_hit = analyze_double_hit(
             ref_signal,
@@ -395,7 +397,7 @@ def apply_modal_processing(
             flags["double_hit_rejected"] = True
             flags["rejected"] = True
 
-    if modal.reject_overload:
+    if reject_enabled and modal.reject_overload:
         if detect_overload(data, list(frame.channel_names), frame.metadata):
             flags["overload_rejected"] = True
             flags["rejected"] = True
@@ -514,7 +516,11 @@ class FrameProcessor:
             ]
 
         frame, modal_flags = apply_modal_processing(
-            frame, channel_index, reference_name, self.acquisition.modal
+            frame,
+            channel_index,
+            reference_name,
+            self.acquisition.modal,
+            reject_enabled=self.averaging_enabled,
         )
         frame.metadata["processing_window"] = self.acquisition.processing_window
         if modal_flags.get("rejected", False):
