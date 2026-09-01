@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -165,6 +166,23 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(float(mat["vdlg1_s1"][0, 6]), 800.0)
         self.assertEqual(float(mat["ChanStat"][0, 2]), 800.0)
         self.assertEqual(loaded.config.ai_channels[0].sensitivity, 800.0)
+
+    def test_save_legacy_vna_writes_chinese_notes_as_utf16_char_data(self):
+        session = self._sample_session()
+        session.config.notes = "垂向"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "chinese_notes.vna"
+            save_legacy_vna(session, path)
+            mat = loadmat(path, squeeze_me=True, struct_as_record=False)
+            raw = path.read_bytes()
+
+        self.assertEqual(str(mat["Cmprssd_Notes"]), "垂向")
+        name_offset = raw.index(b"Cmprssd_Notes")
+        data_type, byte_count = struct.unpack_from("<II", raw, name_offset + 16)
+        self.assertEqual(data_type, 17)
+        self.assertEqual(byte_count, 4)
+        self.assertEqual(raw[name_offset + 24 : name_offset + 28], "垂向".encode("utf-16le"))
 
     def test_save_legacy_vna_hides_trigger_when_linked_excitation_is_enabled(self):
         session = self._sample_session()

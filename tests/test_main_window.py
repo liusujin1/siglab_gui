@@ -3509,6 +3509,52 @@ class MainWindowTests(unittest.TestCase):
             readme_text = (save_path.parent / "readme.txt").read_text(encoding="utf-8-sig")
             self.assertIn("002：保存工况", readme_text)
 
+    def test_save_vna_uses_target_number_from_existing_readme(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_path = Path(tmpdir) / "001.vna"
+            (save_path.parent / "readme.txt").write_text(
+                "001：Z向\n",
+                encoding="utf-8-sig",
+            )
+
+            def fake_save_file(_parent, _title, _filename, _filter):
+                return (str(save_path), "VNA Files (*.vna)")
+
+            captured: list[SavedSession] = []
+            self.window.session_notes_edit.setPlainText(
+                "Imported legacy VNA file: default.vna"
+            )
+
+            def fake_save_legacy(snapshot, _path):
+                captured.append(snapshot)
+
+            with mock.patch.object(main_window_module, "save_legacy_vna", fake_save_legacy):
+                with mock.patch.object(QtWidgets.QFileDialog, "getSaveFileName", fake_save_file):
+                    self.window._save_session()
+
+            self.assertEqual(captured[0].config.notes, "Z向")
+
+    def test_save_vna_uses_dirty_readme_preview_for_target_number(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_path = Path(tmpdir) / "001.vna"
+
+            def fake_save_file(_parent, _title, _filename, _filter):
+                return (str(save_path), "VNA Files (*.vna)")
+
+            captured: list[SavedSession] = []
+            self.window._current_source_path = save_path
+            self.window.condition_button.setChecked(True)
+            self.window.condition_readme_preview.setPlainText("001：Z向\n")
+
+            def fake_save_legacy(snapshot, _path):
+                captured.append(snapshot)
+
+            with mock.patch.object(main_window_module, "save_legacy_vna", fake_save_legacy):
+                with mock.patch.object(QtWidgets.QFileDialog, "getSaveFileName", fake_save_file):
+                    self.window._save_session()
+
+            self.assertEqual(captured[0].config.notes, "Z向")
+
     def test_load_session_remembers_last_folder(self):
         first_path = Path(tempfile.gettempdir()) / "vna_load_first" / "first.vna"
         second_path = Path(tempfile.gettempdir()) / "vna_load_second" / "second.vna"
