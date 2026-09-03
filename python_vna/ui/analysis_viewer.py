@@ -127,6 +127,18 @@ class WorkspaceCurve:
     source: str
 
 
+class _TransferControlPoint(DataTipPoint):
+    def __init__(self, *args, on_drag_finished=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._on_drag_finished = on_drag_finished
+
+    def mouseDragEvent(self, ev) -> None:
+        finished = bool(ev.isFinish())
+        super().mouseDragEvent(ev)
+        if finished and self._on_drag_finished is not None:
+            self._on_drag_finished()
+
+
 class AnalysisDataStore(QtCore.QObject):
     changed = QtCore.Signal(str, object)
 
@@ -3617,7 +3629,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         self._derived_result_cache.clear()
         self._sync_transfer_point_table()
         if replot:
-            self._auto_plot_derived_from_control_change()
+            self._recompute_derived_from_control_change(keep_existing=False)
         return True
 
     def _set_current_psd_control_points(
@@ -3823,7 +3835,43 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         db = db.copy()
         f[point_index] = freq
         db[point_index] = value_db
-        return self._set_current_transfer_control_points(f, db)
+        changed = self._set_current_transfer_control_points(f, db, replot=False)
+        if changed:
+            self._update_transfer_edit_preview(plot)
+        return changed
+
+    def _update_transfer_edit_preview(self, plot: pg.PlotWidget) -> None:
+        control_f, control_db = self._current_transfer_control_points()
+        if control_f.size < 2:
+            return
+        points = [
+            item
+            for item in self._curve_edit_items.get(plot, [])
+            if isinstance(item, _TransferControlPoint)
+        ]
+        for point, frequency_hz, magnitude_db in zip(points, control_f, control_db):
+            point.setData(
+                x=[self._to_plot_x(plot, float(frequency_hz))],
+                y=[self._to_plot_y(plot, float(magnitude_db))],
+            )
+        active_label = self._active_trace.get(plot)
+        curves = self._plot_curves.get(plot, {})
+        if active_label not in curves:
+            return
+        target_f = np.asarray(curves[active_label][0], dtype=float)
+        preview_f, preview_h = transfer_from_db_points(control_f, control_db, target_f)
+        if preview_f.size < 2:
+            return
+        preview_db = 20.0 * np.log10(np.maximum(np.abs(preview_h), 1e-20))
+        curves[active_label] = (preview_f, preview_db)
+        for item in plot.listDataItems():
+            try:
+                item_name = item.name()
+            except Exception:
+                item_name = None
+            if item_name == active_label:
+                item.setData(preview_f, preview_db)
+                break
 
     def _initialize_psd_edit_points_from_active_curve(self) -> None:
         if not hasattr(self, "derived_plots") or len(self.derived_plots) < 2:
@@ -4024,15 +4072,22 @@ class AnalysisWorkbench(QtWidgets.QWidget):
                 keep_existing=self._hold_enabled(),
             )
             return
+        self._recompute_derived_from_control_change()
+
+    def _recompute_derived_from_control_change(self, *, keep_existing: bool | None = None) -> None:
+        if self._suspend_auto_plot or not hasattr(self, "derived_plots"):
+            return
+        if keep_existing is None:
+            keep_existing = self._hold_enabled()
         if self._has_derived_input_ready():
-            self._plot_derived(keep_existing=self._hold_enabled(), quiet=True)
+            self._plot_derived(keep_existing=keep_existing, quiet=True)
             return
         if self.derived_result_mode_combo.currentText() == "近似时域" and self._plot_current_psd_curves_as_time(
-            keep_existing=self._hold_enabled(),
+            keep_existing=keep_existing,
             quiet=True,
         ):
             return
-        self._plot_derived(keep_existing=self._hold_enabled(), quiet=True)
+        self._plot_derived(keep_existing=keep_existing, quiet=True)
 
     def _has_derived_input_ready(self) -> bool:
         transfer_data = self.derived_transfer_combo.currentData()
@@ -5052,7 +5107,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         if f.size < 2:
             return
         for index, (freq, value_db) in enumerate(zip(f, db)):
-            point = DataTipPoint(
+            point = _TransferControlPoint(
                 x=[self._to_plot_x(plot, float(freq))],
                 y=[self._to_plot_y(plot, float(value_db))],
                 size=9,
@@ -5065,6 +5120,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
                     i,
                     scene_pos,
                 ),
+                on_drag_finished=lambda: self._recompute_derived_from_control_change(keep_existing=False),
             )
             point.setZValue(40)
             plot.addItem(point)

@@ -2472,6 +2472,63 @@ class AnalysisViewerUiTests(unittest.TestCase):
         finally:
             viewer.close()
 
+    def test_transfer_control_point_change_replots_transfer_curve_immediately(self):
+        session = default_session_config()
+        frequency = np.array([0.0, 10.0, 20.0, 40.0], dtype=float)
+        time_s = np.arange(256, dtype=float) / 256.0
+        measurement = MeasurementSet(
+            sample_rate=256.0,
+            time_data={
+                "t": time_s,
+                "channels": {"ai0": np.sin(2.0 * np.pi * 10.0 * time_s)},
+            },
+            spectra={"f": frequency, "autospectrum": {"ai0": np.ones(frequency.size)}},
+            frf={},
+            coherence={},
+            cross_spectra={},
+            correlations={},
+            impulse_responses={},
+            metadata={"rbw_hz": 1.0, "legacy_runtime_wincor": 1.0},
+        )
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            viewer._datasets = [
+                dataset_from_measurement(measurement, session_config=session, dataset_id=1, name="input"),
+            ]
+            viewer._next_dataset_id = 2
+            viewer._refresh_dataset_lists()
+            viewer.derived_transfer_combo.setCurrentIndex(
+                viewer._combo_index_for_data(viewer.derived_transfer_combo, ("manual_transfer",))
+            )
+            viewer.derived_input_series_combo.setCurrentIndex(
+                viewer._combo_index_for_data(viewer.derived_input_series_combo, "1:ai0")
+            )
+            viewer._set_current_transfer_control_points(
+                np.array([10.0, 40.0]),
+                np.array([0.0, 0.0]),
+                replot=False,
+            )
+            viewer._plot_derived()
+
+            viewer._set_current_transfer_control_points(
+                np.array([10.0, 40.0]),
+                np.array([6.0, 6.0]),
+                replot=False,
+            )
+            viewer._update_transfer_edit_preview(viewer.derived_plots[0])
+            _label, (_x, preview_db) = next(iter(viewer._plot_curves[viewer.derived_plots[0]].items()))
+            self.assertAlmostEqual(float(np.median(preview_db)), 6.0, places=6)
+
+            viewer._set_current_transfer_control_points(
+                np.array([10.0, 40.0]),
+                np.array([12.0, 12.0]),
+            )
+
+            _label, (_x, magnitude_db) = next(iter(viewer._plot_curves[viewer.derived_plots[0]].items()))
+            self.assertAlmostEqual(float(np.median(magnitude_db)), 12.0, places=6)
+        finally:
+            viewer.close()
+
     def test_mimo_coupling_generates_three_input_psd_curves(self):
         session = default_session_config()
         freqs = np.array([0.0, 10.0, 20.0, 30.0], dtype=float)

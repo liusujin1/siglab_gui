@@ -1281,6 +1281,28 @@ class DiagnosticAppTests(unittest.TestCase):
         self.assertIn("ACC_Y", page._plot_curves[page.log_plot])
         self.assertIn("ACC_X (2)", page._plot_curves[page.log_plot])
 
+    def test_vibration_page_selected_files_plot_together_without_hold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path_a = Path(tmp) / "log_a.csv"
+            path_b = Path(tmp) / "log_b.csv"
+            path_a.write_text("Time,ACC_X,ACC_Y\n0,1,10\n1,4,20\n", encoding="utf-8")
+            path_b.write_text("Time,ACC_X,ACC_Y\n0,2,30\n1,5,40\n", encoding="utf-8")
+            page = VibrationAnalysisPage()
+
+            page.load_paths([path_a, path_b])
+            page.file_list.item(1).setSelected(True)
+
+        self.assertFalse(page.hold_check.isChecked())
+        self.assertEqual(
+            set(page._plot_curves[page.log_plot]),
+            {
+                "log_a.csv | ACC_X",
+                "log_a.csv | ACC_Y",
+                "log_b.csv | ACC_X",
+                "log_b.csv | ACC_Y",
+            },
+        )
+
     def test_vibration_page_file_switch_preserves_selected_log_channels(self):
         with tempfile.TemporaryDirectory() as tmp:
             path_a = Path(tmp) / "log_a.csv"
@@ -1363,6 +1385,24 @@ class DiagnosticAppTests(unittest.TestCase):
         self.assertIn("ACC_1", page._plot_curves[page.ide_time_plot])
         self.assertIn("ACC_1", page._plot_curves[page.ide_psd_plot])
         self.assertLess(after, before)
+
+    def test_trace_page_selected_files_plot_together_without_hold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path_a = Path(tmp) / "trace_a.txt"
+            path_b = Path(tmp) / "trace_b.txt"
+            values_a = "\n".join(f"{i / 100.0:.3f}\t{np.sin(i / 4.0):.6f}" for i in range(64))
+            values_b = "\n".join(f"{i / 100.0:.3f}\t{np.cos(i / 5.0):.6f}" for i in range(64))
+            path_a.write_text("Time\tACC_1\n" + values_a + "\n", encoding="utf-8")
+            path_b.write_text("Time\tACC_1\n" + values_b + "\n", encoding="utf-8")
+            page = TraceAnalysisPage()
+
+            page.load_paths([path_a, path_b])
+            page.file_list.item(1).setSelected(True)
+
+        self.assertFalse(page.hold_check.isChecked())
+        expected = {"trace_a.txt | ACC_1", "trace_b.txt | ACC_1"}
+        self.assertEqual(set(page._plot_curves[page.ide_time_plot]), expected)
+        self.assertEqual(set(page._plot_curves[page.ide_psd_plot]), expected)
 
     def test_trace_page_subplot_mode_applies_to_time_and_psd_plots(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1261,6 +1261,7 @@ class VibrationAnalysisPage(DiagnosticPage):
         self.delete_button.clicked.connect(self._delete_selected)
         self.clear_button.clicked.connect(self.clear)
         self.file_list.currentRowChanged.connect(lambda _row: self._on_file_selection_changed())
+        self.file_list.itemSelectionChanged.connect(self._on_file_list_selection_changed)
         self.log_group_combo.currentIndexChanged.connect(lambda _index: self._on_log_group_changed())
         self.log_range_start.editingFinished.connect(self._on_log_range_changed)
         self.log_range_end.editingFinished.connect(self._on_log_range_changed)
@@ -1322,22 +1323,40 @@ class VibrationAnalysisPage(DiagnosticPage):
             return None
         return self.files[row]
 
-    def plot_current(self) -> None:
+    def selected_files(self) -> list[VibrationAnalysisFile]:
+        rows = sorted({index.row() for index in self.file_list.selectedIndexes()})
+        selected = [self.files[row] for row in rows if 0 <= row < len(self.files)]
+        if selected:
+            return selected
         current = self.current_file()
-        if current is None:
+        return [current] if current is not None else []
+
+    def plot_current(self) -> None:
+        selected_files = self.selected_files()
+        if not selected_files:
             self._show_status("未选择上位机数据文件")
             return
         subplots = self.plot_mode_combo.currentIndex() == 1
         self._sync_hold_availability()
         hold = self.hold_check.isChecked() and not subplots
+        multiple_files = len(selected_files) > 1
+        title_source = f"{len(selected_files)} 个文件" if multiple_files else selected_files[0].table.name
         if self.tabs.currentIndex() == 0:
-            curves = self._selected_frequency_pairs(current)
+            curves = [
+                curve
+                for current in selected_files
+                for curve in self._curves_with_vibration_file_name(
+                    current,
+                    self._selected_frequency_pairs(current),
+                    force=multiple_files,
+                )
+            ]
             x_label = curves[0].x_label if curves else "频率 (Hz)"
             y_label = curves[0].y_label if curves else "幅值"
             plotted = self._plot_vibration_curves_on_widget(
                 self.frequency_plot,
                 curves,
-                title=f"频率响应 - {current.table.name}",
+                title=f"频率响应 - {title_source}",
                 x_label=x_label,
                 y_label=y_label,
                 log_x=True,
@@ -1346,13 +1365,21 @@ class VibrationAnalysisPage(DiagnosticPage):
                 hold=hold,
             )
         else:
-            curves = self._selected_log_curves(current)
+            curves = [
+                curve
+                for current in selected_files
+                for curve in self._curves_with_vibration_file_name(
+                    current,
+                    self._selected_log_curves(current),
+                    force=multiple_files,
+                )
+            ]
             x_label = curves[0].x_label if curves else "样本序号"
             y_label = curves[0].y_label if curves else "数值"
             plotted = self._plot_vibration_curves_on_widget(
                 self.log_plot,
                 curves,
-                title=f"日志 / 传感器 - {current.table.name}",
+                title=f"日志 / 传感器 - {title_source}",
                 x_label=x_label,
                 y_label=y_label,
                 subplots=subplots,
@@ -1363,6 +1390,9 @@ class VibrationAnalysisPage(DiagnosticPage):
     def _on_file_selection_changed(self) -> None:
         self._refresh_controls()
         self._select_default_tab_for_current_file()
+        self._auto_plot_from_control_change()
+
+    def _on_file_list_selection_changed(self) -> None:
         self._auto_plot_from_control_change()
 
     def _on_log_group_changed(self) -> None:
@@ -1517,19 +1547,45 @@ class VibrationAnalysisPage(DiagnosticPage):
         pairs = [pair for pair in current.frequency_pairs if not selected or pair.label in selected]
         return pairs or current.frequency_pairs[:1]
 
-    def _selected_log_curves(self, current: VibrationAnalysisFile) -> list[CurvePair]:
-        selected_items = self.log_channel_list.selectedItems()
-        if not selected_items and self.log_channel_list.count():
-            selected_items = [self.log_channel_list.item(0)]
-        selected_channels = [
-            (
-                int(item.data(QtCore.Qt.UserRole)),
-                str(item.data(QtCore.Qt.UserRole + 1) or item.text()),
-            )
-            for item in selected_items
-            if item.data(QtCore.Qt.UserRole) is not None
+    @staticmethod
+    def _curves_with_vibration_file_name(
+        current: VibrationAnalysisFile,
+        curves: list[CurvePair],
+        *,
+        force: bool,
+    ) -> list[CurvePair]:
+        if not force:
+            return curves
+        prefix = str(current.table.name).strip()
+        if not prefix:
+            return curves
+        return [
+            CurvePair(f"{prefix} | {curve.label}", curve.x, curve.y, curve.x_label, curve.y_label)
+            for curve in curves
         ]
-        start, end = self._log_slice_bounds()
+
+    def _selected_log_curves(self, current: VibrationAnalysisFile) -> list[CurvePair]:
+        selected_labels = {item.text() for item in self.log_channel_list.selectedItems()}
+        if not selected_labels and self._preferred_log_labels:
+            selected_labels = set(self._preferred_log_labels)
+        group = self.log_group_combo.currentText()
+        if group not in current.log_groups and current.log_groups:
+            group = next(iter(current.log_groups))
+        indices = current.log_groups.get(group, [])
+        labels = current.log_group_labels.get(group, [])
+        available_channels = [
+            (index, labels[position] if position < len(labels) else current.table.headers[index])
+            for position, index in enumerate(indices)
+            if 0 <= index < len(current.table.headers)
+        ]
+        selected_channels = [
+            (index, label)
+            for index, label in available_channels
+            if not selected_labels or label in selected_labels
+        ]
+        if not selected_channels and available_channels:
+            selected_channels = available_channels[:1]
+        start, end = self._log_slice_bounds_for_file(current)
         x = np.asarray(
             current.table.metadata.get("sample_index", np.arange(1, current.table.row_count + 1, dtype=float)),
             dtype=float,
@@ -1544,6 +1600,16 @@ class VibrationAnalysisPage(DiagnosticPage):
                 y = self._demean_vector(y)
             curves.append(CurvePair(label, x[: y.size], y, "样本序号", label))
         return curves
+
+    def _log_slice_bounds_for_file(self, current: VibrationAnalysisFile) -> tuple[int, int]:
+        count = max(1, int(current.table.row_count))
+        if current is self.current_file():
+            start_value, end_value = self._resolved_log_range_values(current)
+        else:
+            start_value, end_value = self._log_ranges.get(self._file_key(current), (1, count))
+        start = max(0, int(start_value) - 1)
+        end = max(start + 1, int(end_value))
+        return min(start, count - 1), min(max(end, start + 1), count)
 
     def _configure_log_range_controls(self, current: VibrationAnalysisFile | None) -> None:
         if current is None or current.table.row_count <= 0:
@@ -1981,6 +2047,7 @@ class TraceAnalysisPage(DiagnosticPage):
         self.delete_button.clicked.connect(self._delete_selected)
         self.clear_button.clicked.connect(self.clear_plots)
         self.file_list.currentRowChanged.connect(lambda _row: self._on_file_selection_changed())
+        self.file_list.itemSelectionChanged.connect(self._on_file_list_selection_changed)
         self.rename_edit.editingFinished.connect(self._rename_current_file_from_editor)
         self.rename_edit.returnPressed.connect(self._rename_current_file_confirmed)
         self.ide_x_axis_combo.currentIndexChanged.connect(lambda _index: self._auto_plot_from_control_change())
@@ -2508,25 +2575,38 @@ class TraceAnalysisPage(DiagnosticPage):
             return None
         return self.files[row]
 
+    def selected_files(self, trace_kind: str | None = None) -> list[TraceAnalysisFile]:
+        rows = sorted({index.row() for index in self.file_list.selectedIndexes()})
+        selected = [self.files[row] for row in rows if 0 <= row < len(self.files)]
+        if not selected:
+            current = self.current_file()
+            selected = [current] if current is not None else []
+        if trace_kind is not None:
+            selected = [current for current in selected if current.trace_kind == trace_kind]
+        return selected
+
     def plot_current(self) -> None:
-        current = self.current_file()
-        if current is None:
-            self._show_status("未选择测试文件")
-            return
         active_kind = self._active_tab_kind()
-        if current.trace_kind != active_kind:
-            self._show_status(f"当前页面需要选择 {self._kind_label(active_kind)} 文件")
+        selected_files = self.selected_files(active_kind)
+        if not selected_files:
+            if self.current_file() is None:
+                self._show_status("未选择测试文件")
+            else:
+                self._show_status(f"当前页面需要选择 {self._kind_label(active_kind)} 文件")
             return
         if active_kind == "hac_trace":
-            self._plot_hac_current(current)
+            self._plot_hac_files(selected_files)
         elif active_kind == "cangfu_trace":
-            self._plot_cangfu_current(current)
+            self._plot_cangfu_files(selected_files)
         elif active_kind == "ide_trans":
-            self._plot_ide_trans_current(current)
+            self._plot_ide_trans_files(selected_files)
         elif active_kind == "hac_trans":
-            self._plot_hac_trans_current(current)
+            self._plot_hac_trans_files(selected_files)
         else:
-            self._plot_ide_current(current)
+            self._plot_ide_files(selected_files)
+
+    def _on_file_list_selection_changed(self) -> None:
+        self._auto_plot_from_control_change()
 
     def _on_file_selection_changed(self) -> None:
         self._commit_ide_eu_table_for_index(self._last_trace_file_index)
@@ -2783,8 +2863,13 @@ class TraceAnalysisPage(DiagnosticPage):
         return self._selected_ide_curves(current)
 
     @staticmethod
-    def _curves_with_file_display_name(current: TraceAnalysisFile, curves: list[CurvePair]) -> list[CurvePair]:
-        if not current.table.metadata.get("trace_custom_display_name"):
+    def _curves_with_file_display_name(
+        current: TraceAnalysisFile,
+        curves: list[CurvePair],
+        *,
+        force: bool = False,
+    ) -> list[CurvePair]:
+        if not force and not current.table.metadata.get("trace_custom_display_name"):
             return curves
         prefix = str(current.table.name).strip()
         if not prefix:
@@ -2799,7 +2884,7 @@ class TraceAnalysisPage(DiagnosticPage):
         if not names:
             enabled = self._ide_enabled_channels(current)
             names = [name for name in current.channels if enabled.get(name, True)] or list(current.channels)[:1]
-        start, end = self._slice_bounds(self.ide_range_start, self.ide_range_end)
+        start, end = self._slice_bounds_for_file(current, "ide")
         if self.ide_x_axis_combo.currentData() == "time":
             x_full = np.asarray(current.time_s, dtype=float)
             x_label = "时间 (s)"
@@ -2812,7 +2897,7 @@ class TraceAnalysisPage(DiagnosticPage):
             x = np.asarray(x_full[: y.size], dtype=float)
             x = x[start:end]
             y = y[start:end]
-            eu = self._eu_scale(name)
+            eu = self._eu_scale_for_file(current, name)
             if eu is None:
                 continue
             y = y / eu
@@ -2823,16 +2908,15 @@ class TraceAnalysisPage(DiagnosticPage):
 
     def _selected_hac_curves(self, current: TraceAnalysisFile) -> list[CurvePair]:
         selected_items = self.hac_channel_list.selectedItems()
-        if not selected_items:
-            selected_items = [self.hac_channel_list.item(index) for index in range(self.hac_channel_list.count())]
+        selected_names = {item.text() for item in selected_items if item is not None}
         selected_indices = [
-            int(item.data(QtCore.Qt.UserRole))
-            for item in selected_items
-            if item is not None and item.data(QtCore.Qt.UserRole) is not None
+            index
+            for index, name in enumerate(current.table.headers)
+            if name in selected_names
         ]
         if not selected_indices:
             selected_indices = list(self._selected_hac_group_indices(current))
-        start, end = self._slice_bounds(self.hac_range_start, self.hac_range_end)
+        start, end = self._slice_bounds_for_file(current, "hac")
         if current.time_s.size:
             x_full = np.asarray(current.time_s, dtype=float)
             x_label = "Elapsed Time (s)"
@@ -2857,7 +2941,7 @@ class TraceAnalysisPage(DiagnosticPage):
         transfer_pairs = self._cangfu_transfer_pairs(current)
         if transfer_pairs:
             names = {item.text() for item in self.cangfu_channel_list.selectedItems()}
-            start, end = self._slice_bounds(self.cangfu_range_start, self.cangfu_range_end)
+            start, end = self._slice_bounds_for_file(current, "cangfu")
             curves: list[CurvePair] = []
             for pair in transfer_pairs:
                 if names and pair.label not in names:
@@ -2875,7 +2959,7 @@ class TraceAnalysisPage(DiagnosticPage):
         names = [item.text() for item in self.cangfu_channel_list.selectedItems()]
         if not names:
             names = list(current.channels)[: min(8, len(current.channels))]
-        start, end = self._slice_bounds(self.cangfu_range_start, self.cangfu_range_end)
+        start, end = self._slice_bounds_for_file(current, "cangfu")
         if self.cangfu_x_axis_combo.currentData() == "time":
             x_full = np.asarray(current.time_s, dtype=float)
             x_label = "时间 (s)"
@@ -2920,9 +3004,31 @@ class TraceAnalysisPage(DiagnosticPage):
             return value if np.isfinite(value) and value != 0.0 else 1.0
         return 1.0
 
+    def _eu_scale_for_file(self, current: TraceAnalysisFile, channel_name: str) -> float | None:
+        if current is self.current_file():
+            return self._eu_scale(channel_name)
+        enabled = self._ide_enabled_channels(current)
+        if not enabled.get(channel_name, True):
+            return None
+        value = float(current.channel_eu.get(channel_name, 1.0))
+        return value if np.isfinite(value) and value != 0.0 else 1.0
+
     def _plot_ide_current(self, current: TraceAnalysisFile) -> None:
-        curves = self._selected_ide_curves(current)
-        curves = self._curves_with_file_display_name(current, curves)
+        self._plot_ide_files([current])
+
+    def _plot_ide_files(self, selected_files: list[TraceAnalysisFile]) -> None:
+        multiple_files = len(selected_files) > 1
+        curves: list[CurvePair] = []
+        psd_curves: list[CurvePair] = []
+        for current in selected_files:
+            current_curves = self._selected_ide_curves(current)
+            current_curves = self._curves_with_file_display_name(
+                current,
+                current_curves,
+                force=multiple_files,
+            )
+            curves.extend(current_curves)
+            psd_curves.extend(self._psd_curves(current, current_curves))
         if not curves:
             self._show_status("没有可绘制的 IDE 通道")
             return
@@ -2930,20 +3036,20 @@ class TraceAnalysisPage(DiagnosticPage):
         self._sync_hold_availability()
         hold = self.hold_check.isChecked() and not subplots
         x_label = curves[0].x_label
+        title_source = f"{len(selected_files)} 个文件" if multiple_files else selected_files[0].table.name
         plotted = self._plot_trace_curves_on_widget(
             self.ide_time_plot,
             curves,
-            title=f"IDE 时域 - {current.table.name}",
+            title=f"IDE 时域 - {title_source}",
             x_label=x_label,
             y_label="工程值",
             subplots=subplots,
             hold=hold,
         )
-        psd_curves = self._psd_curves(current, curves)
         self._plot_trace_curves_on_widget(
             self.ide_psd_plot,
             psd_curves,
-            title=f"IDE PSD - {current.table.name}",
+            title=f"IDE PSD - {title_source}",
             x_label="频率 (Hz)",
             y_label="PSD",
             log_x=True,
@@ -2951,12 +3057,27 @@ class TraceAnalysisPage(DiagnosticPage):
             subplots=subplots,
             hold=hold,
         )
-        self._update_ide_context(current, plotted)
-        self._show_status(f"已绘制 IDE 通道：{plotted} 个")
+        context_file = next(
+            (candidate for candidate in selected_files if candidate is self.current_file()),
+            selected_files[0],
+        )
+        self._update_ide_context(context_file, plotted)
+        self._show_status(f"已绘制 IDE 通道：{plotted} 个，文件：{len(selected_files)} 个")
 
     def _plot_hac_current(self, current: TraceAnalysisFile) -> None:
-        curves = self._selected_hac_curves(current)
-        curves = self._curves_with_file_display_name(current, curves)
+        self._plot_hac_files([current])
+
+    def _plot_hac_files(self, selected_files: list[TraceAnalysisFile]) -> None:
+        multiple_files = len(selected_files) > 1
+        curves = [
+            curve
+            for current in selected_files
+            for curve in self._curves_with_file_display_name(
+                current,
+                self._selected_hac_curves(current),
+                force=multiple_files,
+            )
+        ]
         if not curves:
             self._show_status("没有可绘制的 HAC 通道")
             return
@@ -2965,23 +3086,49 @@ class TraceAnalysisPage(DiagnosticPage):
         hold = self.hold_check.isChecked() and not subplots
         x_label = curves[0].x_label
         group_name = self.hac_preset_combo.currentText() or "All Channels"
+        title_source = f"{len(selected_files)} 个文件" if multiple_files else selected_files[0].table.name
         plotted = self._plot_trace_curves_on_widget(
             self.hac_plot,
             curves,
-            title=f"HAC 时域 - {group_name} | {current.table.name}",
+            title=f"HAC 时域 - {group_name} | {title_source}",
             x_label=x_label,
             y_label="工程值",
             subplots=subplots,
             hold=hold,
         )
-        self._update_hac_context(current, plotted)
-        self._show_status(f"已绘制 HAC 通道：{plotted} 个")
+        context_file = next(
+            (candidate for candidate in selected_files if candidate is self.current_file()),
+            selected_files[0],
+        )
+        self._update_hac_context(context_file, plotted)
+        self._show_status(f"已绘制 HAC 通道：{plotted} 个，文件：{len(selected_files)} 个")
 
     def _plot_cangfu_current(self, current: TraceAnalysisFile) -> None:
-        transfer_pairs = self._cangfu_transfer_pairs(current)
-        if transfer_pairs:
-            curves = self._selected_cangfu_curves(current)
-            curves = self._curves_with_file_display_name(current, curves)
+        self._plot_cangfu_files([current])
+
+    def _plot_cangfu_files(self, selected_files: list[TraceAnalysisFile]) -> None:
+        reference = next(
+            (candidate for candidate in selected_files if candidate is self.current_file()),
+            selected_files[0],
+        )
+        transfer_mode = bool(self._cangfu_transfer_pairs(reference))
+        compatible_files = [
+            current
+            for current in selected_files
+            if bool(self._cangfu_transfer_pairs(current)) == transfer_mode
+        ]
+        multiple_files = len(compatible_files) > 1
+        title_source = f"{len(compatible_files)} 个文件" if multiple_files else compatible_files[0].table.name
+        if transfer_mode:
+            curves = [
+                curve
+                for current in compatible_files
+                for curve in self._curves_with_file_display_name(
+                    current,
+                    self._selected_cangfu_curves(current),
+                    force=multiple_files,
+                )
+            ]
             if not curves:
                 self._show_status("没有可绘制的 Cangfu Trace 传递函数")
                 return
@@ -2991,7 +3138,7 @@ class TraceAnalysisPage(DiagnosticPage):
             plotted = self._plot_trace_curves_on_widget(
                 self.cangfu_time_plot,
                 curves,
-                title=f"Cangfu Trace 传递函数 - {current.table.name}",
+                title=f"Cangfu Trace 传递函数 - {title_source}",
                 x_label=curves[0].x_label,
                 y_label=curves[0].y_label,
                 log_x=True,
@@ -3003,11 +3150,20 @@ class TraceAnalysisPage(DiagnosticPage):
             self.cangfu_psd_plot.setTitle("Cangfu Trace PSD - 传递函数模式不适用")
             self.cangfu_psd_plot.setLabel("bottom", "Frequency (Hz)")
             self.cangfu_psd_plot.setLabel("left", "PSD")
-            self._update_cangfu_context(current, plotted)
-            self._show_status(f"已绘制 Cangfu Trace 传递函数：{plotted} 条")
+            self._update_cangfu_context(reference, plotted)
+            self._show_status(f"已绘制 Cangfu Trace 传递函数：{plotted} 条，文件：{len(compatible_files)} 个")
             return
-        curves = self._selected_cangfu_curves(current)
-        curves = self._curves_with_file_display_name(current, curves)
+        curves: list[CurvePair] = []
+        psd_curves: list[CurvePair] = []
+        for current in compatible_files:
+            current_curves = self._selected_cangfu_curves(current)
+            current_curves = self._curves_with_file_display_name(
+                current,
+                current_curves,
+                force=multiple_files,
+            )
+            curves.extend(current_curves)
+            psd_curves.extend(self._psd_curves(current, current_curves))
         if not curves:
             self._show_status("没有可绘制的 Cangfu Trace 通道")
             return
@@ -3018,17 +3174,16 @@ class TraceAnalysisPage(DiagnosticPage):
         plotted = self._plot_trace_curves_on_widget(
             self.cangfu_time_plot,
             curves,
-            title=f"Cangfu Trace 时域 - {current.table.name}",
+            title=f"Cangfu Trace 时域 - {title_source}",
             x_label=x_label,
             y_label="工程值",
             subplots=subplots,
             hold=hold,
         )
-        psd_curves = self._psd_curves(current, curves)
         self._plot_trace_curves_on_widget(
             self.cangfu_psd_plot,
             psd_curves,
-            title=f"Cangfu Trace PSD - {current.table.name}",
+            title=f"Cangfu Trace PSD - {title_source}",
             x_label="频率 (Hz)",
             y_label="PSD",
             log_x=True,
@@ -3036,14 +3191,32 @@ class TraceAnalysisPage(DiagnosticPage):
             subplots=subplots,
             hold=hold,
         )
-        self._update_cangfu_context(current, plotted)
-        self._show_status(f"已绘制 Cangfu Trace 通道：{plotted} 个")
+        self._update_cangfu_context(reference, plotted)
+        self._show_status(f"已绘制 Cangfu Trace 通道：{plotted} 个，文件：{len(compatible_files)} 个")
 
-    def _plot_ide_trans_current(self, current: TraceAnalysisFile) -> None:
+    def _plot_ide_trans_files(self, selected_files: list[TraceAnalysisFile]) -> None:
+        keep_existing = self.hold_check.isChecked()
+        multiple_files = len(selected_files) > 1
+        for index, current in enumerate(selected_files):
+            self._plot_ide_trans_current(
+                current,
+                hold=keep_existing or index > 0,
+                force_file_name=multiple_files,
+            )
+        self._show_status(f"已绘制 IDE Trans 文件：{len(selected_files)} 个")
+
+    def _plot_ide_trans_current(
+        self,
+        current: TraceAnalysisFile,
+        *,
+        hold: bool | None = None,
+        force_file_name: bool = False,
+    ) -> None:
         metadata = current.table.metadata
         input_name = str(metadata.get("ide_trans_input_name") or "激励信号")
         response_name = str(metadata.get("ide_trans_response_name") or "响应信号")
-        hold = self.hold_check.isChecked()
+        if hold is None:
+            hold = self.hold_check.isChecked()
 
         time_curves: list[CurvePair] = []
         for name, values in current.channels.items():
@@ -3052,7 +3225,7 @@ class TraceAnalysisPage(DiagnosticPage):
             if self.demean_check.isChecked() and y.size:
                 y = y - np.nanmean(y)
             time_curves.append(CurvePair(name, x, y, "时间 (s)", "幅值 (digits)"))
-        time_curves = self._curves_with_file_display_name(current, time_curves)
+        time_curves = self._curves_with_file_display_name(current, time_curves, force=force_file_name)
         time_count = self._plot_trace_curves_on_widget(
             self.ide_trans_time_plot,
             time_curves,
@@ -3078,7 +3251,7 @@ class TraceAnalysisPage(DiagnosticPage):
             power_db = 10.0 * np.log10(np.maximum(np.abs(power[:count]), 1e-30))
             power_curves.append(CurvePair(label, frequency[:count], power_db, "频率 (Hz)", "幅值 (dB)"))
         power_curves = self._frequency_limited_curves(power_curves, frequency_min, frequency_max)
-        power_curves = self._curves_with_file_display_name(current, power_curves)
+        power_curves = self._curves_with_file_display_name(current, power_curves, force=force_file_name)
         power_count = self._plot_trace_curves_on_widget(
             self.ide_trans_power_plot,
             power_curves,
@@ -3097,7 +3270,7 @@ class TraceAnalysisPage(DiagnosticPage):
             frequency_min,
             frequency_max,
         )
-        magnitude_curves = self._curves_with_file_display_name(current, magnitude_curves)
+        magnitude_curves = self._curves_with_file_display_name(current, magnitude_curves, force=force_file_name)
         magnitude_plotted = self._plot_trace_curves_on_widget(
             self.ide_trans_magnitude_plot,
             magnitude_curves,
@@ -3115,7 +3288,7 @@ class TraceAnalysisPage(DiagnosticPage):
             frequency_min,
             frequency_max,
         )
-        phase_curves = self._curves_with_file_display_name(current, phase_curves)
+        phase_curves = self._curves_with_file_display_name(current, phase_curves, force=force_file_name)
         phase_plotted = self._plot_trace_curves_on_widget(
             self.ide_trans_phase_plot,
             phase_curves,
@@ -3143,7 +3316,7 @@ class TraceAnalysisPage(DiagnosticPage):
             frequency_min,
             frequency_max,
         )
-        coherence_curves = self._curves_with_file_display_name(current, coherence_curves)
+        coherence_curves = self._curves_with_file_display_name(current, coherence_curves, force=force_file_name)
         coherence_plotted = self._plot_trace_curves_on_widget(
             self.ide_trans_coherence_plot,
             coherence_curves,
@@ -3174,11 +3347,29 @@ class TraceAnalysisPage(DiagnosticPage):
             return float(positive[0]), float(positive[-1])
         return 0.0, 0.0
 
-    def _plot_hac_trans_current(self, current: TraceAnalysisFile) -> None:
+    def _plot_hac_trans_files(self, selected_files: list[TraceAnalysisFile]) -> None:
+        keep_existing = self.hold_check.isChecked()
+        multiple_files = len(selected_files) > 1
+        for index, current in enumerate(selected_files):
+            self._plot_hac_trans_current(
+                current,
+                hold=keep_existing or index > 0,
+                force_file_name=multiple_files,
+            )
+        self._show_status(f"已绘制 HAC Trans 文件：{len(selected_files)} 个")
+
+    def _plot_hac_trans_current(
+        self,
+        current: TraceAnalysisFile,
+        *,
+        hold: bool | None = None,
+        force_file_name: bool = False,
+    ) -> None:
         metadata = current.table.metadata
         input_name = str(metadata.get("ide_trans_input_name") or "激励信号")
         response_name = str(metadata.get("ide_trans_response_name") or "响应信号")
-        hold = self.hold_check.isChecked()
+        if hold is None:
+            hold = self.hold_check.isChecked()
 
         time_curves: list[CurvePair] = []
         for name, values in current.channels.items():
@@ -3187,7 +3378,7 @@ class TraceAnalysisPage(DiagnosticPage):
             if self.demean_check.isChecked() and y.size:
                 y = y - np.nanmean(y)
             time_curves.append(CurvePair(name, x, y, "时间 (s)", "幅值"))
-        time_curves = self._curves_with_file_display_name(current, time_curves)
+        time_curves = self._curves_with_file_display_name(current, time_curves, force=force_file_name)
         time_count = self._plot_trace_curves_on_widget(
             self.hac_trans_time_plot,
             time_curves,
@@ -3208,7 +3399,7 @@ class TraceAnalysisPage(DiagnosticPage):
             frequency_min,
             frequency_max,
         )
-        magnitude_curves = self._curves_with_file_display_name(current, magnitude_curves)
+        magnitude_curves = self._curves_with_file_display_name(current, magnitude_curves, force=force_file_name)
         magnitude_count = self._plot_trace_curves_on_widget(
             self.hac_trans_magnitude_plot,
             magnitude_curves,
@@ -3226,7 +3417,7 @@ class TraceAnalysisPage(DiagnosticPage):
             frequency_min,
             frequency_max,
         )
-        phase_curves = self._curves_with_file_display_name(current, phase_curves)
+        phase_curves = self._curves_with_file_display_name(current, phase_curves, force=force_file_name)
         phase_count = self._plot_trace_curves_on_widget(
             self.hac_trans_phase_plot,
             phase_curves,
@@ -3254,7 +3445,7 @@ class TraceAnalysisPage(DiagnosticPage):
             frequency_min,
             frequency_max,
         )
-        coherence_curves = self._curves_with_file_display_name(current, coherence_curves)
+        coherence_curves = self._curves_with_file_display_name(current, coherence_curves, force=force_file_name)
         coherence_count = self._plot_trace_curves_on_widget(
             self.hac_trans_coherence_plot,
             coherence_curves,
@@ -4014,6 +4205,21 @@ class TraceAnalysisPage(DiagnosticPage):
         start = max(0, start_value - 1)
         end = max(start + 1, end_value)
         return start, end
+
+    def _slice_bounds_for_file(self, current: TraceAnalysisFile, kind: str) -> tuple[int, int]:
+        controls = {
+            "ide": (self.ide_range_start, self.ide_range_end, self._ide_ranges),
+            "hac": (self.hac_range_start, self.hac_range_end, self._hac_ranges),
+            "cangfu": (self.cangfu_range_start, self.cangfu_range_end, self._cangfu_ranges),
+        }
+        start_box, end_box, stored_ranges = controls[kind]
+        if current is self.current_file():
+            return self._slice_bounds(start_box, end_box)
+        count = max(1, int(current.table.row_count))
+        start_value, end_value = stored_ranges.get(self._file_key(current), (1, count))
+        start = max(0, int(start_value) - 1)
+        end = min(count, max(start + 1, int(end_value)))
+        return min(start, count - 1), end
 
     @staticmethod
     def _file_key(current: TraceAnalysisFile) -> str:
