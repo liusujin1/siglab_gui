@@ -4,9 +4,9 @@ import argparse
 from pathlib import Path
 import sys
 
-from python_vna.app import resource_path
 from python_vna.diagnostics import append_log, enable_fault_log
 from python_vna.optional import require
+from python_vna.resources import resource_path
 from python_vna.update_client import cleanup_stale_updater_runner
 
 

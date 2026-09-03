@@ -8,14 +8,9 @@ import sys
 from python_vna.controller import VnaController
 from python_vna.diagnostics import append_log, enable_fault_log
 from python_vna.optional import require
+from python_vna.resources import resource_path
 from python_vna.storage import default_session_config, load_legacy_vna
 from python_vna.update_client import cleanup_stale_updater_runner
-
-
-def resource_path(relative_path: str) -> Path:
-    base_path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
-    return base_path / relative_path
-
 
 def build_backend(name: str):
     if name == "ni":

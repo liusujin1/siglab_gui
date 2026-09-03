@@ -4,6 +4,7 @@ param(
 
     [switch]$Apply,
     [switch]$Build,
+    [switch]$LegacyMigration,
 
     [string]$Version = '',
 
@@ -17,6 +18,11 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent $PSScriptRoot
+
+Write-Warning 'This is a legacy migration tool. Normal builds and releases use the canonical repository root directly.'
+if ($Apply -and -not $LegacyMigration) {
+    throw 'LegacyMigration is required when -Apply is used. Re-run with -LegacyMigration -Apply after reviewing the preview.'
+}
 
 $worktrees = @{
     Test = Join-Path $root '.worktrees\vna_diagnose_isolated'
@@ -55,6 +61,23 @@ $syncPaths = @{
         'tests\test_analysis_viewer.py',
         'tests\test_diagnostic_app.py'
     )
+}
+
+# These modules are maintained by the suite project and pushed back to both
+# worktrees so standalone development uses the same updater implementation.
+$suiteSharedPaths = @(
+    'python_vna\resources.py',
+    'python_vna\ui\plot_interactions.py',
+    'python_vna\update_client.py',
+    'python_vna\updater.py',
+    'tests\test_update_client.py'
+)
+
+# Python files added below these product-owned package roots are discovered
+# automatically, so a new backend or diagnostic page is not silently omitted.
+$ownedPackageRoots = @{
+    Test = @('python_vna\daq')
+    Diagnostic = @('python_vna\diagnostic')
 }
 
 function Resolve-WorkspacePath {
@@ -164,6 +187,23 @@ function Copy-PathIntoWorkspace {
     Copy-Item -LiteralPath $SourcePath -Destination $DestinationPath -Force
 }
 
+function Get-PythonPathsUnderPackage {
+    param(
+        [Parameter(Mandatory=$true)][string]$Workspace,
+        [Parameter(Mandatory=$true)][string]$PackagePath
+    )
+
+    $packageRoot = Resolve-WorkspacePath -Base $Workspace -RelativePath $PackagePath
+    if (-not (Test-Path -LiteralPath $packageRoot -PathType Container)) {
+        return @()
+    }
+    $workspaceRoot = [System.IO.Path]::GetFullPath($Workspace).TrimEnd('\') + '\'
+    return @(
+        Get-ChildItem -LiteralPath $packageRoot -Recurse -Force -File -Filter '*.py' |
+            ForEach-Object { $_.FullName.Substring($workspaceRoot.Length) }
+    )
+}
+
 function Normalize-Version {
     param([Parameter(Mandatory=$true)][string]$Value)
 
@@ -225,21 +265,32 @@ function Update-VersionFiles {
 }
 
 function Apply-SuiteLocalPatches {
-    $mainWindowPath = Resolve-WorkspacePath -Base $root -RelativePath 'python_vna\ui\main_window.py'
-    if (-not (Test-Path -LiteralPath $mainWindowPath)) {
+    $plotInteractionsPath = Resolve-WorkspacePath -Base $root -RelativePath 'python_vna\ui\plot_interactions.py'
+    if (-not (Test-Path -LiteralPath $plotInteractionsPath)) {
         return
     }
 
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    $text = [System.IO.File]::ReadAllText($mainWindowPath)
+    $text = [System.IO.File]::ReadAllText($plotInteractionsPath)
     $patched = $text.Replace(
         'if self.orientation in {"left", "right"} and hasattr(self, "enableAutoSIPrefix"):',
         'if hasattr(self, "enableAutoSIPrefix"):'
     )
     if ($patched -ne $text) {
-        [System.IO.File]::WriteAllText($mainWindowPath, $patched, $utf8NoBom)
+        [System.IO.File]::WriteAllText($plotInteractionsPath, $patched, $utf8NoBom)
         Write-Host "Applied suite local patch: disable VnaAxisItem auto SI prefix on all axes"
     }
+}
+
+foreach ($name in @('Test', 'Diagnostic')) {
+    $worktree = $worktrees[$name]
+    if (-not (Test-Path -LiteralPath $worktree)) {
+        continue
+    }
+    $discoveredPaths = foreach ($packagePath in $ownedPackageRoots[$name]) {
+        Get-PythonPathsUnderPackage -Workspace $worktree -PackagePath $packagePath
+    }
+    $syncPaths[$name] = @($syncPaths[$name] + $discoveredPaths | Sort-Object -Unique)
 }
 
 $selectedSources = if ($Source -contains 'All') {
@@ -295,6 +346,26 @@ foreach ($name in $selectedSources) {
     }
 }
 
+foreach ($name in $selectedSources) {
+    $worktree = $worktrees[$name]
+    foreach ($relativePath in $suiteSharedPaths) {
+        $sourcePath = Resolve-WorkspacePath -Base $root -RelativePath $relativePath
+        if (-not (Test-Path -LiteralPath $sourcePath)) {
+            Write-Warning "Skipping missing suite shared path: $relativePath"
+            continue
+        }
+        $destinationPath = Resolve-WorkspacePath -Base $worktree -RelativePath $relativePath
+        if (Test-DifferentPath -SourcePath $sourcePath -DestinationPath $destinationPath) {
+            $plan.Add([pscustomobject]@{
+                SourceName = "SuiteShared->$name"
+                RelativePath = $relativePath
+                SourcePath = $sourcePath
+                DestinationPath = $destinationPath
+            })
+        }
+    }
+}
+
 if ($plan.Count -eq 0) {
     Write-Host "No mapped differences found."
 }
@@ -309,10 +380,10 @@ else {
 
 if (-not $Apply) {
     Write-Host ""
-    Write-Host "Preview only. Re-run with -Apply to copy mapped files into the suite project."
+    Write-Host "Preview only. Re-run with -LegacyMigration -Apply to copy mapped files into the suite project."
     if (-not [string]::IsNullOrWhiteSpace($Version)) {
         $previewVersion = Normalize-Version -Value $Version
-        Write-Host "Preview only. Re-run with -Apply to set version to $previewVersion."
+        Write-Host "Preview only. Re-run with -LegacyMigration -Apply to set version to $previewVersion."
     }
 }
 else {

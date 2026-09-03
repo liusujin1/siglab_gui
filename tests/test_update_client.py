@@ -21,6 +21,41 @@ from python_vna.updater import main as updater_main
 
 
 class UpdateClientTests(unittest.TestCase):
+    def test_removed_file_list_cannot_escape_to_similarly_named_sibling(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "suite"
+            sibling = root / "suite_old"
+            staging = root / "staging"
+            target.mkdir()
+            sibling.mkdir()
+            staging.mkdir()
+            sibling_file = sibling / "keep.txt"
+            sibling_file.write_text("keep", encoding="utf-8")
+            (staging / "UPDATE_REMOVED_FILES.txt").write_text(
+                "../suite_old/keep.txt\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "escapes update root"):
+                updater.apply_removed_files(staging, target)
+
+            self.assertTrue(sibling_file.exists())
+
+    def test_zip_extraction_rejects_parent_directory_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = root / "unsafe.zip"
+            destination = root / "staging"
+            destination.mkdir()
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.writestr("../outside.txt", "unsafe")
+
+            with self.assertRaisesRegex(RuntimeError, "escapes update root"):
+                updater.extract_archive(archive, destination, "zip")
+
+            self.assertFalse((root / "outside.txt").exists())
+
     def test_load_update_settings_from_suite_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

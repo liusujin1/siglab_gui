@@ -50,7 +50,8 @@ $root = Split-Path -Parent $PSScriptRoot
 $distRoot = Join-Path $root 'dist'
 $latestPathFile = Join-Path $distRoot 'LATEST_SUITE_PATH.txt'
 $buildUpdateScript = Join-Path $PSScriptRoot 'build_vna_suite_update.ps1'
-$buildReleaseScript = Join-Path $PSScriptRoot 'sync_worktrees_and_build_suite.ps1'
+$buildReleaseScript = Join-Path $PSScriptRoot 'build_vna_suite.ps1'
+$ensureArchiveScript = Join-Path $PSScriptRoot 'ensure_vna_suite_archive.ps1'
 $manifestScript = Join-Path $PSScriptRoot 'generate_update_manifest.ps1'
 $python = Join-Path $root '.venv\Scripts\python.exe'
 $defaultCredentialPath = Join-Path $env:APPDATA 'PythonVNA\nas_credential.xml'
@@ -512,8 +513,6 @@ elseif ($fullOnlyMode) {
             '-NoProfile',
             '-ExecutionPolicy', 'Bypass',
             '-File', $buildReleaseScript,
-            '-Apply',
-            '-Build',
             '-Version', $Version
         )
         if ($fastMode) {
@@ -556,6 +555,10 @@ if ([string]::IsNullOrWhiteSpace($latestRelease) -or -not (Test-Path -LiteralPat
 }
 
 $latestVersion = Get-ReleaseVersion -ReleasePath $latestRelease
+$ensuredArchive = @(& $ensureArchiveScript -ReleasePath $latestRelease)
+if ($ensuredArchive.Count -eq 0) {
+    throw "Full release archive preparation did not return a path for v$latestVersion."
+}
 $releaseArchive = Get-FullReleaseArchivePath -ReleaseVersion $latestVersion
 $releaseArchiveUrl = "$BaseUrl/$(Split-Path -Leaf $releaseArchive)"
 

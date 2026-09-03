@@ -23,7 +23,7 @@ from python_vna.diagnostic.data import (
 )
 from python_vna.diagnostics import append_log
 from python_vna.optional import require
-from python_vna.ui.main_window import (
+from python_vna.ui.plot_interactions import (
     DataTipPoint,
     DataTipText,
     VnaAxisItem,

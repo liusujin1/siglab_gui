@@ -6,12 +6,14 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 import zipfile
 
 import numpy as np
 
 from python_vna.continuous_recording import (
     ContinuousDatWriter,
+    available_recording_directory,
     iter_dat_frames,
     read_dat_header,
 )
@@ -38,6 +40,21 @@ class _Clock:
 
 
 class ContinuousRecordingTests(unittest.TestCase):
+    def test_available_recording_directory_does_not_reuse_existing_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            parent = Path(tmpdir)
+            (parent / "recording_fixed").mkdir()
+            (parent / "recording_fixed_2").mkdir()
+
+            with mock.patch(
+                "python_vna.continuous_recording.recording_directory_name",
+                return_value="recording_fixed",
+            ):
+                output_dir = available_recording_directory(parent)
+
+            self.assertEqual(output_dir, parent / "recording_fixed_3")
+            self.assertFalse(output_dir.exists())
+
     def _frame(self, index: int, value: float = 1.0) -> BackendFrame:
         return BackendFrame(
             sample_rate=2560.0,

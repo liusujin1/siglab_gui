@@ -62,7 +62,7 @@ from python_vna.analysis_data import (
 from python_vna.diagnostics import append_log
 from python_vna.display_transforms import transform_legacy_autospectrum
 from python_vna.optional import require
-from python_vna.ui.main_window import (
+from python_vna.ui.plot_interactions import (
     DataTipPoint,
     DataTipText,
     VnaAxisItem,
@@ -209,6 +209,8 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         self._workspace_operation_sources: dict[str, object | None] = {"a": None, "b": None}
         self._interpolation_resolution_hz = 1.0
         self._interpolation_resolution_s = 0.001
+        self._last_time_pair_transfer_description: str | None = None
+        self._mimo_current_grid: np.ndarray | None = None
         self._build_ui()
         self.apply_theme(self._theme)
         self._data_store.changed.connect(self._on_shared_data_store_changed)
@@ -574,6 +576,9 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         self.series_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.series_list.setAlternatingRowColors(True)
         self.series_list.setMinimumHeight(84)
+        self.series_list.setToolTip(
+            "选择两条没有原生传递率的时域数据时，列表中靠前的数据作为输入，靠后的数据作为响应。"
+        )
         self.rename_edit = QtWidgets.QLineEdit()
         self.factor_edit = QtWidgets.QLineEdit("1")
         self.rename_edit.setPlaceholderText("selected channel name")
@@ -1949,10 +1954,9 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         target_items: list[object],
         grid: np.ndarray,
     ) -> tuple[np.ndarray | None, list[tuple[np.ndarray, np.ndarray, str, tuple[np.ndarray, np.ndarray] | None]] | None, str | None]:
-        target_curves = [self._acceleration_psd_from_mimo_target(item) for item in target_items]
-        if any(curve is None for curve in target_curves):
+        curves = self._mimo_target_curves(target_items, grid)
+        if curves is None:
             return None, None, None
-        curves = [curve for curve in target_curves if curve is not None]
 
         dataset_refs: list[tuple[AnalysisDataset, AnalysisSeries]] = []
         same_dataset = True
@@ -2006,6 +2010,21 @@ class AnalysisWorkbench(QtWidgets.QWidget):
                 return None, curves, None
             diagonal[:, index] = np.interp(grid, f, psd, left=0.0, right=0.0)
         return diagonal_psd_matrix(diagonal), curves, "diagonal_only"
+
+    def _mimo_target_curves(
+        self,
+        target_items: list[object],
+        grid: np.ndarray,
+    ) -> list[tuple[np.ndarray, np.ndarray, str, tuple[np.ndarray, np.ndarray] | None]] | None:
+        previous_grid = self._mimo_current_grid
+        self._mimo_current_grid = np.asarray(grid, dtype=float)
+        try:
+            target_curves = [self._acceleration_psd_from_mimo_target(item) for item in target_items]
+        finally:
+            self._mimo_current_grid = previous_grid
+        if any(curve is None for curve in target_curves):
+            return None
+        return [curve for curve in target_curves if curve is not None]
 
     def _transfer_from_mimo_data(self, data: object) -> tuple[np.ndarray, np.ndarray, str, bool] | None:
         if not isinstance(data, tuple) or len(data) != 5:
@@ -2162,143 +2181,6 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         grid = np.unique(np.concatenate([f[(f >= low) & (f <= high)] for f in points] + [np.array([low, high], dtype=float)]))
         return grid[np.isfinite(grid) & (grid > 0.0)]
 
-    def _execute_mimo_coupling(self, config: dict[str, object]) -> bool:
-        if str(config.get("relation")) != "independent":
-            self.statusBar().showMessage("当前版本先支持独立三轴随机输入")
-            return False
-        transfer_rows = config.get("transfers")
-        target_items = config.get("targets")
-        if not isinstance(transfer_rows, list) or len(transfer_rows) != 3 or not isinstance(target_items, list) or len(target_items) != 3:
-            self.statusBar().showMessage("三轴耦合配置不完整")
-            return False
-        transfer_curves: list[tuple[np.ndarray, np.ndarray, str, bool]] = []
-        for row in transfer_rows:
-            if not isinstance(row, list) or len(row) != 3:
-                self.statusBar().showMessage("请选择完整的 3×3 传递率矩阵")
-                return False
-            for item in row:
-                transfer = self._transfer_from_mimo_data(item)
-                if transfer is None:
-                    self.statusBar().showMessage("三轴耦合传递率中存在无效曲线")
-                    return False
-                transfer_curves.append(transfer)
-        grid = self._mimo_common_frequency_grid(transfer_curves)
-        if grid.size < 2:
-            self.statusBar().showMessage("三轴耦合传递率没有重叠频率范围")
-            return False
-        self._mimo_current_grid = grid
-        try:
-            target_curves = [self._acceleration_psd_from_mimo_target(item) for item in target_items]
-        finally:
-            self._mimo_current_grid = None
-        if any(curve is None for curve in target_curves):
-            self.statusBar().showMessage("三轴耦合目标曲线无效")
-            return False
-        all_curves = transfer_curves + [(curve[0], curve[1], curve[2]) for curve in target_curves if curve is not None]
-        grid = self._mimo_common_frequency_grid(all_curves)
-        if grid.size < 2:
-            self.statusBar().showMessage("三轴耦合目标和传递率没有重叠频率范围")
-            return False
-        transfer_matrix = np.empty((grid.size, 3, 3), dtype=complex)
-        transfer_phase_complete = True
-        for output_index in range(3):
-            for input_index in range(3):
-                frequency, values, _label, phase_available = transfer_curves[output_index * 3 + input_index]
-                transfer_phase_complete = transfer_phase_complete and bool(phase_available)
-                transfer_matrix[:, output_index, input_index] = interpolate_complex_transfer(
-                    frequency,
-                    values,
-                    grid,
-                )
-        target_psd = np.empty((grid.size, 3), dtype=float)
-        target_labels: list[str] = []
-        target_band_edges: list[tuple[np.ndarray, np.ndarray] | None] = []
-        for index, curve in enumerate(target_curves):
-            if curve is None:
-                return False
-            frequency, values, label, band_edges = curve
-            f, psd = _finite_aligned_xy(frequency, values)
-            valid = (f > 0.0) & (psd > 0.0)
-            f = f[valid]
-            psd = psd[valid]
-            if f.size < 2:
-                self.statusBar().showMessage("三轴耦合目标曲线有效频点不足")
-                return False
-            target_psd[:, index] = np.interp(grid, f, psd, left=0.0, right=0.0)
-            target_labels.append(label)
-            target_band_edges.append(_vc_band_edges_for_frequencies(label, grid) if label in VC_REFERENCE_NAMES else band_edges)
-        regularization = float(config.get("regularization", 0.0))
-        direction = str(self.derived_direction_combo.currentData() or DERIVE_BASE_TO_TOP)
-        input_endpoint, target_endpoint = self._mimo_direction_endpoints(direction)
-        solve_f = grid
-        solve_transfer_matrix = transfer_matrix
-        out_f, input_psd, predicted_psd = solve_mimo_independent_psd(
-            solve_f,
-            solve_transfer_matrix,
-            target_psd,
-            regularization_floor=regularization,
-        )
-        if out_f.size < 2 or input_psd.shape != (out_f.size, 3):
-            self.statusBar().showMessage("三轴耦合计算失败：未得到有效输入 PSD")
-            return False
-        default_prefix = self._mimo_default_output_prefix(direction)
-        prefix = str(config.get("prefix") or default_prefix).strip() or default_prefix
-        axes = ("X", "Y", "Z")
-        results: list[dict[str, object]] = []
-        for index, axis in enumerate(axes):
-            f_quantity, psd_quantity = convert_acceleration_psd(
-                out_f,
-                input_psd[:, index],
-                self.quantity_combo.currentText(),
-                highpass_enabled=self.highpass_check.isChecked(),
-                highpass_hz=float(self.highpass_spin.value()),
-            )
-            if f_quantity.size < 2:
-                continue
-            label = f"{prefix}{axis}"
-            result: dict[str, object] = {
-                "label": label,
-                "source_label": f"目标{target_endpoint}响应{axis}: {target_labels[index]}",
-                "psd": (f_quantity, psd_quantity),
-                "cumulative": compute_cumulative_spectrum(f_quantity, psd_quantity),
-                "foundation": compute_third_octave_velocity_rms(out_f, input_psd[:, index], _infer_rbw(out_f)),
-            }
-            results.append(result)
-            self._save_workspace_curve(label, "三轴耦合输入PSD", f_quantity, psd_quantity, "MIMO三轴耦合反推")
-        for index, axis in enumerate(axes):
-            f_quantity, psd_quantity = convert_acceleration_psd(
-                out_f,
-                predicted_psd[:, index],
-                self.quantity_combo.currentText(),
-                highpass_enabled=self.highpass_check.isChecked(),
-                highpass_hz=float(self.highpass_spin.value()),
-            )
-            if f_quantity.size < 2:
-                continue
-            results.append({
-                "label": f"校核{target_endpoint}响应{axis}",
-                "source_label": f"目标{target_endpoint}响应{axis}: {target_labels[index]}",
-                "psd": (f_quantity, psd_quantity),
-                "display_psd": (f_quantity, psd_quantity),
-                "cumulative": compute_cumulative_spectrum(f_quantity, psd_quantity),
-                "foundation": compute_third_octave_velocity_rms(out_f, predicted_psd[:, index], _infer_rbw(out_f)),
-                "psd_band_edges": target_band_edges[index],
-            })
-        if not results:
-            self.statusBar().showMessage("三轴耦合计算没有可绘制结果")
-            return False
-        self.derived_result_mode_combo.setCurrentText("PSD")
-        self._last_derived_results = [dict(result) for result in results]
-        self._plot_derived_result_axis(
-            self.derived_plots[1],
-            "PSD",
-            results,
-            keep_existing=self._hold_enabled(),
-        )
-        self.statusBar().showMessage(
-            f"三轴耦合计算完成：已生成 X/Y/Z {input_endpoint}输入 PSD，并完成{target_endpoint}响应校核"
-        )
-        return True
 
     def _execute_mimo_coupling(self, config: dict[str, object]) -> bool:
         transfer_rows = config.get("transfers")
@@ -2342,12 +2224,8 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             self.statusBar().showMessage("三轴耦合传递率没有重叠频率范围")
             return False
 
-        self._mimo_current_grid = grid
-        try:
-            target_matrix, target_curves, target_matrix_mode = self._mimo_target_psd_matrix(target_items, grid)
-        finally:
-            self._mimo_current_grid = None
-        if target_matrix is None or target_curves is None:
+        target_curves = self._mimo_target_curves(target_items, grid)
+        if target_curves is None:
             self.statusBar().showMessage("三轴耦合目标曲线无效")
             return False
 
@@ -2357,11 +2235,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             self.statusBar().showMessage("三轴耦合目标和传递率没有重叠频率范围")
             return False
 
-        self._mimo_current_grid = grid
-        try:
-            target_matrix, target_curves, target_matrix_mode = self._mimo_target_psd_matrix(target_items, grid)
-        finally:
-            self._mimo_current_grid = None
+        target_matrix, target_curves, target_matrix_mode = self._mimo_target_psd_matrix(target_items, grid)
         if target_matrix is None or target_curves is None:
             self.statusBar().showMessage("三轴耦合目标曲线无效")
             return False
@@ -2995,6 +2869,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         if measurement is None:
             return False
         if self._current_measurement_dataset_id is not None:
+            self._discard_dataset_caches({self._current_measurement_dataset_id})
             self._datasets = [
                 dataset
                 for dataset in self._datasets
@@ -3076,12 +2951,12 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             self.statusBar().showMessage("Refreshed analysis data")
 
     def _clear_datasets(self) -> None:
+        self._discard_dataset_caches()
         self._datasets.clear()
         self._series_labels.clear()
         self._custom_series_labels.clear()
         self._custom_series_scales.clear()
         self._original_series_scales.clear()
-        self._derived_result_cache.clear()
         self._current_measurement_dataset_id = None
         self._refresh_dataset_lists()
         self._sync_workspace_operation_labels()
@@ -3155,6 +3030,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         try:
             append_log(f"analysis.delete.by_ids.before_filter datasets={len(self._datasets)}")
             self._datasets = [dataset for dataset in self._datasets if dataset.id not in selected_dataset_ids]
+            self._discard_dataset_caches(selected_dataset_ids)
             append_log(f"analysis.delete.by_ids.after_filter datasets={len(self._datasets)}")
             self._custom_series_labels = {
                 key: value
@@ -3171,7 +3047,6 @@ class AnalysisWorkbench(QtWidgets.QWidget):
                 for key, value in self._original_series_scales.items()
                 if key[0] not in selected_dataset_ids
             }
-            self._derived_result_cache.clear()
             if self._current_measurement_dataset_id in selected_dataset_ids:
                 self._current_measurement_dataset_id = None
             append_log("analysis.delete.by_ids.before_refresh_lists")
@@ -3183,6 +3058,26 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             self._suspend_auto_plot = previous_suspend
             append_log("analysis.delete.by_ids.finally_restore_suspend")
         self.statusBar().showMessage(f"已删除 {len(selected_dataset_ids)} 个数据；图像将在下次绘图时刷新")
+
+    def _discard_dataset_caches(self, dataset_ids: set[int] | None = None) -> None:
+        if dataset_ids is None:
+            self._time_series_cache.clear()
+            self._bulk_time_series_cache.clear()
+            self._selected_channel_keys_by_dataset.clear()
+        else:
+            ids = {int(dataset_id) for dataset_id in dataset_ids}
+            self._time_series_cache = {
+                key: value for key, value in self._time_series_cache.items() if key[0] not in ids
+            }
+            self._bulk_time_series_cache = {
+                key: value for key, value in self._bulk_time_series_cache.items() if key[0] not in ids
+            }
+            self._selected_channel_keys_by_dataset = {
+                key: value for key, value in self._selected_channel_keys_by_dataset.items() if key not in ids
+            }
+        self._derived_result_cache.clear()
+        self._last_derived_results = None
+        self._last_time_pair_transfer_description = None
 
     def _refresh_dataset_series_list_only(self) -> None:
         selected_ids = {
@@ -4174,6 +4069,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         self._time_series_cache.clear()
         self._bulk_time_series_cache.clear()
         self._selected_channel_keys_by_dataset = {}
+        self._last_time_pair_transfer_description = None
         keep_existing = self._hold_enabled()
         if not keep_existing:
             for plot in self._all_analysis_plots():
@@ -4188,7 +4084,12 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         self._plot_foundation(selected, keep_existing=keep_existing)
         if self._include_derived_tab:
             self._plot_derived(keep_existing=keep_existing, quiet=True)
-        self.statusBar().showMessage(f"Plotted {len(selected)} selected channel(s)")
+        if self._last_time_pair_transfer_description:
+            self.statusBar().showMessage(
+                f"已绘制 {len(selected)} 条数据；传递率方向：{self._last_time_pair_transfer_description}"
+            )
+        else:
+            self.statusBar().showMessage(f"Plotted {len(selected)} selected channel(s)")
 
     def _clear_plots(self, *, show_status: bool = True) -> None:
         for plot in self._all_analysis_plots():
@@ -4258,10 +4159,17 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         x_values_for_range: list[np.ndarray] = []
         y_values_for_range: list[np.ndarray] = []
         status_parts: list[str] = []
-        for dataset, series in selected:
-            curve = self._curve_for_mode(dataset, series, mode)
-            if curve is None:
-                continue
+        curves_to_plot: list[tuple[np.ndarray, np.ndarray, str]] = []
+        if mode == "Trans" and len(selected) == 2:
+            paired_curve = self._transfer_curve_from_selected_time_series(selected)
+            if paired_curve is not None:
+                curves_to_plot.append(paired_curve)
+        if not curves_to_plot:
+            for dataset, series in selected:
+                curve = self._curve_for_mode(dataset, series, mode)
+                if curve is not None:
+                    curves_to_plot.append(curve)
+        for curve in curves_to_plot:
             x, y, label = curve
             if x.size < 2 or y.size < 2:
                 continue
@@ -4458,6 +4366,156 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         transfer = np.abs(xfer * eu_ratio * float(self.scale_spin.value()))
         valid = np.isfinite(f) & np.isfinite(transfer) & (f > 0.0) & (transfer > 0.0)
         return f[valid], 20.0 * np.log10(np.maximum(transfer[valid], 1e-20)), self._series_label(dataset, series)
+
+    def _transfer_curve_from_selected_time_series(
+        self,
+        selected: list[tuple[AnalysisDataset, AnalysisSeries]],
+    ) -> tuple[np.ndarray, np.ndarray, str] | None:
+        if len(selected) != 2:
+            return None
+        if any(dataset.frf for dataset, _series in selected):
+            return None
+        (reference_dataset, reference), (response_dataset, response) = selected
+        if not self._series_has_time_data(reference_dataset, reference) or not self._series_has_time_data(
+            response_dataset, response
+        ):
+            return None
+
+        start_s, end_s = self._time_window()
+        t_reference, reference_raw = self._load_analysis_time_series(
+            reference_dataset,
+            reference.channel_key,
+            start_s=start_s,
+            end_s=end_s,
+        )
+        t_response, response_raw = self._load_analysis_time_series(
+            response_dataset,
+            response.channel_key,
+            start_s=start_s,
+            end_s=end_s,
+        )
+        aligned = self._align_time_series_pair(
+            t_reference,
+            reference_raw,
+            reference_dataset.sample_rate,
+            t_response,
+            response_raw,
+            response_dataset.sample_rate,
+        )
+        if aligned is None:
+            return None
+        reference_aligned, response_aligned, sample_rate = aligned
+        reference_filtered, reference_trim = apply_filter_to_signal(
+            reference_aligned,
+            sample_rate,
+            self._filter_config(),
+        )
+        response_filtered, response_trim = apply_filter_to_signal(
+            response_aligned,
+            sample_rate,
+            self._filter_config(),
+        )
+        trim = max(reference_trim, response_trim)
+        if trim > 0 and reference_filtered.size > trim * 2 and response_filtered.size > trim * 2:
+            reference_filtered = reference_filtered[trim:-trim]
+            response_filtered = response_filtered[trim:-trim]
+        block_size = self._fft_block_size(
+            min(reference_filtered.size, response_filtered.size),
+            reference_dataset,
+        )
+        frequency, transfer_values = compute_transfer_function_welch(
+            reference_filtered,
+            response_filtered,
+            sample_rate,
+            block_size,
+        )
+        if frequency.size < 2:
+            return None
+        reference_scale = float(reference.scale or 1.0)
+        if reference_scale == 0.0:
+            return None
+        eu_ratio = float(response.scale or 1.0) / reference_scale
+        transfer = np.abs(transfer_values * eu_ratio * float(self.scale_spin.value()))
+        valid = np.isfinite(frequency) & np.isfinite(transfer) & (frequency > 0.0) & (transfer > 0.0)
+        if np.count_nonzero(valid) < 2:
+            return None
+        reference_label = self._series_label(reference_dataset, reference)
+        response_label = self._series_label(response_dataset, response)
+        self._last_time_pair_transfer_description = f"{reference_label} -> {response_label}"
+        return (
+            frequency[valid],
+            20.0 * np.log10(np.maximum(transfer[valid], 1e-20)),
+            f"{response_label} / {reference_label}",
+        )
+
+    @staticmethod
+    def _series_has_time_data(dataset: AnalysisDataset, series: AnalysisSeries) -> bool:
+        return bool(dataset.is_continuous or series.channel_key in dataset.channels)
+
+    @staticmethod
+    def _align_time_series_pair(
+        reference_time: np.ndarray,
+        reference_values: np.ndarray,
+        reference_sample_rate: float,
+        response_time: np.ndarray,
+        response_values: np.ndarray,
+        response_sample_rate: float,
+    ) -> tuple[np.ndarray, np.ndarray, float] | None:
+        def prepare(time_values: np.ndarray, signal_values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+            time_array = np.asarray(time_values, dtype=float).ravel()
+            signal_array = np.asarray(signal_values, dtype=float).ravel()
+            count = min(time_array.size, signal_array.size)
+            time_array = time_array[:count]
+            signal_array = signal_array[:count]
+            finite = np.isfinite(time_array) & np.isfinite(signal_array)
+            time_array = time_array[finite]
+            signal_array = signal_array[finite]
+            if time_array.size < 2:
+                return np.array([], dtype=float), np.array([], dtype=float)
+            order = np.argsort(time_array, kind="mergesort")
+            time_array = time_array[order]
+            signal_array = signal_array[order]
+            unique = np.concatenate(([True], np.diff(time_array) > 0.0))
+            return time_array[unique], signal_array[unique]
+
+        def effective_rate(time_array: np.ndarray, fallback: float) -> float:
+            differences = np.diff(time_array)
+            differences = differences[np.isfinite(differences) & (differences > 0.0)]
+            if differences.size:
+                rate = 1.0 / float(np.median(differences))
+                if np.isfinite(rate) and rate > 0.0:
+                    return rate
+            return float(fallback) if np.isfinite(fallback) and fallback > 0.0 else 1.0
+
+        ref_time, ref_signal = prepare(reference_time, reference_values)
+        resp_time, resp_signal = prepare(response_time, response_values)
+        if ref_time.size < 2 or resp_time.size < 2:
+            return None
+        start_time = max(float(ref_time[0]), float(resp_time[0]))
+        end_time = min(float(ref_time[-1]), float(resp_time[-1]))
+        if not np.isfinite(start_time) or not np.isfinite(end_time) or end_time <= start_time:
+            return None
+        sample_rate = min(
+            effective_rate(ref_time, reference_sample_rate),
+            effective_rate(resp_time, response_sample_rate),
+        )
+        sample_count = int(np.floor((end_time - start_time) * sample_rate + 1e-9)) + 1
+        if sample_count < 2:
+            return None
+        reference_count = int(np.count_nonzero((ref_time >= start_time) & (ref_time <= end_time)))
+        response_count = int(np.count_nonzero((resp_time >= start_time) & (resp_time <= end_time)))
+        available_count = min(reference_count, response_count)
+        if available_count < 2 or sample_count > available_count * 4:
+            return None
+        common_time = start_time + np.arange(sample_count, dtype=float) / sample_rate
+        common_time = common_time[common_time <= end_time + max(1e-12, 1e-9 / sample_rate)]
+        if common_time.size < 2:
+            return None
+        return (
+            np.interp(common_time, ref_time, ref_signal),
+            np.interp(common_time, resp_time, resp_signal),
+            float(sample_rate),
+        )
 
     def _transfer_curve_from_time_data(
         self,

@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -28,6 +29,16 @@ CHUNK_SIZE = 1024 * 1024
 
 class UpdateCancelled(RuntimeError):
     pass
+
+
+def _resolve_within(root: Path, relative_path: str | Path) -> Path:
+    root_path = root.resolve()
+    candidate = (root_path / relative_path).resolve()
+    try:
+        candidate.relative_to(root_path)
+    except ValueError as exc:
+        raise RuntimeError(f"Path escapes update root: {relative_path}") from exc
+    return candidate
 
 
 class ProgressReporter:
@@ -185,6 +196,11 @@ def download_file(url: str, path: Path, progress: ProgressReporter | None = None
 def extract_archive(archive: Path, destination: Path, archive_type: str) -> None:
     if archive_type == "zip":
         with zipfile.ZipFile(archive) as zf:
+            for member in zf.infolist():
+                _resolve_within(destination, member.filename)
+                mode = (member.external_attr >> 16) & 0xFFFF
+                if stat.S_ISLNK(mode):
+                    raise RuntimeError(f"Update archive contains a symbolic link: {member.filename}")
             zf.extractall(destination)
         return
 
@@ -290,14 +306,12 @@ def apply_removed_files(staging: Path, target: Path) -> None:
     removed_path = staging / "UPDATE_REMOVED_FILES.txt"
     if not removed_path.exists():
         return
+    target_root = target.resolve()
     for line in removed_path.read_text(encoding="utf-8").splitlines():
         relative = line.strip()
         if not relative:
             continue
-        target_path = (target / relative).resolve()
-        target_root = target.resolve()
-        if not str(target_path).lower().startswith(str(target_root).lower()):
-            raise RuntimeError(f"Refusing to delete path outside target: {relative}")
+        target_path = _resolve_within(target_root, relative)
         if target_path.exists() and target_path.is_file():
             target_path.unlink()
 

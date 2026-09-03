@@ -22,11 +22,14 @@ def _filter_bundle_entries(entries):
         "assets/vianalysis_icon.png",
         "nidaqmx/_stubs/",
         "opengl/dlls/",
+        "pyside6/plugins/networkinformation/",
+        "pyside6/plugins/tls/",
         "pyside6/translations/",
         "pyqtgraph/icons/peegee/",
     )
     blocked_exact = {
         "pyside6/qt6pdf.dll",
+        "pyside6/qt6network.dll",
         "pyside6/qt6quick.dll",
         "pyside6/qt6qml.dll",
         "pyside6/qt6qmlmodels.dll",
@@ -36,6 +39,7 @@ def _filter_bundle_entries(entries):
         "pyside6/plugins/platforms/qdirect2d.dll",
         "pyside6/plugins/platforms/qminimal.dll",
         "pyside6/plugins/platforms/qoffscreen.dll",
+        "pyside6/plugins/generic/qtuiotouchplugin.dll",
         "pyside6/plugins/imageformats/qicns.dll",
         "pyside6/plugins/imageformats/qjpeg.dll",
         "pyside6/plugins/imageformats/qpdf.dll",
@@ -43,6 +47,7 @@ def _filter_bundle_entries(entries):
         "pyside6/plugins/imageformats/qtiff.dll",
         "pyside6/plugins/imageformats/qwbmp.dll",
         "pyside6/plugins/imageformats/qwebp.dll",
+        "pyside6/plugins/platforminputcontexts/qtvirtualkeyboardplugin.dll",
     }
     filtered = []
     for entry in entries:
@@ -155,10 +160,21 @@ NI_HIDDENIMPORTS += collect_submodules("nidaqmx")
 NI_HIDDENIMPORTS += collect_submodules("nitypes")
 
 EXCLUDES = [
+    "_distutils_hack",
+    "doctest",
     "IPython",
     "jupyter",
     "notebook",
+    "numpy.lib.tests",
+    "pydoc_data",
+    "pyqtgraph.console",
+    "pyqtgraph.dockarea",
+    "pyqtgraph.exporters",
+    "pyqtgraph.flowchart",
     "pytest",
+    "scipy._lib.tests",
+    "scipy.tests",
+    "setuptools",
     "tkinter",
     "PySide6.QtWebEngineCore",
     "PySide6.QtWebEngineWidgets",
@@ -167,6 +183,7 @@ EXCLUDES = [
     "PySide6.QtHelp",
     "PySide6.QtMultimedia",
     "PySide6.QtMultimediaWidgets",
+    "PySide6.QtNetwork",
     "PySide6.QtNetworkAuth",
     "PySide6.QtPdf",
     "PySide6.QtPdfWidgets",

@@ -13,6 +13,8 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+build_size_test_optimized/
+dist_size_test_optimized/
 .worktrees/
 
 # MATLAB transient artifacts

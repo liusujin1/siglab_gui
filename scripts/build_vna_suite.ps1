@@ -1,6 +1,8 @@
 param(
+    [string]$Version = '',
     [switch]$SkipTests,
-    [switch]$SkipReleaseArchives
+    [switch]$SkipReleaseArchives,
+    [switch]$SkipPreflight
 )
 
 $ErrorActionPreference = 'Stop'
@@ -9,27 +11,12 @@ $root = Split-Path -Parent $PSScriptRoot
 $python = Join-Path $root '.venv\Scripts\python.exe'
 $pyinstaller = Join-Path $root '.venv\Scripts\pyinstaller.exe'
 $spec = Join-Path $root 'PythonVNA_Suite.spec'
+$preflight = Join-Path $PSScriptRoot 'preflight_vna_suite.ps1'
+$setVersion = Join-Path $PSScriptRoot 'set_vna_suite_version.ps1'
+$ensureArchive = Join-Path $PSScriptRoot 'ensure_vna_suite_archive.ps1'
 $distRoot = Join-Path $root 'dist'
 $dist = Join-Path $distRoot 'PythonVNA_Suite'
 $latestPathFile = Join-Path $distRoot 'LATEST_SUITE_PATH.txt'
-
-function Find-7Zip {
-    $candidates = @(
-        (Join-Path $env:ProgramFiles '7-Zip\7z.exe'),
-        (Join-Path ${env:ProgramFiles(x86)} '7-Zip\7z.exe'),
-        '7z.exe'
-    )
-    foreach ($candidate in $candidates) {
-        if ([string]::IsNullOrWhiteSpace($candidate)) {
-            continue
-        }
-        $resolved = Get-Command $candidate -ErrorAction SilentlyContinue
-        if ($resolved -and (Test-Path -LiteralPath $resolved.Source)) {
-            return $resolved.Source
-        }
-    }
-    return $null
-}
 
 function Get-SuiteVersion {
     $initPath = Join-Path $root 'python_vna\__init__.py'
@@ -76,9 +63,26 @@ if (-not (Test-Path $pyinstaller)) {
 if (-not (Test-Path $spec)) {
     throw "Suite spec was not found: $spec"
 }
+if (-not (Test-Path $preflight)) {
+    throw "Suite preflight script was not found: $preflight"
+}
+if (-not (Test-Path $setVersion)) {
+    throw "Suite version script was not found: $setVersion"
+}
+if (-not (Test-Path $ensureArchive)) {
+    throw "Suite archive script was not found: $ensureArchive"
+}
 
 Push-Location $root
 try {
+    if (-not [string]::IsNullOrWhiteSpace($Version)) {
+        & $setVersion -Version $Version
+    }
+
+    if (-not $SkipPreflight) {
+        & $preflight
+    }
+
     if (-not $SkipTests) {
         & $python -m pytest tests
         if ($LASTEXITCODE -ne 0) {
@@ -152,23 +156,7 @@ try {
         Format-Table -AutoSize
 
     if (-not $SkipReleaseArchives) {
-        $sevenZip = Find-7Zip
-        if ($sevenZip) {
-            $archivePath = Join-Path $distRoot "$releaseName.7z"
-            if (Test-Path -LiteralPath $archivePath) {
-                Remove-Item -LiteralPath $archivePath -Force
-            }
-            & $sevenZip a -t7z -mx=9 -m0=LZMA2 -md=256m -mfb=273 -ms=on $archivePath $releaseDist | Out-Host
-            if ($LASTEXITCODE -ne 0) {
-                throw "7-Zip failed with exit code $LASTEXITCODE"
-            }
-            $archive = Get-Item -LiteralPath $archivePath
-            Write-Host "Archive: $archivePath"
-            Write-Host "Archive size: $([Math]::Round($archive.Length / 1MB, 2)) MiB"
-        }
-        else {
-            throw "7-Zip was not found. Install 7-Zip before building a full release archive."
-        }
+        & $ensureArchive -ReleasePath $releaseDist -Force | Out-Null
     }
     else {
         Write-Host "Skipping local full release archives."

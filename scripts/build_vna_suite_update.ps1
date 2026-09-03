@@ -19,11 +19,14 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+if ($Source.Count -ne 1 -or $Source[0] -ne 'All') {
+    Write-Warning '-Source is retained for command compatibility but is ignored. Incremental builds now use the canonical repository root.'
+}
+
 $root = Split-Path -Parent $PSScriptRoot
 $distRoot = Join-Path $root 'dist'
 $updatesRoot = Join-Path $distRoot 'updates'
 $latestPathFile = Join-Path $distRoot 'LATEST_SUITE_PATH.txt'
-$syncScript = Join-Path $PSScriptRoot 'sync_worktrees_and_build_suite.ps1'
 $buildScript = Join-Path $PSScriptRoot 'build_vna_suite.ps1'
 
 function Find-7Zip {
@@ -202,9 +205,6 @@ function Write-ListFile {
     [System.IO.File]::WriteAllText($Path, $text, [System.Text.UTF8Encoding]::new($false))
 }
 
-if (-not (Test-Path -LiteralPath $syncScript)) {
-    throw "Missing sync/build script: $syncScript"
-}
 if (-not (Test-Path -LiteralPath $buildScript)) {
     throw "Missing build script: $buildScript"
 }
@@ -220,8 +220,7 @@ else {
 if (-not $SkipBuild) {
     Push-Location $root
     try {
-        $buildArgs = @('-File', $syncScript, '-Apply', '-Build', '-Source')
-        $buildArgs += $Source
+        $buildArgs = @('-File', $buildScript)
         if (-not [string]::IsNullOrWhiteSpace($Version)) {
             $buildArgs += @('-Version', (Normalize-Version -Value $Version))
         }

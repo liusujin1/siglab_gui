@@ -77,6 +77,22 @@ def recording_directory_name(prefix: str = "recording") -> str:
     return f"{prefix}_{stamp}"
 
 
+def available_recording_directory(
+    parent_dir: str | Path,
+    prefix: str = "recording",
+) -> Path:
+    """Return a non-existing recording directory without overwriting prior data."""
+
+    parent = Path(parent_dir)
+    base_name = recording_directory_name(prefix)
+    candidate = parent / base_name
+    suffix = 2
+    while candidate.exists():
+        candidate = parent / f"{base_name}_{suffix}"
+        suffix += 1
+    return candidate
+
+
 def _normalize_storage_format(value: str) -> str:
     text = str(value or "text").strip().lower()
     if text in {"binary", "bin", "binary_float64", BINARY_DAT_FORMAT}:

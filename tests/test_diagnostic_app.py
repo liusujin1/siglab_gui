@@ -36,7 +36,7 @@ from python_vna.diagnostic.shell import DiagnosticMainWindow
 from python_vna.models import ChannelConfig, MeasurementSet, SavedSession
 from python_vna.storage import default_session_config, save_legacy_vna
 from python_vna.ui.analysis_viewer import AnalysisWorkbench, AnalysisViewer
-from python_vna.ui.main_window import DataTipPoint, VnaViewBox, copy_widget_image_to_clipboard
+from python_vna.ui.plot_interactions import DataTipPoint, VnaViewBox, copy_widget_image_to_clipboard
 
 
 def _write_ide_trans_sdm_fixture(

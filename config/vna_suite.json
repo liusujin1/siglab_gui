@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "repository": {
+    "canonical_root": ".",
+    "source_of_truth": "canonical_root",
+    "worktree_policy": "temporary_feature_branches"
+  },
+  "version_files": {
+    "project": "pyproject.toml",
+    "package": "python_vna/__init__.py"
+  },
+  "build": {
+    "spec": "PythonVNA_Suite.spec",
+    "script": "scripts/build_vna_suite.ps1",
+    "preflight": "scripts/preflight_vna_suite.ps1",
+    "archive_script": "scripts/ensure_vna_suite_archive.ps1",
+    "executables": [
+      "VIanalysis.exe",
+      "PythonVNATest.exe",
+      "PythonVNAUpdater.exe"
+    ]
+  },
+  "areas": [
+    {
+      "id": "shared",
+      "description": "Core models, formats, plotting primitives, themes, and updater code used across products.",
+      "patterns": [
+        "python_vna/__init__.py",
+        "python_vna/analysis_algorithms.py",
+        "python_vna/condition_notes.py",
+        "python_vna/diagnostics.py",
+        "python_vna/display_transforms.py",
+        "python_vna/measurement_filter.py",
+        "python_vna/models.py",
+        "python_vna/optional.py",
+        "python_vna/resources.py",
+        "python_vna/storage.py",
+        "python_vna/ui/__init__.py",
+        "python_vna/ui/diagnostic_theme.py",
+        "python_vna/ui/legend_placement.py",
+        "python_vna/ui/plot_interactions.py",
+        "python_vna/update_client.py",
+        "python_vna/updater.py",
+        "tests/test_condition_notes.py",
+        "tests/test_display_transforms.py",
+        "tests/test_repository_config.py",
+        "tests/test_storage.py",
+        "tests/test_update_client.py"
+      ],
+      "tests": [
+        "tests/test_condition_notes.py",
+        "tests/test_display_transforms.py",
+        "tests/test_repository_config.py",
+        "tests/test_storage.py",
+        "tests/test_update_client.py"
+      ]
+    },
+    {
+      "id": "python_vna_test",
+      "description": "Acquisition, NI-DAQ, signal processing, and the PythonVNATest desktop UI.",
+      "entrypoint": "scripts/entry_python_vna_test.py",
+      "executable": "PythonVNATest.exe",
+      "patterns": [
+        "python_vna/app.py",
+        "python_vna/continuous_recording.py",
+        "python_vna/controller.py",
+        "python_vna/daq/**",
+        "python_vna/signal_pipeline.py",
+        "python_vna/ui/main_window.py",
+        "tests/test_app.py",
+        "tests/test_continuous_recording.py",
+        "tests/test_controller.py",
+        "tests/test_main_window.py",
+        "tests/test_signal_pipeline.py",
+        "tests/test_simulated_backend.py"
+      ],
+      "tests": [
+        "tests/test_app.py",
+        "tests/test_continuous_recording.py",
+        "tests/test_controller.py",
+        "tests/test_main_window.py",
+        "tests/test_signal_pipeline.py",
+        "tests/test_simulated_backend.py"
+      ]
+    },
+    {
+      "id": "vianalysis",
+      "description": "Analysis workflows, diagnostic pages, and the VIanalysis desktop UI.",
+      "entrypoint": "scripts/entry_vianalysis.py",
+      "executable": "VIanalysis.exe",
+      "patterns": [
+        "python_vna/analysis_curve_editing.py",
+        "python_vna/analysis_data.py",
+        "python_vna/analysis_derivation.py",
+        "python_vna/conversion_app.py",
+        "python_vna/diagnostic/**",
+        "python_vna/ui/analysis_viewer.py",
+        "tests/test_analysis_viewer.py",
+        "tests/test_diagnostic_app.py"
+      ],
+      "tests": [
+        "tests/test_analysis_viewer.py",
+        "tests/test_diagnostic_app.py"
+      ]
+    }
+  ],
+  "legacy_worktrees": [
+    {
+      "id": "python_vna_test_legacy",
+      "product": "python_vna_test",
+      "path": ".worktrees/vna_diagnose_isolated",
+      "branch": "codex/vna_diagnose_isolated",
+      "mode": "migration_source_only"
+    },
+    {
+      "id": "vianalysis_legacy",
+      "product": "vianalysis",
+      "path": ".worktrees/vna_diagnostic_current",
+      "branch": "codex/vna_diagnostic_current",
+      "mode": "migration_source_only"
+    }
+  ],
+  "generated": [
+    "build/**",
+    "dist/**",
+    "build_size_test_optimized/**",
+    "dist_size_test_optimized/**",
+    ".worktrees/**"
+  ]
+}

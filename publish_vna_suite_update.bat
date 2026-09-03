@@ -27,7 +27,7 @@ echo.
 echo Mode:
 echo   [Enter] 1  standard   Build full release, build incremental update, publish both.
 echo           2  existing   Publish existing dist artifacts only; no rebuild.
-echo           3  fast       Build release/update, publish incremental package only; skip full archive upload.
+echo           3  fast       Skip tests; reuse the online full archive when present, otherwise build/upload it.
 echo           4  full       Force full-only publish.
 set /p MODE=Mode: 
 

@@ -3,7 +3,7 @@ setlocal EnableDelayedExpansion
 
 cd /d "%~dp0"
 
-set "SCRIPT=%~dp0scripts\sync_worktrees_and_build_suite.ps1"
+set "SCRIPT=%~dp0scripts\build_vna_suite.ps1"
 if not exist "%SCRIPT%" (
     echo Missing script: %SCRIPT%
     pause
@@ -18,14 +18,14 @@ if "%VERSION%"=="" (
 )
 
 echo.
-echo Syncing worktrees and building PythonVNA suite...
+echo Building PythonVNA suite from the canonical repository root...
 echo This release build creates VIanalysis.exe, PythonVNATest.exe, and PythonVNAUpdater.exe.
 echo.
 
 if "%VERSION%"=="" (
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%" -Apply -Build
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%"
 ) else (
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%" -Apply -Build -Version "%VERSION%"
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%" -Version "%VERSION%"
 )
 
 set "EXITCODE=%ERRORLEVEL%"

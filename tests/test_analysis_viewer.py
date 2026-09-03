@@ -69,7 +69,7 @@ from python_vna.ui.analysis_viewer import (
     _vc_reference_band_edges,
     _vc_reference_frequency_velocity,
 )
-from python_vna.ui.main_window import DataTipText, VnaAxisItem
+from python_vna.ui.plot_interactions import DataTipText, VnaAxisItem
 
 
 def _matlab_sd_round(value: float, digits: int, multiple: int) -> float:
@@ -1089,6 +1089,184 @@ class AnalysisViewerUiTests(unittest.TestCase):
                 self.assertAlmostEqual(trans_db[target_index], 20.0 * np.log10(3.0), delta=0.35)
             finally:
                 viewer.close()
+
+    def test_dataset_removal_releases_only_the_matching_time_series_caches(self):
+        viewer = AnalysisViewer()
+        try:
+            viewer._datasets = [
+                AnalysisDataset(id=1, path=Path("one.csv"), name="one.csv", sample_rate=1.0),
+                AnalysisDataset(id=2, path=Path("two.csv"), name="two.csv", sample_rate=1.0),
+            ]
+            viewer._time_series_cache = {
+                (1, "ai0", None, None, None): (np.array([0.0]), np.array([1.0])),
+                (2, "ai0", None, None, None): (np.array([0.0]), np.array([2.0])),
+            }
+            viewer._bulk_time_series_cache = {
+                (1, None, None, None): (np.array([0.0]), {"ai0": np.array([1.0])}),
+                (2, None, None, None): (np.array([0.0]), {"ai0": np.array([2.0])}),
+            }
+            viewer._selected_channel_keys_by_dataset = {1: {"ai0"}, 2: {"ai0"}}
+            viewer._derived_result_cache[("result",)] = (np.array([1.0]),)
+            viewer._last_derived_results = [{"psd": np.array([1.0])}]
+
+            viewer._delete_datasets_by_ids({1})
+
+            self.assertEqual([dataset.id for dataset in viewer._datasets], [2])
+            self.assertEqual({key[0] for key in viewer._time_series_cache}, {2})
+            self.assertEqual({key[0] for key in viewer._bulk_time_series_cache}, {2})
+            self.assertEqual(set(viewer._selected_channel_keys_by_dataset), {2})
+            self.assertEqual(viewer._derived_result_cache, {})
+            self.assertIsNone(viewer._last_derived_results)
+
+            viewer._clear_datasets()
+
+            self.assertEqual(viewer._time_series_cache, {})
+            self.assertEqual(viewer._bulk_time_series_cache, {})
+            self.assertEqual(viewer._selected_channel_keys_by_dataset, {})
+        finally:
+            viewer.close()
+
+    def test_time_series_alignment_rejects_large_timestamp_gaps(self):
+        regular = np.arange(100, dtype=float) / 1000.0
+        timestamps = np.concatenate((regular, np.array([1000.0])))
+        values = np.arange(timestamps.size, dtype=float)
+
+        aligned = AnalysisViewer._align_time_series_pair(
+            timestamps,
+            values,
+            1000.0,
+            timestamps,
+            values,
+            1000.0,
+        )
+
+        self.assertIsNone(aligned)
+
+    def test_two_selected_time_datasets_compute_response_over_input_transfer(self):
+        sample_rate = 1024.0
+        sample_count = 4096
+        time_s = np.arange(sample_count, dtype=float) / sample_rate
+        reference_values = np.random.default_rng(42).standard_normal(sample_count)
+        response_values = 2.5 * reference_values
+        reference_series = AnalysisSeries(
+            dataset_id=1,
+            channel_index=0,
+            channel_key="input",
+            display_name="Input",
+        )
+        response_series = AnalysisSeries(
+            dataset_id=2,
+            channel_index=0,
+            channel_key="response",
+            display_name="Response",
+        )
+        viewer = AnalysisViewer()
+        try:
+            viewer._datasets = [
+                AnalysisDataset(
+                    id=1,
+                    path=Path("input.csv"),
+                    name="input.csv",
+                    sample_rate=sample_rate,
+                    series=[reference_series],
+                    time_s=time_s,
+                    channels={"input": reference_values},
+                ),
+                AnalysisDataset(
+                    id=2,
+                    path=Path("response.csv"),
+                    name="response.csv",
+                    sample_rate=sample_rate,
+                    series=[response_series],
+                    time_s=time_s,
+                    channels={"response": response_values},
+                ),
+            ]
+            viewer._refresh_dataset_lists()
+            viewer.series_list.blockSignals(True)
+            try:
+                viewer.series_list.item(0).setSelected(True)
+                viewer.series_list.item(1).setSelected(True)
+            finally:
+                viewer.series_list.blockSignals(False)
+            viewer.fs_hint_spin.setValue(512.0)
+
+            viewer.plot_current()
+
+            curves = viewer._plot_curves[viewer.main_plots[2]]
+            self.assertEqual(len(curves), 1)
+            label, (_frequency, transfer_db) = next(iter(curves.items()))
+            self.assertIn("response.csv", label)
+            self.assertIn("input.csv", label)
+            self.assertAlmostEqual(
+                float(np.nanmedian(transfer_db)),
+                20.0 * np.log10(2.5),
+                delta=0.05,
+            )
+            self.assertIn("input.csv", viewer.statusBar().currentMessage())
+            self.assertIn("response.csv", viewer.statusBar().currentMessage())
+        finally:
+            viewer.close()
+
+    def test_two_selected_complete_vna_channels_keep_their_native_transfer_curves(self):
+        sample_rate = 1024.0
+        time_s = np.arange(2048, dtype=float) / sample_rate
+        frequency = np.array([0.0, 10.0, 20.0, 30.0], dtype=float)
+        datasets: list[AnalysisDataset] = []
+        for dataset_id, gain in ((1, 2.0), (2, 3.0)):
+            reference = np.sin(2.0 * np.pi * 20.0 * time_s)
+            response = gain * reference
+            datasets.append(
+                AnalysisDataset(
+                    id=dataset_id,
+                    path=Path(f"complete_{dataset_id}.vna"),
+                    name=f"complete_{dataset_id}.vna",
+                    sample_rate=sample_rate,
+                    series=[
+                        AnalysisSeries(
+                            dataset_id=dataset_id,
+                            channel_index=0,
+                            channel_key="ai0",
+                            display_name="Reference",
+                        ),
+                        AnalysisSeries(
+                            dataset_id=dataset_id,
+                            channel_index=1,
+                            channel_key="ai1",
+                            display_name="Response",
+                        ),
+                    ],
+                    time_s=time_s,
+                    channels={"ai0": reference, "ai1": response},
+                    frequency_hz=frequency,
+                    frf={"ai0->ai1": np.full(frequency.size, gain, dtype=complex)},
+                )
+            )
+        viewer = AnalysisViewer()
+        try:
+            viewer._datasets = datasets
+            viewer._refresh_dataset_lists()
+            viewer.series_list.blockSignals(True)
+            try:
+                viewer.series_list.item(1).setSelected(True)
+                viewer.series_list.item(3).setSelected(True)
+            finally:
+                viewer.series_list.blockSignals(False)
+
+            viewer.plot_current()
+
+            curves = viewer._plot_curves[viewer.main_plots[2]]
+            self.assertEqual(len(curves), 2)
+            median_levels = sorted(float(np.nanmedian(values)) for _frequency, values in curves.values())
+            np.testing.assert_allclose(
+                median_levels,
+                sorted([20.0 * np.log10(2.0), 20.0 * np.log10(3.0)]),
+                rtol=0.0,
+                atol=1e-10,
+            )
+            self.assertIsNone(viewer._last_time_pair_transfer_description)
+        finally:
+            viewer.close()
 
     def test_vna_raw_aspec_psd_matches_main_display_density_scaling(self):
         session = default_session_config()
@@ -2846,21 +3024,27 @@ class AnalysisViewerUiTests(unittest.TestCase):
                 ]
                 for output_index in range(3)
             ]
-            ok = viewer._execute_mimo_coupling(
-                {
-                    "transfers": transfer_matrix_data,
-                    "targets": [
-                        ("dataset_psd_curve", "2:ai0"),
-                        ("dataset_psd_curve", "2:ai1"),
-                        ("dataset_psd_curve", "2:ai2"),
-                    ],
-                    "relation": "independent",
-                    "regularization": 1e-8,
-                    "prefix": "corr_",
-                }
-            )
+            with mock.patch.object(
+                viewer,
+                "_time_domain_cross_psd_matrix_for_targets",
+                wraps=viewer._time_domain_cross_psd_matrix_for_targets,
+            ) as target_matrix_builder:
+                ok = viewer._execute_mimo_coupling(
+                    {
+                        "transfers": transfer_matrix_data,
+                        "targets": [
+                            ("dataset_psd_curve", "2:ai0"),
+                            ("dataset_psd_curve", "2:ai1"),
+                            ("dataset_psd_curve", "2:ai2"),
+                        ],
+                        "relation": "independent",
+                        "regularization": 1e-8,
+                        "prefix": "corr_",
+                    }
+                )
 
             self.assertTrue(ok)
+            self.assertEqual(target_matrix_builder.call_count, 1)
             self.assertIn("时域重算互谱反演", viewer.statusBar().currentMessage())
             plot_curves = viewer._plot_curves[viewer.derived_plots[1]]
             predicted_x = plot_curves["校核顶部响应X"][1]
