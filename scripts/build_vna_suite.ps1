@@ -54,6 +54,29 @@ function Assert-GeneratedDistPath {
     }
 }
 
+function Get-IsolatedPyInstallerPath {
+    $codexRuntimeRoot = Join-Path $env:USERPROFILE '.cache\codex-runtimes'
+    $codexRuntimePrefix = [System.IO.Path]::GetFullPath($codexRuntimeRoot).TrimEnd('\') + '\'
+    $separator = [System.IO.Path]::PathSeparator
+
+    return (($env:PATH -split [regex]::Escape([string]$separator)) |
+        Where-Object {
+            if ([string]::IsNullOrWhiteSpace($_)) {
+                return $false
+            }
+            try {
+                $candidate = [System.IO.Path]::GetFullPath($_).TrimEnd('\') + '\'
+                return -not $candidate.StartsWith(
+                    $codexRuntimePrefix,
+                    [System.StringComparison]::OrdinalIgnoreCase
+                )
+            }
+            catch {
+                return $true
+            }
+        }) -join $separator
+}
+
 if (-not (Test-Path $python)) {
     throw "Python virtual environment was not found: $python"
 }
@@ -95,9 +118,16 @@ try {
         throw "icon generation failed with exit code $LASTEXITCODE"
     }
 
-    & $pyinstaller --clean --noconfirm $spec
-    if ($LASTEXITCODE -ne 0) {
-        throw "PyInstaller failed with exit code $LASTEXITCODE"
+    $originalPath = $env:PATH
+    try {
+        $env:PATH = Get-IsolatedPyInstallerPath
+        & $pyinstaller --clean --noconfirm $spec
+        if ($LASTEXITCODE -ne 0) {
+            throw "PyInstaller failed with exit code $LASTEXITCODE"
+        }
+    }
+    finally {
+        $env:PATH = $originalPath
     }
 
     if (-not (Test-Path $dist)) {

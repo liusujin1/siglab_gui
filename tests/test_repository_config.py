@@ -135,6 +135,18 @@ class RepositoryConfigTests(unittest.TestCase):
         analysis_end = text.index("pyz_vianalysis =", analysis_start)
         self.assertIn("SCIPY_ARRAY_API_HIDDENIMPORTS", text[analysis_start:analysis_end])
 
+    def test_build_isolates_pyinstaller_from_codex_runtime_tools(self):
+        text = (ROOT / "scripts" / "build_vna_suite.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("function Get-IsolatedPyInstallerPath", text)
+        self.assertIn(".cache\\codex-runtimes", text)
+        self.assertRegex(
+            text,
+            r"\$env:PATH\s*=\s*Get-IsolatedPyInstallerPath[\s\S]+?&\s+\$pyinstaller",
+        )
+        self.assertIn("$env:PATH = $originalPath", text)
+
 
 if __name__ == "__main__":
     unittest.main()
