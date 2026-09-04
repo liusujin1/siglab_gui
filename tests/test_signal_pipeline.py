@@ -391,6 +391,41 @@ class SignalPipelineTests(unittest.TestCase):
         self.assertEqual(measurement.metadata["average_count"], 0)
         self.assertEqual(measurement.metadata["average_target"], 0)
 
+    def test_instant_run_does_not_apply_double_hit_or_overload_reject(self):
+        sample_rate = 1024.0
+        samples = 1024
+        t = np.arange(samples, dtype=float) / sample_rate
+        acquisition = AcquisitionConfig()
+        acquisition.reference_channel = "ref"
+        acquisition.modal = ModalProcessingConfig(
+            reject_double_hit=True,
+            double_hit_threshold=0.5,
+            double_hit_delay_fraction=0.2,
+            reject_overload=True,
+        )
+        processor = FrameProcessor(acquisition, averaging_enabled=False)
+        reference = np.zeros(samples, dtype=float)
+        reference[100] = 1.0
+        reference[500] = 0.9
+        frame = BackendFrame(
+            sample_rate=sample_rate,
+            channel_names=["ref"],
+            data=reference[None, :],
+            timestamps=t,
+            frame_index=0,
+            metadata={"channel_full_scales": {"ref": 1.0}},
+        )
+
+        measurement = processor.process(frame)
+
+        self.assertFalse(measurement.metadata["averaging_enabled"])
+        self.assertFalse(measurement.metadata["rejected"])
+        self.assertFalse(measurement.metadata["double_hit_rejected"])
+        self.assertFalse(measurement.metadata["overload_rejected"])
+        self.assertTrue(measurement.time_data["channels"])
+        self.assertTrue(measurement.spectra["autospectrum"])
+        self.assertTrue(measurement.spectra["fft"])
+
     def test_frame_processor_reports_average_progress(self):
         sample_rate = 1024.0
         samples = 1024
