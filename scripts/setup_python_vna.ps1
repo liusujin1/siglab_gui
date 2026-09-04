@@ -12,6 +12,7 @@ try {
     & $PythonExe -m venv .venv
     & $VenvPython -m pip install --upgrade pip
     & $VenvPython -m pip install -e .[gui,ni,dev]
+    & $VenvPython -m pip install pyinstaller==6.20.0
 }
 finally {
     Pop-Location
