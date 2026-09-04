@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
 from pathlib import Path
+import threading
 
 import numpy as np
 
@@ -60,6 +62,15 @@ from python_vna.analysis_data import (
     load_analysis_path,
 )
 from python_vna.diagnostics import append_log
+from python_vna.diagnostic.processing_workflow import (
+    CurveDescriptor,
+    ProcessingIssue,
+    ProcessingRecipe,
+    ValidationReport,
+    parse_optional_number,
+    validate_control_points,
+    validate_processing_task,
+)
 from python_vna.display_transforms import transform_legacy_autospectrum
 from python_vna.optional import require
 from python_vna.ui.plot_interactions import (
@@ -127,15 +138,17 @@ class WorkspaceCurve:
     source: str
 
 
-class _TransferControlPoint(DataTipPoint):
-    def __init__(self, *args, on_drag_finished=None, **kwargs):
+class EditableControlPoint(DataTipPoint):
+    def __init__(self, *args, on_drag_started=None, on_drag_finished=None, **kwargs):
         super().__init__(*args, **kwargs)
+        self._on_drag_started = on_drag_started
         self._on_drag_finished = on_drag_finished
 
-    def mouseDragEvent(self, ev) -> None:
-        finished = bool(ev.isFinish())
-        super().mouseDragEvent(ev)
-        if finished and self._on_drag_finished is not None:
+    def mouseDragEvent(self, event) -> None:
+        if event.button() == QtCore.Qt.LeftButton and event.isStart() and self._on_drag_started is not None:
+            self._on_drag_started()
+        super().mouseDragEvent(event)
+        if event.isAccepted() and event.isFinish() and self._on_drag_finished is not None:
             self._on_drag_finished()
 
 
@@ -150,6 +163,45 @@ class AnalysisDataStore(QtCore.QObject):
         self.custom_series_scales: dict[tuple[int, int], float] = {}
         self.original_series_scales: dict[tuple[int, int], float] = {}
         self.current_measurement_dataset_id: int | None = None
+
+
+class AnalysisLoadSignals(QtCore.QObject):
+    item_finished = QtCore.Signal(int, object, object)
+    finished = QtCore.Signal(bool)
+
+
+class AnalysisLoadTask(QtCore.QRunnable):
+    def __init__(self, paths: list[Path], *, first_dataset_id: int, import_kind: str | None):
+        super().__init__()
+        self.paths = list(paths)
+        self.first_dataset_id = int(first_dataset_id)
+        self.import_kind = import_kind
+        self.signals = AnalysisLoadSignals()
+        self._cancelled = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancelled.set()
+
+    @QtCore.Slot()
+    def run(self) -> None:
+        cancelled = False
+        for index, path in enumerate(self.paths):
+            if self._cancelled.is_set():
+                cancelled = True
+                break
+            try:
+                dataset = load_analysis_path(
+                    path,
+                    fs_hint=TEXT_FILE_FS_HINT_HZ,
+                    dataset_id=self.first_dataset_id + index,
+                    import_kind=self.import_kind,
+                )
+                error = None
+            except Exception as exc:
+                dataset = None
+                error = str(exc)
+            self.signals.item_finished.emit(index, dataset, error)
+        self.signals.finished.emit(cancelled or self._cancelled.is_set())
 
 
 class AnalysisWorkbench(QtWidgets.QWidget):
@@ -223,6 +275,19 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         self._interpolation_resolution_s = 0.001
         self._last_time_pair_transfer_description: str | None = None
         self._mimo_current_grid: np.ndarray | None = None
+        self._derived_results_stale = True
+        self._derived_stale_reason = "尚未计算"
+        self._derived_cancel_requested = False
+        self._last_processing_recipe: ProcessingRecipe | None = None
+        self._last_processing_report: ValidationReport | None = None
+        self._last_load_report: list[tuple[str, str, str]] = []
+        self._curve_edit_undo: list[tuple[str, object, np.ndarray, np.ndarray]] = []
+        self._curve_edit_redo: list[tuple[str, object, np.ndarray, np.ndarray]] = []
+        self._restoring_curve_edit = False
+        self._background_load_task: AnalysisLoadTask | None = None
+        self._background_load_progress: QtWidgets.QProgressDialog | None = None
+        self._background_load_rows: list[tuple[str, str, str]] = []
+        self._background_load_paths: list[Path] = []
         self._build_ui()
         self.apply_theme(self._theme)
         self._data_store.changed.connect(self._on_shared_data_store_changed)
@@ -263,6 +328,8 @@ class AnalysisWorkbench(QtWidgets.QWidget):
                 self._sync_workspace_operation_labels()
         finally:
             self._suspend_auto_plot = previous_suspend
+        if self._derived_only:
+            self._mark_derived_results_stale("共享数据已变化")
         if reason in {"refresh", "current_measurement"} and self.isVisible():
             self._clear_plots_later(show_status=False)
         append_log(f"analysis.shared.end reason={reason} datasets={len(self._datasets)}")
@@ -429,7 +496,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             left_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
             left_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
             left_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
-            left_scroll.setMinimumWidth(270)
+            left_scroll.setMinimumWidth(230)
             left_scroll.setMaximumWidth(326)
             left_scroll.setWidget(self.left_panel)
             self.left_panel_scroll = left_scroll
@@ -471,6 +538,8 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             },
         )
         plot = pg.PlotWidget(plotItem=plot_item)
+        plot_item.setDownsampling(auto=True, mode="peak")
+        plot_item.setClipToView(True)
         view_box._on_left_drag = (
             lambda scene_pos, plot_widget=plot: self._move_cursor_from_scene_pos(plot_widget, scene_pos)
         )
@@ -674,6 +743,14 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             button.clicked.connect(lambda _checked=False, slot_role=role: self._show_slot_selector(slot_role))
             layout.addWidget(value_label, row, 1)
             layout.addWidget(button, row, 2)
+        self.derived_batch_target_list = QtWidgets.QListWidget()
+        self.derived_batch_target_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.derived_batch_target_list.setMinimumHeight(76)
+        self.derived_batch_target_list.setMaximumHeight(126)
+        self.derived_batch_target_list.setToolTip("按 Ctrl 或 Shift 可一次选择多个待换算目标")
+        layout.addWidget(QtWidgets.QLabel("批量待换算目标"), 2, 0, 1, 3)
+        layout.addWidget(self.derived_batch_target_list, 3, 0, 1, 3)
+        self.derived_batch_target_list.itemSelectionChanged.connect(self._on_batch_target_selection_changed)
         return group
 
     def _build_workspace_group(self) -> QtWidgets.QGroupBox:
@@ -713,43 +790,55 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         return group
 
     def _build_settings_buttons_group(self) -> QtWidgets.QGroupBox:
-        group = QtWidgets.QGroupBox("4. 设置")
+        group = QtWidgets.QGroupBox("4. 批量与配方")
         layout = QtWidgets.QGridLayout(group)
         layout.setContentsMargins(8, 14, 8, 8)
         layout.setHorizontalSpacing(6)
         layout.setVerticalSpacing(6)
-        self.derived_parameter_button = QtWidgets.QPushButton("换算参数")
-        self.derived_curve_panel_button = QtWidgets.QPushButton("曲线编辑")
-        self.derived_workspace_button = QtWidgets.QPushButton("工作区运算")
-        self.derived_processing_button = QtWidgets.QPushButton("滤波处理")
-        self.derived_mimo_button = QtWidgets.QPushButton("三轴耦合")
+        self.derived_batch_calculate_button = QtWidgets.QPushButton("全部计算")
+        self.derived_batch_export_button = QtWidgets.QPushButton("全部导出")
+        self.derived_batch_cancel_button = QtWidgets.QPushButton("取消任务")
+        self.derived_recipe_save_button = QtWidgets.QPushButton("保存配方")
+        self.derived_recipe_load_button = QtWidgets.QPushButton("加载配方")
+        self.derived_load_report_button = QtWidgets.QPushButton("加载详情")
         for button in (
-            self.derived_parameter_button,
-            self.derived_curve_panel_button,
-            self.derived_workspace_button,
-            self.derived_processing_button,
-            self.derived_mimo_button,
+            self.derived_batch_calculate_button,
+            self.derived_batch_export_button,
+            self.derived_batch_cancel_button,
+            self.derived_recipe_save_button,
+            self.derived_recipe_load_button,
+            self.derived_load_report_button,
         ):
             set_button_role(button, "secondary")
-        layout.addWidget(self.derived_parameter_button, 0, 0)
-        layout.addWidget(self.derived_curve_panel_button, 0, 1)
-        layout.addWidget(self.derived_workspace_button, 1, 0)
-        layout.addWidget(self.derived_processing_button, 1, 1)
-        layout.addWidget(self.derived_mimo_button, 2, 0, 1, 2)
-        self.derived_settings_stack = QtWidgets.QStackedWidget()
-        self.derived_settings_stack.setVisible(False)
-        self.derived_settings_stack.setMinimumSize(0, 0)
-        self.derived_settings_stack.setSizePolicy(
-            QtWidgets.QSizePolicy.Expanding,
-            QtWidgets.QSizePolicy.Preferred,
-        )
-        self.derived_settings_stack.setMaximumHeight(360)
-        layout.addWidget(self.derived_settings_stack, 3, 0, 1, 2)
-        self.derived_parameter_button.clicked.connect(lambda _checked=False: self._show_settings_panel(0))
-        self.derived_curve_panel_button.clicked.connect(lambda _checked=False: self._show_settings_panel(1))
-        self.derived_workspace_button.clicked.connect(lambda _checked=False: self._show_settings_panel(2))
-        self.derived_processing_button.clicked.connect(lambda _checked=False: self._show_settings_panel(3))
-        self.derived_mimo_button.clicked.connect(self._show_mimo_dialog)
+        set_button_role(self.derived_batch_calculate_button, "primary")
+        set_button_role(self.derived_batch_cancel_button, "danger")
+        layout.addWidget(self.derived_batch_calculate_button, 0, 0)
+        layout.addWidget(self.derived_batch_export_button, 0, 1)
+        layout.addWidget(self.derived_batch_cancel_button, 1, 0)
+        layout.addWidget(self.derived_load_report_button, 1, 1)
+        layout.addWidget(self.derived_recipe_save_button, 2, 0)
+        layout.addWidget(self.derived_recipe_load_button, 2, 1)
+        self.derived_batch_status_table = QtWidgets.QTableWidget(0, 3)
+        self.derived_batch_status_table.setHorizontalHeaderLabels(["目标", "状态", "说明"])
+        self.derived_batch_status_table.verticalHeader().setVisible(False)
+        self.derived_batch_status_table.setMaximumHeight(126)
+        self.derived_batch_status_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
+        self.derived_batch_status_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
+        self.derived_batch_status_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.Stretch)
+        layout.addWidget(self.derived_batch_status_table, 3, 0, 1, 2)
+        self.derived_batch_name_edit = QtWidgets.QLineEdit("{name}_{mode}")
+        self.derived_batch_name_edit.setToolTip("批量导出命名模板，可使用 {name} 和 {mode}")
+        layout.addWidget(QtWidgets.QLabel("输出命名"), 4, 0)
+        layout.addWidget(self.derived_batch_name_edit, 4, 1)
+        self.derived_batch_calculate_button.clicked.connect(self._calculate_all_derived_targets)
+        self.derived_batch_export_button.clicked.connect(self._export_all_derived_results)
+        self.derived_batch_cancel_button.clicked.connect(self._cancel_derived_batch)
+        self.derived_recipe_save_button.clicked.connect(self._save_processing_recipe)
+        self.derived_recipe_load_button.clicked.connect(self._load_processing_recipe)
+        self.derived_load_report_button.clicked.connect(self._show_last_load_report)
+        self.derived_batch_export_button.setEnabled(False)
+        self.derived_batch_cancel_button.setEnabled(False)
+        self.derived_load_report_button.setEnabled(False)
         return group
 
     def _build_workspace_operation_group(self) -> QtWidgets.QGroupBox:
@@ -781,6 +870,13 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         self.workspace_op_order_combo.addItem("B在前，A在后", "b_first")
         self.workspace_op_split_edit = QtWidgets.QLineEdit("30")
         self.workspace_op_split_edit.setMaximumWidth(86)
+        self.workspace_stitch_blend_check = QtWidgets.QCheckBox("平滑过渡")
+        self.workspace_stitch_blend_width_spin = QtWidgets.QDoubleSpinBox()
+        self.workspace_stitch_blend_width_spin.setRange(0.01, 1e6)
+        self.workspace_stitch_blend_width_spin.setValue(2.0)
+        self.workspace_stitch_blend_width_spin.setSuffix(" Hz")
+        self.workspace_stitch_blend_width_spin.setEnabled(False)
+        self.workspace_stitch_blend_check.toggled.connect(self.workspace_stitch_blend_width_spin.setEnabled)
         self.workspace_op_execute_button = QtWidgets.QPushButton("执行并保存到工作区")
         set_button_role(self.workspace_op_execute_button, "primary")
         self.workspace_op_execute_button.clicked.connect(self._execute_workspace_operation)
@@ -797,6 +893,8 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         stitch_layout.addWidget(self.workspace_op_order_combo, 0, 1)
         stitch_layout.addWidget(QtWidgets.QLabel("分界Hz"), 1, 0)
         stitch_layout.addWidget(self.workspace_op_split_edit, 1, 1)
+        stitch_layout.addWidget(self.workspace_stitch_blend_check, 2, 0)
+        stitch_layout.addWidget(self.workspace_stitch_blend_width_spin, 2, 1)
         layout.addWidget(self.workspace_stitch_controls, 4, 0, 1, 3)
         layout.addWidget(self.workspace_op_execute_button, 5, 0, 1, 3)
         self._sync_workspace_operation_ui()
@@ -1185,7 +1283,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         self.derived_regularization_spin.setSingleStep(1e-6)
         self.derived_regularization_spin.setValue(0.0)
         self.derived_regularization_spin.setToolTip("反推除法的传递率下限；力/加速度等带单位传递率建议保持 0。")
-        self.derived_plot_button = QtWidgets.QPushButton("换算绘图" if self._derived_only else "应用")
+        self.derived_plot_button = QtWidgets.QPushButton("计算 / 更新结果" if self._derived_only else "应用")
         set_button_role(self.derived_plot_button, "primary")
         self.derived_show_source_check = QtWidgets.QCheckBox("绘制待换算数据")
         self.derived_show_source_check.setObjectName("vcCheck")
@@ -1198,8 +1296,40 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         self.derived_coherence_correction_check.setChecked(True)
         self.derived_vc_checks: dict[str, QtWidgets.QCheckBox] = {}
 
+        if self._derived_only:
+            workflow_group = QtWidgets.QGroupBox("处理流程")
+            workflow_group.setMinimumWidth(0)
+            workflow_group.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+            workflow_layout = QtWidgets.QGridLayout(workflow_group)
+            workflow_layout.setContentsMargins(8, 14, 8, 8)
+            workflow_layout.setHorizontalSpacing(6)
+            workflow_layout.setVerticalSpacing(5)
+            workflow_layout.addWidget(QtWidgets.QLabel("传递率"), 0, 0)
+            workflow_layout.addWidget(self.derived_transfer_combo, 0, 1)
+            workflow_layout.addWidget(QtWidgets.QLabel("方向"), 0, 2)
+            workflow_layout.addWidget(self.derived_direction_combo, 0, 3)
+            workflow_layout.addWidget(self.derived_plot_button, 0, 4)
+            workflow_layout.addWidget(QtWidgets.QLabel("待换算数据"), 1, 0)
+            workflow_layout.addWidget(self.derived_input_series_combo, 1, 1, 1, 4)
+            workflow_layout.setColumnStretch(1, 2)
+            workflow_layout.setColumnStretch(3, 1)
+            self.derived_task_summary_label = QtWidgets.QLabel("请选择传递率和待换算数据")
+            self.derived_task_summary_label.setWordWrap(True)
+            self.derived_task_summary_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+            self.derived_task_summary_label.setObjectName("processingTaskSummary")
+            workflow_layout.addWidget(self.derived_task_summary_label, 2, 0, 1, 5)
+            self.derived_issue_label = QtWidgets.QLabel("结果待更新")
+            self.derived_issue_label.setWordWrap(True)
+            self.derived_issue_label.setObjectName("processingIssue")
+            workflow_layout.addWidget(self.derived_issue_label, 3, 0, 1, 5)
+            self.derived_verification_label = QtWidgets.QLabel("结果校核：等待计算")
+            self.derived_verification_label.setWordWrap(True)
+            self.derived_verification_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+            workflow_layout.addWidget(self.derived_verification_label, 4, 0, 1, 5)
+            layout.addWidget(workflow_group)
+
         for combo in (self.derived_transfer_combo, self.derived_input_series_combo):
-            combo.setMinimumWidth(150)
+            combo.setMinimumWidth(100 if self._derived_only else 150)
             combo.setMaximumWidth(16777215)
             combo.setMinimumContentsLength(12)
             combo.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
@@ -1213,8 +1343,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             transfer_factor_row.setSpacing(6)
             transfer_factor_row.addWidget(QtWidgets.QLabel("传递率系数"))
             transfer_factor_row.addWidget(self.derived_transfer_factor_spin)
-            transfer_factor_row.addWidget(QtWidgets.QLabel("换算方向"))
-            transfer_factor_row.addWidget(self.derived_direction_combo, 1)
+            transfer_factor_row.addStretch(1)
             control_layout.addLayout(transfer_factor_row)
 
             input_factor_row = QtWidgets.QHBoxLayout()
@@ -1235,7 +1364,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             regularization_row.setSpacing(6)
             regularization_row.addWidget(QtWidgets.QLabel("反推下限"))
             regularization_row.addWidget(self.derived_regularization_spin)
-            regularization_row.addWidget(self.derived_plot_button)
+            regularization_row.addStretch(1)
             control_layout.addLayout(regularization_row)
         else:
             transfer_row = QtWidgets.QHBoxLayout()
@@ -1300,6 +1429,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         self.derived_transfer_point_table.setHorizontalHeaderLabels(["Hz", "dB"])
         self.derived_transfer_point_table.verticalHeader().setVisible(False)
         self.derived_transfer_point_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.derived_transfer_point_table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         if self._derived_only:
             self.derived_transfer_point_table.setMinimumHeight(150)
             self.derived_transfer_point_table.setMaximumHeight(260)
@@ -1317,6 +1447,12 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         self.derived_transfer_reset_button = QtWidgets.QPushButton("清除传递率编辑")
         self.derived_psd_edit_button = QtWidgets.QPushButton("编辑当前PSD")
         self.derived_psd_reset_button = QtWidgets.QPushButton("清除PSD编辑")
+        self.derived_curve_undo_button = QtWidgets.QPushButton("撤销")
+        self.derived_curve_redo_button = QtWidgets.QPushButton("重做")
+        self.derived_curve_copy_button = QtWidgets.QPushButton("复制")
+        self.derived_curve_paste_button = QtWidgets.QPushButton("粘贴")
+        self.derived_curve_import_button = QtWidgets.QPushButton("导入点表")
+        self.derived_curve_export_button = QtWidgets.QPushButton("导出点表")
         self.derived_stitch_enabled_check = QtWidgets.QCheckBox("拼合")
         self.derived_stitch_order_combo = QtWidgets.QComboBox()
         self.derived_stitch_order_combo.addItem("换算结果在前", "primary_first")
@@ -1334,16 +1470,30 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             transfer_actions.addWidget(self.derived_transfer_edit_button)
             transfer_actions.addWidget(self.derived_transfer_reset_button)
             edit_layout.addLayout(transfer_actions)
+            history_actions = QtWidgets.QHBoxLayout()
+            history_actions.setSpacing(5)
+            history_actions.addWidget(self.derived_curve_undo_button)
+            history_actions.addWidget(self.derived_curve_redo_button)
+            edit_layout.addLayout(history_actions)
             point_actions = QtWidgets.QHBoxLayout()
             point_actions.setSpacing(5)
             point_actions.addWidget(self.derived_transfer_add_point_button)
             point_actions.addWidget(self.derived_transfer_delete_point_button)
             edit_layout.addLayout(point_actions)
+            clipboard_actions = QtWidgets.QHBoxLayout()
+            clipboard_actions.setSpacing(5)
+            clipboard_actions.addWidget(self.derived_curve_copy_button)
+            clipboard_actions.addWidget(self.derived_curve_paste_button)
+            edit_layout.addLayout(clipboard_actions)
             psd_actions = QtWidgets.QHBoxLayout()
             psd_actions.setSpacing(5)
             psd_actions.addWidget(self.derived_psd_edit_button)
             psd_actions.addWidget(self.derived_psd_reset_button)
             edit_layout.addLayout(psd_actions)
+            file_actions = QtWidgets.QHBoxLayout()
+            file_actions.addWidget(self.derived_curve_import_button)
+            file_actions.addWidget(self.derived_curve_export_button)
+            edit_layout.addLayout(file_actions)
             self.derived_stitch_enabled_check.setVisible(False)
             self.derived_stitch_order_combo.setVisible(False)
             self.derived_stitch_series_combo.setVisible(False)
@@ -1378,12 +1528,18 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             self.derived_curve_dialog = None
             self.derived_parameter_dialog = None
             self.derived_processing_dialog = None
-            self.derived_settings_stack.addWidget(controls)
-            self.derived_settings_stack.addWidget(edit_group)
-            self.derived_settings_stack.addWidget(self._build_workspace_operation_group())
-            self.derived_settings_stack.addWidget(self.processing_controls_group)
-            for index in range(self.derived_settings_stack.count()):
-                self.derived_settings_stack.widget(index).setMinimumWidth(0)
+            self.derived_right_toolbox = QtWidgets.QToolBox()
+            self.derived_right_toolbox.setMinimumWidth(250)
+            self.derived_right_toolbox.setMaximumWidth(370)
+            self.derived_right_toolbox.addItem(controls, "参数")
+            workspace_operation_group = self._build_workspace_operation_group()
+            self.derived_right_toolbox.addItem(edit_group, "曲线编辑")
+            self.derived_right_toolbox.addItem(workspace_operation_group, "工作区运算")
+            self.derived_right_toolbox.addItem(self.processing_controls_group, "时域与滤波")
+            for panel in (controls, edit_group, workspace_operation_group, self.processing_controls_group):
+                panel.setMinimumWidth(0)
+                panel.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+            self.derived_settings_stack = self.derived_right_toolbox
         else:
             self.derived_curve_dialog = QtWidgets.QDialog(self)
             self.derived_curve_dialog.setWindowTitle("曲线编辑与拼合")
@@ -1407,7 +1563,25 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             action_row.addWidget(self.derived_main_plot_button)
             action_row.addStretch(1)
             layout.addLayout(action_row)
-        layout.addLayout(vc_grid)
+        if self._derived_only:
+            control_layout.addLayout(vc_grid)
+            self.derived_dimensionless_check = QtWidgets.QCheckBox("单位未知时按无量纲继续")
+            self.derived_dimensionless_check.setChecked(True)
+            self.derived_dimensionless_check.setToolTip("仅在确认单位处理由外部流程完成时使用；该覆盖会写入配方和导出元数据。")
+            control_layout.addWidget(self.derived_dimensionless_check)
+        else:
+            layout.addLayout(vc_grid)
+
+        if self._derived_only:
+            plot_host = QtWidgets.QWidget()
+            plot_host.setMinimumWidth(0)
+            plot_host.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Expanding)
+            plot_layout = QtWidgets.QVBoxLayout(plot_host)
+            plot_layout.setContentsMargins(0, 0, 0, 0)
+            plot_layout.setSpacing(6)
+        else:
+            plot_host = None
+            plot_layout = layout
 
         self.derived_plots: list[pg.PlotWidget] = []
         self.derived_open_buttons: list[QtWidgets.QPushButton] = []
@@ -1416,7 +1590,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         self.derived_result_mode_combo = QtWidgets.QComboBox()
         self.derived_result_mode_combo.addItems(["PSD", "CumPSD", "地基振动", "近似时域"])
         self.derived_result_mode_combo.setCurrentText("PSD")
-        self.derived_result_mode_combo.currentTextChanged.connect(lambda _text: self._auto_plot_derived_from_control_change())
+        self.derived_result_mode_combo.currentTextChanged.connect(self._on_derived_result_mode_changed)
         for index, title in enumerate(("传递率曲线", "换算图窗")):
             row = QtWidgets.QHBoxLayout()
             row.setSpacing(5)
@@ -1427,6 +1601,9 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             open_button = QtWidgets.QPushButton("图窗")
             interpolate_button = QtWidgets.QPushButton("插值")
             export_button = QtWidgets.QPushButton("导出数据")
+            for action_button in (open_button, interpolate_button, export_button):
+                action_button.setMinimumWidth(0)
+                action_button.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
             open_button.clicked.connect(lambda _checked=False, i=index: self._open_plot_window_for_plot(self.derived_plots[i]))
             interpolate_button.clicked.connect(lambda _checked=False, i=index: self._show_interpolation_dialog_for_plot(self.derived_plots[i]))
             export_button.clicked.connect(lambda _checked=False, i=index: self._export_plot_csv(self.derived_plots[i]))
@@ -1436,10 +1613,21 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             row.addWidget(open_button)
             row.addWidget(interpolate_button)
             row.addWidget(export_button)
-            layout.addLayout(row)
+            plot_layout.addLayout(row)
             plot = self._create_plot_widget(title)
-            layout.addWidget(plot, 1)
+            plot_layout.addWidget(plot, 1)
             self.derived_plots.append(plot)
+
+        if self._derived_only and plot_host is not None:
+            content_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+            content_splitter.setChildrenCollapsible(False)
+            content_splitter.addWidget(plot_host)
+            content_splitter.addWidget(self.derived_right_toolbox)
+            content_splitter.setStretchFactor(0, 1)
+            content_splitter.setStretchFactor(1, 0)
+            content_splitter.setSizes([720, 300])
+            layout.addWidget(content_splitter, 1)
+            self.derived_content_splitter = content_splitter
 
         self.derived_transfer_combo.currentIndexChanged.connect(
             lambda _index: self._auto_plot_derived_from_control_change()
@@ -1448,10 +1636,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         self.derived_direction_combo.currentIndexChanged.connect(
             lambda _index: self._auto_plot_derived_from_control_change()
         )
-        self.derived_input_series_combo.currentIndexChanged.connect(
-            lambda _index: self._auto_plot_derived_from_control_change()
-        )
-        self.derived_input_series_combo.currentIndexChanged.connect(lambda _index: self._sync_slot_labels())
+        self.derived_input_series_combo.currentIndexChanged.connect(self._on_derived_input_combo_changed)
         self.derived_show_source_check.toggled.connect(lambda _checked: self._auto_plot_derived_from_control_change())
         self.derived_coherence_correction_check.toggled.connect(
             lambda _checked: self._auto_plot_derived_from_control_change()
@@ -1461,6 +1646,8 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         self.derived_freq_min_edit.editingFinished.connect(self._auto_plot_derived_from_control_change)
         self.derived_freq_max_edit.editingFinished.connect(self._auto_plot_derived_from_control_change)
         self.derived_regularization_spin.editingFinished.connect(self._auto_plot_derived_from_control_change)
+        if self._derived_only:
+            self.derived_dimensionless_check.toggled.connect(lambda _checked: self._mark_derived_results_stale("单位确认已变化"))
         if self._derived_only:
             self.derived_plot_button.clicked.connect(
                 lambda _checked=False: self._plot_derived(keep_existing=self._hold_enabled())
@@ -1481,6 +1668,12 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         self.derived_transfer_point_table.cellChanged.connect(lambda _row, _col: self._transfer_point_table_changed())
         self.derived_psd_edit_button.clicked.connect(self._initialize_psd_edit_points_from_active_curve)
         self.derived_psd_reset_button.clicked.connect(self._clear_active_psd_edit_points)
+        self.derived_curve_undo_button.clicked.connect(self._undo_curve_edit)
+        self.derived_curve_redo_button.clicked.connect(self._redo_curve_edit)
+        self.derived_curve_copy_button.clicked.connect(self._copy_selected_curve_points)
+        self.derived_curve_paste_button.clicked.connect(self._paste_curve_points)
+        self.derived_curve_import_button.clicked.connect(self._import_curve_points)
+        self.derived_curve_export_button.clicked.connect(self._export_curve_points)
         self.derived_stitch_enabled_check.toggled.connect(lambda _checked: self._auto_plot_derived_from_control_change())
         self.derived_stitch_series_combo.currentIndexChanged.connect(
             lambda _index: self._auto_plot_derived_from_control_change()
@@ -1528,6 +1721,10 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             return
         index = int(index)
         if index < 0 or index >= self.derived_settings_stack.count():
+            return
+        if self._derived_only:
+            self.derived_settings_stack.setCurrentIndex(index)
+            self.derived_settings_stack.setVisible(True)
             return
         if not self.derived_settings_stack.isHidden() and self.derived_settings_stack.currentIndex() == index:
             self.derived_settings_stack.setVisible(False)
@@ -2709,16 +2906,51 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             if split is None:
                 self.statusBar().showMessage("请输入有效的拼合分界频率")
                 return
+            left_range = (float(np.min(left_x)), float(np.max(left_x)))
+            right_range = (float(np.min(right_x)), float(np.max(right_x)))
+            overlap_low = max(left_range[0], right_range[0])
+            overlap_high = min(left_range[1], right_range[1])
+            if overlap_high < overlap_low:
+                self.statusBar().showMessage(
+                    f"拼合失败：两条曲线存在频段断裂 ({min(left_range[1], right_range[1]):g} - {max(left_range[0], right_range[0]):g} Hz)"
+                )
+                return
+            if not overlap_low <= float(split) <= overlap_high:
+                self.statusBar().showMessage(f"拼合失败：分界频率应位于重叠频段 {overlap_low:g} - {overlap_high:g} Hz")
+                return
             if self.workspace_op_order_combo.currentData() == "b_first":
-                out_x, out_y = stitch_frequency_curves(right_x, right_y, left_x, left_y, float(split))
+                primary_x, primary_y, secondary_x, secondary_y = right_x, right_y, left_x, left_y
                 if not output_name:
                     output_name = f"{right_label}|{left_label}@{float(split):.6g}Hz"
                 source_text = f"拼合: {right_label} -> {left_label} @ {float(split):.6g}Hz"
             else:
-                out_x, out_y = stitch_frequency_curves(left_x, left_y, right_x, right_y, float(split))
+                primary_x, primary_y, secondary_x, secondary_y = left_x, left_y, right_x, right_y
                 if not output_name:
                     output_name = f"{left_label}|{right_label}@{float(split):.6g}Hz"
                 source_text = f"拼合: {left_label} -> {right_label} @ {float(split):.6g}Hz"
+            out_x, out_y = stitch_frequency_curves(primary_x, primary_y, secondary_x, secondary_y, float(split))
+            if self.workspace_stitch_blend_check.isChecked():
+                width = float(self.workspace_stitch_blend_width_spin.value())
+                blend_low = max(overlap_low, float(split) - width / 2.0)
+                blend_high = min(overlap_high, float(split) + width / 2.0)
+                if blend_high > blend_low:
+                    blend_grid = np.unique(
+                        np.concatenate((
+                            np.asarray(primary_x)[(np.asarray(primary_x) >= blend_low) & (np.asarray(primary_x) <= blend_high)],
+                            np.asarray(secondary_x)[(np.asarray(secondary_x) >= blend_low) & (np.asarray(secondary_x) <= blend_high)],
+                            np.array([blend_low, blend_high]),
+                        ))
+                    )
+                    primary_interp = np.interp(np.log10(blend_grid), np.log10(primary_x), primary_y)
+                    secondary_interp = np.interp(np.log10(blend_grid), np.log10(secondary_x), secondary_y)
+                    weight = (blend_grid - blend_low) / (blend_high - blend_low)
+                    blend_values = np.exp((1.0 - weight) * np.log(np.maximum(primary_interp, 1e-300)) + weight * np.log(np.maximum(secondary_interp, 1e-300)))
+                    outside = (out_x < blend_low) | (out_x > blend_high)
+                    out_x = np.concatenate((out_x[outside], blend_grid))
+                    out_y = np.concatenate((out_y[outside], blend_values))
+                    order = np.argsort(out_x)
+                    out_x, out_y = out_x[order], out_y[order]
+                    source_text += f"，平滑过渡 {width:g} Hz"
             curve_type = "拼合结果PSD"
         elif operation == "subtract":
             out_x, out_y, clipped = self._aligned_psd_operation(left_x, left_y, right_x, right_y, subtract=True)
@@ -2769,7 +3001,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         import_kind = self._prompt_import_kind_for_paths(path_objects)
         if import_kind == "cancel":
             return
-        self._load_paths(path_objects, import_kind=import_kind)
+        self._dispatch_load_paths(path_objects, import_kind=import_kind)
 
     def _load_folder(self) -> None:
         path = QtWidgets.QFileDialog.getExistingDirectory(
@@ -2783,17 +3015,106 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         self._last_directory = folder
         manifest = folder / "manifest.json"
         if manifest.exists():
-            self._load_path(folder)
+            self._dispatch_load_paths([folder])
             return
         paths = _supported_files_in_folder(folder)
         if not paths:
             QtWidgets.QMessageBox.warning(self, "Load failed", "Folder does not contain supported analysis files.")
             self.statusBar().showMessage("Load failed: folder has no supported analysis files")
             return
-        self._load_paths(paths, quiet_failures=True)
+        self._dispatch_load_paths(paths, quiet_failures=True)
 
     def _load_path(self, path: Path, *, import_kind: str | None = None) -> None:
-        self._load_paths([path], import_kind=import_kind)
+        self._dispatch_load_paths([path], import_kind=import_kind)
+
+    def _dispatch_load_paths(
+        self,
+        paths: list[Path],
+        *,
+        quiet_failures: bool = False,
+        import_kind: str | None = None,
+    ) -> None:
+        use_background = False
+        if self._derived_only and self.isVisible() and paths:
+            total_bytes = 0
+            for path in paths:
+                try:
+                    total_bytes += int(path.stat().st_size) if path.is_file() else 16 * 1024 * 1024
+                except OSError:
+                    pass
+            use_background = len(paths) > 1 or total_bytes >= 16 * 1024 * 1024
+        if use_background:
+            self._load_paths_in_background(paths, import_kind=import_kind)
+            return
+        self._load_paths(paths, quiet_failures=quiet_failures, import_kind=import_kind)
+
+    def _load_paths_in_background(self, paths: list[Path], *, import_kind: str | None) -> None:
+        if self._background_load_task is not None:
+            self.statusBar().showMessage("已有数据加载任务正在运行")
+            return
+        self._background_load_paths = list(paths)
+        self._background_load_rows = [(path.name, "等待", "") for path in paths]
+        task = AnalysisLoadTask(paths, first_dataset_id=self._next_dataset_id, import_kind=import_kind)
+        self._background_load_task = task
+        progress = QtWidgets.QProgressDialog("正在后台加载数据...", "取消", 0, len(paths), self)
+        progress.setWindowTitle("加载数据")
+        progress.setWindowModality(QtCore.Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.canceled.connect(task.cancel)
+        self._background_load_progress = progress
+        task.signals.item_finished.connect(self._on_background_load_item_finished)
+        task.signals.finished.connect(self._on_background_load_finished)
+        QtCore.QThreadPool.globalInstance().start(task)
+        self.statusBar().showMessage(f"已开始后台加载 {len(paths)} 个数据源")
+
+    @QtCore.Slot(int, object, object)
+    def _on_background_load_item_finished(self, index: int, dataset: object, error: object) -> None:
+        if index < 0 or index >= len(self._background_load_rows):
+            return
+        path = self._background_load_paths[index]
+        if isinstance(dataset, AnalysisDataset):
+            self._apply_loaded_dataset_ui_defaults(dataset)
+            self._datasets.append(dataset)
+            self._next_dataset_id = max(self._next_dataset_id, int(dataset.id) + 1)
+            self._background_load_rows[index] = (path.name, "成功", "")
+        else:
+            self._background_load_rows[index] = (path.name, "失败", str(error or "无法识别数据"))
+        progress = self._background_load_progress
+        if progress is not None:
+            progress.setLabelText(f"已处理 {index + 1}/{len(self._background_load_paths)}")
+            progress.setValue(index + 1)
+
+    @QtCore.Slot(bool)
+    def _on_background_load_finished(self, cancelled: bool) -> None:
+        if cancelled:
+            for index, (name, status, detail) in enumerate(self._background_load_rows):
+                if status == "等待":
+                    self._background_load_rows[index] = (name, "跳过", "用户取消加载")
+        self._last_load_report = list(self._background_load_rows)
+        loaded_count = sum(status == "成功" for _name, status, _detail in self._last_load_report)
+        failed_count = sum(status == "失败" for _name, status, _detail in self._last_load_report)
+        skipped_count = len(self._last_load_report) - loaded_count - failed_count
+        if self._background_load_paths:
+            last_path = self._background_load_paths[-1]
+            self._last_directory = last_path if last_path.is_dir() else last_path.parent
+        if self._background_load_progress is not None:
+            self._background_load_progress.close()
+        self._background_load_progress = None
+        self._background_load_task = None
+        self._background_load_paths = []
+        self._background_load_rows = []
+        if hasattr(self, "derived_load_report_button"):
+            self.derived_load_report_button.setEnabled(bool(self._last_load_report))
+        if loaded_count:
+            self._derived_result_cache.clear()
+            self._last_derived_results = None
+        self._refresh_dataset_lists()
+        if loaded_count:
+            self._notify_data_store_changed("load", self)
+            self._mark_derived_results_stale("已加载新数据")
+        self.statusBar().showMessage(
+            f"后台加载完成：成功 {loaded_count}，失败 {failed_count}，跳过 {skipped_count}"
+        )
 
     def _load_paths(
         self,
@@ -2804,22 +3125,45 @@ class AnalysisWorkbench(QtWidgets.QWidget):
     ) -> None:
         loaded: list[str] = []
         failed: list[str] = []
-        for path in paths:
+        report_rows: list[tuple[str, str, str]] = []
+        progress = None
+        if len(paths) > 1 and self.isVisible():
+            progress = QtWidgets.QProgressDialog("正在加载数据...", "取消", 0, len(paths), self)
+            progress.setWindowModality(QtCore.Qt.WindowModal)
+            progress.setMinimumDuration(250)
+        for index, path in enumerate(paths):
+            if progress is not None:
+                progress.setValue(index)
+                progress.setLabelText(f"正在加载 {path.name} ({index + 1}/{len(paths)})")
+                QtWidgets.QApplication.processEvents()
+                if progress.wasCanceled():
+                    report_rows.extend((remaining.name, "跳过", "用户取消加载") for remaining in paths[index:])
+                    break
             if self._load_one_path(path, quiet=quiet_failures, import_kind=import_kind):
                 loaded.append(path.name if not path.is_dir() else path.name)
+                report_rows.append((path.name, "成功", ""))
             else:
                 failed.append(path.name if not path.is_dir() else path.name)
+                report_rows.append((path.name, "失败", getattr(self, "_last_load_failure_reason", "无法识别数据")))
+        if progress is not None:
+            progress.setValue(len(paths))
+            progress.close()
+        self._last_load_report = report_rows
+        if hasattr(self, "derived_load_report_button"):
+            self.derived_load_report_button.setEnabled(bool(report_rows))
         if paths:
             self._last_directory = paths[-1] if paths[-1].is_dir() else paths[-1].parent
         if loaded:
             self._derived_result_cache.clear()
+            self._last_derived_results = None
         self._refresh_dataset_lists()
         if loaded:
             self._notify_data_store_changed("load", self)
+            self._mark_derived_results_stale("已加载新数据")
         if failed:
-            self.statusBar().showMessage(f"Loaded {len(loaded)} file(s), failed {len(failed)}")
+            self.statusBar().showMessage(f"加载完成：成功 {len(loaded)}，失败 {len(failed)}；点击“加载详情”查看原因")
         elif loaded:
-            self.statusBar().showMessage(f"Loaded {len(loaded)} file(s). Select channel(s) or press Plot to draw.")
+            self.statusBar().showMessage(f"加载完成：成功 {len(loaded)}，失败 0；请选择数据后计算")
 
     def _prompt_import_kind_for_paths(self, paths: list[Path]) -> str | None:
         if self._derived_only:
@@ -2845,6 +3189,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         }.get(str(selected), None)
 
     def _load_one_path(self, path: Path, *, quiet: bool = False, import_kind: str | None = None) -> bool:
+        self._last_load_failure_reason = ""
         try:
             dataset = load_analysis_path(
                 path,
@@ -2853,6 +3198,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
                 import_kind=import_kind,
             )
         except Exception as exc:
+            self._last_load_failure_reason = str(exc)
             if not quiet:
                 QtWidgets.QMessageBox.warning(self, "Load failed", str(exc))
                 self.statusBar().showMessage(f"Load failed: {exc}")
@@ -3342,6 +3688,10 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             return
         previous_transfer = self.derived_transfer_combo.currentData()
         previous_input_id = self.derived_input_series_combo.currentData()
+        previous_batch_ids = {
+            item.data(QtCore.Qt.UserRole)
+            for item in getattr(self, "derived_batch_target_list", QtWidgets.QListWidget()).selectedItems()
+        }
         previous_stitch_id = (
             self.derived_stitch_series_combo.currentData()
             if hasattr(self, "derived_stitch_series_combo")
@@ -3402,6 +3752,20 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             self.derived_input_series_combo.setEnabled(self.derived_input_series_combo.count() > 0)
             self._update_foundation_file_combo_tooltip(self.derived_input_series_combo)
 
+            if hasattr(self, "derived_batch_target_list"):
+                batch_list = self.derived_batch_target_list
+                batch_list.blockSignals(True)
+                batch_list.clear()
+                for index in range(self.derived_input_series_combo.count()):
+                    item = QtWidgets.QListWidgetItem(self.derived_input_series_combo.itemText(index))
+                    data = self.derived_input_series_combo.itemData(index)
+                    item.setData(QtCore.Qt.UserRole, data)
+                    item.setToolTip(self.derived_input_series_combo.itemText(index))
+                    batch_list.addItem(item)
+                    if data in previous_batch_ids or (not previous_batch_ids and data == self.derived_input_series_combo.currentData()):
+                        item.setSelected(True)
+                batch_list.blockSignals(False)
+
             if hasattr(self, "derived_stitch_series_combo"):
                 self.derived_stitch_series_combo.clear()
                 self.derived_stitch_series_combo.addItem("(no stitch source)", None)
@@ -3429,6 +3793,21 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         self._active_psd_edit_label = None
         self._sync_transfer_point_table()
         self._sync_slot_labels()
+        self._update_processing_task_summary()
+
+    def _on_batch_target_selection_changed(self) -> None:
+        if not hasattr(self, "derived_batch_target_list"):
+            return
+        selected = self.derived_batch_target_list.selectedItems()
+        if selected:
+            first_data = selected[0].data(QtCore.Qt.UserRole)
+            index = self._combo_index_for_data(self.derived_input_series_combo, first_data)
+            if index >= 0:
+                self.derived_input_series_combo.blockSignals(True)
+                self.derived_input_series_combo.setCurrentIndex(index)
+                self.derived_input_series_combo.blockSignals(False)
+        self._sync_slot_labels()
+        self._mark_derived_results_stale("待换算目标已变化")
 
     def _derived_transfer_options(self) -> list[tuple[str, tuple[object, ...]]]:
         options: list[tuple[str, tuple[object, ...]]] = []
@@ -3571,6 +3950,128 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             return self._current_psd_control_points()
         return self._current_transfer_control_points()
 
+    def _curve_edit_identity(self) -> tuple[str, object]:
+        if self._curve_point_edit_mode == "psd":
+            return "psd", self._current_psd_edit_label()
+        return "transfer", self._current_transfer_edit_key()
+
+    def _push_curve_edit_history(self) -> None:
+        if self._restoring_curve_edit:
+            return
+        mode, key = self._curve_edit_identity()
+        frequency, values = self._current_curve_control_points()
+        self._curve_edit_undo.append((mode, key, frequency.copy(), values.copy()))
+        self._curve_edit_undo = self._curve_edit_undo[-100:]
+        self._curve_edit_redo.clear()
+
+    def _restore_curve_edit_snapshot(self, snapshot: tuple[str, object, np.ndarray, np.ndarray]) -> None:
+        mode, key, frequency, values = snapshot
+        self._restoring_curve_edit = True
+        try:
+            self._curve_point_edit_mode = mode
+            if mode == "psd":
+                self._active_psd_edit_label = str(key) if key is not None else None
+                if key is not None and frequency.size >= 2:
+                    self._psd_edit_points[str(key)] = (frequency.copy(), values.copy())
+                elif key is not None:
+                    self._psd_edit_points.pop(str(key), None)
+            else:
+                transfer_key = key if isinstance(key, tuple) else None
+                if transfer_key == ("manual_transfer",) and frequency.size >= 2:
+                    self._manual_transfer_points = (frequency.copy(), values.copy())
+                elif transfer_key is not None and frequency.size >= 2:
+                    self._transfer_edit_points[transfer_key] = (frequency.copy(), values.copy())
+                elif transfer_key is not None:
+                    self._transfer_edit_points.pop(transfer_key, None)
+            self._derived_result_cache.clear()
+            self._sync_transfer_point_table()
+            self._mark_derived_results_stale("曲线编辑已变化")
+        finally:
+            self._restoring_curve_edit = False
+
+    def _undo_curve_edit(self) -> None:
+        if not self._curve_edit_undo:
+            self.statusBar().showMessage("没有可撤销的曲线编辑")
+            return
+        mode, key = self._curve_edit_identity()
+        frequency, values = self._current_curve_control_points()
+        self._curve_edit_redo.append((mode, key, frequency.copy(), values.copy()))
+        self._restore_curve_edit_snapshot(self._curve_edit_undo.pop())
+
+    def _redo_curve_edit(self) -> None:
+        if not self._curve_edit_redo:
+            self.statusBar().showMessage("没有可重做的曲线编辑")
+            return
+        mode, key = self._curve_edit_identity()
+        frequency, values = self._current_curve_control_points()
+        self._curve_edit_undo.append((mode, key, frequency.copy(), values.copy()))
+        self._restore_curve_edit_snapshot(self._curve_edit_redo.pop())
+
+    def _copy_selected_curve_points(self) -> None:
+        table = self.derived_transfer_point_table
+        rows = sorted({index.row() for index in table.selectedIndexes()})
+        if not rows:
+            rows = list(range(table.rowCount()))
+        lines = ["frequency_hz,value_db"]
+        for row in rows:
+            frequency = table.item(row, 0)
+            value = table.item(row, 1)
+            if frequency is not None and value is not None:
+                lines.append(f"{frequency.text()},{value.text()}")
+        QtWidgets.QApplication.clipboard().setText("\n".join(lines))
+        self.statusBar().showMessage(f"已复制 {max(0, len(lines) - 1)} 个控制点")
+
+    @staticmethod
+    def _curve_points_from_text(text: str) -> tuple[np.ndarray, np.ndarray]:
+        frequencies: list[float] = []
+        values: list[float] = []
+        for line in str(text).replace("\t", ",").splitlines():
+            parts = [part.strip() for part in line.split(",")]
+            if len(parts) < 2:
+                continue
+            try:
+                frequency, value = float(parts[0]), float(parts[1])
+            except ValueError:
+                continue
+            frequencies.append(frequency)
+            values.append(value)
+        return np.asarray(frequencies, dtype=float), np.asarray(values, dtype=float)
+
+    def _paste_curve_points(self) -> None:
+        frequency, values = self._curve_points_from_text(QtWidgets.QApplication.clipboard().text())
+        if not self._set_current_curve_control_points(frequency, values):
+            return
+        self.statusBar().showMessage(f"已粘贴 {frequency.size} 个控制点")
+
+    def _import_curve_points(self) -> None:
+        path, _filter = QtWidgets.QFileDialog.getOpenFileName(self, "导入曲线控制点", str(self._last_directory), "CSV Files (*.csv *.txt)")
+        if not path:
+            return
+        try:
+            frequency, values = self._curve_points_from_text(Path(path).read_text(encoding="utf-8-sig"))
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "导入失败", str(exc))
+            return
+        if self._set_current_curve_control_points(frequency, values):
+            self._last_directory = Path(path).parent
+            self.statusBar().showMessage(f"已导入 {frequency.size} 个控制点")
+
+    def _export_curve_points(self) -> None:
+        frequency, values = self._current_curve_control_points()
+        if frequency.size < 2:
+            self.statusBar().showMessage("当前没有可导出的控制点")
+            return
+        path, _filter = QtWidgets.QFileDialog.getSaveFileName(self, "导出曲线控制点", str(self._last_directory / "curve_points.csv"), "CSV Files (*.csv)")
+        if not path:
+            return
+        destination = Path(path)
+        with destination.open("w", encoding="utf-8-sig", newline="\n") as handle:
+            handle.write("frequency_hz,value_db\n")
+            for frequency_hz, value_db in zip(frequency, values):
+                handle.write(f"{frequency_hz:.17g},{value_db:.17g}\n")
+        self._last_directory = destination.parent
+        self.statusBar().showMessage(f"已导出控制点：{destination.name}")
+
     @staticmethod
     def _edit_control_frequencies(frequency_hz: np.ndarray) -> np.ndarray:
         f = np.asarray(frequency_hz, dtype=float).ravel()
@@ -3602,24 +4103,13 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         *,
         replot: bool = True,
     ) -> bool:
-        f = np.asarray(frequency_hz, dtype=float).ravel()
-        db = np.asarray(magnitude_db, dtype=float).ravel()
-        count = min(f.size, db.size)
-        if count < 2:
-            self.statusBar().showMessage("传递率控制点至少需要 2 个有效频点")
+        f, db, issues = validate_control_points(frequency_hz, magnitude_db)
+        errors = [issue for issue in issues if issue.severity == "error"]
+        if errors:
+            self.statusBar().showMessage(errors[0].message)
             return False
-        f = f[:count]
-        db = db[:count]
-        valid = np.isfinite(f) & np.isfinite(db) & (f > 0.0)
-        f = f[valid]
-        db = db[valid]
-        if f.size < 2:
-            self.statusBar().showMessage("传递率控制点至少需要 2 个有效频点")
-            return False
-        order = np.argsort(f)
-        f = f[order]
-        db = db[order]
         key = self._current_transfer_edit_key()
+        self._push_curve_edit_history()
         if key == ("manual_transfer",):
             self._manual_transfer_points = (f, db)
         elif key is not None:
@@ -3643,23 +4133,14 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         if not label:
             self.statusBar().showMessage("当前换算图窗没有可编辑PSD曲线")
             return False
-        f = np.asarray(frequency_hz, dtype=float).ravel()
-        db = np.asarray(power_db, dtype=float).ravel()
-        count = min(f.size, db.size)
-        if count < 2:
-            self.statusBar().showMessage("PSD控制点至少需要 2 个有效频点")
+        f, db, issues = validate_control_points(frequency_hz, power_db)
+        errors = [issue for issue in issues if issue.severity == "error"]
+        if errors:
+            self.statusBar().showMessage(errors[0].message)
             return False
-        f = f[:count]
-        db = db[:count]
-        valid = np.isfinite(f) & np.isfinite(db) & (f > 0.0)
-        f = f[valid]
-        db = db[valid]
-        if f.size < 2:
-            self.statusBar().showMessage("PSD控制点至少需要 2 个有效频点")
-            return False
-        order = np.argsort(f)
+        self._push_curve_edit_history()
         self._active_psd_edit_label = label
-        self._psd_edit_points[label] = (f[order], db[order])
+        self._psd_edit_points[label] = (f, db)
         self._derived_result_cache.clear()
         self._sync_transfer_point_table()
         if replot:
@@ -3768,6 +4249,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
 
     def _clear_current_transfer_edit_points(self) -> None:
         key = self._current_transfer_edit_key()
+        self._push_curve_edit_history()
         if key == ("manual_transfer",):
             self._manual_transfer_points = (
                 np.array([10.0, 100.0], dtype=float),
@@ -3835,10 +4317,16 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         db = db.copy()
         f[point_index] = freq
         db[point_index] = value_db
-        changed = self._set_current_transfer_control_points(f, db, replot=False)
-        if changed:
-            self._update_transfer_edit_preview(plot)
-        return changed
+        self._restoring_curve_edit = True
+        try:
+            changed = self._set_current_transfer_control_points(f, db, replot=False)
+        finally:
+            self._restoring_curve_edit = False
+        if not changed:
+            return False
+        self._update_transfer_edit_preview(plot)
+        self._mark_derived_results_stale("传递率控制点已拖动")
+        return True
 
     def _update_transfer_edit_preview(self, plot: pg.PlotWidget) -> None:
         control_f, control_db = self._current_transfer_control_points()
@@ -3847,7 +4335,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         points = [
             item
             for item in self._curve_edit_items.get(plot, [])
-            if isinstance(item, _TransferControlPoint)
+            if isinstance(item, EditableControlPoint)
         ]
         for point, frequency_hz, magnitude_db in zip(points, control_f, control_db):
             point.setData(
@@ -3911,6 +4399,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         plot = self.derived_plots[1]
         self._curve_point_edit_mode = "psd"
         label = self._current_psd_edit_label() or self._active_trace.get(plot)
+        self._push_curve_edit_history()
         if label in self._psd_edit_points:
             self._psd_edit_points.pop(label, None)
         elif self._psd_edit_points:
@@ -3946,8 +4435,31 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         self._curve_point_edit_mode = "psd"
         self._active_psd_edit_label = label
         self._sync_transfer_point_table()
-        self._auto_plot_derived_from_control_change()
+        points = self._curve_edit_items.get(plot, [])
+        if point_index < len(points):
+            points[point_index].setData([self._to_plot_x(plot, freq)], [self._to_plot_y(plot, value)])
+        source_curve = None
+        for result in self._last_derived_results or []:
+            if str(result.get("label", "")) == label and result.get("psd") is not None:
+                source_curve = result["psd"]
+                break
+        if source_curve is not None:
+            preview_x, preview_y = apply_power_db_profile(source_curve[0], source_curve[1], f[order], db[order])
+            item = self._plot_item_for_label(plot, label)
+            if item is not None and preview_x.size >= 2:
+                item.setData(preview_x, preview_y)
+                self._plot_curves[plot][label] = (preview_x, preview_y)
+        self._mark_derived_results_stale("PSD控制点已拖动")
         return True
+
+    def _begin_curve_control_point_drag(self) -> None:
+        self._push_curve_edit_history()
+
+    def _finish_curve_control_point_drag(self) -> None:
+        if self._derived_only:
+            self._plot_derived(keep_existing=False, quiet=True)
+        else:
+            self._auto_plot_derived_from_control_change()
 
     def _selected_stitch_series(self) -> tuple[AnalysisDataset, AnalysisSeries] | None:
         if not hasattr(self, "derived_stitch_series_combo"):
@@ -4048,6 +4560,9 @@ class AnalysisWorkbench(QtWidgets.QWidget):
     def _auto_plot_from_control_change(self) -> None:
         if self._suspend_auto_plot:
             return
+        if self._derived_only:
+            self._mark_derived_results_stale("时域或滤波参数已变化")
+            return
         if self._include_derived_tab and hasattr(self, "derived_plots") and self._has_derived_input_ready():
             self._plot_derived(keep_existing=self._hold_enabled(), quiet=True)
         if not self._datasets or not self.series_list.selectedItems():
@@ -4058,6 +4573,9 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         if self._suspend_auto_plot:
             return
         if not hasattr(self, "derived_plots"):
+            return
+        if self._derived_only:
+            self._mark_derived_results_stale("参数已变化")
             return
         if self._last_derived_results is not None and self.derived_result_mode_combo.currentText() in {
             "PSD",
@@ -4088,6 +4606,142 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         ):
             return
         self._plot_derived(keep_existing=keep_existing, quiet=True)
+
+    def _on_derived_result_mode_changed(self, _text: str) -> None:
+        if self._last_derived_results is None:
+            if self.derived_result_mode_combo.currentText() == "近似时域" and self._plot_current_psd_curves_as_time(
+                keep_existing=False,
+                quiet=True,
+            ):
+                return
+            if self._derived_only:
+                self._mark_derived_results_stale("输出类型已变化")
+            return
+        self._plot_derived_result_axis(
+            self.derived_plots[1],
+            self.derived_result_mode_combo.currentText(),
+            self._last_derived_results,
+            keep_existing=False,
+        )
+
+    def _on_derived_input_combo_changed(self, _index: int) -> None:
+        if self._derived_only and hasattr(self, "derived_batch_target_list"):
+            current_data = self.derived_input_series_combo.currentData()
+            self.derived_batch_target_list.blockSignals(True)
+            try:
+                for row in range(self.derived_batch_target_list.count()):
+                    item = self.derived_batch_target_list.item(row)
+                    item.setSelected(item.data(QtCore.Qt.UserRole) == current_data)
+            finally:
+                self.derived_batch_target_list.blockSignals(False)
+        self._sync_slot_labels()
+        self._mark_derived_results_stale("待换算数据已变化")
+
+    def _mark_derived_results_stale(self, reason: str = "参数已变化") -> None:
+        if not self._derived_only:
+            return
+        self._derived_results_stale = True
+        self._derived_stale_reason = str(reason)
+        if hasattr(self, "derived_issue_label"):
+            self.derived_issue_label.setText(f"结果待更新：{reason}")
+            self.derived_issue_label.setStyleSheet("color: #9a6700; font-weight: 600;")
+        if hasattr(self, "derived_verification_label"):
+            self.derived_verification_label.setText("结果校核：当前参数已变化，旧校核结果不可导出")
+        for button in getattr(self, "derived_export_buttons", []):
+            button.setEnabled(False)
+        if hasattr(self, "derived_batch_export_button"):
+            self.derived_batch_export_button.setEnabled(False)
+        if hasattr(self, "derived_plot_button"):
+            self.derived_plot_button.setText("计算 / 更新结果")
+        self._update_processing_task_summary()
+
+    def _set_processing_report(self, report: ValidationReport | None) -> None:
+        self._last_processing_report = report
+        if not hasattr(self, "derived_issue_label"):
+            return
+        if report is None:
+            self.derived_issue_label.setText(f"结果待更新：{self._derived_stale_reason}")
+            return
+        messages = [issue.message for issue in report.errors[:2]]
+        color = "#b42318"
+        if not messages:
+            messages = [issue.message for issue in report.warnings[:2]]
+            color = "#9a6700"
+        if not messages:
+            messages = [
+                f"校验通过：{report.valid_points} 个有效点，丢弃 {report.discarded_points} 个点，"
+                f"实际频段 {report.effective_frequency_min_hz:g} - {report.effective_frequency_max_hz:g} Hz"
+            ]
+            color = "#18794e"
+        self.derived_issue_label.setText("；".join(messages))
+        self.derived_issue_label.setStyleSheet(f"color: {color}; font-weight: 600;")
+
+    def _set_processing_field_errors(self, issues: list[ProcessingIssue] | tuple[ProcessingIssue, ...]) -> None:
+        controls = {
+            "frequency_min": self.derived_freq_min_edit,
+            "frequency_max": self.derived_freq_max_edit,
+            "frequency_range": self.derived_freq_min_edit,
+            "regularization": self.derived_regularization_spin,
+            "unit": getattr(self, "derived_dimensionless_check", None),
+            "transfer": self.derived_transfer_combo,
+            "target": self.derived_input_series_combo,
+        }
+        for control in {value for value in controls.values() if value is not None}:
+            control.setStyleSheet("")
+        for issue in issues:
+            if issue.severity != "error":
+                continue
+            control = controls.get(issue.field)
+            if control is not None:
+                control.setStyleSheet("border: 1px solid #d1242f;")
+
+    def _update_processing_task_summary(self) -> None:
+        if not self._derived_only or not hasattr(self, "derived_task_summary_label"):
+            return
+        transfer = self.derived_transfer_combo.currentText() or "(未选择)"
+        targets = self._derived_input_series() if hasattr(self, "derived_input_series_combo") else []
+        target_labels: list[str] = []
+        rates: list[str] = []
+        units: list[str] = []
+        curve_types: list[str] = []
+        frequency_ranges: list[str] = []
+        for dataset, series in targets:
+            if dataset is None:
+                target_labels.append(str(series))
+                units.append("(VC加速度PSD)")
+                curve_types.append("VC参考PSD")
+                vc_frequency, _vc_psd = _vc_reference_acceleration_psd(str(series))
+                if vc_frequency.size:
+                    frequency_ranges.append(f"{float(np.min(vc_frequency)):g}-{float(np.max(vc_frequency)):g} Hz")
+            else:
+                target_labels.append(self._series_label(dataset, series))
+                if np.isfinite(dataset.sample_rate) and dataset.sample_rate > 0.0:
+                    rates.append(f"{dataset.sample_rate:g} Hz")
+                units.append(series.unit or "单位未知")
+                if series.channel_key in dataset.autospectrum:
+                    curve_types.append("PSD")
+                elif series.channel_key in dataset.channels or dataset.is_continuous:
+                    curve_types.append("时域")
+                else:
+                    curve_types.append("数据曲线")
+                frequency = np.asarray(dataset.frequency_hz, dtype=float) if dataset.frequency_hz is not None else np.array([], dtype=float)
+                frequency = frequency[np.isfinite(frequency) & (frequency > 0.0)]
+                if frequency.size:
+                    frequency_ranges.append(f"{float(np.min(frequency)):g}-{float(np.max(frequency)):g} Hz")
+                elif np.isfinite(dataset.sample_rate) and dataset.sample_rate > 0.0:
+                    frequency_ranges.append(f"0-{float(dataset.sample_rate) / 2.0:g} Hz")
+        direction = self.derived_direction_combo.currentText() if hasattr(self, "derived_direction_combo") else ""
+        target_text = "、".join(target_labels[:3]) or "(未选择)"
+        if len(target_labels) > 3:
+            target_text += f" 等 {len(target_labels)} 条"
+        detail = f"传递率：{transfer}  |  {direction}  |  目标：{target_text}  |  单位：{', '.join(dict.fromkeys(units)) or '未知'}"
+        if curve_types:
+            detail += f"  |  类型：{', '.join(dict.fromkeys(curve_types))}"
+        if frequency_ranges:
+            detail += f"  |  频段：{', '.join(dict.fromkeys(frequency_ranges))}"
+        if rates:
+            detail += f"  |  采样率：{', '.join(dict.fromkeys(rates))}"
+        self.derived_task_summary_label.setText(detail)
 
     def _has_derived_input_ready(self) -> bool:
         transfer_data = self.derived_transfer_combo.currentData()
@@ -4717,22 +5371,184 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             self._clear_plot_with_title(self.foundation_plots[1], "Dynamic stiffness (no source)")
             self._clear_plot_with_title(self.foundation_plots[2], "Coherence (no source)")
 
+    def _processing_target_frequency(
+        self,
+        dataset: AnalysisDataset | None,
+        series: AnalysisSeries | str,
+    ) -> tuple[np.ndarray, str, str]:
+        if dataset is None or not isinstance(series, AnalysisSeries):
+            curve = _vc_reference_acceleration_psd(str(series))
+            return np.asarray(curve[0], dtype=float), "加速度PSD", "VC参考线"
+        frequency, _psd = self._psd_for_series(
+            dataset,
+            series,
+            scale=float(self._derived_input_factor()) * float(series.scale or 1.0),
+        )
+        return np.asarray(frequency, dtype=float), str(series.unit or ""), self._series_label(dataset, series)
+
+    def _processing_report_for_target(
+        self,
+        dataset: AnalysisDataset | None,
+        series: AnalysisSeries | str,
+        transfer_f: np.ndarray,
+        transfer_h: np.ndarray,
+        phase_available: bool,
+        *,
+        freq_min: float | None,
+        freq_max: float | None,
+    ) -> ValidationReport:
+        target_f, unit, _label = self._processing_target_frequency(dataset, series)
+        return validate_processing_task(
+            transfer_frequency_hz=transfer_f,
+            transfer_values=transfer_h,
+            target_frequency_hz=target_f,
+            requested_min_hz=freq_min,
+            requested_max_hz=freq_max,
+            direction=str(self.derived_direction_combo.currentData() or DERIVE_BASE_TO_TOP),
+            regularization_floor=float(self.derived_regularization_spin.value()),
+            target_unit=unit,
+            phase_available=phase_available,
+            result_mode=self.derived_result_mode_combo.currentText(),
+            allow_dimensionless=bool(getattr(self, "derived_dimensionless_check", None) is None or self.derived_dimensionless_check.isChecked()),
+        )
+
+    @staticmethod
+    def _merge_processing_reports(reports: list[ValidationReport]) -> ValidationReport | None:
+        if not reports:
+            return None
+        lows = [report.effective_frequency_min_hz for report in reports if report.effective_frequency_min_hz is not None]
+        highs = [report.effective_frequency_max_hz for report in reports if report.effective_frequency_max_hz is not None]
+        return ValidationReport(
+            tuple(issue for report in reports for issue in report.issues),
+            min(lows) if lows else None,
+            max(highs) if highs else None,
+            sum(report.valid_points for report in reports),
+            sum(report.discarded_points for report in reports),
+        )
+
+    def _current_processing_recipe(
+        self,
+        transfer_f: np.ndarray,
+        targets: list[tuple[AnalysisDataset | None, AnalysisSeries | str]],
+        reports: list[ValidationReport],
+    ) -> ProcessingRecipe:
+        transfer_frequency = np.asarray(transfer_f, dtype=float)
+        transfer_descriptor = CurveDescriptor(
+            name=self.derived_transfer_combo.currentText(),
+            curve_type="transfer",
+            frequency_min_hz=float(np.min(transfer_frequency)) if transfer_frequency.size else None,
+            frequency_max_hz=float(np.max(transfer_frequency)) if transfer_frequency.size else None,
+            point_count=int(transfer_frequency.size),
+        )
+        target_descriptors: list[CurveDescriptor] = []
+        for (dataset, series), report in zip(targets, reports):
+            if dataset is None or not isinstance(series, AnalysisSeries):
+                name = str(series)
+                unit = "加速度PSD"
+                sample_rate = None
+                curve_type = "vc_reference"
+            else:
+                name = self._series_label(dataset, series)
+                unit = series.unit or ""
+                sample_rate = float(dataset.sample_rate) if np.isfinite(dataset.sample_rate) else None
+                curve_type = "series"
+            target_descriptors.append(
+                CurveDescriptor(
+                    name=name,
+                    curve_type=curve_type,
+                    unit=unit,
+                    sample_rate_hz=sample_rate,
+                    frequency_min_hz=report.effective_frequency_min_hz,
+                    frequency_max_hz=report.effective_frequency_max_hz,
+                    point_count=report.valid_points,
+                )
+            )
+        curve_edits = {
+            "mode": self._curve_point_edit_mode,
+            "identity": self._curve_edit_identity()[1],
+            "frequency_hz": self._current_curve_control_points()[0].tolist(),
+            "values_db": self._current_curve_control_points()[1].tolist(),
+        }
+        return ProcessingRecipe(
+            transfer=transfer_descriptor,
+            targets=tuple(target_descriptors),
+            direction=str(self.derived_direction_combo.currentData() or DERIVE_BASE_TO_TOP),
+            transfer_factor=self._derived_transfer_factor(),
+            input_factor=self._derived_input_factor(),
+            frequency_min_hz=_parse_optional_float(self.derived_freq_min_edit.text()),
+            frequency_max_hz=_parse_optional_float(self.derived_freq_max_edit.text()),
+            regularization_floor=float(self.derived_regularization_spin.value()),
+            quantity=self.quantity_combo.currentText(),
+            result_mode=self.derived_result_mode_combo.currentText(),
+            coherence_correction=self.derived_coherence_correction_check.isChecked(),
+            allow_dimensionless=bool(
+                getattr(self, "derived_dimensionless_check", None) is None
+                or self.derived_dimensionless_check.isChecked()
+            ),
+            output_name_template=(
+                self.derived_batch_name_edit.text()
+                if hasattr(self, "derived_batch_name_edit")
+                else "{name}_{mode}"
+            ),
+            interpolation={
+                "frequency_resolution_hz": float(self._interpolation_resolution_hz),
+                "time_resolution_s": float(self._interpolation_resolution_s),
+                "time_kind": "statistical_approximation" if self.derived_result_mode_combo.currentText() == "近似时域" else "not_applicable",
+            },
+            curve_edits=curve_edits,
+        )
+
+    def _reset_batch_status(self, targets: list[tuple[AnalysisDataset | None, AnalysisSeries | str]]) -> None:
+        table = getattr(self, "derived_batch_status_table", None)
+        if table is None:
+            return
+        table.setRowCount(len(targets))
+        if hasattr(self, "derived_batch_cancel_button"):
+            self.derived_batch_cancel_button.setEnabled(len(targets) > 1)
+            self.derived_batch_cancel_button.setToolTip(
+                "在当前目标完成后取消剩余任务" if len(targets) > 1 else "单目标计算不可中途取消"
+            )
+        for row, (dataset, series) in enumerate(targets):
+            label = str(series) if dataset is None else self._series_label(dataset, series)
+            table.setItem(row, 0, QtWidgets.QTableWidgetItem(label))
+            table.setItem(row, 1, QtWidgets.QTableWidgetItem("等待"))
+            table.setItem(row, 2, QtWidgets.QTableWidgetItem(""))
+
+    def _set_batch_status(self, row: int, status: str, detail: str = "") -> None:
+        table = getattr(self, "derived_batch_status_table", None)
+        if table is None or row < 0 or row >= table.rowCount():
+            return
+        table.setItem(row, 1, QtWidgets.QTableWidgetItem(str(status)))
+        table.setItem(row, 2, QtWidgets.QTableWidgetItem(str(detail)))
+
+    def _calculate_all_derived_targets(self) -> None:
+        self._plot_derived(keep_existing=False, quiet=False)
+
+    def _cancel_derived_batch(self) -> None:
+        if hasattr(self, "derived_batch_cancel_button") and not self.derived_batch_cancel_button.isEnabled():
+            self.statusBar().showMessage("单目标计算不可中途取消")
+            return
+        self._derived_cancel_requested = True
+        self.statusBar().showMessage("将在当前目标完成后取消剩余任务")
+
     def _plot_derived(self, *, keep_existing: bool = False, quiet: bool = False) -> None:
         if not hasattr(self, "derived_plots"):
             return
         selected_transfer = self._selected_derived_transfer()
         input_series = self._derived_input_series()
         if selected_transfer is None or not input_series:
-            self._last_derived_results = None
             if self.derived_result_mode_combo.currentText() == "近似时域" and self._plot_current_psd_curves_as_time(
                 keep_existing=keep_existing,
                 quiet=quiet,
             ):
                 return
+            issue = ProcessingIssue("error", "transfer" if selected_transfer is None else "target", "请选择传递率曲线和待换算数据。", "missing_selection")
+            report = ValidationReport((issue,), None, None, 0, 0)
+            self._mark_derived_results_stale("选择不完整")
+            self._set_processing_report(report)
+            self._set_processing_field_errors(report.issues)
             if not quiet:
                 self.statusBar().showMessage("换算页缺少传递率曲线或待换算数据")
-            for plot, title in zip(self.derived_plots, ("传递率曲线 (no source)", "换算图窗 1 (no source)", "换算图窗 2 (no source)")):
-                self._clear_plot_with_title(plot, title)
             return
         transfer_dataset, transfer_key, source_kind, base_series, top_series, transfer_label = selected_transfer
         if transfer_dataset is not None and base_series is not None and top_series is not None:
@@ -4756,17 +5572,27 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             edit_key=self._transfer_edit_key_from_data(self.derived_transfer_combo.currentData()),
         )
         if transfer is None:
-            self._last_derived_results = None
+            issue = ProcessingIssue("error", "transfer", "无法从所选数据得到有效传递率。", "invalid_transfer")
+            report = ValidationReport((issue,), None, None, 0, 0)
+            self._mark_derived_results_stale("传递率无效")
+            self._set_processing_report(report)
+            self._set_processing_field_errors(report.issues)
             if not quiet:
                 self.statusBar().showMessage("无法从所选传递率数据得到 H_top/base")
-            for plot in self.derived_plots:
-                self._clear_plot_with_title(plot, "No transfer function")
             return
         transfer_f, transfer_h, phase_available = transfer
         direction = str(self.derived_direction_combo.currentData() or DERIVE_BASE_TO_TOP)
         regularization = float(self.derived_regularization_spin.value())
-        freq_min = _parse_optional_float(self.derived_freq_min_edit.text())
-        freq_max = _parse_optional_float(self.derived_freq_max_edit.text())
+        freq_min, min_issue = parse_optional_number(self.derived_freq_min_edit.text(), field="frequency_min")
+        freq_max, max_issue = parse_optional_number(self.derived_freq_max_edit.text(), field="frequency_max")
+        numeric_issues = tuple(issue for issue in (min_issue, max_issue) if issue is not None)
+        if numeric_issues:
+            report = ValidationReport(numeric_issues, None, None, 0, 0)
+            self._mark_derived_results_stale("参数校验未通过")
+            self._set_processing_report(report)
+            self._set_processing_field_errors(report.issues)
+            self.statusBar().showMessage(numeric_issues[0].message)
+            return
         coherence_correction = bool(self.derived_coherence_correction_check.isChecked())
         coherence = (
             self._coherence_for_derived(
@@ -4785,8 +5611,43 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         coherence_f = coherence[0] if coherence is not None else None
         coherence_values = coherence[1] if coherence is not None else None
 
+        self._derived_cancel_requested = False
+        self._reset_batch_status(input_series)
+        reports = [
+            self._processing_report_for_target(
+                input_dataset,
+                series,
+                transfer_f,
+                transfer_h,
+                phase_available,
+                freq_min=freq_min,
+                freq_max=freq_max,
+            )
+            for input_dataset, series in input_series
+        ]
+        merged_report = self._merge_processing_reports(reports)
+        self._set_processing_report(merged_report)
+        self._set_processing_field_errors(merged_report.issues if merged_report is not None else ())
         results: list[dict[str, object]] = []
-        for input_dataset, series in input_series:
+        progress = None
+        if len(input_series) > 1 and self.isVisible():
+            progress = QtWidgets.QProgressDialog("正在批量换算...", "取消", 0, len(input_series), self)
+            progress.setWindowModality(QtCore.Qt.WindowModal)
+            progress.setMinimumDuration(250)
+        for row, ((input_dataset, series), report) in enumerate(zip(input_series, reports)):
+            QtWidgets.QApplication.processEvents()
+            if self._derived_cancel_requested or (progress is not None and progress.wasCanceled()):
+                self._derived_cancel_requested = True
+                self._set_batch_status(row, "已取消", "用户取消任务")
+                continue
+            if progress is not None:
+                progress.setValue(row)
+                progress.setLabelText(f"正在计算 {row + 1}/{len(input_series)}")
+                QtWidgets.QApplication.processEvents()
+            if not report.can_run:
+                self._set_batch_status(row, "失败", report.errors[0].message)
+                continue
+            self._set_batch_status(row, "计算中", "")
             if input_dataset is None or not isinstance(series, AnalysisSeries):
                 result = self._derived_result_for_vc_reference(
                     str(series),
@@ -4826,6 +5687,20 @@ class AnalysisWorkbench(QtWidgets.QWidget):
                 )
             if result is not None:
                 results.append(result)
+                warning = report.warnings[0].message if report.warnings else ""
+                self._set_batch_status(row, "警告" if warning else "完成", warning)
+            else:
+                self._set_batch_status(row, "失败", "计算未得到有效数据")
+        if progress is not None:
+            progress.setValue(len(input_series))
+            progress.close()
+        if not results:
+            self._mark_derived_results_stale("计算前校验未通过")
+            self._set_processing_report(merged_report)
+            self._set_processing_field_errors(merged_report.issues if merged_report is not None else ())
+            if not quiet:
+                self.statusBar().showMessage("换算未执行：请查看顶部校验信息和批量任务详情")
+            return
         self._plot_derived_results(
             transfer_f,
             transfer_h,
@@ -4833,11 +5708,53 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             results,
             keep_existing=keep_existing,
         )
+        self._update_derived_result_verification(results)
+        self._derived_results_stale = False
+        self._derived_stale_reason = ""
+        self._last_processing_recipe = self._current_processing_recipe(transfer_f, input_series, reports)
+        if hasattr(self, "derived_plot_button"):
+            self.derived_plot_button.setText("计算 / 更新结果")
+        for button in getattr(self, "derived_export_buttons", []):
+            button.setEnabled(True)
+        if hasattr(self, "derived_batch_export_button"):
+            self.derived_batch_export_button.setEnabled(True)
         if not quiet:
             if results:
-                self.statusBar().showMessage(f"换算完成：{len(results)} 条曲线")
+                suffix = "（部分目标失败）" if len(results) < len(input_series) else ""
+                self.statusBar().showMessage(f"换算完成：{len(results)} 条曲线{suffix}")
             else:
                 self.statusBar().showMessage("换算没有得到有效曲线")
+
+    def _update_derived_result_verification(self, results: list[dict[str, object]]) -> None:
+        label = getattr(self, "derived_verification_label", None)
+        if label is None:
+            return
+        summaries: list[str] = []
+        for result in results[:3]:
+            name = str(result.get("label", "结果"))
+            metrics: list[str] = []
+            psd_curve = result.get("psd")
+            if psd_curve is not None:
+                frequency, psd = _finite_aligned_xy(psd_curve[0], psd_curve[1])
+                valid = np.isfinite(frequency) & np.isfinite(psd) & (psd >= 0.0)
+                frequency = frequency[valid]
+                psd = psd[valid]
+                if frequency.size >= 2:
+                    metrics.append(f"PSD RMS={np.sqrt(max(float(np.trapezoid(psd, frequency)), 0.0)):.5g}")
+            time_curve = result.get("time")
+            if time_curve is not None:
+                _time, values = _finite_aligned_xy(time_curve[0], time_curve[1])
+                if values.size:
+                    prefix = "统计近似时域" if result.get("time_synthesized") else "时域"
+                    metrics.append(f"{prefix} RMS={np.sqrt(float(np.mean(values ** 2))):.5g}")
+            foundation_curve = result.get("foundation")
+            if foundation_curve is not None:
+                _centers, velocity = _finite_aligned_xy(foundation_curve[0], foundation_curve[1])
+                if velocity.size:
+                    metrics.append(f"1/3倍频程峰值={float(np.max(velocity)):.5g} um/s")
+            if metrics:
+                summaries.append(f"{name}: {', '.join(metrics)}")
+        label.setText("结果校核：" + ("；".join(summaries) if summaries else "当前输出无可校核曲线"))
 
     def _plot_derived_results(
         self,
@@ -5107,7 +6024,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         if f.size < 2:
             return
         for index, (freq, value_db) in enumerate(zip(f, db)):
-            point = _TransferControlPoint(
+            point = EditableControlPoint(
                 x=[self._to_plot_x(plot, float(freq))],
                 y=[self._to_plot_y(plot, float(value_db))],
                 size=9,
@@ -5120,7 +6037,8 @@ class AnalysisWorkbench(QtWidgets.QWidget):
                     i,
                     scene_pos,
                 ),
-                on_drag_finished=lambda: self._recompute_derived_from_control_change(keep_existing=False),
+                on_drag_started=self._begin_curve_control_point_drag,
+                on_drag_finished=self._finish_curve_control_point_drag,
             )
             point.setZValue(40)
             plot.addItem(point)
@@ -5134,7 +6052,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             return
         for index, (freq, value_db) in enumerate(zip(f, db)):
             value = 10.0 ** (float(value_db) / 10.0)
-            point = DataTipPoint(
+            point = EditableControlPoint(
                 x=[self._to_plot_x(plot, float(freq))],
                 y=[self._to_plot_y(plot, float(value))],
                 size=9,
@@ -5148,6 +6066,8 @@ class AnalysisWorkbench(QtWidgets.QWidget):
                     i,
                     scene_pos,
                 ),
+                on_drag_started=self._begin_curve_control_point_drag,
+                on_drag_finished=self._finish_curve_control_point_drag,
             )
             point.setZValue(40)
             plot.addItem(point)
@@ -5819,18 +6739,20 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         )
 
     def _derived_input_series(self) -> list[tuple[AnalysisDataset | None, AnalysisSeries | str]]:
-        selected_id = self.derived_input_series_combo.currentData()
-        if (
-            isinstance(selected_id, tuple)
-            and len(selected_id) == 2
-            and selected_id[0] == "vc_reference"
-        ):
-            return [(None, str(selected_id[1]))]
+        selected_ids: list[object] = []
+        if self._derived_only and hasattr(self, "derived_batch_target_list"):
+            selected_ids = [item.data(QtCore.Qt.UserRole) for item in self.derived_batch_target_list.selectedItems()]
+        if not selected_ids:
+            selected_ids = [self.derived_input_series_combo.currentData()]
         selected: list[tuple[AnalysisDataset | None, AnalysisSeries | str]] = []
-        for dataset in self._datasets:
-            for series in dataset.series:
-                if series.id == selected_id:
-                    selected.append((dataset, series))
+        for selected_id in selected_ids:
+            if isinstance(selected_id, tuple) and len(selected_id) == 2 and selected_id[0] == "vc_reference":
+                selected.append((None, str(selected_id[1])))
+                continue
+            for dataset in self._datasets:
+                for series in dataset.series:
+                    if series.id == selected_id:
+                        selected.append((dataset, series))
         return selected
 
     def _selected_derived_transfer(
@@ -6418,6 +7340,246 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             self._auto_range_plot(plot, x_ranges, [np.array([0.0, 1.0])], log_x=True, log_y=False)
         plot.setYRange(0.0, 1.0, padding=0.0)
 
+    def _show_last_load_report(self) -> None:
+        if not self._last_load_report:
+            self.statusBar().showMessage("当前没有加载报告")
+            return
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("数据加载报告")
+        dialog.resize(680, 360)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        success_count = sum(status == "成功" for _name, status, _detail in self._last_load_report)
+        failed_count = len(self._last_load_report) - success_count
+        layout.addWidget(QtWidgets.QLabel(f"成功 {success_count}，跳过/失败 {failed_count}"))
+        details = "\n".join(
+            f"[{status}] {name}{': ' + detail if detail else ''}"
+            for name, status, detail in self._last_load_report
+        )
+        text = QtWidgets.QPlainTextEdit(details)
+        text.setReadOnly(True)
+        layout.addWidget(text, 1)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        copy_button = buttons.addButton("复制详情", QtWidgets.QDialogButtonBox.ActionRole)
+        copy_button.clicked.connect(lambda: QtWidgets.QApplication.clipboard().setText(details))
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.exec()
+
+    def _save_processing_recipe(self) -> None:
+        if self._last_processing_recipe is None or self._derived_results_stale:
+            self.statusBar().showMessage("请先完成一次有效计算，再保存处理配方")
+            return
+        path, _filter = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "保存处理配方",
+            str(self._last_directory / "vianalysis_recipe.json"),
+            "JSON Files (*.json)",
+        )
+        if not path:
+            return
+        destination = Path(path)
+        destination.write_text(
+            json.dumps(self._last_processing_recipe.to_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        self._last_directory = destination.parent
+        self.statusBar().showMessage(f"已保存处理配方：{destination.name}")
+
+    def _load_processing_recipe(self) -> None:
+        path, _filter = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "加载处理配方",
+            str(self._last_directory),
+            "JSON Files (*.json)",
+        )
+        if not path:
+            return
+        try:
+            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "配方加载失败", str(exc))
+            return
+        if not isinstance(payload, dict):
+            QtWidgets.QMessageBox.warning(self, "配方加载失败", "配方根节点必须是 JSON 对象。")
+            return
+        self._suspend_auto_plot = True
+        try:
+            transfer_payload = payload.get("transfer", {})
+            interpolation = payload.get("interpolation", {})
+            edits = payload.get("curve_edits", {})
+            targets_payload = payload.get("targets", [])
+            if not isinstance(transfer_payload, dict):
+                raise ValueError("transfer 必须是对象")
+            if not isinstance(interpolation, dict):
+                raise ValueError("interpolation 必须是对象")
+            if not isinstance(edits, dict):
+                raise ValueError("curve_edits 必须是对象")
+            if not isinstance(targets_payload, list):
+                raise ValueError("targets 必须是数组")
+            transfer_name = str(transfer_payload.get("name", ""))
+            transfer_index = self.derived_transfer_combo.findText(transfer_name)
+            if transfer_index >= 0:
+                self.derived_transfer_combo.setCurrentIndex(transfer_index)
+            direction_index = self._combo_index_for_data(self.derived_direction_combo, payload.get("direction"))
+            if direction_index >= 0:
+                self.derived_direction_combo.setCurrentIndex(direction_index)
+            self.derived_transfer_factor_spin.setValue(float(payload.get("transfer_factor", 1.0)))
+            self.derived_input_factor_spin.setValue(float(payload.get("input_factor", 1.0)))
+            self.derived_freq_min_edit.setText(_optional_number_text(payload.get("frequency_min_hz")))
+            self.derived_freq_max_edit.setText(_optional_number_text(payload.get("frequency_max_hz")))
+            self.derived_regularization_spin.setValue(float(payload.get("regularization_floor", 0.0)))
+            self.quantity_combo.setCurrentText(str(payload.get("quantity", self.quantity_combo.currentText())))
+            self.derived_result_mode_combo.setCurrentText(str(payload.get("result_mode", "PSD")))
+            self.derived_coherence_correction_check.setChecked(bool(payload.get("coherence_correction", True)))
+            self.derived_dimensionless_check.setChecked(bool(payload.get("allow_dimensionless", False)))
+            self.derived_batch_name_edit.setText(str(payload.get("output_name_template", "{name}_{mode}")))
+            target_names = {str(item.get("name", "")) for item in targets_payload if isinstance(item, dict)}
+            self.derived_batch_target_list.clearSelection()
+            for row in range(self.derived_batch_target_list.count()):
+                item = self.derived_batch_target_list.item(row)
+                item.setSelected(item.text() in target_names)
+            self._interpolation_resolution_hz = float(interpolation.get("frequency_resolution_hz", self._interpolation_resolution_hz))
+            self._interpolation_resolution_s = float(interpolation.get("time_resolution_s", self._interpolation_resolution_s))
+            if edits.get("frequency_hz") and edits.get("values_db"):
+                edit_mode = str(edits.get("mode", "transfer"))
+                identity = edits.get("identity")
+                frequency = np.asarray(edits["frequency_hz"], dtype=float)
+                values = np.asarray(edits["values_db"], dtype=float)
+                clean_frequency, clean_values, point_issues = validate_control_points(frequency, values)
+                point_errors = [issue for issue in point_issues if issue.severity == "error"]
+                if point_errors:
+                    raise ValueError(point_errors[0].message)
+                self._curve_point_edit_mode = edit_mode
+                if edit_mode == "psd":
+                    if not isinstance(identity, str) or not identity:
+                        raise ValueError("PSD 编辑缺少曲线标识")
+                    self._active_psd_edit_label = identity
+                    self._psd_edit_points[identity] = (clean_frequency, clean_values)
+                elif not self._set_current_transfer_control_points(clean_frequency, clean_values, replot=False):
+                    raise ValueError("传递率编辑与当前传递率不匹配")
+        except (AttributeError, TypeError, ValueError, KeyError) as exc:
+            QtWidgets.QMessageBox.warning(self, "配方加载失败", f"配方字段无效：{exc}")
+            return
+        finally:
+            self._suspend_auto_plot = False
+        self._last_directory = Path(path).parent
+        self._mark_derived_results_stale("已加载处理配方")
+        self.statusBar().showMessage("处理配方已加载，请检查数据映射后计算")
+
+    def _processing_export_metadata(self) -> dict[str, object]:
+        recipe = self._last_processing_recipe.to_dict() if self._last_processing_recipe is not None else {}
+        if hasattr(self, "derived_batch_name_edit"):
+            recipe["output_name_template"] = self.derived_batch_name_edit.text()
+        report = self._last_processing_report
+        validation = {}
+        if report is not None:
+            validation = {
+                "effective_frequency_min_hz": report.effective_frequency_min_hz,
+                "effective_frequency_max_hz": report.effective_frequency_max_hz,
+                "valid_points": report.valid_points,
+                "discarded_points": report.discarded_points,
+                "issues": [
+                    {"severity": issue.severity, "field": issue.field, "code": issue.code, "message": issue.message}
+                    for issue in report.issues
+                ],
+            }
+        statistical_time = None
+        if self.derived_result_mode_combo.currentText() == "近似时域":
+            statistical_time = {
+                "kind": "statistical_approximation",
+                "seed_policy": "sha256_stable_from_curve_identity",
+                "reproduction_seeds": [
+                    {
+                        "label": str(result.get("label", "")),
+                        "seed": _stable_seed_from_parts(
+                            "result_psd_to_time",
+                            "psd",
+                            result.get("label"),
+                            result.get("source_label"),
+                        ),
+                    }
+                    for result in self._last_derived_results or []
+                ],
+                "out_of_band": "zero",
+            }
+        return {
+            "format": "vianalysis_processing_metadata_v1",
+            "recipe": recipe,
+            "validation": validation,
+            "statistical_time": statistical_time,
+        }
+
+    def _write_processing_metadata(self, csv_path: Path, *, curve_names: list[str]) -> None:
+        metadata = self._processing_export_metadata()
+        metadata["exported_curves"] = list(curve_names)
+        csv_path.with_suffix(".json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def _unique_batch_export_path(directory: Path, output_name: str, reserved: set[Path]) -> Path:
+        stem = _safe_filename_part(output_name) or "result"
+        candidate = directory / f"{stem}.csv"
+        suffix = 2
+        while candidate in reserved or candidate.exists() or candidate.with_suffix(".json").exists():
+            candidate = directory / f"{stem}#{suffix}.csv"
+            suffix += 1
+        reserved.add(candidate)
+        return candidate
+
+    def _export_all_derived_results(self) -> None:
+        if self._derived_results_stale or not self._last_derived_results:
+            self.statusBar().showMessage("结果待更新，完成计算后才能批量导出")
+            return
+        directory = QtWidgets.QFileDialog.getExistingDirectory(self, "导出全部换算结果", str(self._last_directory))
+        if not directory:
+            return
+        destination_dir = Path(directory)
+        mode = self.derived_result_mode_combo.currentText()
+        key = {"PSD": "psd", "CumPSD": "cumulative", "地基振动": "foundation", "近似时域": "time"}.get(mode, "psd")
+        exportable = [result for result in self._last_derived_results if result.get(key) is not None]
+        preview_names: list[str] = []
+        for result in exportable[:5]:
+            name = str(result.get("label", "result"))
+            try:
+                preview_names.append(self.derived_batch_name_edit.text().format(name=name, mode=mode))
+            except (KeyError, ValueError):
+                preview_names.append(f"{name}_{mode}")
+        preview = "\n".join(preview_names)
+        if len(exportable) > 5:
+            preview += f"\n... 共 {len(exportable)} 条"
+        if QtWidgets.QMessageBox.question(
+            self,
+            "确认批量导出",
+            f"将导出 {len(exportable)} 条曲线及同名 JSON 元数据：\n{preview}",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.Yes,
+        ) != QtWidgets.QMessageBox.Yes:
+            return
+        exported = 0
+        reserved_paths: set[Path] = set()
+        for result in exportable:
+            curve = result.get(key)
+            if curve is None:
+                continue
+            x_values, y_values = _finite_aligned_xy(curve[0], curve[1])
+            if x_values.size < 2:
+                continue
+            label = str(result.get("label", f"result_{exported + 1}"))
+            try:
+                output_name = self.derived_batch_name_edit.text().format(name=label, mode=mode)
+            except (KeyError, ValueError):
+                output_name = f"{label}_{mode}"
+            path = self._unique_batch_export_path(destination_dir, output_name, reserved_paths)
+            with path.open("w", encoding="utf-8-sig", newline="\n") as handle:
+                handle.write("# python_vna_plot_export=1\n")
+                handle.write(f"# plot_kind={key}\n")
+                handle.write(f"{_safe_header_part(label)}_x,{_safe_header_part(label)}_y\n")
+                for x_value, y_value in zip(x_values, y_values):
+                    handle.write(f"{x_value:.17g},{y_value:.17g}\n")
+            self._write_processing_metadata(path, curve_names=[label])
+            exported += 1
+        self._last_directory = destination_dir
+        self.statusBar().showMessage(f"已导出 {exported} 条结果及 JSON 处理元数据")
+
     def _export_current_csv(self) -> None:
         main_plots = getattr(self, "main_plots", [])
         plot = self._active_plot or (main_plots[0] if main_plots else None)
@@ -6426,17 +7588,15 @@ class AnalysisWorkbench(QtWidgets.QWidget):
     def _plot_interpolation_axis_kind(self, plot: pg.PlotWidget | None) -> str:
         if plot is None:
             return "frequency"
-        curve_kind = str(self._plot_curve_kind.get(plot, "") or "").strip().lower()
-        if curve_kind == "time":
-            return "time"
-        if curve_kind in {"psd", "cumulative", "transfer", "coherence", "foundation"}:
-            return "frequency"
         try:
             label = str(getattr(plot.getAxis("bottom"), "labelText", "") or "")
         except Exception:
             label = ""
         label_lower = label.lower()
         if "time" in label_lower or "时间" in label_lower:
+            return "time"
+        curve_kind = str(self._plot_curve_kind.get(plot, "") or "").strip().lower()
+        if curve_kind == "time":
             return "time"
         return "frequency"
 
@@ -6719,6 +7879,9 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             self.statusBar().showMessage(f"已按 {resolution:g} {unit} 插值 {len(updates)} 条曲线")
 
     def _export_plot_csv(self, plot: pg.PlotWidget | None) -> None:
+        if self._derived_only and plot in getattr(self, "derived_plots", []) and self._derived_results_stale:
+            self.statusBar().showMessage("结果待更新，重新计算后才能导出")
+            return
         if plot is None:
             self.statusBar().showMessage("No active plot for export")
             return
@@ -6773,6 +7936,8 @@ class AnalysisWorkbench(QtWidgets.QWidget):
                     else:
                         values.extend(["", ""])
                 handle.write(",".join(values) + "\n")
+        if self._derived_only and plot in getattr(self, "derived_plots", []):
+            self._write_processing_metadata(destination, curve_names=[label for label, _x, _y in rows])
         self.statusBar().showMessage(f"Exported active plot to {destination.name}")
 
     def _open_plot_window_for_plot(self, plot: pg.PlotWidget | None) -> None:
@@ -7826,6 +8991,16 @@ def _parse_optional_float(text: str) -> float | None:
     except ValueError:
         return None
     return value if np.isfinite(value) else None
+
+
+def _optional_number_text(value: object) -> str:
+    if value is None:
+        return ""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return ""
+    return f"{number:g}" if np.isfinite(number) else ""
 
 
 def _stable_seed_from_parts(*parts: object) -> int:

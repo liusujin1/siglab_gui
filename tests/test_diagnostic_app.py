@@ -206,7 +206,7 @@ class DiagnosticAppTests(unittest.TestCase):
             ["主界面", "地面振动"],
         )
         self.assertIsNone(window.data_processing_page.tabs)
-        self.assertEqual(window.data_processing_page.derived_plot_button.text(), "换算绘图")
+        self.assertEqual(window.data_processing_page.derived_plot_button.text(), "计算 / 更新结果")
         menu_actions = {
             action.text().replace("&", ""): action for action in window.menuBar().actions()
         }

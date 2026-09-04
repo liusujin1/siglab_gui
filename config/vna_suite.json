@@ -93,14 +93,17 @@
         "python_vna/analysis_data.py",
         "python_vna/analysis_derivation.py",
         "python_vna/conversion_app.py",
+        "python_vna/diagnostic/processing_workflow.py",
         "python_vna/diagnostic/**",
         "python_vna/ui/analysis_viewer.py",
         "tests/test_analysis_viewer.py",
-        "tests/test_diagnostic_app.py"
+        "tests/test_diagnostic_app.py",
+        "tests/test_processing_workflow.py"
       ],
       "tests": [
         "tests/test_analysis_viewer.py",
-        "tests/test_diagnostic_app.py"
+        "tests/test_diagnostic_app.py",
+        "tests/test_processing_workflow.py"
       ]
     }
   ],

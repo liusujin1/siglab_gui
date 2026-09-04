@@ -1540,7 +1540,7 @@ class AnalysisViewerUiTests(unittest.TestCase):
 
                 warning.assert_not_called()
                 self.assertEqual(viewer.series_list.count(), 2)
-                self.assertIn("failed 1", viewer.statusBar().currentMessage())
+                self.assertIn("失败 1", viewer.statusBar().currentMessage())
             finally:
                 viewer.close()
 
@@ -2314,7 +2314,7 @@ class AnalysisViewerUiTests(unittest.TestCase):
             self.assertFalse(hasattr(viewer, "main_plots"))
             self.assertFalse(hasattr(viewer, "foundation_plots"))
             self.assertFalse(hasattr(viewer, "derived_config_button"))
-            self.assertEqual(viewer.derived_plot_button.text(), "换算绘图")
+            self.assertEqual(viewer.derived_plot_button.text(), "计算 / 更新结果")
             self.assertIsNone(viewer.clear_button.parentWidget())
             self.assertIsNotNone(viewer.derived_manage_data_button.parentWidget())
             self.assertFalse(hasattr(viewer, "derived_curve_button"))
@@ -2324,12 +2324,10 @@ class AnalysisViewerUiTests(unittest.TestCase):
             self.assertEqual(viewer.left_layout.itemAt(0).widget().title(), "1. 数据")
             self.assertEqual(viewer.left_layout.itemAt(1).widget().title(), "2. 当前选择")
             self.assertEqual(viewer.left_layout.itemAt(2).widget().title(), "3. 工作区曲线")
-            self.assertEqual(viewer.left_layout.itemAt(3).widget().title(), "4. 设置")
-            self.assertEqual(viewer.derived_parameter_button.text(), "换算参数")
-            self.assertEqual(viewer.derived_curve_panel_button.text(), "曲线编辑")
-            self.assertEqual(viewer.derived_workspace_button.text(), "工作区运算")
-            self.assertEqual(viewer.derived_processing_button.text(), "滤波处理")
-            self.assertEqual(viewer.derived_mimo_button.text(), "三轴耦合")
+            self.assertEqual(viewer.left_layout.itemAt(3).widget().title(), "4. 批量与配方")
+            self.assertEqual(viewer.derived_batch_calculate_button.text(), "全部计算")
+            self.assertEqual(viewer.derived_batch_export_button.text(), "全部导出")
+            self.assertEqual(viewer.derived_batch_cancel_button.text(), "取消任务")
             self.assertEqual(viewer.derived_curve_group.title(), "曲线编辑")
             self.assertIsNone(viewer.derived_stitch_enabled_check.parentWidget())
             self.assertFalse(hasattr(viewer, "left_scroll"))
@@ -2338,7 +2336,7 @@ class AnalysisViewerUiTests(unittest.TestCase):
             self.assertIsNone(viewer.fs_hint_spin.parentWidget())
             self.assertEqual(viewer.derived_transfer_point_table.maximumHeight(), 260)
             viewer._show_derived_config_dialog()
-            self.assertTrue(viewer.derived_settings_stack.isHidden())
+            self.assertFalse(viewer.derived_settings_stack.isHidden())
             self.assertEqual(viewer.derived_settings_stack.count(), 4)
             viewer._show_settings_panel(0)
             self.assertFalse(viewer.derived_settings_stack.isHidden())
@@ -2350,7 +2348,7 @@ class AnalysisViewerUiTests(unittest.TestCase):
             self.assertFalse(viewer.derived_settings_stack.isHidden())
             self.assertEqual(viewer.derived_settings_stack.currentIndex(), 2)
             viewer._show_settings_panel(2)
-            self.assertTrue(viewer.derived_settings_stack.isHidden())
+            self.assertFalse(viewer.derived_settings_stack.isHidden())
             self.assertGreaterEqual(
                 viewer._combo_index_for_data(viewer.derived_transfer_combo, ("manual_transfer",)),
                 0,
@@ -2367,7 +2365,7 @@ class AnalysisViewerUiTests(unittest.TestCase):
         try:
             viewer.resize(960, 600)
             viewer.show()
-            viewer._show_settings_panel(1)
+            viewer.derived_right_toolbox.setCurrentIndex(1)
             QtWidgets.QApplication.processEvents()
             QtWidgets.QApplication.processEvents()
             self.assertLessEqual(viewer.height(), 620)
@@ -2378,13 +2376,198 @@ class AnalysisViewerUiTests(unittest.TestCase):
                 viewer.left_panel.width(),
                 viewer.left_panel_scroll.viewport().width(),
             )
-            self.assertLessEqual(
-                viewer.derived_settings_stack.width(),
-                viewer.left_panel_scroll.viewport().width(),
-            )
+            self.assertLessEqual(viewer.derived_right_toolbox.width(), 390)
+            self.assertGreaterEqual(viewer.derived_right_toolbox.width(), 300)
             self.assertTrue(viewer.derived_transfer_point_table.isVisible())
             self.assertGreaterEqual(viewer.derived_transfer_point_table.height(), 120)
             self.assertGreaterEqual(viewer.derived_transfer_edit_button.width(), 100)
+        finally:
+            viewer.close()
+
+    def test_conversion_batch_targets_validate_calculate_and_export_metadata(self):
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            frequency = np.array([10.0, 20.0, 40.0, 80.0], dtype=float)
+            dataset = AnalysisDataset(
+                id=1,
+                path=Path("batch_psd.csv"),
+                name="batch_psd.csv",
+                sample_rate=256.0,
+                series=[
+                    AnalysisSeries(1, 0, "x", "X", unit="g^2/Hz"),
+                    AnalysisSeries(1, 1, "y", "Y", unit="g^2/Hz"),
+                ],
+                frequency_hz=frequency,
+                autospectrum={
+                    "x": np.array([1.0, 2.0, 3.0, 4.0]),
+                    "y": np.array([2.0, 3.0, 4.0, 5.0]),
+                },
+            )
+            viewer._datasets = [dataset]
+            viewer._next_dataset_id = 2
+            viewer._refresh_dataset_lists()
+            manual_index = viewer._combo_index_for_data(viewer.derived_transfer_combo, ("manual_transfer",))
+            viewer.derived_transfer_combo.setCurrentIndex(manual_index)
+            viewer.derived_batch_target_list.clearSelection()
+            for row in range(2):
+                viewer.derived_batch_target_list.item(row).setSelected(True)
+
+            viewer._plot_derived()
+
+            self.assertEqual(len(viewer._last_derived_results), 2)
+            self.assertFalse(viewer._derived_results_stale)
+            self.assertTrue(viewer.derived_batch_export_button.isEnabled())
+            self.assertEqual(
+                [viewer.derived_batch_status_table.item(row, 1).text() for row in range(2)],
+                ["完成", "完成"],
+            )
+            with tempfile.TemporaryDirectory() as temp_dir:
+                destination = Path(temp_dir) / "batch_result.csv"
+                with mock.patch(
+                    "python_vna.ui.analysis_viewer.QtWidgets.QFileDialog.getSaveFileName",
+                    return_value=(str(destination), ""),
+                ):
+                    viewer._export_plot_csv(viewer.derived_plots[1])
+                self.assertTrue(destination.exists())
+                metadata = destination.with_suffix(".json").read_text(encoding="utf-8")
+                self.assertIn("vianalysis_processing_metadata_v1", metadata)
+                self.assertIn("batch_psd.csv", metadata)
+        finally:
+            viewer.close()
+
+    def test_conversion_invalid_range_preserves_previous_plot_and_blocks_stale_export(self):
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            frequency = np.array([10.0, 20.0, 40.0, 80.0], dtype=float)
+            dataset = AnalysisDataset(
+                id=1,
+                path=Path("input.csv"),
+                name="input.csv",
+                sample_rate=256.0,
+                series=[AnalysisSeries(1, 0, "x", "X", unit="g^2/Hz")],
+                frequency_hz=frequency,
+                autospectrum={"x": np.ones(frequency.shape)},
+            )
+            viewer._datasets = [dataset]
+            viewer._refresh_dataset_lists()
+            viewer.derived_transfer_combo.setCurrentIndex(
+                viewer._combo_index_for_data(viewer.derived_transfer_combo, ("manual_transfer",))
+            )
+            viewer._plot_derived()
+            previous = {
+                label: (x.copy(), y.copy())
+                for label, (x, y) in viewer._plot_curves[viewer.derived_plots[1]].items()
+            }
+
+            viewer.derived_freq_min_edit.setText("70")
+            viewer.derived_freq_max_edit.setText("20")
+            viewer._plot_derived()
+
+            self.assertTrue(viewer._derived_results_stale)
+            self.assertFalse(viewer.derived_export_buttons[1].isEnabled())
+            self.assertIn("频率下限必须小于", viewer.derived_issue_label.text())
+            self.assertEqual(set(viewer._plot_curves[viewer.derived_plots[1]]), set(previous))
+            for label, (x, y) in previous.items():
+                np.testing.assert_array_equal(viewer._plot_curves[viewer.derived_plots[1]][label][0], x)
+                np.testing.assert_array_equal(viewer._plot_curves[viewer.derived_plots[1]][label][1], y)
+        finally:
+            viewer.close()
+
+    def test_conversion_text_parameter_waits_for_editing_finished(self):
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            viewer._derived_results_stale = False
+            viewer.derived_export_buttons[1].setEnabled(True)
+            viewer.derived_freq_min_edit.setText("5")
+            self.assertFalse(viewer._derived_results_stale)
+            viewer.derived_freq_min_edit.editingFinished.emit()
+            self.assertTrue(viewer._derived_results_stale)
+            self.assertFalse(viewer.derived_export_buttons[1].isEnabled())
+        finally:
+            viewer.close()
+
+    def test_conversion_curve_edit_undo_redo_and_duplicate_guard(self):
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            viewer.derived_transfer_combo.setCurrentIndex(
+                viewer._combo_index_for_data(viewer.derived_transfer_combo, ("manual_transfer",))
+            )
+            original_f, original_db = viewer._current_transfer_control_points()
+            self.assertTrue(
+                viewer._set_current_transfer_control_points(
+                    np.array([10.0, 20.0, 100.0]),
+                    np.array([1.0, 2.0, 3.0]),
+                    replot=False,
+                )
+            )
+            viewer._undo_curve_edit()
+            np.testing.assert_array_equal(viewer._current_transfer_control_points()[0], original_f)
+            np.testing.assert_array_equal(viewer._current_transfer_control_points()[1], original_db)
+            viewer._redo_curve_edit()
+            np.testing.assert_array_equal(viewer._current_transfer_control_points()[0], [10.0, 20.0, 100.0])
+            viewer._clear_current_transfer_edit_points()
+            viewer._undo_curve_edit()
+            np.testing.assert_array_equal(viewer._current_transfer_control_points()[0], [10.0, 20.0, 100.0])
+            self.assertFalse(
+                viewer._set_current_transfer_control_points(
+                    np.array([10.0, 10.0, 100.0]),
+                    np.array([1.0, 2.0, 3.0]),
+                    replot=False,
+                )
+            )
+            self.assertIn("重复频率", viewer.statusBar().currentMessage())
+        finally:
+            viewer.close()
+
+    def test_conversion_recipe_rejects_invalid_structure_and_batch_paths_do_not_overwrite(self):
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                recipe_path = root / "invalid_recipe.json"
+                recipe_path.write_text('{"transfer": "not-an-object"}', encoding="utf-8")
+                with mock.patch(
+                    "python_vna.ui.analysis_viewer.QtWidgets.QFileDialog.getOpenFileName",
+                    return_value=(str(recipe_path), ""),
+                ), mock.patch(
+                    "python_vna.ui.analysis_viewer.QtWidgets.QMessageBox.warning"
+                ) as warning:
+                    viewer._load_processing_recipe()
+                self.assertTrue(warning.called)
+
+                existing = root / "same.csv"
+                existing.write_text("existing", encoding="utf-8")
+                reserved: set[Path] = set()
+                first = viewer._unique_batch_export_path(root, "same", reserved)
+                second = viewer._unique_batch_export_path(root, "same", reserved)
+                self.assertEqual(first.name, "same#2.csv")
+                self.assertEqual(second.name, "same#3.csv")
+        finally:
+            viewer.close()
+
+    def test_conversion_visible_multi_file_load_runs_in_background_and_reports_results(self):
+        viewer = AnalysisViewer(derived_only=True)
+        try:
+            viewer.show()
+            QtWidgets.QApplication.processEvents()
+            with tempfile.TemporaryDirectory() as temp_dir:
+                first = Path(temp_dir) / "first.csv"
+                second = Path(temp_dir) / "second.csv"
+                first.write_text("time,x\n0,1\n0.1,2\n", encoding="utf-8")
+                second.write_text("time,y\n0,3\n0.1,4\n", encoding="utf-8")
+
+                viewer._dispatch_load_paths([first, second])
+                self.assertIsNotNone(viewer._background_load_task)
+                timer = QtCore.QElapsedTimer()
+                timer.start()
+                while viewer._background_load_task is not None and timer.elapsed() < 5000:
+                    QtWidgets.QApplication.processEvents()
+                    QtCore.QThread.msleep(10)
+
+                self.assertIsNone(viewer._background_load_task)
+                self.assertEqual(len(viewer._datasets), 2)
+                self.assertEqual([status for _name, status, _detail in viewer._last_load_report], ["成功", "成功"])
+                self.assertIn("后台加载完成", viewer.statusBar().currentMessage())
         finally:
             viewer.close()
 
@@ -3455,6 +3638,7 @@ class AnalysisViewerUiTests(unittest.TestCase):
                 replot=False,
             )
             viewer.derived_result_mode_combo.setCurrentText("近似时域")
+            viewer._plot_derived()
             plot = viewer.derived_plots[1]
             label = next(iter(viewer._plot_curves[plot]))
             before_source = viewer._time_curve_psd_sources[plot][label]
