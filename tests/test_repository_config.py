@@ -113,6 +113,18 @@ class RepositoryConfigTests(unittest.TestCase):
             r"&\s+\$ensureArchiveScript\s+-ReleasePath\s+\$latestRelease",
         )
 
+    def test_publish_prefers_compact_7z_incremental_archives(self):
+        text = (ROOT / "scripts" / "publish_vna_suite_update.ps1").read_text(
+            encoding="utf-8"
+        )
+        helper_start = text.index("function Get-IncrementalArchivePath")
+        helper_end = text.index("function Get-ReleaseItemVersion", helper_start)
+        helper = text[helper_start:helper_end]
+
+        self.assertLess(helper.index('"$archiveStem.7z"'), helper.index('"$archiveStem.zip"'))
+        self.assertIn("Get-IncrementalArchivePath -BaseVersion", text)
+        self.assertNotIn("'-SkipSevenZip'", text)
+
 
 if __name__ == "__main__":
     unittest.main()

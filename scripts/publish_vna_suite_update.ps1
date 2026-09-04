@@ -182,6 +182,24 @@ function Get-FullReleaseArchivePath {
     throw "Full release archive was not found for v${ReleaseVersion}: $zipArchive or $sevenZipArchive"
 }
 
+function Get-IncrementalArchivePath {
+    param(
+        [Parameter(Mandatory=$true)][string]$BaseVersion,
+        [Parameter(Mandatory=$true)][string]$TargetVersion
+    )
+
+    $archiveStem = Join-Path $distRoot "updates\PythonVNA_Update_v${BaseVersion}_to_v${TargetVersion}"
+    $sevenZipArchive = "$archiveStem.7z"
+    if (Test-Path -LiteralPath $sevenZipArchive -PathType Leaf) {
+        return $sevenZipArchive
+    }
+    $zipArchive = "$archiveStem.zip"
+    if (Test-Path -LiteralPath $zipArchive -PathType Leaf) {
+        return $zipArchive
+    }
+    throw "Incremental update archive was not found: $sevenZipArchive or $zipArchive"
+}
+
 function Get-ReleaseItemVersion {
     param([Parameter(Mandatory=$true)][string]$Name)
 
@@ -540,9 +558,6 @@ else {
         '-Version', $Version,
         '-BasePath', $previousRelease
     )
-    if ($fastMode) {
-        $buildUpdateArgs += '-SkipSevenZip'
-    }
     & powershell @buildUpdateArgs
     if ($LASTEXITCODE -ne 0) {
         throw "Incremental build failed with exit code $LASTEXITCODE"
@@ -616,7 +631,6 @@ if (-not $fullOnlyMode) {
             continue
         }
         $seenBaseVersions[$baseVersion] = $true
-        $updateArchive = Join-Path $distRoot "updates\PythonVNA_Update_v${baseVersion}_to_v${latestVersion}.zip"
         if (-not $UseExistingArtifacts) {
             Write-Host "Building direct incremental update v$baseVersion -> v$latestVersion..."
             $directBuildArgs = @(
@@ -627,17 +641,12 @@ if (-not $fullOnlyMode) {
                 '-BasePath', $baseRelease,
                 '-NewPath', $latestRelease
             )
-            if ($fastMode) {
-                $directBuildArgs += '-SkipSevenZip'
-            }
             & powershell @directBuildArgs
             if ($LASTEXITCODE -ne 0) {
                 throw "Direct incremental build failed with exit code $LASTEXITCODE"
             }
         }
-        if (-not (Test-Path -LiteralPath $updateArchive -PathType Leaf)) {
-            throw "Incremental update archive was not found: $updateArchive"
-        }
+        $updateArchive = Get-IncrementalArchivePath -BaseVersion $baseVersion -TargetVersion $latestVersion
         $manifestBasePaths.Add($baseRelease)
         $manifestUpdateArchives.Add($updateArchive)
         $uploadFiles.Add($updateArchive)
