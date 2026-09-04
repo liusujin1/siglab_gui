@@ -3874,6 +3874,33 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         write_condition_readme(path.parent, number, condition)
 
+    def _condition_for_save_path(self, path: Path) -> str:
+        number = condition_number_from_path(path)
+        preview_condition = None
+        if number and hasattr(self, "condition_readme_preview"):
+            preview_condition = condition_for_number(
+                self.condition_readme_preview.toPlainText(),
+                number,
+            )
+        if self._condition_edit_dirty and hasattr(self, "condition_edit"):
+            return self.condition_edit.toPlainText()
+        condition_folder = self._condition_folder()
+        same_folder = (
+            condition_folder is not None
+            and condition_folder.resolve() == path.parent.resolve()
+        )
+        if same_folder and self._condition_preview_dirty and preview_condition is not None:
+            return preview_condition
+        try:
+            stored_condition = condition_for_number(read_condition_readme(path.parent), number)
+        except OSError:
+            stored_condition = None
+        if stored_condition is not None:
+            return stored_condition
+        if same_folder and preview_condition is not None:
+            return preview_condition
+        return self.session_notes_edit.toPlainText()
+
     def _apply_condition_from_readme_for_path(self, path: Path) -> None:
         number = condition_number_from_path(path)
         if not number:
@@ -8969,8 +8996,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"已导出到 {export_path}")
 
     def _save_session(self) -> None:
-        if hasattr(self, "condition_edit") and self._left_panel_mode == "conditions":
-            self._condition_text_changed()
         self._read_session_from_widgets()
         default_save_path = self._suggest_vna_save_path()
         path, selected_filter = get_save_file_name(
@@ -8984,6 +9009,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._ensure_real_filesystem_path(path, operation="保存"):
             return
         save_path = save_path_with_selected_suffix(path, selected_filter)
+        if save_path.suffix.lower() == ".vna":
+            condition = self._condition_for_save_path(save_path)
+            self.session.notes = condition
+            self.session_notes_edit.setPlainText(condition)
         snapshot = self._snapshot_with_current_display_state()
         if save_path.suffix.lower() == ".json":
             save_session_json(snapshot, save_path)

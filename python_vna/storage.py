@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import csv
+from io import BytesIO
 import json
 from dataclasses import asdict
 from pathlib import Path
+import struct
 from typing import Any
 
 import numpy as np
@@ -803,6 +805,74 @@ def _legacy_xplot_axes(
     return axes
 
 
+def _mat5_regular_element(data_type: int, payload: bytes) -> bytes:
+    padding = b"\x00" * (-len(payload) % 8)
+    return struct.pack("<II", data_type, len(payload)) + payload + padding
+
+
+def _mat5_char_matrix(name: str, value: str) -> bytes:
+    """Build a Level-5 char matrix with fixed-width UTF-16 data.
+
+    Older MATLAB releases can misread variable-width UTF-8 char payloads when
+    their byte count differs from the matrix dimensions. UTF-16 keeps the
+    character width explicit while preserving the legacy mxCHAR_CLASS.
+    """
+
+    encoded = value.encode("utf-16le")
+    code_unit_count = len(encoded) // 2
+    matrix_payload = b"".join(
+        (
+            _mat5_regular_element(6, struct.pack("<II", 4, 0)),  # miUINT32, mxCHAR_CLASS
+            _mat5_regular_element(5, struct.pack("<ii", 1, code_unit_count)),  # miINT32
+            _mat5_regular_element(1, name.encode("latin1")),  # miINT8
+            _mat5_regular_element(17, encoded),  # miUTF16
+        )
+    )
+    return _mat5_regular_element(14, matrix_payload)  # miMATRIX
+
+
+def _mat5_subelement(payload: bytes, offset: int) -> tuple[int, bytes, int]:
+    tag_word = struct.unpack_from("<I", payload, offset)[0]
+    small_byte_count = tag_word >> 16
+    if small_byte_count:
+        data_type = tag_word & 0xFFFF
+        data_start = offset + 4
+        return data_type, payload[data_start : data_start + small_byte_count], offset + 8
+    data_type, byte_count = struct.unpack_from("<II", payload, offset)
+    data_start = offset + 8
+    next_offset = data_start + byte_count + (-byte_count % 8)
+    return data_type, payload[data_start : data_start + byte_count], next_offset
+
+
+def _replace_mat5_top_level_variable(
+    file_data: bytes,
+    variable_name: str,
+    replacement: bytes,
+) -> bytes:
+    target = variable_name.encode("latin1")
+    offset = 128
+    while offset + 8 <= len(file_data):
+        data_type, byte_count = struct.unpack_from("<II", file_data, offset)
+        payload_start = offset + 8
+        payload_end = payload_start + byte_count
+        next_offset = payload_end + (-byte_count % 8)
+        if payload_end > len(file_data):
+            break
+        if data_type == 14:  # miMATRIX
+            payload = file_data[payload_start:payload_end]
+            sub_offset = 0
+            try:
+                for _ in range(2):
+                    _sub_type, _sub_data, sub_offset = _mat5_subelement(payload, sub_offset)
+                _name_type, name_data, _sub_offset = _mat5_subelement(payload, sub_offset)
+            except (IndexError, struct.error):
+                name_data = b""
+            if name_data == target:
+                return file_data[:offset] + replacement + file_data[next_offset:]
+        offset = next_offset
+    raise ValueError(f"MAT-file variable was not found: {variable_name}")
+
+
 def save_legacy_vna(session: SavedSession, path: str | Path) -> Path:
     """Save a Python VNA session as a MATLAB MAT-file with a .vna extension.
 
@@ -1313,38 +1383,47 @@ def save_legacy_vna(session: SavedSession, path: str | Path) -> Path:
         measurement=measurement,
         display_state=legacy_display_state,
     )
+    mat_variables = {
+        "key": "DSPt vna_2 file",
+        "SampleRate": np.array([[round(legacy_sample_rate)]], dtype=np.uint16),
+        "CenterFreq": np.array([[0]], dtype=np.uint8),
+        "num_io": np.array([[channel_count, 1]], dtype=np.uint8),
+        "SystemClk": np.array([[system_clock]], dtype=np.uint16),
+        "UniformFlg": np.array([[1]], dtype=np.uint8),
+        "ch_ptr": np.array([[1]], dtype=np.uint8),
+        "grids": "off",
+        "hdlg1_s1": hdlg1_s1,
+        "hdlg2_s1": hdlg2_s1,
+        "hdlg2_vis": hdlg2_vis,
+        "exdlg2_s1": exdlg2_s1,
+        "exdlg2_vis": exdlg2_vis,
+        "vdlg2_s1": vdlg2_s1,
+        "xplot_s1": xplot_s1,
+        "xplot_s2": np.array([[252, 11, 640, 436]], dtype=float),
+        "xplot_axes": xplot_axes,
+        "vna_pos": np.array([[4, 61, 241, 386]], dtype=float),
+        "vi_timestamp": np.array([[1998, 1, 1, 0, 0, 0]], dtype=float),
+        "Cmprssd_Notes": config.notes or "Enter your notes here.",
+        "vdlg1_s1": vdlg1_s1,
+        "vdlg1_s2": vdlg1_s2,
+        "ChanStat": chan_stat,
+        "ChanLabel": chan_label,
+        "EULabel": eu_label,
+        "SLm": slm,
+    }
+    stream = BytesIO()
     savemat(
-        destination,
-        {
-            "key": "DSPt vna_2 file",
-            "SampleRate": np.array([[round(legacy_sample_rate)]], dtype=np.uint16),
-            "CenterFreq": np.array([[0]], dtype=np.uint8),
-            "num_io": np.array([[channel_count, 1]], dtype=np.uint8),
-            "SystemClk": np.array([[system_clock]], dtype=np.uint16),
-            "UniformFlg": np.array([[1]], dtype=np.uint8),
-            "ch_ptr": np.array([[1]], dtype=np.uint8),
-            "grids": "off",
-            "hdlg1_s1": hdlg1_s1,
-            "hdlg2_s1": hdlg2_s1,
-            "hdlg2_vis": hdlg2_vis,
-            "exdlg2_s1": exdlg2_s1,
-            "exdlg2_vis": exdlg2_vis,
-            "vdlg2_s1": vdlg2_s1,
-            "xplot_s1": xplot_s1,
-            "xplot_s2": np.array([[252, 11, 640, 436]], dtype=float),
-            "xplot_axes": xplot_axes,
-            "vna_pos": np.array([[4, 61, 241, 386]], dtype=float),
-            "vi_timestamp": np.array([[1998, 1, 1, 0, 0, 0]], dtype=float),
-            "Cmprssd_Notes": config.notes or "Enter your notes here.",
-            "vdlg1_s1": vdlg1_s1,
-            "vdlg1_s2": vdlg1_s2,
-            "ChanStat": chan_stat,
-            "ChanLabel": chan_label,
-            "EULabel": eu_label,
-            "SLm": slm,
-        },
+        stream,
+        mat_variables,
         do_compression=False,
     )
+    notes = str(mat_variables["Cmprssd_Notes"])
+    mat_data = _replace_mat5_top_level_variable(
+        stream.getvalue(),
+        "Cmprssd_Notes",
+        _mat5_char_matrix("Cmprssd_Notes", notes),
+    )
+    destination.write_bytes(mat_data)
     return destination
 
 
