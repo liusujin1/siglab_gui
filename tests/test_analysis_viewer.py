@@ -2623,6 +2623,16 @@ class AnalysisViewerUiTests(unittest.TestCase):
             viewer._active_trace[viewer.derived_plots[1]] = label
             viewer._initialize_psd_edit_points_from_active_curve()
             self.assertIn(label, viewer._psd_edit_points)
+            initial_point_count = viewer.derived_transfer_point_table.rowCount()
+
+            viewer._add_transfer_control_point()
+            self.assertEqual(viewer.derived_transfer_point_table.rowCount(), initial_point_count + 1)
+            self.assertEqual(len(viewer._curve_edit_items[viewer.derived_plots[1]]), initial_point_count + 1)
+
+            viewer.derived_transfer_point_table.selectRow(1)
+            viewer._delete_selected_transfer_control_point()
+            self.assertEqual(viewer.derived_transfer_point_table.rowCount(), initial_point_count)
+            self.assertEqual(len(viewer._curve_edit_items[viewer.derived_plots[1]]), initial_point_count)
 
             viewer._workspace_operation_sources["a"] = ("current_result_curve", label)
             viewer._workspace_operation_sources["b"] = ("dataset_psd_curve", "1:ai1")

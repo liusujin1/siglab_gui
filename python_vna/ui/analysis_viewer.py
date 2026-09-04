@@ -4144,7 +4144,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         self._derived_result_cache.clear()
         self._sync_transfer_point_table()
         if replot:
-            self._auto_plot_derived_from_control_change()
+            self._recompute_derived_from_control_change(keep_existing=False)
         return True
 
     def _set_current_curve_control_points(
