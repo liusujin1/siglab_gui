@@ -137,6 +137,8 @@ SCIPY_CURVE_HIDDENIMPORTS = [
     "scipy.interpolate",
 ]
 
+SCIPY_ARRAY_API_HIDDENIMPORTS = collect_submodules("scipy._external.array_api_compat")
+
 SCIPY_HIGHS_HIDDENIMPORTS = collect_submodules("scipy.optimize._highspy")
 
 OPENGL_HIDDENIMPORTS = [
@@ -203,7 +205,7 @@ EXCLUDES = [
 # can replace changed Python modules without republishing both main executables.
 analysis_vianalysis = _build_analysis(
     "scripts\\entry_vianalysis.py",
-    hiddenimports=SCIPY_CURVE_HIDDENIMPORTS + OPENGL_HIDDENIMPORTS,
+    hiddenimports=SCIPY_CURVE_HIDDENIMPORTS + SCIPY_ARRAY_API_HIDDENIMPORTS + OPENGL_HIDDENIMPORTS,
 )
 pyz_vianalysis = PYZ(analysis_vianalysis.pure)
 vianalysis = _build_exe(

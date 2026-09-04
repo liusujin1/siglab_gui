@@ -125,6 +125,16 @@ class RepositoryConfigTests(unittest.TestCase):
         self.assertIn("Get-IncrementalArchivePath -BaseVersion", text)
         self.assertNotIn("'-SkipSevenZip'", text)
 
+    def test_vianalysis_bundle_collects_scipy_array_api_compat_modules(self):
+        text = (ROOT / "PythonVNA_Suite.spec").read_text(encoding="utf-8")
+        self.assertIn(
+            'SCIPY_ARRAY_API_HIDDENIMPORTS = collect_submodules("scipy._external.array_api_compat")',
+            text,
+        )
+        analysis_start = text.index("analysis_vianalysis = _build_analysis(")
+        analysis_end = text.index("pyz_vianalysis =", analysis_start)
+        self.assertIn("SCIPY_ARRAY_API_HIDDENIMPORTS", text[analysis_start:analysis_end])
+
 
 if __name__ == "__main__":
     unittest.main()
