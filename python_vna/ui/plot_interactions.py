@@ -33,6 +33,43 @@ def copy_widget_image_to_clipboard(widget: QtWidgets.QWidget) -> bool:
     return True
 
 
+class EditableLegendItem(pg.LegendItem):
+    """Legend whose text labels request renaming on a left-button double click."""
+
+    def __init__(self, *args, on_rename_requested=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._on_rename_requested = on_rename_requested
+
+    def addItem(self, item, name) -> None:  # noqa: N802 - pyqtgraph override
+        super().addItem(item, name)
+        _sample, label_item = self.items[-1]
+        text_item = label_item.item
+        text_item.installEventFilter(self)
+        text_item.setToolTip("双击编辑图例名称")
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt override
+        if (
+            event.type() == QtCore.QEvent.Type.GraphicsSceneMouseDoubleClick
+            and event.button() == QtCore.Qt.LeftButton
+        ):
+            for sample, label_item in self.items:
+                if label_item.item is not watched:
+                    continue
+                curve_item = getattr(sample, "item", None)
+                if curve_item is None:
+                    break
+                try:
+                    name = curve_item.name()
+                except Exception:
+                    name = curve_item.opts.get("name") if hasattr(curve_item, "opts") else None
+                if name and self._on_rename_requested is not None:
+                    event.accept()
+                    self._on_rename_requested(str(name))
+                    return True
+                break
+        return super().eventFilter(watched, event)
+
+
 class VnaAxisItem(pg.AxisItem):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

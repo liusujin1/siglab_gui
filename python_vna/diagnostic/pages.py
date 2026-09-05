@@ -26,6 +26,7 @@ from python_vna.optional import require
 from python_vna.ui.plot_interactions import (
     DataTipPoint,
     DataTipText,
+    EditableLegendItem,
     VnaAxisItem,
     VnaViewBox,
     _apply_text_item_style,
@@ -484,7 +485,15 @@ class DiagnosticPage(QtWidgets.QWidget):
         )
         plot.getPlotItem().setMenuEnabled(False)
         plot.getPlotItem().vb.setMenuEnabled(False)
-        plot.addLegend(offset=(4, 2), labelTextSize="7pt")
+        legend = EditableLegendItem(
+            offset=(4, 2),
+            labelTextSize="7pt",
+            on_rename_requested=lambda label, plot_widget=plot: self._rename_from_legend(
+                plot_widget, label
+            ),
+        )
+        legend.setParentItem(plot_item.vb)
+        plot_item.legend = legend
         plot.showGrid(x=True, y=True, alpha=0.22)
         plot.scene().sigMouseClicked.connect(
             lambda event, plot_widget=plot: self._handle_plot_click(plot_widget, event)
@@ -506,6 +515,11 @@ class DiagnosticPage(QtWidgets.QWidget):
             apply_plot_theme(plot, self._theme)
             self._apply_cursor_theme(plot)
         return plot
+
+    def _rename_from_legend(self, plot: pg.PlotWidget, label: str) -> None:
+        self._active_plot = plot
+        self._active_trace[plot] = label
+        self._prompt_rename_plot_curve(plot, label)
 
     def _clear_plot_widget(self, plot: pg.PlotWidget) -> None:
         self._data_tip_items[plot] = []

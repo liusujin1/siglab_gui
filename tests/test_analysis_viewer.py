@@ -1805,6 +1805,29 @@ class AnalysisViewerUiTests(unittest.TestCase):
         finally:
             viewer.close()
 
+    def test_analysis_legend_text_double_click_opens_rename_editor(self):
+        viewer = AnalysisViewer()
+        try:
+            plot = viewer.main_plots[0]
+            plot.plot([1.0, 2.0], [3.0, 4.0], name="原图例")
+            viewer._plot_curves[plot]["原图例"] = (
+                np.array([1.0, 2.0]),
+                np.array([3.0, 4.0]),
+            )
+            _sample, label_item = plot.plotItem.legend.items[0]
+            event = QtWidgets.QGraphicsSceneMouseEvent(
+                QtCore.QEvent.Type.GraphicsSceneMouseDoubleClick
+            )
+            event.setButton(QtCore.Qt.LeftButton)
+
+            with mock.patch.object(viewer, "_prompt_rename_plot_curve", return_value=True) as prompt:
+                self.assertTrue(plot.plotItem.legend.eventFilter(label_item.item, event))
+
+            prompt.assert_called_once_with(plot, "原图例")
+            self.assertEqual(viewer._active_trace[plot], "原图例")
+        finally:
+            viewer.close()
+
     def test_analysis_context_menu_selection_style_is_visible(self):
         viewer = AnalysisViewer()
         try:
