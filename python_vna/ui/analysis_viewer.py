@@ -8288,6 +8288,13 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         if not plot.sceneBoundingRect().contains(event.scenePos()):
             return
         self._active_plot = plot
+        if event.button() == QtCore.Qt.LeftButton and event.double():
+            trace = self._legend_trace_at_scene_pos(plot, event.scenePos())
+            if trace is not None:
+                event.accept()
+                self._active_trace[plot] = trace
+                self._prompt_rename_plot_curve(plot, trace)
+                return
         if event.button() == QtCore.Qt.RightButton:
             event.accept()
             if self._suppress_next_plot_context_menu:
@@ -8335,6 +8342,10 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             self._toggle_cursor_readout(not self._cursor_enabled)
         elif action is actions["clear_tips"]:
             self._clear_data_tips(plot)
+        elif action is actions["rename_curve"]:
+            trace = self._active_trace.get(plot)
+            if trace:
+                self._prompt_rename_plot_curve(plot, trace)
         elif action is actions["delete_curve"]:
             trace = self._active_trace.get(plot)
             if trace:
@@ -8375,6 +8386,82 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             if str(item_name or "") == str(label):
                 return item
         return None
+
+    @staticmethod
+    def _rename_mapping_key(mapping: dict, old_label: str, new_label: str) -> None:
+        if old_label not in mapping:
+            return
+        renamed = {
+            new_label if label == old_label else label: values
+            for label, values in mapping.items()
+        }
+        mapping.clear()
+        mapping.update(renamed)
+
+    def _rename_plot_curve(self, plot: pg.PlotWidget, old_label: str, new_label: str) -> bool:
+        curves = self._plot_curves.get(plot, {})
+        old_label = str(old_label)
+        new_label = str(new_label).strip()
+        if old_label not in curves:
+            self.statusBar().showMessage("当前图窗中找不到要重命名的曲线")
+            return False
+        if not new_label:
+            self.statusBar().showMessage("图例名称不能为空")
+            return False
+        if new_label == old_label:
+            return True
+        if new_label in curves:
+            self.statusBar().showMessage(f"图例名称“{new_label}”已存在")
+            return False
+
+        item = self._plot_item_for_label(plot, old_label)
+        label_item = None
+        legend = plot.plotItem.legend
+        if legend is not None:
+            for sample, candidate in getattr(legend, "items", []):
+                if getattr(sample, "item", None) is item:
+                    label_item = candidate
+                    break
+
+        self._rename_mapping_key(curves, old_label, new_label)
+        self._rename_mapping_key(self._time_curve_psd_sources.setdefault(plot, {}), old_label, new_label)
+
+        info_map = self._plot_curve_info.setdefault(plot, {})
+        info = self._curve_info_for(plot, old_label)
+        info_map.pop(old_label, None)
+        info.label = new_label
+        info_map[new_label] = info
+        excluded = self._plot_export_excluded.setdefault(plot, set())
+        if old_label in excluded:
+            excluded.remove(old_label)
+            excluded.add(new_label)
+        if self._active_trace.get(plot) == old_label:
+            self._active_trace[plot] = new_label
+        for data_tip in self._data_tip_items.get(plot, []):
+            if data_tip.get("trace") == old_label:
+                data_tip["trace"] = new_label
+
+        if item is not None and hasattr(item, "opts"):
+            item.opts["name"] = new_label
+        if label_item is not None:
+            label_item.setText(new_label)
+        self.statusBar().showMessage(f"图例已重命名：{old_label} -> {new_label}")
+        return True
+
+    def _prompt_rename_plot_curve(self, plot: pg.PlotWidget, label: str) -> bool:
+        new_label, accepted = QtWidgets.QInputDialog.getText(
+            self,
+            "重命名图例",
+            "图例名称：",
+            QtWidgets.QLineEdit.Normal,
+            str(label),
+        )
+        if not accepted:
+            return False
+        if self._rename_plot_curve(plot, label, new_label):
+            return True
+        QtWidgets.QMessageBox.warning(self, "重命名图例", "请输入非空且不重复的图例名称。")
+        return False
 
     def _remove_plot_curves(self, plot: pg.PlotWidget, labels: set[str]) -> int:
         curves = self._plot_curves.get(plot, {})
@@ -8483,9 +8570,11 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         actions["cursor"].setChecked(self._cursor_enabled)
         actions["clear_tips"] = menu.addAction("清除数据提示")
         menu.addSeparator()
+        actions["rename_curve"] = menu.addAction("重命名图例")
         actions["delete_curve"] = menu.addAction("删除当前曲线")
         actions["manage_curves"] = menu.addAction("管理当前图窗曲线")
         trace = self._active_trace.get(plot)
+        actions["rename_curve"].setEnabled(trace in self._plot_curves.get(plot, {}))
         actions["delete_curve"].setEnabled(
             trace is not None and self._curve_info_for(plot, trace).removable
         )

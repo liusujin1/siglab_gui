@@ -555,6 +555,48 @@ class DiagnosticAppTests(unittest.TestCase):
         self.assertTrue(page._place_data_tip(page.frequency_plot, 2.1, 5.8))
         self.assertIsInstance(page._data_tip_items[page.frequency_plot][0]["point"], DataTipPoint)
 
+    def test_diagnostic_plot_legend_rename_updates_plot_state_and_export_name(self):
+        page = VibrationAnalysisPage()
+        plot = page.frequency_plot
+        page._plot_curves_on_widget(
+            plot,
+            [
+                CurvePair(
+                    "FRF_Z",
+                    np.array([1.0, 2.0, 3.0]),
+                    np.array([2.0, 6.0, 4.0]),
+                    point_times=np.array(["T1", "T2", "T3"], dtype=object),
+                )
+            ],
+            title="测试曲线",
+            x_label="频率 (Hz)",
+            y_label="幅值",
+        )
+        page._active_trace[plot] = "FRF_Z"
+        self.assertTrue(page._place_data_tip(plot, 2.0, 6.0))
+
+        self.assertTrue(page._rename_plot_curve(plot, "FRF_Z", "Z向传递率"))
+
+        self.assertEqual(set(page._plot_curves[plot]), {"Z向传递率"})
+        self.assertEqual(set(page._plot_point_times[plot]), {"Z向传递率"})
+        self.assertEqual(page._active_trace[plot], "Z向传递率")
+        self.assertEqual(page._data_tip_items[plot][0]["trace"], "Z向传递率")
+        self.assertEqual(page._plot_item_for_label(plot, "Z向传递率").name(), "Z向传递率")
+        self.assertEqual(plot.plotItem.legend.items[0][1].text, "Z向传递率")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = page.export_plot_csv(plot, Path(tmp) / "renamed.csv")
+            header = destination.read_text(encoding="utf-8-sig").splitlines()[0]
+            self.assertEqual(header, "Z向传递率_X,Z向传递率_Y")
+
+        menu, actions = page._build_plot_context_menu(plot)
+        try:
+            self.assertEqual(actions["rename_curve"].text(), "重命名图例")
+            self.assertTrue(actions["rename_curve"].isEnabled())
+        finally:
+            menu.close()
+            page.close()
+
     def test_vibration_log_cursor_and_data_tip_show_first_column_time(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "log.csv"

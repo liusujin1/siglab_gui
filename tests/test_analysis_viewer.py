@@ -1676,6 +1676,7 @@ class AnalysisViewerUiTests(unittest.TestCase):
                             "数据提示",
                             "读数游标",
                             "清除数据提示",
+                            "重命名图例",
                             "删除当前曲线",
                             "管理当前图窗曲线",
                             "复制图像",
@@ -1683,6 +1684,7 @@ class AnalysisViewerUiTests(unittest.TestCase):
                     )
                     self.assertTrue(actions["data_tip"].isCheckable())
                     self.assertTrue(actions["cursor"].isCheckable())
+                    self.assertTrue(actions["rename_curve"].isEnabled())
                     self.assertTrue(actions["manage_curves"].isEnabled())
                 finally:
                     menu.close()
@@ -1761,8 +1763,45 @@ class AnalysisViewerUiTests(unittest.TestCase):
             viewer._active_trace[plot] = "VC A"
             self.assertFalse(viewer._curve_info_for(plot, "VC A").removable)
             self.assertFalse(viewer._curve_info_for(plot, "VC A").exportable)
+            self.assertTrue(viewer._rename_plot_curve(plot, "VC A", "VC A 参考"))
+            self.assertFalse(viewer._curve_info_for(plot, "VC A 参考").removable)
+            self.assertFalse(viewer._curve_info_for(plot, "VC A 参考").exportable)
             self.assertEqual(viewer._remove_plot_curves(plot, {"VC A"}), 0)
-            self.assertIn("VC A", viewer._plot_curves[plot])
+            self.assertEqual(viewer._remove_plot_curves(plot, {"VC A 参考"}), 0)
+            self.assertIn("VC A 参考", viewer._plot_curves[plot])
+        finally:
+            viewer.close()
+
+    def test_analysis_plot_legend_rename_updates_curve_metadata_and_export_state(self):
+        viewer = AnalysisViewer()
+        try:
+            plot = viewer.main_plots[0]
+            frequency = np.array([1.0, 2.0, 4.0], dtype=float)
+            values = np.array([1.0, 3.0, 2.0], dtype=float)
+            plot.plot(frequency, values, name="测点数据")
+            viewer._plot_curves[plot]["测点数据"] = (frequency, values)
+            viewer._register_plot_curve(plot, "测点数据", source="sample.vna")
+            viewer._plot_export_excluded[plot].add("测点数据")
+            viewer._time_curve_psd_sources.setdefault(plot, {})["测点数据"] = (
+                frequency,
+                values,
+                None,
+            )
+            viewer._active_trace[plot] = "测点数据"
+            viewer._toggle_data_tip_mode(True)
+            self.assertTrue(viewer._place_data_tip(plot, 2.0, 3.0))
+
+            self.assertTrue(viewer._rename_plot_curve(plot, "测点数据", "Z向响应"))
+
+            self.assertEqual(set(viewer._plot_curves[plot]), {"Z向响应"})
+            self.assertEqual(viewer._plot_curve_info[plot]["Z向响应"].label, "Z向响应")
+            self.assertEqual(viewer._plot_curve_info[plot]["Z向响应"].source, "sample.vna")
+            self.assertEqual(viewer._plot_export_excluded[plot], {"Z向响应"})
+            self.assertEqual(set(viewer._time_curve_psd_sources[plot]), {"Z向响应"})
+            self.assertEqual(viewer._active_trace[plot], "Z向响应")
+            self.assertEqual(viewer._data_tip_items[plot][0]["trace"], "Z向响应")
+            self.assertEqual(viewer._plot_item_for_label(plot, "Z向响应").name(), "Z向响应")
+            self.assertEqual(plot.plotItem.legend.items[0][1].text, "Z向响应")
         finally:
             viewer.close()
 

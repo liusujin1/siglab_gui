@@ -808,11 +808,28 @@ class DiagnosticPage(QtWidgets.QWidget):
         if not plot.sceneBoundingRect().contains(event.scenePos()):
             return
         self._active_plot = plot
+        if event.button() == QtCore.Qt.LeftButton and event.double():
+            trace = self._legend_trace_at_scene_pos(plot, event.scenePos())
+            if trace is not None:
+                event.accept()
+                self._active_trace[plot] = trace
+                self._prompt_rename_plot_curve(plot, trace)
+                return
         if event.button() == QtCore.Qt.RightButton:
             event.accept()
             if self._suppress_next_plot_context_menu:
                 self._suppress_next_plot_context_menu = False
                 return
+            trace = self._legend_trace_at_scene_pos(plot, event.scenePos())
+            if trace is None:
+                mouse_point = plot.getPlotItem().vb.mapSceneToView(event.scenePos())
+                trace = self._nearest_trace_name(
+                    plot,
+                    self._from_plot_x(plot, float(mouse_point.x())),
+                    self._from_plot_y(plot, float(mouse_point.y())),
+                )
+            if trace:
+                self._active_trace[plot] = trace
             self._show_plot_context_menu(plot, event.screenPos())
             return
         if event.button() != QtCore.Qt.LeftButton:
@@ -845,11 +862,128 @@ class DiagnosticPage(QtWidgets.QWidget):
             self._toggle_cursor_readout(not self._cursor_enabled)
         elif action is actions["clear_tips"]:
             self._clear_data_tips(plot)
+        elif action is actions["rename_curve"]:
+            trace = self._active_trace.get(plot)
+            if trace:
+                self._prompt_rename_plot_curve(plot, trace)
         elif action is actions["copy_image"]:
             if copy_widget_image_to_clipboard(plot):
                 self._show_status("已复制图像到剪贴板")
             else:
                 self._show_status("复制图像失败")
+
+    @staticmethod
+    def _legend_entry_for_label(plot: pg.PlotWidget, label: str):
+        legend = plot.plotItem.legend
+        if legend is None:
+            return None
+        for sample, label_item in getattr(legend, "items", []):
+            curve_item = getattr(sample, "item", None)
+            if curve_item is None:
+                continue
+            try:
+                item_name = curve_item.name()
+            except Exception:
+                item_name = curve_item.opts.get("name") if hasattr(curve_item, "opts") else None
+            if str(item_name or "") == str(label):
+                return curve_item, label_item
+        return None
+
+    def _plot_item_for_label(self, plot: pg.PlotWidget, label: str):
+        entry = self._legend_entry_for_label(plot, label)
+        if entry is not None:
+            return entry[0]
+        for item in plot.listDataItems():
+            try:
+                item_name = item.name()
+            except Exception:
+                item_name = item.opts.get("name") if hasattr(item, "opts") else None
+            if str(item_name or "") == str(label):
+                return item
+        return None
+
+    @classmethod
+    def _legend_trace_at_scene_pos(cls, plot: pg.PlotWidget, scene_pos) -> str | None:
+        legend = plot.plotItem.legend
+        if legend is None or not legend.sceneBoundingRect().contains(scene_pos):
+            return None
+        for sample, label_item in getattr(legend, "items", []):
+            if not (
+                sample.sceneBoundingRect().contains(scene_pos)
+                or label_item.sceneBoundingRect().contains(scene_pos)
+            ):
+                continue
+            curve_item = getattr(sample, "item", None)
+            if curve_item is None:
+                continue
+            try:
+                name = curve_item.name()
+            except Exception:
+                name = curve_item.opts.get("name") if hasattr(curve_item, "opts") else None
+            if name:
+                return str(name)
+        return None
+
+    def _rename_plot_curve(self, plot: pg.PlotWidget, old_label: str, new_label: str) -> bool:
+        curves = self._plot_curves.get(plot, {})
+        old_label = str(old_label)
+        new_label = str(new_label).strip()
+        if old_label not in curves:
+            self._show_status("当前图窗中找不到要重命名的曲线")
+            return False
+        if not new_label:
+            self._show_status("图例名称不能为空")
+            return False
+        if new_label == old_label:
+            return True
+        if new_label in curves:
+            self._show_status(f"图例名称“{new_label}”已存在")
+            return False
+
+        legend_entry = self._legend_entry_for_label(plot, old_label)
+        renamed_curves = {
+            new_label if label == old_label else label: values
+            for label, values in curves.items()
+        }
+        curves.clear()
+        curves.update(renamed_curves)
+
+        point_times = self._plot_point_times.setdefault(plot, {})
+        if old_label in point_times:
+            renamed_times = {
+                new_label if label == old_label else label: values
+                for label, values in point_times.items()
+            }
+            point_times.clear()
+            point_times.update(renamed_times)
+        if self._active_trace.get(plot) == old_label:
+            self._active_trace[plot] = new_label
+        for data_tip in self._data_tip_items.get(plot, []):
+            if data_tip.get("trace") == old_label:
+                data_tip["trace"] = new_label
+
+        if legend_entry is not None:
+            curve_item, label_item = legend_entry
+            if hasattr(curve_item, "opts"):
+                curve_item.opts["name"] = new_label
+            label_item.setText(new_label)
+        self._show_status(f"图例已重命名：{old_label} -> {new_label}")
+        return True
+
+    def _prompt_rename_plot_curve(self, plot: pg.PlotWidget, label: str) -> bool:
+        new_label, accepted = QtWidgets.QInputDialog.getText(
+            self,
+            "重命名图例",
+            "图例名称：",
+            QtWidgets.QLineEdit.Normal,
+            str(label),
+        )
+        if not accepted:
+            return False
+        if self._rename_plot_curve(plot, label, new_label):
+            return True
+        QtWidgets.QMessageBox.warning(self, "重命名图例", "请输入非空且不重复的图例名称。")
+        return False
 
     def _build_plot_context_menu(self, plot: pg.PlotWidget) -> tuple[QtWidgets.QMenu, dict[str, object]]:
         menu = QtWidgets.QMenu(plot)
@@ -864,6 +998,10 @@ class DiagnosticPage(QtWidgets.QWidget):
         actions["cursor"].setCheckable(True)
         actions["cursor"].setChecked(self._cursor_enabled)
         actions["clear_tips"] = menu.addAction("清除数据提示")
+        menu.addSeparator()
+        actions["rename_curve"] = menu.addAction("重命名图例")
+        trace = self._active_trace.get(plot)
+        actions["rename_curve"].setEnabled(trace in self._plot_curves.get(plot, {}))
         menu.addSeparator()
         actions["copy_image"] = menu.addAction("复制图像")
         actions["copy_image"].setEnabled(bool(self._plot_curves.get(plot)))
