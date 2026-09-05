@@ -726,6 +726,67 @@ class AnalysisDataTests(unittest.TestCase):
         )
         np.testing.assert_allclose(dataset.autospectrum["I2 (G2, 2)"][:2], [expected_first, expected_second])
 
+    def test_load_floor_response_transfer_ascii_with_companion_coherence(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            transfer_path = root / "Hxysv00014 - HS-2#_009_Z.txt"
+            coherence_path = root / "Cxysv00014 - HS-2#_009_Z.txt"
+            transfer_path.write_text(
+                "Data written for 3 signals in a group signal\n"
+                "Ref Chan:Resp Chan\t0-Z:0-Z\t0-Z:0-Z\t0-Z:0-Z\n"
+                "Channel Names\tI1 : I2\tI1 : I3\tI1 : I4\n"
+                "Channel Comments\t\t\t\n\n"
+                "\tH1, 2\t\tH1, 3\t\tH1, 4\n"
+                "Frequency\tMag\tPhase\tMag\tPhase\tMag\tPhase\n"
+                "\tRatio\t\tRatio\t\tRatio\n\n"
+                "Units:\n"
+                "Hz\tg / N\t\tg / N\t\tg / N\n"
+                "0\t0.10\t0\t0.20\t0\t0.30\t0\n"
+                "40\t0.20\t90\t0.40\t-90\t0.60\t180\n"
+                "80\t0.40\t45\t0.80\t-45\t1.20\t90\n",
+                encoding="utf-8",
+            )
+            coherence_path.write_text(
+                "Data written for 3 signals in a group signal\n"
+                "Ref Chan:Resp Chan\t0-Z:0-Z\t0-Z:0-Z\t0-Z:0-Z\n"
+                "Channel Names\tI2\tI3\tI4\n"
+                "Channel Comments\t\t\t\n\n"
+                "\tC1, 2\tC1, 3\tC1, 4\n"
+                "Frequency\tMag\tMag\tMag\n"
+                "\tRatio\tRatio\tRatio\n\n"
+                "Units:\n"
+                "Hz\t\t\t\n"
+                "0\t0.90\t0.80\t0.70\n"
+                "40\t0.91\t0.81\t0.71\n"
+                "80\t0.92\t0.82\t0.72\n",
+                encoding="utf-8",
+            )
+
+            dataset = load_analysis_path(transfer_path, fs_hint=100.0)
+            coherence_dataset = load_analysis_path(coherence_path, fs_hint=100.0)
+
+        self.assertEqual(dataset.metadata["source"], "floor_response_transfer_ascii")
+        self.assertEqual([series.channel_key for series in dataset.series], ["ai0", "ai1", "ai2", "ai3"])
+        self.assertEqual([series.display_name for series in dataset.series], ["I1", "I2", "I3", "I4"])
+        self.assertEqual(set(dataset.frf), {"ai0->ai1", "ai0->ai2", "ai0->ai3"})
+        self.assertEqual(set(dataset.coherence), {"ai0->ai1", "ai0->ai2", "ai0->ai3"})
+        self.assertEqual(coherence_dataset.path.name, coherence_path.name)
+        self.assertEqual(set(coherence_dataset.frf), set(dataset.frf))
+        self.assertEqual(set(coherence_dataset.coherence), set(dataset.coherence))
+        np.testing.assert_allclose(np.abs(dataset.frf["ai0->ai3"]), [0.30, 0.60, 1.20])
+        np.testing.assert_allclose(dataset.coherence["ai0->ai3"], [0.70, 0.71, 0.72])
+        stiffness_f, stiffness = compute_dynamic_stiffness(
+            dataset.frequency_hz,
+            dataset.frf["ai0->ai3"],
+            dataset.series[3].scale,
+            dataset.series[0].scale,
+        )
+        np.testing.assert_allclose(stiffness_f, [40.0, 80.0])
+        np.testing.assert_allclose(
+            stiffness,
+            (2.0 * np.pi * stiffness_f) ** 2 / (np.array([0.60, 1.20]) * 10.0),
+        )
+
     def test_load_simulink_mat_with_global_time_and_numeric_channels(self):
         from scipy.io import savemat
 
@@ -1015,6 +1076,35 @@ class AnalysisViewerUiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+    def test_floor_response_transfer_dataset_plots_stiffness_and_coherence(self):
+        frequency = np.array([0.0, 40.0, 80.0], dtype=float)
+        dataset = AnalysisDataset(
+            id=1,
+            path=Path("Hxysv00014.txt"),
+            name="Hxysv00014.txt",
+            sample_rate=0.0,
+            series=[
+                AnalysisSeries(1, 0, "ai0", "I1", "N", 1.0),
+                AnalysisSeries(1, 1, "ai1", "I2", "g", 10.0),
+                AnalysisSeries(1, 2, "ai2", "I3", "g", 10.0),
+                AnalysisSeries(1, 3, "ai3", "I4", "g", 10.0),
+            ],
+            frequency_hz=frequency,
+            frf={"ai0->ai3": np.array([0.3, 0.6, 1.2], dtype=complex)},
+            coherence={"ai0->ai3": np.array([0.7, 0.71, 0.72], dtype=float)},
+        )
+        viewer = AnalysisViewer()
+        try:
+            viewer.foundation_resp_edit.setText("4")
+            viewer._plot_foundation_stiffness(viewer.foundation_plots[1], dataset)
+            viewer._plot_foundation_coherence(viewer.foundation_plots[2], dataset)
+            stiffness_curves = viewer._plot_curves[viewer.foundation_plots[1]]
+            coherence_curves = viewer._plot_curves[viewer.foundation_plots[2]]
+            self.assertIn("Z", stiffness_curves)
+            self.assertIn("Z", coherence_curves)
+        finally:
+            viewer.close()
 
     def test_viewer_loads_text_path_and_plots(self):
         with tempfile.TemporaryDirectory() as tmpdir:

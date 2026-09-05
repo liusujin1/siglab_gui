@@ -607,8 +607,8 @@ def load_numeric_text_dataset(
 ) -> AnalysisDataset:
     source = Path(path)
     requested_kind = _normalize_import_kind(import_kind)
-    if requested_kind in {None, "psd"}:
-        floor_response = _load_floor_response_eu_ascii_dataset(source, dataset_id=dataset_id)
+    if requested_kind in {None, "psd", "transfer"}:
+        floor_response = _load_floor_response_ascii_dataset(source, dataset_id=dataset_id)
         if floor_response is not None:
             return floor_response
 
@@ -713,7 +713,7 @@ def _load_forced_frequency_text_dataset(
     return _plot_export_transfer_dataset(path, pairs, metadata=metadata, dataset_id=dataset_id)
 
 
-def _load_floor_response_eu_ascii_dataset(path: Path, *, dataset_id: int) -> AnalysisDataset | None:
+def _load_floor_response_ascii_dataset(path: Path, *, dataset_id: int) -> AnalysisDataset | None:
     try:
         text = _read_text_for_numeric_table(path)
     except OSError:
@@ -724,6 +724,15 @@ def _load_floor_response_eu_ascii_dataset(path: Path, *, dataset_id: int) -> Ana
     data = _floor_response_numeric_matrix(lines)
     if data is None or data.shape[1] < 2:
         return None
+    curve_kind = _floor_response_ascii_curve_kind(lines)
+    if curve_kind in {"transfer", "coherence"}:
+        return _load_floor_response_transfer_ascii_dataset(
+            path,
+            lines,
+            data,
+            curve_kind=curve_kind,
+            dataset_id=dataset_id,
+        )
     frequency = np.asarray(data[:, 0], dtype=float).ravel()
     if not _is_frequency_like(frequency):
         return None
@@ -777,6 +786,177 @@ def _load_floor_response_eu_ascii_dataset(path: Path, *, dataset_id: int) -> Ana
     )
 
 
+def _floor_response_ascii_curve_kind(lines: list[str]) -> str:
+    head = "\n".join(lines[:32])
+    if re.search(r"\bH\d+\s*,\s*\d+\b", head, flags=re.I) and "phase" in head.lower():
+        return "transfer"
+    if re.search(r"\bC\d+\s*,\s*\d+\b", head, flags=re.I):
+        return "coherence"
+    return "psd"
+
+
+def _floor_response_companion_ascii(
+    path: Path,
+    curve_kind: str,
+) -> tuple[Path, list[str], np.ndarray] | None:
+    prefix = "H" if curve_kind == "transfer" else "C"
+    if not path.name or path.name[0].lower() not in {"h", "c"}:
+        return None
+    candidate = path.with_name(prefix + path.name[1:])
+    if not candidate.exists() or candidate.resolve() == path.resolve():
+        return None
+    try:
+        lines = _read_text_for_numeric_table(candidate).splitlines()
+    except OSError:
+        return None
+    if not _looks_like_floor_response_eu_ascii(lines):
+        return None
+    if _floor_response_ascii_curve_kind(lines) != curve_kind:
+        return None
+    data = _floor_response_numeric_matrix(lines)
+    if data is None or data.shape[1] < 2:
+        return None
+    return candidate, lines, data
+
+
+def _floor_response_transfer_channel_pairs(lines: list[str], response_count: int) -> list[tuple[str, str]]:
+    names = _floor_response_channel_names(lines, response_count)
+    pairs: list[tuple[str, str]] = []
+    for index, name in enumerate(names):
+        parts = [part.strip() for part in re.split(r"\s*:\s*", str(name), maxsplit=1)]
+        if len(parts) == 2 and all(parts):
+            pairs.append((parts[0], parts[1]))
+        else:
+            pairs.append(("I1", str(name or f"I{index + 2}")))
+    return pairs
+
+
+def _load_floor_response_transfer_ascii_dataset(
+    path: Path,
+    lines: list[str],
+    data: np.ndarray,
+    *,
+    curve_kind: str,
+    dataset_id: int,
+) -> AnalysisDataset | None:
+    transfer_path: Path | None = path if curve_kind == "transfer" else None
+    transfer_lines: list[str] | None = lines if curve_kind == "transfer" else None
+    transfer_data: np.ndarray | None = data if curve_kind == "transfer" else None
+    coherence_path: Path | None = path if curve_kind == "coherence" else None
+    coherence_lines: list[str] | None = lines if curve_kind == "coherence" else None
+    coherence_data: np.ndarray | None = data if curve_kind == "coherence" else None
+
+    companion_kind = "coherence" if curve_kind == "transfer" else "transfer"
+    companion = _floor_response_companion_ascii(path, companion_kind)
+    if companion is not None:
+        companion_path, companion_lines, companion_data = companion
+        if companion_kind == "transfer":
+            transfer_path, transfer_lines, transfer_data = companion_path, companion_lines, companion_data
+        else:
+            coherence_path, coherence_lines, coherence_data = companion_path, companion_lines, companion_data
+
+    if transfer_data is not None:
+        response_count = max(0, (transfer_data.shape[1] - 1) // 2)
+        frequency = np.asarray(transfer_data[:, 0], dtype=float).ravel()
+        pair_lines = transfer_lines or lines
+    elif coherence_data is not None:
+        response_count = max(0, coherence_data.shape[1] - 1)
+        frequency = np.asarray(coherence_data[:, 0], dtype=float).ravel()
+        pair_lines = coherence_lines or lines
+    else:
+        return None
+    if response_count < 1 or not _is_frequency_like(frequency):
+        return None
+
+    pairs = _floor_response_transfer_channel_pairs(pair_lines, response_count)
+    reference_name = pairs[0][0] if pairs else "I1"
+    series = [
+        AnalysisSeries(
+            dataset_id=dataset_id,
+            channel_index=0,
+            channel_key="ai0",
+            display_name=reference_name,
+            unit="N",
+            scale=1.0,
+        )
+    ]
+    for index, (_reference, response_name) in enumerate(pairs):
+        series.append(
+            AnalysisSeries(
+                dataset_id=dataset_id,
+                channel_index=index + 1,
+                channel_key=f"ai{index + 1}",
+                display_name=response_name,
+                unit="g",
+                scale=10.0,
+            )
+        )
+
+    frf: dict[str, np.ndarray] = {}
+    if transfer_data is not None:
+        transfer_frequency = np.asarray(transfer_data[:, 0], dtype=float).ravel()
+        count = min(frequency.size, transfer_frequency.size)
+        if not np.allclose(transfer_frequency[:count], frequency[:count], rtol=1e-8, atol=1e-12):
+            frequency = transfer_frequency
+        for index in range(response_count):
+            magnitude_column = 1 + index * 2
+            phase_column = magnitude_column + 1
+            magnitude = np.asarray(transfer_data[:, magnitude_column], dtype=float).ravel()
+            phase_deg = (
+                np.asarray(transfer_data[:, phase_column], dtype=float).ravel()
+                if phase_column < transfer_data.shape[1]
+                else np.zeros_like(magnitude)
+            )
+            value_count = min(frequency.size, magnitude.size, phase_deg.size)
+            frf[f"ai0->ai{index + 1}"] = magnitude[:value_count] * np.exp(
+                1j * np.deg2rad(phase_deg[:value_count])
+            )
+
+    coherence: dict[str, np.ndarray] = {}
+    if coherence_data is not None:
+        coherence_frequency = np.asarray(coherence_data[:, 0], dtype=float).ravel()
+        for index in range(min(response_count, coherence_data.shape[1] - 1)):
+            values = np.asarray(coherence_data[:, index + 1], dtype=float).ravel()
+            count = min(coherence_frequency.size, values.size)
+            source_f = coherence_frequency[:count]
+            source_values = values[:count]
+            valid = np.isfinite(source_f) & np.isfinite(source_values)
+            if np.count_nonzero(valid) < 2:
+                continue
+            source_f = source_f[valid]
+            source_values = source_values[valid]
+            order = np.argsort(source_f)
+            coherence[f"ai0->ai{index + 1}"] = np.interp(
+                frequency,
+                source_f[order],
+                source_values[order],
+                left=np.nan,
+                right=np.nan,
+            )
+
+    rbw = _infer_rbw(frequency)
+    return AnalysisDataset(
+        id=dataset_id,
+        path=path,
+        name=path.name,
+        sample_rate=0.0,
+        series=series,
+        frequency_hz=frequency,
+        frf=frf,
+        coherence=coherence,
+        rbw_hz=rbw,
+        metadata={
+            "source": "floor_response_transfer_ascii",
+            "plot_kind": "transfer",
+            "frf_kind": "complex",
+            "rbw_hz": rbw,
+            "response_eu_per_g": 10.0,
+            "transfer_path": str(transfer_path) if transfer_path is not None else "",
+            "coherence_path": str(coherence_path) if coherence_path is not None else "",
+        },
+    )
+
+
 def _looks_like_floor_response_eu_ascii(lines: list[str]) -> bool:
     head = "\n".join(lines[:32]).lower()
     return (
@@ -784,7 +964,7 @@ def _looks_like_floor_response_eu_ascii(lines: list[str]) -> bool:
         and "channel names" in head
         and "frequency" in head
         and "units:" in head
-        and "\t mag" in head
+        and re.search(r"\t\s*mag\b", head) is not None
     )
 
 
