@@ -428,6 +428,9 @@ class DiagnosticPage(QtWidgets.QWidget):
         self._last_directory = Path.cwd()
         self._theme: dict[str, object] = {}
         self._plot_curves: dict[pg.PlotWidget, dict[str, tuple[np.ndarray, np.ndarray]]] = {}
+        self._plot_point_times: dict[
+            pg.PlotWidget, dict[str, tuple[np.ndarray, np.ndarray]]
+        ] = {}
         self._active_trace: dict[pg.PlotWidget, str | None] = {}
         self._active_plot: pg.PlotWidget | None = None
         self._data_tip_items: dict[pg.PlotWidget, list[dict[str, object]]] = {}
@@ -490,6 +493,7 @@ class DiagnosticPage(QtWidgets.QWidget):
             lambda *_args, plot_widget=plot: self._remember_axis_range(plot_widget)
         )
         self._plot_curves[plot] = {}
+        self._plot_point_times[plot] = {}
         self._active_trace[plot] = None
         if self._active_plot is None:
             self._active_plot = plot
@@ -507,6 +511,7 @@ class DiagnosticPage(QtWidgets.QWidget):
         self._data_tip_items[plot] = []
         plot.clear()
         self._plot_curves[plot] = {}
+        self._plot_point_times[plot] = {}
         self._active_trace[plot] = None
         self._cursor_positions[plot] = None
         self._axis_history[plot] = []
@@ -542,17 +547,23 @@ class DiagnosticPage(QtWidgets.QWidget):
             apply_plot_theme(plot, self._theme)
             self._apply_cursor_theme(plot)
         saved: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        saved_point_times: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         plotted = 0
-        prepared: list[tuple[CurvePair, np.ndarray, np.ndarray]] = []
+        prepared: list[tuple[CurvePair, np.ndarray, np.ndarray, np.ndarray | None]] = []
         for curve in curves:
             x, y = finite_xy(curve.x, curve.y, positive_x=log_x, positive_y=log_y and not subplots)
             if x.size == 0:
                 continue
-            prepared.append((curve, x, y))
+            point_times = self._finite_curve_point_times(
+                curve,
+                positive_x=log_x,
+                positive_y=log_y and not subplots,
+            )
+            prepared.append((curve, x, y, point_times))
         if subplots and prepared:
             total = len(prepared)
             tick_values: list[tuple[float, str]] = []
-            for index, (curve, x, y) in enumerate(prepared):
+            for index, (curve, x, y, point_times) in enumerate(prepared):
                 center = float(total - index - 0.5)
                 y_min = float(np.nanmin(y))
                 y_max = float(np.nanmax(y))
@@ -577,9 +588,12 @@ class DiagnosticPage(QtWidgets.QWidget):
                     divider.setZValue(5)
                     plot.addItem(divider, ignoreBounds=True)
                 saved[label] = (x, y_plot)
+                if point_times is not None:
+                    saved_point_times[label] = (x.copy(), point_times.copy())
                 tick_values.append((center, label))
                 plotted += 1
             self._plot_curves[plot] = saved
+            self._plot_point_times[plot] = saved_point_times
             try:
                 plot.getAxis("left").setTicks([tick_values])
             except Exception:
@@ -598,13 +612,16 @@ class DiagnosticPage(QtWidgets.QWidget):
             finally:
                 self._axis_scaling_plot = None
             return plotted
-        for index, (curve, x, y) in enumerate(prepared):
+        for index, (curve, x, y, point_times) in enumerate(prepared):
             color = self._color_for_label(curve.label)
             label = self._unique_saved_label(saved, curve.label)
             plot.plot(x, y, pen=pg.mkPen(color, width=1.5), name=label)
             saved[label] = (x, y)
+            if point_times is not None:
+                saved_point_times[label] = (x.copy(), point_times.copy())
             plotted += 1
         self._plot_curves[plot] = saved
+        self._plot_point_times[plot] = saved_point_times
         plot.showGrid(x=True, y=True, alpha=0.22)
         if saved:
             self._auto_range_plot(
@@ -617,6 +634,71 @@ class DiagnosticPage(QtWidgets.QWidget):
         else:
             plot.enableAutoRange()
         return plotted
+
+    @staticmethod
+    def _finite_curve_point_times(
+        curve: CurvePair,
+        *,
+        positive_x: bool,
+        positive_y: bool,
+    ) -> np.ndarray | None:
+        if curve.point_times is None:
+            return None
+        x = np.asarray(curve.x, dtype=float).ravel()
+        y = np.asarray(curve.y, dtype=float).ravel()
+        times = np.asarray(curve.point_times, dtype=object).ravel()
+        count = min(x.size, y.size)
+        if count < 1 or times.size < count:
+            return None
+        x = x[:count]
+        y = y[:count]
+        times = times[:count]
+        mask = np.isfinite(x) & np.isfinite(y)
+        if positive_x:
+            mask &= x > 0.0
+        if positive_y:
+            mask &= y > 0.0
+        return times[mask]
+
+    def _time_text_for_curve_point(
+        self,
+        plot: pg.PlotWidget,
+        trace: str | None,
+        value_x: float,
+    ) -> str | None:
+        if not trace:
+            return None
+        metadata = self._plot_point_times.get(plot, {}).get(trace)
+        if metadata is None:
+            return None
+        x_values = np.asarray(metadata[0], dtype=float).ravel()
+        time_values = np.asarray(metadata[1], dtype=object).ravel()
+        count = min(x_values.size, time_values.size)
+        if count < 1:
+            return None
+        distances = np.abs(x_values[:count] - float(value_x))
+        finite = np.isfinite(distances)
+        if not np.any(finite):
+            return None
+        index = int(np.nanargmin(np.where(finite, distances, np.nan)))
+        tolerance = max(1e-9, abs(float(value_x)) * 1e-9)
+        if float(distances[index]) > tolerance:
+            return None
+        text = str(time_values[index]).strip()
+        return text or None
+
+    def _point_readout_text(
+        self,
+        plot: pg.PlotWidget,
+        value_x: float,
+        value_y: float,
+        trace: str | None,
+    ) -> str:
+        lines = [f"X {value_x:.6g}", f"Y {value_y:.6g}"]
+        time_text = self._time_text_for_curve_point(plot, trace, value_x)
+        if time_text is not None:
+            lines.append(f"时间 {time_text}")
+        return "\n".join(lines)
 
     @staticmethod
     def _unique_saved_label(saved: dict[str, tuple[np.ndarray, np.ndarray]], label: str) -> str:
@@ -713,7 +795,8 @@ class DiagnosticPage(QtWidgets.QWidget):
         items["line"].setVisible(True)
         items["point"].setData([plot_x], [plot_y])
         items["point"].setVisible(True)
-        items["text"].setText(f"X {cursor_x:.6g}\nY {cursor_y:.6g}")
+        active_trace = trace or self._active_trace.get(plot)
+        items["text"].setText(self._point_readout_text(plot, cursor_x, cursor_y, active_trace))
         if hasattr(items["text"], "setAnchor"):
             items["text"].setAnchor(self._data_tip_anchor_for_plot_point(plot, cursor_x, cursor_y))
         items["text"].setPos(plot_x, plot_y)
@@ -926,7 +1009,13 @@ class DiagnosticPage(QtWidgets.QWidget):
             return False
         tip_x, tip_y, trace = snapped
         self._active_trace[plot] = trace
-        data_tip: dict[str, object] = {"trace": trace, "x": tip_x, "y": tip_y}
+        time_text = self._time_text_for_curve_point(plot, trace, tip_x)
+        data_tip: dict[str, object] = {
+            "trace": trace,
+            "x": tip_x,
+            "y": tip_y,
+            "time": time_text,
+        }
         point = DataTipPoint(
             [self._to_plot_x(plot, tip_x)],
             [self._to_plot_y(plot, tip_y)],
@@ -944,7 +1033,7 @@ class DiagnosticPage(QtWidgets.QWidget):
         )
         point.setZValue(40)
         text = DataTipText(
-            text=f"X {tip_x:.6g}\nY {tip_y:.6g}",
+            text=self._point_readout_text(plot, tip_x, tip_y, trace),
             color="#111111",
             anchor=self._data_tip_anchor_for_plot_point(plot, tip_x, tip_y),
             fill=pg.mkBrush(255, 245, 157, 230),
@@ -979,10 +1068,11 @@ class DiagnosticPage(QtWidgets.QWidget):
         data_tip["trace"] = trace
         data_tip["x"] = tip_x
         data_tip["y"] = tip_y
+        data_tip["time"] = self._time_text_for_curve_point(plot, trace, tip_x)
         point = data_tip["point"]
         text = data_tip["text"]
         point.setData([self._to_plot_x(plot, tip_x)], [self._to_plot_y(plot, tip_y)])
-        text.setText(f"X {tip_x:.6g}\nY {tip_y:.6g}")
+        text.setText(self._point_readout_text(plot, tip_x, tip_y, trace))
         if hasattr(text, "setAnchor"):
             text.setAnchor(
                 data_tip.get("label_anchor")
@@ -1461,10 +1551,22 @@ class VibrationAnalysisPage(DiagnosticPage):
     ) -> int:
         render_curves = list(curves)
         if hold and not subplots:
-            prior = [
-                CurvePair(label, np.asarray(x, dtype=float).copy(), np.asarray(y, dtype=float).copy(), x_label, y_label)
-                for label, (x, y) in self._plot_curves.get(plot, {}).items()
-            ]
+            prior: list[CurvePair] = []
+            prior_times = self._plot_point_times.get(plot, {})
+            for label, (x, y) in self._plot_curves.get(plot, {}).items():
+                time_metadata = prior_times.get(label)
+                prior.append(
+                    CurvePair(
+                        label,
+                        np.asarray(x, dtype=float).copy(),
+                        np.asarray(y, dtype=float).copy(),
+                        x_label,
+                        y_label,
+                        np.asarray(time_metadata[1], dtype=object).copy()
+                        if time_metadata is not None
+                        else None,
+                    )
+                )
             render_curves = prior + render_curves
         return self._plot_curves_on_widget(
             plot,
@@ -1560,7 +1662,14 @@ class VibrationAnalysisPage(DiagnosticPage):
         if not prefix:
             return curves
         return [
-            CurvePair(f"{prefix} | {curve.label}", curve.x, curve.y, curve.x_label, curve.y_label)
+            CurvePair(
+                f"{prefix} | {curve.label}",
+                curve.x,
+                curve.y,
+                curve.x_label,
+                curve.y_label,
+                curve.point_times,
+            )
             for curve in curves
         ]
 
@@ -1593,12 +1702,23 @@ class VibrationAnalysisPage(DiagnosticPage):
         if x.size < current.table.row_count:
             x = np.arange(1, current.table.row_count + 1, dtype=float)
         x = x[start:end]
+        raw_times = np.asarray(current.table.metadata.get("raw_time_text", []), dtype=object).ravel()
+        point_times = raw_times[start:end] if raw_times.size >= end else None
         curves: list[CurvePair] = []
         for index, label in selected_channels:
             y = np.asarray(current.table.data[start:end, index], dtype=float)
             if self.demean_check.isChecked():
                 y = self._demean_vector(y)
-            curves.append(CurvePair(label, x[: y.size], y, "样本序号", label))
+            curves.append(
+                CurvePair(
+                    label,
+                    x[: y.size],
+                    y,
+                    "样本序号",
+                    label,
+                    point_times[: y.size] if point_times is not None else None,
+                )
+            )
         return curves
 
     def _log_slice_bounds_for_file(self, current: VibrationAnalysisFile) -> tuple[int, int]:
@@ -3944,6 +4064,7 @@ class TraceAnalysisPage(DiagnosticPage):
         self._log_modes[plot] = (log_x, log_y)
         if self._theme:
             apply_plot_theme(plot, self._theme)
+        source_point_times = self._plot_point_times.get(source_plot, {})
         for index, (label, (x, y)) in enumerate(curves.items()):
             plot.plot(
                 np.asarray(x, dtype=float),
@@ -3955,6 +4076,12 @@ class TraceAnalysisPage(DiagnosticPage):
                 np.asarray(x, dtype=float).copy(),
                 np.asarray(y, dtype=float).copy(),
             )
+            time_metadata = source_point_times.get(label)
+            if time_metadata is not None:
+                self._plot_point_times[plot][label] = (
+                    np.asarray(time_metadata[0], dtype=float).copy(),
+                    np.asarray(time_metadata[1], dtype=object).copy(),
+                )
             if self._active_trace.get(plot) is None:
                 self._active_trace[plot] = label
         layout.addWidget(plot)
@@ -3975,6 +4102,7 @@ class TraceAnalysisPage(DiagnosticPage):
             if self._active_plot is plot:
                 self._active_plot = None
             self._plot_curves.pop(plot, None)
+            self._plot_point_times.pop(plot, None)
             self._active_trace.pop(plot, None)
             self._data_tip_items.pop(plot, None)
             self._cursor_items.pop(plot, None)

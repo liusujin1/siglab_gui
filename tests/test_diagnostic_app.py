@@ -555,6 +555,31 @@ class DiagnosticAppTests(unittest.TestCase):
         self.assertTrue(page._place_data_tip(page.frequency_plot, 2.1, 5.8))
         self.assertIsInstance(page._data_tip_items[page.frequency_plot][0]["point"], DataTipPoint)
 
+    def test_vibration_log_cursor_and_data_tip_show_first_column_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "log.csv"
+            path.write_text(
+                "Time,ACC_X\n"
+                "0.125,10\n"
+                "0.250,20\n"
+                "0.375,30\n",
+                encoding="utf-8",
+            )
+            page = VibrationAnalysisPage()
+            page.load_paths([path])
+            page.plot_current()
+
+        self.assertTrue(page._set_cursor_position(page.log_plot, 2.0, 20.0, "ACC_X"))
+        cursor_text = page._cursor_items[page.log_plot]["text"].toPlainText()
+        self.assertIn("X 2", cursor_text)
+        self.assertIn("Y 20", cursor_text)
+        self.assertIn("时间 0.250", cursor_text)
+
+        self.assertTrue(page._place_data_tip(page.log_plot, 2.1, 19.0))
+        data_tip = page._data_tip_items[page.log_plot][0]
+        self.assertEqual(data_tip["time"], "0.250")
+        self.assertIn("时间 0.250", data_tip["text"].toPlainText())
+
     def test_trace_page_loads_and_plots_time_and_psd(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "trace.txt"

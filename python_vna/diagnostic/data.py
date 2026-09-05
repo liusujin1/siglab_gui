@@ -21,6 +21,7 @@ class CurvePair:
     y: np.ndarray
     x_label: str = "X"
     y_label: str = "Y"
+    point_times: np.ndarray | None = None
 
 
 @dataclass(slots=True)
