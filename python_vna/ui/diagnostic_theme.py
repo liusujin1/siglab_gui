@@ -33,19 +33,23 @@ DARK_TRACE_COLORS: list[str] = [
 ]
 
 LIGHT_TRACE_COLORS: list[str] = [
-    "#148A14",  # 1 green
-    "#2878B5",  # 2 blue
-    "#B88600",  # 3 dark yellow
-    "#D43A3A",  # 4 red
-    "#A80018",  # 5 dark red
-    "#C46A00",  # 6 amber
-    "#008C9E",  # 7 cyan
-    "#6657B8",  # 8 violet
-    "#304FC4",  # 9 blue
-    "#4A4A4A",  # 10 charcoal
-    "#5D8F00",  # 11 lime
-    "#0077B8",  # 12 azure
+    "#1875A6",  # 1 blue
+    "#DC6B2F",  # 2 orange
+    "#3F9B55",  # 3 green
+    "#8A5AB7",  # 4 violet
+    "#C43B62",  # 5 rose
+    "#287D8E",  # 6 teal
+    "#BD8A22",  # 7 ochre
+    "#526FB4",  # 8 indigo
+    "#8B6F47",  # 9 brown
+    "#1C9B8E",  # 10 turquoise
+    "#B44C9B",  # 11 magenta
+    "#6D7A86",  # 12 gray blue
 ]
+
+TRACE_CURVE_WIDTH = 1.45
+TRACE_ACTIVE_WIDTH = 2.2
+TRACE_CURVE_ALPHA = 225
 
 # VC reference curves — fixed semantic colors, readable on light plot bg.
 VC_REFERENCE_COLORS: dict[str, str] = {
@@ -222,7 +226,7 @@ THEMES: dict[str, dict[str, object]] = {
         "panel_bg_alt": "#eef3f5",
         "control_bg": "#ffffff",
         "cell_bg": "#e3ecef",
-        "plot_bg": "#ffffff",
+        "plot_bg": "#fbfdfe",
         "plot_workspace_bg": "#dfe8eb",
         "elevated": "#ffffff",
         # Text
@@ -259,9 +263,10 @@ THEMES: dict[str, dict[str, object]] = {
         "nav_selected": "#f3f7f8",
         "nav_selected_text": "#102a32",
         # Plot overlays
-        "legend_bg": (255, 255, 255, 235),
+        "legend_bg": (255, 255, 255, 224),
+        "legend_border": "#9bb4c2",
         "legend_text": "#15242b",
-        "grid_alpha": 0.18,
+        "grid_alpha": 0.14,
         "marker_a": "#c9851f",
         "marker_b": "#0f6b78",
         "cursor": "#c23b4a",
@@ -320,6 +325,7 @@ THEMES: dict[str, dict[str, object]] = {
         "nav_selected_text": "#0a1a20",
         # Plot overlays
         "legend_bg": (10, 18, 22, 220),
+        "legend_border": "#4a616c",
         "legend_text": "#e7f0f3",
         "grid_alpha": 0.26,
         "marker_a": "#e2a84a",
@@ -421,7 +427,7 @@ def apply_plot_legend_theme(plot, theme: dict[str, object]) -> None:
             legend.setBrush(pg.mkBrush(*legend_bg))
         else:
             legend.setBrush(pg.mkBrush(str(legend_bg)))
-        legend.setPen(pg.mkPen(legend_text, width=0.8))
+        legend.setPen(pg.mkPen(str(theme.get("legend_border", legend_text)), width=0.8))
         legend.opts["labelTextColor"] = legend_text
         for _sample, label in getattr(legend, "items", []):
             label.setText(label.text, color=legend_text)

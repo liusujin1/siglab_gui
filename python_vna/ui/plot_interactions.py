@@ -3,12 +3,18 @@ from __future__ import annotations
 import numpy as np
 
 from python_vna.optional import require
+from python_vna.ui.diagnostic_theme import (
+    TRACE_ACTIVE_WIDTH,
+    TRACE_CURVE_ALPHA,
+    TRACE_CURVE_WIDTH,
+)
 
 
 QtCore = require("PySide6.QtCore", "python -m pip install -e .[gui]")
 QtGui = require("PySide6.QtGui", "python -m pip install -e .[gui]")
 QtWidgets = require("PySide6.QtWidgets", "python -m pip install -e .[gui]")
 pg = require("pyqtgraph", "python -m pip install -e .[gui]")
+pg.setConfigOption("antialias", True)
 
 
 CURVE_Z = 0
@@ -16,6 +22,25 @@ LEGEND_Z = 10
 MARKER_Z = 20
 CURSOR_Z = 30
 DATA_TIP_Z = 40
+
+
+def trace_pen(
+    color,
+    *,
+    width: float = TRACE_CURVE_WIDTH,
+    style=None,
+    alpha: int | None = TRACE_CURVE_ALPHA,
+):
+    """Build the shared antialiased cosmetic pen used for data curves."""
+    qcolor = QtGui.QColor(color)
+    if alpha is not None:
+        qcolor.setAlpha(max(0, min(255, int(alpha))))
+    kwargs = {"color": qcolor, "width": float(width)}
+    if style is not None:
+        kwargs["style"] = style
+    pen = pg.mkPen(**kwargs)
+    pen.setCosmetic(True)
+    return pen
 
 
 def copy_widget_image_to_clipboard(widget: QtWidgets.QWidget) -> bool:

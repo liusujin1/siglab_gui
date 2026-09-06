@@ -410,6 +410,8 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(self.window._theme_name, "light")
         self.assertTrue(self.window.light_theme_action.isChecked())
         theme = self.window._theme()
+        self.assertEqual(theme["plot_bg"], "#fbfdfe")
+        self.assertEqual(theme["grid_alpha"], 0.14)
         self.assertIn(f"background: {theme['window_bg']};", self.window.styleSheet())
         self.assertIn(
             f"#plotWorkspace {{ background: {theme['plot_workspace_bg']}; }}",
@@ -443,7 +445,7 @@ class MainWindowTests(unittest.TestCase):
         first_curve = self.window._plot_curve_items["top"]["ai0"]
         second_curve = self.window._plot_curve_items["top"]["ai1"]
         self.assertEqual(self.window._trace_colors()[:4], self.window.LIGHT_TRACE_COLORS[:4])
-        self.assertEqual(self.window.LIGHT_TRACE_COLORS[3], "#D43A3A")
+        self.assertEqual(self.window.LIGHT_TRACE_COLORS[3], "#8A5AB7")
         self.assertNotEqual(self.window.LIGHT_TRACE_COLORS[1], self.window.LIGHT_TRACE_COLORS[3])
         self.assertEqual(
             first_curve.opts["pen"].color().name().lower(),
@@ -454,6 +456,11 @@ class MainWindowTests(unittest.TestCase):
             self.window.LIGHT_TRACE_COLORS[1].lower(),
         )
         self.assertNotEqual(first_curve.opts["pen"].color().name(), self.window.TRACE_COLORS[0])
+        self.assertAlmostEqual(first_curve.opts["pen"].widthF(), 2.2)
+        self.assertAlmostEqual(second_curve.opts["pen"].widthF(), 1.45)
+        self.assertTrue(first_curve.opts["pen"].isCosmetic())
+        self.assertEqual(first_curve.opts["pen"].color().alpha(), 225)
+        self.assertTrue(main_window_module.pg.getConfigOption("antialias"))
 
     def test_legacy_left_panel_avoids_gray_background_black_text(self):
         stylesheet = self.window.left_panel.styleSheet()

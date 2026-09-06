@@ -27,12 +27,15 @@ from python_vna.ui.plot_interactions import (
     DataTipPoint,
     DataTipText,
     EditableLegendItem,
+    TRACE_ACTIVE_WIDTH,
+    TRACE_CURVE_WIDTH,
     VnaAxisItem,
     VnaViewBox,
     _apply_text_item_style,
     _cursor_palette_for_background,
     _data_tip_anchor_for_label_drag,
     copy_widget_image_to_clipboard,
+    trace_pen,
 )
 from python_vna.ui.legend_placement import place_legend_away_from_curves
 from python_vna.ui.diagnostic_theme import (
@@ -494,7 +497,7 @@ class DiagnosticPage(QtWidgets.QWidget):
         )
         legend.setParentItem(plot_item.vb)
         plot_item.legend = legend
-        plot.showGrid(x=True, y=True, alpha=0.22)
+        plot.showGrid(x=True, y=True, alpha=float(self._theme.get("grid_alpha", 0.14)))
         plot.scene().sigMouseClicked.connect(
             lambda event, plot_widget=plot: self._handle_plot_click(plot_widget, event)
         )
@@ -519,6 +522,7 @@ class DiagnosticPage(QtWidgets.QWidget):
     def _rename_from_legend(self, plot: pg.PlotWidget, label: str) -> None:
         self._active_plot = plot
         self._active_trace[plot] = label
+        self._refresh_active_curve_style(plot)
         self._prompt_rename_plot_curve(plot, label)
 
     def _clear_plot_widget(self, plot: pg.PlotWidget) -> None:
@@ -588,7 +592,7 @@ class DiagnosticPage(QtWidgets.QWidget):
                     y_plot = ((y - y_min) / span - 0.5) * 0.72 + center
                 color = self._color_for_label(curve.label)
                 label = self._unique_saved_label(saved, curve.label)
-                plot.plot(x, y_plot, pen=pg.mkPen(color, width=1.35), name=label)
+                plot.plot(x, y_plot, pen=trace_pen(color), name=label)
                 text = pg.TextItem(label, color=color, anchor=(0.0, 0.5))
                 text.setZValue(20)
                 text.setPos(float(x[0]), center)
@@ -612,7 +616,7 @@ class DiagnosticPage(QtWidgets.QWidget):
                 plot.getAxis("left").setTicks([tick_values])
             except Exception:
                 pass
-            plot.showGrid(x=True, y=False, alpha=0.18)
+            plot.showGrid(x=True, y=False, alpha=float(self._theme.get("grid_alpha", 0.14)))
             self._axis_scaling_plot = plot
             try:
                 xs = concat_finite([curve[0] for curve in saved.values()], positive_only=log_x)
@@ -629,14 +633,14 @@ class DiagnosticPage(QtWidgets.QWidget):
         for index, (curve, x, y, point_times) in enumerate(prepared):
             color = self._color_for_label(curve.label)
             label = self._unique_saved_label(saved, curve.label)
-            plot.plot(x, y, pen=pg.mkPen(color, width=1.5), name=label)
+            plot.plot(x, y, pen=trace_pen(color), name=label)
             saved[label] = (x, y)
             if point_times is not None:
                 saved_point_times[label] = (x.copy(), point_times.copy())
             plotted += 1
         self._plot_curves[plot] = saved
         self._plot_point_times[plot] = saved_point_times
-        plot.showGrid(x=True, y=True, alpha=0.22)
+        plot.showGrid(x=True, y=True, alpha=float(self._theme.get("grid_alpha", 0.14)))
         if saved:
             self._auto_range_plot(
                 plot,
@@ -797,6 +801,7 @@ class DiagnosticPage(QtWidgets.QWidget):
     ) -> bool:
         if trace:
             self._active_trace[plot] = trace
+            self._refresh_active_curve_style(plot)
         self._cursor_positions[plot] = (float(cursor_x), float(cursor_y))
         if not self._cursor_enabled:
             self._toggle_cursor_readout(True)
@@ -844,6 +849,7 @@ class DiagnosticPage(QtWidgets.QWidget):
                 )
             if trace:
                 self._active_trace[plot] = trace
+                self._refresh_active_curve_style(plot)
             self._show_plot_context_menu(plot, event.screenPos())
             return
         if event.button() != QtCore.Qt.LeftButton:
@@ -854,6 +860,7 @@ class DiagnosticPage(QtWidgets.QWidget):
         trace = self._nearest_trace_name(plot, click_x, click_y)
         if trace:
             self._active_trace[plot] = trace
+            self._refresh_active_curve_style(plot)
         if self._data_tip_enabled:
             self._place_data_tip(plot, click_x, click_y)
         else:
@@ -915,6 +922,21 @@ class DiagnosticPage(QtWidgets.QWidget):
             if str(item_name or "") == str(label):
                 return item
         return None
+
+    def _refresh_active_curve_style(self, plot: pg.PlotWidget) -> None:
+        active_trace = self._active_trace.get(plot)
+        for label in self._plot_curves.get(plot, {}):
+            item = self._plot_item_for_label(plot, label)
+            if item is None:
+                continue
+            pen = pg.mkPen(item.opts.get("pen"))
+            item.setPen(
+                trace_pen(
+                    pen.color(),
+                    width=TRACE_ACTIVE_WIDTH if label == active_trace else TRACE_CURVE_WIDTH,
+                    style=pen.style(),
+                )
+            )
 
     @classmethod
     def _legend_trace_at_scene_pos(cls, plot: pg.PlotWidget, scene_pos) -> str | None:
@@ -1161,6 +1183,7 @@ class DiagnosticPage(QtWidgets.QWidget):
             return False
         tip_x, tip_y, trace = snapped
         self._active_trace[plot] = trace
+        self._refresh_active_curve_style(plot)
         time_text = self._time_text_for_curve_point(plot, trace, tip_x)
         data_tip: dict[str, object] = {
             "trace": trace,
@@ -4221,7 +4244,7 @@ class TraceAnalysisPage(DiagnosticPage):
             plot.plot(
                 np.asarray(x, dtype=float),
                 np.asarray(y, dtype=float),
-                pen=pg.mkPen(self._color_for_label(label), width=1.5),
+                pen=trace_pen(self._color_for_label(label)),
                 name=label,
             )
             self._plot_curves[plot][label] = (

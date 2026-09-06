@@ -1808,6 +1808,30 @@ class AnalysisViewerUiTests(unittest.TestCase):
         finally:
             viewer.close()
 
+    def test_analysis_active_curve_uses_shared_samba_pen_style(self):
+        viewer = AnalysisViewer()
+        try:
+            plot = viewer.main_plots[0]
+            x = np.array([1.0, 2.0], dtype=float)
+            plot.plot(x, [1.0, 2.0], pen=viewer._pen_for_label("A"), name="A")
+            plot.plot(x, [2.0, 1.0], pen=viewer._pen_for_label("B"), name="B")
+            viewer._plot_curves[plot] = {
+                "A": (x, np.array([1.0, 2.0])),
+                "B": (x, np.array([2.0, 1.0])),
+            }
+
+            viewer._active_trace[plot] = "A"
+            viewer._refresh_active_curve_style(plot)
+
+            active_pen = viewer._plot_item_for_label(plot, "A").opts["pen"]
+            normal_pen = viewer._plot_item_for_label(plot, "B").opts["pen"]
+            self.assertAlmostEqual(active_pen.widthF(), 2.2)
+            self.assertAlmostEqual(normal_pen.widthF(), 1.45)
+            self.assertEqual(active_pen.color().alpha(), 225)
+            self.assertTrue(active_pen.isCosmetic())
+        finally:
+            viewer.close()
+
     def test_analysis_legend_text_double_click_opens_rename_editor(self):
         viewer = AnalysisViewer()
         try:

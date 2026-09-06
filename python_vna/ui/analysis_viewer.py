@@ -77,12 +77,15 @@ from python_vna.ui.plot_interactions import (
     DataTipPoint,
     DataTipText,
     EditableLegendItem,
+    TRACE_ACTIVE_WIDTH,
+    TRACE_CURVE_WIDTH,
     VnaAxisItem,
     VnaViewBox,
     _apply_text_item_style,
     _cursor_palette_for_background,
     _data_tip_anchor_for_label_drag,
     copy_widget_image_to_clipboard,
+    trace_pen,
 )
 from python_vna.ui.legend_placement import place_legend_away_from_curves
 from python_vna.ui.diagnostic_theme import (
@@ -418,20 +421,16 @@ class AnalysisWorkbench(QtWidgets.QWidget):
     def _color_for_label(self, label: object) -> str:
         return color_for_trace_name(label, self._trace_colors(), theme=self._theme)
 
-    def _pen_for_label(self, label: object, *, width: float = 1.3, style=None):
-        kwargs = {"width": width}
-        if style is not None:
-            kwargs["style"] = style
-        return pg.mkPen(self._color_for_label(label), **kwargs)
+    def _pen_for_label(self, label: object, *, width: float = TRACE_CURVE_WIDTH, style=None):
+        return trace_pen(self._color_for_label(label), width=width, style=style)
 
-    def _pen_for_curve_index(self, index: int, *, width: float = 1.3, style=None):
+    def _pen_for_curve_index(
+        self, index: int, *, width: float = TRACE_CURVE_WIDTH, style=None
+    ):
         """Assign distinct colors to curves that share the same channel name."""
-        kwargs = {"width": width}
-        if style is not None:
-            kwargs["style"] = style
         colors = self._trace_colors()
         color = colors[int(index) % len(colors)] if colors else self._color_for_label(index)
-        return pg.mkPen(color, **kwargs)
+        return trace_pen(color, width=width, style=style)
 
     def _apply_list_widget_palette(self, list_widget: QtWidgets.QListWidget) -> None:
         theme = self._theme
@@ -558,7 +557,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         )
         legend.setParentItem(plot_item.vb)
         plot_item.legend = legend
-        plot.showGrid(x=True, y=True, alpha=0.25)
+        plot.showGrid(x=True, y=True, alpha=float(self._theme.get("grid_alpha", 0.14)))
         plot.scene().sigMouseClicked.connect(
             lambda event, plot_widget=plot: self._handle_plot_click(plot_widget, event)
         )
@@ -582,6 +581,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
     def _rename_from_legend(self, plot: pg.PlotWidget, label: str) -> None:
         self._active_plot = plot
         self._active_trace[plot] = label
+        self._refresh_active_curve_style(plot)
         self._prompt_rename_plot_curve(plot, label)
 
     def _curve_info_for(self, plot: pg.PlotWidget, label: str) -> PlotCurveInfo:
@@ -8278,6 +8278,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
     ) -> bool:
         if trace:
             self._active_trace[plot] = trace
+            self._refresh_active_curve_style(plot)
         self._cursor_positions[plot] = (float(cursor_x), float(cursor_y))
         if not self._cursor_enabled:
             self._toggle_cursor_readout(True)
@@ -8324,6 +8325,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
                 )
             if trace:
                 self._active_trace[plot] = trace
+                self._refresh_active_curve_style(plot)
             self._show_plot_context_menu(plot, event.screenPos())
             return
         if event.button() != QtCore.Qt.LeftButton:
@@ -8334,6 +8336,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         trace = self._nearest_trace_name(plot, click_x, click_y)
         if trace:
             self._active_trace[plot] = trace
+            self._refresh_active_curve_style(plot)
         if self._data_tip_enabled:
             self._place_data_tip(plot, click_x, click_y)
         else:
@@ -8400,6 +8403,23 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             if str(item_name or "") == str(label):
                 return item
         return None
+
+    def _refresh_active_curve_style(self, plot: pg.PlotWidget) -> None:
+        active_trace = self._active_trace.get(plot)
+        for label in self._plot_curves.get(plot, {}):
+            if not self._curve_info_for(plot, label).removable:
+                continue
+            item = self._plot_item_for_label(plot, label)
+            if item is None:
+                continue
+            pen = pg.mkPen(item.opts.get("pen"))
+            item.setPen(
+                trace_pen(
+                    pen.color(),
+                    width=TRACE_ACTIVE_WIDTH if label == active_trace else TRACE_CURVE_WIDTH,
+                    style=pen.style(),
+                )
+            )
 
     @staticmethod
     def _rename_mapping_key(mapping: dict, old_label: str, new_label: str) -> None:
@@ -8738,6 +8758,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             return False
         tip_x, tip_y, trace = snapped
         self._active_trace[plot] = trace
+        self._refresh_active_curve_style(plot)
         data_tip: dict[str, object] = {"trace": trace, "x": tip_x, "y": tip_y}
         point = DataTipPoint(
             [self._to_plot_x(plot, tip_x)],

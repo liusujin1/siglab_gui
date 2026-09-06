@@ -554,6 +554,10 @@ class DiagnosticAppTests(unittest.TestCase):
         self.assertEqual(page._cursor_positions[page.frequency_plot], (2.0, 6.0))
         self.assertTrue(page._place_data_tip(page.frequency_plot, 2.1, 5.8))
         self.assertIsInstance(page._data_tip_items[page.frequency_plot][0]["point"], DataTipPoint)
+        pen = page._plot_item_for_label(page.frequency_plot, "FRF_Z").opts["pen"]
+        self.assertAlmostEqual(pen.widthF(), 2.2)
+        self.assertEqual(pen.color().alpha(), 225)
+        self.assertTrue(pen.isCosmetic())
 
     def test_diagnostic_plot_legend_rename_updates_plot_state_and_export_name(self):
         page = VibrationAnalysisPage()

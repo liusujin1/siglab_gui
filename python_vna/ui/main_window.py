@@ -63,6 +63,8 @@ from python_vna.ui.plot_interactions import (
     DATA_TIP_Z,
     LEGEND_Z,
     MARKER_Z,
+    TRACE_ACTIVE_WIDTH,
+    TRACE_CURVE_WIDTH,
     DataTipPoint,
     DataTipText,
     VnaAxisItem,
@@ -71,6 +73,7 @@ from python_vna.ui.plot_interactions import (
     _cursor_palette_for_background,
     _data_tip_anchor_for_label_drag,
     copy_widget_image_to_clipboard,
+    trace_pen,
 )
 from python_vna.ui.diagnostic_theme import (
     DARK_TRACE_COLORS as SHARED_DARK_TRACE_COLORS,
@@ -313,7 +316,7 @@ class DetachedPlotWindow(QtWidgets.QDialog):
                 plot.plot(
                     x_arr[:point_count],
                     y_arr[:point_count],
-                    pen=pg.mkPen(color, width=1.6),
+                    pen=trace_pen(color),
                     name=str(panel.get("legend_names", {}).get(trace_name, trace_name))
                     if isinstance(panel.get("legend_names", {}), dict)
                     else str(trace_name),
@@ -369,7 +372,12 @@ class DetachedPlotWindow(QtWidgets.QDialog):
         legend = plot.plotItem.legend
         if legend is not None:
             legend.setBrush(pg.mkBrush(*self._theme["legend_bg"]))
-            legend.setPen(pg.mkPen(str(self._theme["legend_text"]), width=1.0))
+            legend.setPen(
+                pg.mkPen(
+                    str(self._theme.get("legend_border", self._theme["legend_text"])),
+                    width=0.8,
+                )
+            )
             legend.opts["labelTextColor"] = str(self._theme["legend_text"])
             for _sample, label in legend.items:
                 label.setText(label.text, color=str(self._theme["legend_text"]))
@@ -1747,7 +1755,9 @@ class MainWindow(QtWidgets.QMainWindow):
         legend = plot.plotItem.legend
         if legend is not None:
             legend.setBrush(pg.mkBrush(*theme["legend_bg"]))
-            legend.setPen(pg.mkPen(str(theme["legend_text"]), width=1.0))
+            legend.setPen(
+                pg.mkPen(str(theme.get("legend_border", theme["legend_text"])), width=0.8)
+            )
             legend.opts["labelTextColor"] = str(theme["legend_text"])
             for _sample, label in legend.items:
                 label.setText(label.text, color=str(theme["legend_text"]))
@@ -1871,7 +1881,7 @@ class MainWindow(QtWidgets.QMainWindow):
         legend = plot.addLegend(
             offset=(3, 2),
             brush=pg.mkBrush(*theme["legend_bg"]),
-            pen=pg.mkPen(str(theme["legend_text"]), width=1.0),
+            pen=pg.mkPen(str(theme.get("legend_border", theme["legend_text"])), width=0.8),
             labelTextColor=str(theme["legend_text"]),
             labelTextSize="8pt",
             colCount=4,
@@ -2423,8 +2433,9 @@ class MainWindow(QtWidgets.QMainWindow):
         dialog.exec()
 
     def _toggle_grids(self, enabled: bool) -> None:
-        self.top_plot.showGrid(x=enabled, y=enabled, alpha=0.25)
-        self.bottom_plot.showGrid(x=enabled, y=enabled, alpha=0.25)
+        alpha = float(self._theme().get("grid_alpha", 0.14))
+        self.top_plot.showGrid(x=enabled, y=enabled, alpha=alpha)
+        self.bottom_plot.showGrid(x=enabled, y=enabled, alpha=alpha)
 
     def _toggle_cursor_readout(self, enabled: bool) -> None:
         self._cursor_enabled = enabled
@@ -7562,9 +7573,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @staticmethod
     def _curve_pen(color: str, trace_name: str, active_trace_name: str | None):
-        if active_trace_name is None or trace_name == active_trace_name:
-            return pg.mkPen(color, width=2.4 if active_trace_name == trace_name else 1.5)
-        return pg.mkPen(color, width=1.2, style=QtCore.Qt.SolidLine)
+        width = TRACE_ACTIVE_WIDTH if active_trace_name == trace_name else TRACE_CURVE_WIDTH
+        return trace_pen(color, width=width)
 
     def _trace_combo_for_key(self, key: str):
         return self.top_trace_combo if key == "top" else self.bottom_trace_combo
