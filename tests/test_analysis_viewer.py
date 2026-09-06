@@ -1465,6 +1465,9 @@ class AnalysisViewerUiTests(unittest.TestCase):
 
                 viewer._load_path(path)
                 self.assertEqual(viewer.foundation_vib_edit.text(), "1,2,3")
+                viewer._plot_foundation_vibration(viewer.foundation_plots[0], dataset)
+                plotted_labels = list(viewer._plot_curves[viewer.foundation_plots[0]])
+                self.assertEqual(plotted_labels[:3], ["X", "Y", "Z"])
             finally:
                 viewer.close()
 

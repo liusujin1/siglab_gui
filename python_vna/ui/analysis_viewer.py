@@ -7164,7 +7164,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             centers, velocity = self._foundation_vibration_curve(dataset, series)
             if centers.size < 1:
                 continue
-            label = _foundation_channel_name(channel_number, series.display_name)
+            label = _foundation_vibration_channel_name(dataset, channel_number, series.display_name)
             plot_label = self._unique_plot_label(plot, label) if keep_existing else label
             plot.plot(
                 centers,
@@ -9428,6 +9428,21 @@ def _foundation_channel_name(channel_number: int, fallback: str) -> str:
     if channel_number == 4:
         return "Z"
     return fallback or f"Ch {channel_number}"
+
+
+def _foundation_vibration_channel_name(
+    dataset: AnalysisDataset,
+    channel_number: int,
+    fallback: str,
+) -> str:
+    if (
+        str(dataset.metadata.get("source", "")) == "floor_response_eu_ascii"
+        and str(dataset.metadata.get("plot_kind", "")) == "psd"
+    ):
+        axis_name = {1: "X", 2: "Y", 3: "Z"}.get(channel_number)
+        if axis_name is not None:
+            return axis_name
+    return _foundation_channel_name(channel_number, fallback)
 
 
 def _infer_rbw(frequencies: np.ndarray) -> float:
