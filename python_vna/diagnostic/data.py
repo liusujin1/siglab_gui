@@ -1560,6 +1560,7 @@ def _detect_vibration_file_kind(lines: list[str], file_stem: str) -> str:
 
 def _load_vibration_frequency_file(path: Path, lines: list[str]) -> VibrationAnalysisFile:
     data_start = -1
+    n_cols = 0
     update = float("nan")
     samples = float("nan")
     average = float("nan")
@@ -1572,34 +1573,44 @@ def _load_vibration_frequency_file(path: Path, lines: list[str]) -> VibrationAna
             samples = _first_finite(samples, _parse_header_scalar(line, "Samples"))
         if not np.isfinite(average):
             average = _first_finite(average, _parse_header_scalar(line, "Average"))
-        if _fixed_numeric_row(line, 12) is not None:
+        row = _any_numeric_row(line)
+        if row is not None and len(row) >= 2 and len(row) % 2 == 0:
             data_start = index
+            n_cols = len(row)
             break
     if data_start < 0:
-        raise ValueError("No 12-column numeric block found.")
+        raise ValueError("No paired numeric data block found.")
     if not np.isfinite(update) or update <= 0.0:
         raise ValueError("Cannot find a valid Update value in file header.")
 
-    rows = [row for line in lines[data_start:] if (row := _fixed_numeric_row(line, 12)) is not None]
+    rows = [row for line in lines[data_start:] if (row := _fixed_numeric_row(line, n_cols)) is not None]
     if not rows:
         raise ValueError("Frequency data block is empty.")
     data = np.asarray(rows, dtype=float)
     header_tokens: list[str] = []
     for line in reversed(lines[:data_start]):
         tokens = _split_fields(line)
-        if len(tokens) >= 12 and sum(bool(re.search(r"[A-Za-z]", token)) for token in tokens[:12]) >= 6:
-            header_tokens = tokens[:12]
+        if len(tokens) >= n_cols and sum(bool(re.search(r"[A-Za-z]", token)) for token in tokens[:n_cols]) >= n_cols // 2:
+            header_tokens = tokens[:n_cols]
             break
     if not header_tokens:
-        header_tokens = _default_pair_headers(6)
-    headers = normalize_headers(header_tokens, 12)
+        header_tokens = _default_pair_headers(n_cols // 2)
+    headers = normalize_headers(header_tokens, n_cols)
     fs = 5000.0 / float(update)
+    requested_fft_size = int(round(samples)) if np.isfinite(samples) and samples >= 8 else 2048
+    fft_size = min(requested_fft_size, data.shape[0])
     frequency_pairs: list[CurvePair] = []
     phase_pairs: list[CurvePair] = []
-    for pair_index in range(6):
+    for pair_index in range(n_cols // 2):
         input_col = 2 * pair_index
         output_col = input_col + 1
-        freq, frf = compute_matlab_tfestimate(data[:, input_col], data[:, output_col], fs)
+        freq, frf = compute_matlab_tfestimate(
+            data[:, input_col],
+            data[:, output_col],
+            fs,
+            block_size=fft_size,
+            overlap_samples=0,
+        )
         if freq.size == 0:
             continue
         label = _pair_label_from_headers(headers[input_col], headers[output_col], pair_index)
@@ -1619,6 +1630,9 @@ def _load_vibration_frequency_file(path: Path, lines: list[str]) -> VibrationAna
             "average": float(average) if np.isfinite(average) else np.nan,
             "fs_numerator": 5000.0,
             "sample_rate": fs,
+            "fft_size": fft_size,
+            "overlap_samples": 0,
+            "frequency_resolution_hz": fs / fft_size,
             "phase_pairs": phase_pairs,
         },
     )

@@ -40,6 +40,7 @@ from python_vna.analysis_algorithms import (
     compute_cumulative_spectrum,
     compute_dynamic_stiffness,
     compute_mimo_transfer_function_welch,
+    compute_matlab_tfestimate,
     compute_transfer_function_welch,
     compute_welch_psd,
     compute_periodogram_psd,
@@ -164,6 +165,69 @@ class AnalysisAlgorithmTests(unittest.TestCase):
 
         peak_index = int(np.argmin(np.abs(freqs - 40.0)))
         self.assertAlmostEqual(abs(xfer[peak_index]), 2.5, delta=0.1)
+
+    def test_welch_transfer_accepts_explicit_zero_overlap(self):
+        sample_rate = 1000.0
+        time_s = np.arange(4096, dtype=float) / sample_rate
+        reference = np.sin(2.0 * np.pi * 40.0 * time_s)
+        response = 2.5 * reference
+
+        freqs, xfer = compute_transfer_function_welch(
+            reference,
+            response,
+            sample_rate,
+            512,
+            overlap_percent=0.0,
+        )
+
+        peak_index = int(np.argmin(np.abs(freqs - 40.0)))
+        self.assertAlmostEqual(abs(xfer[peak_index]), 2.5, delta=0.1)
+
+    def test_welch_defaults_match_explicit_zero_overlap(self):
+        rng = np.random.default_rng(20260906)
+        sample_rate = 1000.0
+        reference = rng.normal(size=4096)
+        response = np.convolve(reference, np.array([0.8, -0.2, 0.1]), mode="same")
+
+        default_f, default_psd = compute_welch_psd(reference, sample_rate, 512)
+        zero_f, zero_psd = compute_welch_psd(reference, sample_rate, 512, overlap_percent=0.0)
+        default_tf_f, default_tf = compute_transfer_function_welch(reference, response, sample_rate, 512)
+        zero_tf_f, zero_tf = compute_transfer_function_welch(
+            reference,
+            response,
+            sample_rate,
+            512,
+            overlap_percent=0.0,
+        )
+
+        np.testing.assert_array_equal(default_f, zero_f)
+        np.testing.assert_allclose(default_psd, zero_psd)
+        np.testing.assert_array_equal(default_tf_f, zero_tf_f)
+        np.testing.assert_allclose(default_tf, zero_tf)
+
+    def test_matlab_tfestimate_uses_requested_block_size_without_overlap(self):
+        sample_rate = 5000.0 / 3.0
+        samples = 2048
+        averages = 7
+        time_s = np.arange(samples * averages, dtype=float) / sample_rate
+        reference = (
+            4.0
+            + np.sin(2.0 * np.pi * 41.0 * time_s)
+            + 0.25 * np.sin(2.0 * np.pi * 87.0 * time_s)
+        )
+        response = 1.75 * reference
+
+        freqs, xfer = compute_matlab_tfestimate(
+            reference,
+            response,
+            sample_rate,
+            block_size=samples,
+            overlap_samples=0,
+        )
+
+        self.assertEqual(freqs.size, samples // 2)
+        self.assertAlmostEqual(float(freqs[0]), sample_rate / samples, places=12)
+        np.testing.assert_allclose(np.abs(xfer), 1.75, rtol=1e-5, atol=1e-5)
 
     def test_derived_psd_transfer_converts_both_directions(self):
         freqs = np.array([10.0, 20.0, 30.0], dtype=float)

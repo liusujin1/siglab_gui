@@ -227,17 +227,20 @@ def compute_welch_psd(
     values: np.ndarray,
     sample_rate: float,
     block_size: int,
+    *,
+    overlap_percent: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     y = _finite_signal(values)
     nperseg = _validated_block_size(y.size, sample_rate, block_size)
     if nperseg < 2:
         return np.array([], dtype=float), np.array([], dtype=float)
+    noverlap = _overlap_sample_count(nperseg, overlap_percent)
     freqs, psd = _signal().welch(
         y,
         fs=float(sample_rate),
         window="hann",
         nperseg=nperseg,
-        noverlap=nperseg // 2,
+        noverlap=noverlap,
         detrend="constant",
         scaling="density",
     )
@@ -250,18 +253,21 @@ def compute_transfer_function_welch(
     response: np.ndarray,
     sample_rate: float,
     block_size: int,
+    *,
+    overlap_percent: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     ref, resp = _finite_pair(reference, response)
     nperseg = _validated_block_size(ref.size, sample_rate, block_size)
     if nperseg < 2:
         return np.array([], dtype=float), np.array([], dtype=complex)
+    noverlap = _overlap_sample_count(nperseg, overlap_percent)
     sig = _signal()
     freqs, g_xx = sig.welch(
         ref,
         fs=float(sample_rate),
         window="hann",
         nperseg=nperseg,
-        noverlap=nperseg // 2,
+        noverlap=noverlap,
         detrend="constant",
         scaling="density",
     )
@@ -271,7 +277,7 @@ def compute_transfer_function_welch(
         fs=float(sample_rate),
         window="hann",
         nperseg=nperseg,
-        noverlap=nperseg // 2,
+        noverlap=noverlap,
         detrend="constant",
         scaling="density",
     )
@@ -287,6 +293,7 @@ def compute_mimo_transfer_function_welch(
     block_size: int,
     *,
     regularization_floor: float = 1e-9,
+    overlap_percent: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Estimate a MIMO transfer matrix with H(f) = S_yx(f) S_xx(f)^-1."""
     x = np.asarray(inputs, dtype=float)
@@ -310,6 +317,11 @@ def compute_mimo_transfer_function_welch(
     x = x - np.mean(x, axis=1, keepdims=True)
     y = y - np.mean(y, axis=1, keepdims=True)
     nperseg = _validated_block_size(x.shape[1], sample_rate, block_size)
+    # A zero-overlap spectral matrix needs enough independent segments to reach full input rank.
+    if _overlap_sample_count(nperseg, overlap_percent) == 0:
+        max_nonoverlap_segment = x.shape[1] // max(x.shape[0] + 1, 1)
+        if max_nonoverlap_segment >= 2:
+            nperseg = min(nperseg, max_nonoverlap_segment)
     if nperseg < 2:
         return np.array([], dtype=float), np.zeros((0, y.shape[0], x.shape[0]), dtype=complex)
 
@@ -318,7 +330,7 @@ def compute_mimo_transfer_function_welch(
         "fs": float(sample_rate),
         "window": "hann",
         "nperseg": nperseg,
-        "noverlap": nperseg // 2,
+        "noverlap": _overlap_sample_count(nperseg, overlap_percent),
         "detrend": "constant",
         "scaling": "density",
     }
@@ -375,15 +387,23 @@ def compute_matlab_tfestimate(
     reference: np.ndarray,
     response: np.ndarray,
     sample_rate: float,
+    *,
+    block_size: int = 2048,
+    overlap_samples: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    ref, resp = _finite_pair(reference, response)
+    ref = np.asarray(reference, dtype=float).ravel()
+    resp = np.asarray(response, dtype=float).ravel()
+    count = min(ref.size, resp.size)
+    ref = ref[:count]
+    resp = resp[:count]
+    finite = np.isfinite(ref) & np.isfinite(resp)
+    ref = ref[finite]
+    resp = resp[finite]
     n = ref.size
     if n < 8 or not np.isfinite(sample_rate) or sample_rate <= 0.0:
         return np.array([], dtype=float), np.array([], dtype=complex)
-    nfft = n // 3
-    if nfft < 8:
-        nfft = n
-    nfft = min(nfft, n)
+    nfft = min(max(int(block_size), 8), n)
+    noverlap = min(max(int(overlap_samples), 0), nfft - 1)
     window = np.hanning(nfft)
     sig = _signal()
     freqs, g_xx = sig.welch(
@@ -391,7 +411,7 @@ def compute_matlab_tfestimate(
         fs=float(sample_rate),
         window=window,
         nperseg=nfft,
-        noverlap=0,
+        noverlap=noverlap,
         nfft=nfft,
         detrend=False,
         scaling="density",
@@ -403,7 +423,7 @@ def compute_matlab_tfestimate(
         fs=float(sample_rate),
         window=window,
         nperseg=nfft,
-        noverlap=0,
+        noverlap=noverlap,
         nfft=nfft,
         detrend=False,
         scaling="density",
@@ -419,6 +439,8 @@ def compute_coherence_welch(
     response: np.ndarray,
     sample_rate: float,
     block_size: int,
+    *,
+    overlap_percent: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     ref, resp = _finite_pair(reference, response)
     nperseg = _validated_block_size(ref.size, sample_rate, block_size)
@@ -430,7 +452,7 @@ def compute_coherence_welch(
         fs=float(sample_rate),
         window="hann",
         nperseg=nperseg,
-        noverlap=nperseg // 2,
+        noverlap=_overlap_sample_count(nperseg, overlap_percent),
         detrend="constant",
     )
     valid = np.isfinite(freqs) & np.isfinite(coherence) & (freqs > 0.0)
@@ -442,6 +464,8 @@ def compute_cross_spectrum_welch(
     response: np.ndarray,
     sample_rate: float,
     block_size: int,
+    *,
+    overlap_percent: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     ref, resp = _finite_pair(reference, response)
     nperseg = _validated_block_size(ref.size, sample_rate, block_size)
@@ -453,7 +477,7 @@ def compute_cross_spectrum_welch(
         fs=float(sample_rate),
         window="hann",
         nperseg=nperseg,
-        noverlap=nperseg // 2,
+        noverlap=_overlap_sample_count(nperseg, overlap_percent),
         detrend="constant",
         scaling="density",
     )
@@ -495,6 +519,16 @@ def _validated_block_size(sample_count: int, sample_rate: float, block_size: int
         requested = sample_count
     requested = max(2, requested)
     return min(int(sample_count), requested)
+
+
+def _overlap_sample_count(block_size: int, overlap_percent: float) -> int:
+    try:
+        percent = float(overlap_percent)
+    except (TypeError, ValueError):
+        percent = 0.0
+    percent = float(np.clip(percent, 0.0, 99.0))
+    count = int(round(int(block_size) * percent / 100.0))
+    return min(max(count, 0), max(int(block_size) - 1, 0))
 
 
 def convert_acceleration_time_series(

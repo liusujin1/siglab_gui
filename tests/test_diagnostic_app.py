@@ -1096,6 +1096,41 @@ class DiagnosticAppTests(unittest.TestCase):
         self.assertEqual(len(parsed.frequency_pairs), 6)
         self.assertAlmostEqual(float(np.nanmedian(parsed.frequency_pairs[0].y)), 20.0 * np.log10(2.0), places=1)
 
+    def test_vibration_frequency_parser_uses_header_fft_size_and_paired_column_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "IVHF_demo.dat"
+            sample_rate = 5000.0 / 3.0
+            samples = 2048
+            averages = 3
+            time_s = np.arange(samples * averages, dtype=float) / sample_rate
+            reference = np.sin(2.0 * np.pi * 43.0 * time_s)
+            lines = [
+                "Magnitude: 0.1",
+                "Update: 3",
+                f"Samples: {samples}",
+                f"Average: {averages}",
+                "",
+                "X_in X_out Y_in Y_out Z_in Z_out",
+            ]
+            for value in reference:
+                row = (value, 2 * value, value, 3 * value, value, 4 * value)
+                lines.append(" ".join(f"{item:.12g}" for item in row))
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+            parsed = load_vibration_analysis_file(path)
+
+        self.assertEqual(len(parsed.frequency_pairs), 3)
+        self.assertEqual(parsed.table.metadata["fft_size"], samples)
+        self.assertEqual(parsed.table.metadata["overlap_samples"], 0)
+        self.assertAlmostEqual(
+            parsed.table.metadata["frequency_resolution_hz"],
+            sample_rate / samples,
+            places=12,
+        )
+        self.assertEqual(parsed.frequency_pairs[0].x.size, samples // 2)
+        self.assertAlmostEqual(float(parsed.frequency_pairs[0].x[0]), sample_rate / samples, places=12)
+        self.assertAlmostEqual(float(np.nanmedian(parsed.frequency_pairs[0].y)), 20.0 * np.log10(2.0), places=6)
+
     def test_vibration_parser_builds_log_groups_for_wide_tables(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "log.csv"
