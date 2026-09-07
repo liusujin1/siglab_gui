@@ -1527,6 +1527,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_plot_key = "top"
         self._plot_curve_items: dict[str, dict[str, object]] = {"top": {}, "bottom": {}}
         self._plot_curve_colors: dict[str, dict[str, str]] = {"top": {}, "bottom": {}}
+        self._plot_overlay_items: dict[str, list[object]] = {"top": [], "bottom": []}
+        self._plot_legend_entries: dict[str, tuple[tuple[str, str], ...]] = {
+            "top": (),
+            "bottom": (),
+        }
         self._axis_scaling_key: str | None = None
         self._axis_history_suspended = False
         self._axis_range_history: dict[str, deque[tuple[tuple[float, float], tuple[float, float]]]] = {
@@ -6138,6 +6143,10 @@ class MainWindow(QtWidgets.QMainWindow):
             else None
         )
         display_interval = self._acquisition_display_interval_seconds(session)
+        if average_run:
+            # Averaging must process every frame, but repainting every frame makes
+            # four-channel time/PSD views monopolize the Qt event loop.
+            display_interval = max(display_interval, 3.0)
         worker = AcquisitionWorker(
             self.controller,
             device_name,
@@ -7233,18 +7242,19 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _plot_measurement_view(self, plot, measurement, mode: str, value_mode: str) -> None:
-        plot.clear()
         legend = plot.plotItem.legend
-        if legend is not None:
-            legend.clear()
         colors = self._trace_colors()
         cache_key = "top" if plot is self.top_plot else "bottom"
+        reusable_curve_items = dict(self._plot_curve_items[cache_key])
+        current_curve_items: dict[str, object] = {}
+        current_curve_colors: dict[str, str] = {}
+        for overlay_item in self._plot_overlay_items[cache_key]:
+            plot.removeItem(overlay_item)
+        self._plot_overlay_items[cache_key] = []
         self._set_combo_text_silent(
             self._yscale_combo_for_key(cache_key),
             self._default_yscale_for_value(mode, value_mode),
         )
-        self._plot_curve_items[cache_key] = {}
-        self._plot_curve_colors[cache_key] = {}
         raw_visible_names = self._checked_trace_names(cache_key)
         preferred_visible_names = self._preferred_trace_checks.get(cache_key)
         def selected_names(available_names: list[str]) -> set[str]:
@@ -7262,25 +7272,6 @@ class MainWindow(QtWidgets.QMainWindow):
             return set(resolved_names)
 
         self._configure_plot_xscale(plot, cache_key)
-        for line in self._marker_lines[cache_key]:
-            plot.addItem(line, ignoreBounds=True)
-        for point in self._marker_points[cache_key]:
-            plot.addItem(point)
-        for text in self._marker_texts[cache_key]:
-            plot.addItem(text)
-        if self._cursor_lines[cache_key] is not None:
-            plot.addItem(self._cursor_lines[cache_key], ignoreBounds=True)
-        if self._cursor_points[cache_key] is not None:
-            plot.addItem(self._cursor_points[cache_key])
-        if self._cursor_texts[cache_key] is not None:
-            plot.addItem(self._cursor_texts[cache_key])
-        for point in self._marker_history_points[cache_key]:
-            plot.addItem(point)
-        for text in self._marker_history_texts[cache_key]:
-            plot.addItem(text)
-        for data_tip in self._data_tip_items[cache_key]:
-            plot.addItem(data_tip["point"])
-            plot.addItem(data_tip["text"])
         if self.overlay_checkbox.isChecked():
             for history_index, overlay_curves in enumerate(self._stored_overlays[cache_key]):
                 alpha = max(45, 165 - history_index * 22)
@@ -7288,25 +7279,66 @@ class MainWindow(QtWidgets.QMainWindow):
                     x_plot, y_plot = self._prepare_curve_xy(cache_key, x_data, y_data)
                     if x_plot.size == 0:
                         continue
-                    curve_item = plot.plot(
+                    curve_item = pg.PlotDataItem(
                         x_plot,
                         y_plot,
                         pen=pg.mkPen((220, 220, 220, alpha), width=1.0, style=QtCore.Qt.DashLine),
-                        name=None,
                     )
+                    plot.addItem(curve_item)
                     curve_item.setZValue(CURVE_Z - 1)
                     curve_item.setCurveClickable(False)
+                    self._plot_overlay_items[cache_key].append(curve_item)
 
         current_curves: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         active_trace_name = self._active_trace_names.get(cache_key)
         def legend_name(trace_name: str) -> str:
             return self._legend_display_name(trace_name, mode)
 
-        def register_curve(trace_name: str, curve_item, color: str, x_plot: np.ndarray, y_plot: np.ndarray) -> None:
+        def register_curve(
+            trace_name: str,
+            color: str,
+            x_plot: np.ndarray,
+            y_plot: np.ndarray,
+            *,
+            symbol: str | None = None,
+            symbol_size: int | None = None,
+        ) -> None:
+            curve_item = reusable_curve_items.pop(trace_name, None)
+            if curve_item is None:
+                curve_item = pg.PlotDataItem()
+                plot.addItem(curve_item)
+            data_options: dict[str, object] = {
+                "pen": self._curve_pen(color, trace_name, active_trace_name),
+                "name": legend_name(trace_name),
+                "symbol": symbol,
+                "autoDownsample": True,
+                "autoDownsampleFactor": 0.25,
+                "downsampleMethod": "peak",
+                "clipToView": True,
+            }
+            if symbol_size is not None:
+                data_options["symbolSize"] = symbol_size
+            curve_item.setData(x_plot, y_plot, **data_options)
             curve_item.setZValue(CURVE_Z)
-            self._plot_curve_items[cache_key][trace_name] = curve_item
-            self._plot_curve_colors[cache_key][trace_name] = color
+            current_curve_items[trace_name] = curve_item
+            current_curve_colors[trace_name] = color
             current_curves[trace_name] = (x_plot, y_plot)
+
+        def finish_curves(available_names: list[str]) -> None:
+            for stale_item in reusable_curve_items.values():
+                plot.removeItem(stale_item)
+            self._plot_curve_items[cache_key] = current_curve_items
+            self._plot_curve_colors[cache_key] = current_curve_colors
+            legend_entries = tuple(
+                (trace_name, legend_name(trace_name)) for trace_name in current_curve_items
+            )
+            if legend is not None and legend_entries != self._plot_legend_entries[cache_key]:
+                legend.clear()
+                for trace_name, label in legend_entries:
+                    legend.addItem(current_curve_items[trace_name], label)
+            self._plot_legend_entries[cache_key] = legend_entries
+            self._last_plot_cache[cache_key] = current_curves
+            self._update_trace_selector(cache_key, current_curves, available_names)
 
         def color_for(trace_name: str, available_names: list[str] | None = None) -> str:
             # Prefer a packed map over the full available channel set so upper/lower
@@ -7329,15 +7361,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 x_plot, y_plot = self._prepare_curve_xy(cache_key, time_t, y)
                 if x_plot.size == 0:
                     continue
-                curve_item = plot.plot(
-                    x_plot,
-                    y_plot,
-                    pen=self._curve_pen(color_for(name, available_names), name, active_trace_name),
-                    name=legend_name(name),
-                )
-                register_curve(name, curve_item, color_for(name, available_names), x_plot, y_plot)
-            self._last_plot_cache[cache_key] = current_curves
-            self._update_trace_selector(cache_key, current_curves, available_names)
+                register_curve(name, color_for(name, available_names), x_plot, y_plot)
+            finish_curves(available_names)
             return
 
         freqs = measurement.spectra["f"]
@@ -7368,15 +7393,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 x_plot, y_plot = self._prepare_curve_xy(cache_key, freqs, y)
                 if x_plot.size == 0:
                     continue
-                curve_item = plot.plot(
-                    x_plot,
-                    y_plot,
-                    pen=self._curve_pen(color_for(name, available_names), name, active_trace_name),
-                    name=legend_name(name),
-                )
-                register_curve(name, curve_item, color_for(name, available_names), x_plot, y_plot)
-            self._last_plot_cache[cache_key] = current_curves
-            self._update_trace_selector(cache_key, current_curves, available_names)
+                register_curve(name, color_for(name, available_names), x_plot, y_plot)
+            finish_curves(available_names)
             return
         if mode in {"cumulative_psd", "foundation_vibration"}:
             available_names = list(measurement.spectra["autospectrum"].keys())
@@ -7395,17 +7413,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 x_plot, y_plot = self._prepare_curve_xy(cache_key, x_values, y_values)
                 if x_plot.size == 0:
                     continue
-                curve_item = plot.plot(
+                register_curve(
+                    name,
+                    color_for(name, available_names),
                     x_plot,
                     y_plot,
-                    pen=self._curve_pen(color_for(name, available_names), name, active_trace_name),
-                    name=legend_name(name),
                     symbol="o" if mode == "foundation_vibration" else None,
-                    symbolSize=5 if mode == "foundation_vibration" else None,
+                    symbol_size=5 if mode == "foundation_vibration" else None,
                 )
-                register_curve(name, curve_item, color_for(name, available_names), x_plot, y_plot)
-            self._last_plot_cache[cache_key] = current_curves
-            self._update_trace_selector(cache_key, current_curves, available_names)
+            finish_curves(available_names)
             return
         if mode == "fft":
             available_names = list(measurement.spectra["fft"].keys())
@@ -7422,15 +7438,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 x_plot, y_plot = self._prepare_curve_xy(cache_key, freqs, y)
                 if x_plot.size == 0:
                     continue
-                curve_item = plot.plot(
-                    x_plot,
-                    y_plot,
-                    pen=self._curve_pen(color_for(name, available_names), name, active_trace_name),
-                    name=legend_name(name),
-                )
-                register_curve(name, curve_item, color_for(name, available_names), x_plot, y_plot)
-            self._last_plot_cache[cache_key] = current_curves
-            self._update_trace_selector(cache_key, current_curves, available_names)
+                register_curve(name, color_for(name, available_names), x_plot, y_plot)
+            finish_curves(available_names)
             return
         if mode == "coherence":
             available_names = list(measurement.coherence.keys())
@@ -7441,15 +7450,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 x_plot, y_plot = self._prepare_curve_xy(cache_key, freqs, values)
                 if x_plot.size == 0:
                     continue
-                curve_item = plot.plot(
-                    x_plot,
-                    y_plot,
-                    pen=self._curve_pen(color_for(name, available_names), name, active_trace_name),
-                    name=legend_name(name),
-                )
-                register_curve(name, curve_item, color_for(name, available_names), x_plot, y_plot)
-            self._last_plot_cache[cache_key] = current_curves
-            self._update_trace_selector(cache_key, current_curves, available_names)
+                register_curve(name, color_for(name, available_names), x_plot, y_plot)
+            finish_curves(available_names)
             return
         if mode == "frf":
             available_names = list(measurement.frf.keys())
@@ -7469,15 +7471,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     x_plot, y_plot = self._prepare_curve_xy(cache_key, freqs, y)
                 if x_plot.size == 0:
                     continue
-                curve_item = plot.plot(
-                    x_plot,
-                    y_plot,
-                    pen=self._curve_pen(color_for(name, available_names), name, active_trace_name),
-                    name=legend_name(name),
-                )
-                register_curve(name, curve_item, color_for(name, available_names), x_plot, y_plot)
-            self._last_plot_cache[cache_key] = current_curves
-            self._update_trace_selector(cache_key, current_curves, available_names)
+                register_curve(name, color_for(name, available_names), x_plot, y_plot)
+            finish_curves(available_names)
             return
         if mode == "dynamic_stiffness":
             available_names = list(measurement.frf.keys())
@@ -7489,15 +7484,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 x_plot, y_plot = self._prepare_curve_xy(cache_key, x_values, y_values)
                 if x_plot.size == 0:
                     continue
-                curve_item = plot.plot(
-                    x_plot,
-                    y_plot,
-                    pen=self._curve_pen(color_for(name, available_names), name, active_trace_name),
-                    name=legend_name(name),
-                )
-                register_curve(name, curve_item, color_for(name, available_names), x_plot, y_plot)
-            self._last_plot_cache[cache_key] = current_curves
-            self._update_trace_selector(cache_key, current_curves, available_names)
+                register_curve(name, color_for(name, available_names), x_plot, y_plot)
+            finish_curves(available_names)
             return
         if mode == "cross_spectrum":
             available_names = list(measurement.cross_spectra.keys())
@@ -7517,15 +7505,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     x_plot, y_plot = self._prepare_curve_xy(cache_key, freqs, y)
                 if x_plot.size == 0:
                     continue
-                curve_item = plot.plot(
-                    x_plot,
-                    y_plot,
-                    pen=self._curve_pen(color_for(name, available_names), name, active_trace_name),
-                    name=legend_name(name),
-                )
-                register_curve(name, curve_item, color_for(name, available_names), x_plot, y_plot)
-            self._last_plot_cache[cache_key] = current_curves
-            self._update_trace_selector(cache_key, current_curves, available_names)
+                register_curve(name, color_for(name, available_names), x_plot, y_plot)
+            finish_curves(available_names)
             return
         if mode in {"auto_correlation", "cross_correlation"}:
             correlation_map = measurement.correlations
@@ -7539,15 +7520,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 x_plot, y_plot = self._prepare_curve_xy(cache_key, time_axis, y)
                 if x_plot.size == 0:
                     continue
-                curve_item = plot.plot(
-                    x_plot,
-                    y_plot,
-                    pen=self._curve_pen(color_for(name, available_names), name, active_trace_name),
-                    name=legend_name(name),
-                )
-                register_curve(name, curve_item, color_for(name, available_names), x_plot, y_plot)
-            self._last_plot_cache[cache_key] = current_curves
-            self._update_trace_selector(cache_key, current_curves, available_names)
+                register_curve(name, color_for(name, available_names), x_plot, y_plot)
+            finish_curves(available_names)
             return
         if mode == "impulse_response":
             available_names = list(measurement.impulse_responses.keys())
@@ -7560,23 +7534,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 x_plot, y_plot = self._prepare_curve_xy(cache_key, time_axis, y)
                 if x_plot.size == 0:
                     continue
-                curve_item = plot.plot(
-                    x_plot,
-                    y_plot,
-                    pen=self._curve_pen(color_for(name, available_names), name, active_trace_name),
-                    name=legend_name(name),
-                )
-                register_curve(name, curve_item, color_for(name, available_names), x_plot, y_plot)
-            self._last_plot_cache[cache_key] = current_curves
-            self._update_trace_selector(cache_key, current_curves, available_names)
+                register_curve(name, color_for(name, available_names), x_plot, y_plot)
+            finish_curves(available_names)
 
     def _overlay_toggled(self, enabled: bool) -> None:
         self.overlay_action.setChecked(enabled)
         self._refresh_current_measurement_view()
 
-    @staticmethod
-    def _curve_pen(color: str, trace_name: str, active_trace_name: str | None):
-        width = TRACE_ACTIVE_WIDTH if active_trace_name == trace_name else TRACE_CURVE_WIDTH
+    def _curve_pen(self, color: str, trace_name: str, active_trace_name: str | None):
+        if self._acquisition_thread is not None:
+            width = 1.4 if active_trace_name == trace_name else 1.0
+        else:
+            width = TRACE_ACTIVE_WIDTH if active_trace_name == trace_name else TRACE_CURVE_WIDTH
         return trace_pen(color, width=width)
 
     def _trace_combo_for_key(self, key: str):
