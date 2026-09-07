@@ -97,6 +97,9 @@ QtCore = require("PySide6.QtCore", "python -m pip install -e .[gui]")
 QtGui = require("PySide6.QtGui", "python -m pip install -e .[gui]")
 QtWidgets = require("PySide6.QtWidgets", "python -m pip install -e .[gui]")
 pg = require("pyqtgraph", "python -m pip install -e .[gui]")
+# Acquisition replaces both plot scenes on every display frame. Antialiasing
+# makes those repaints expensive enough to delay UI events such as Stop.
+pg.setConfigOption("antialias", False)
 
 ARCHIVE_CONTAINER_SUFFIXES = {
     ".7z",

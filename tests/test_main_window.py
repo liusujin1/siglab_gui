@@ -460,7 +460,7 @@ class MainWindowTests(unittest.TestCase):
         self.assertAlmostEqual(second_curve.opts["pen"].widthF(), 1.45)
         self.assertTrue(first_curve.opts["pen"].isCosmetic())
         self.assertEqual(first_curve.opts["pen"].color().alpha(), 225)
-        self.assertTrue(main_window_module.pg.getConfigOption("antialias"))
+        self.assertFalse(main_window_module.pg.getConfigOption("antialias"))
 
     def test_legacy_left_panel_avoids_gray_background_black_text(self):
         stylesheet = self.window.left_panel.styleSheet()
