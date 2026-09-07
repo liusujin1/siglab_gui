@@ -60,6 +60,13 @@ def _env_flag(name: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def configure_live_plot_rendering() -> bool:
+    pg = require("pyqtgraph", "python -m pip install -e .[gui]")
+    use_opengl = not _env_flag("PYTHON_VNA_DISABLE_OPENGL")
+    pg.setConfigOptions(useOpenGL=use_opengl, antialias=use_opengl)
+    return use_opengl
+
+
 def main(argv: list[str] | None = None) -> int:
     enable_fault_log()
     append_log("app start")
@@ -81,6 +88,8 @@ def main(argv: list[str] | None = None) -> int:
     font.setStyleHint(QtGui.QFont.SansSerif)
     app.setFont(font)
     append_log("qapplication create: end")
+    use_opengl = configure_live_plot_rendering()
+    append_log(f"plot rendering: opengl={use_opengl} antialias={use_opengl}")
     icon_path = resource_path("assets/python_vna_icon.ico")
     if icon_path.exists():
         app.setWindowIcon(QtGui.QIcon(str(icon_path)))

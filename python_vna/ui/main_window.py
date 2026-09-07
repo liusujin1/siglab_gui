@@ -97,8 +97,8 @@ QtCore = require("PySide6.QtCore", "python -m pip install -e .[gui]")
 QtGui = require("PySide6.QtGui", "python -m pip install -e .[gui]")
 QtWidgets = require("PySide6.QtWidgets", "python -m pip install -e .[gui]")
 pg = require("pyqtgraph", "python -m pip install -e .[gui]")
-# Acquisition replaces both plot scenes on every display frame. Antialiasing
-# makes those repaints expensive enough to delay UI events such as Stop.
+# Keep direct imports on the compatible software renderer. python_vna.app enables
+# process-local OpenGL before constructing the interactive acquisition window.
 pg.setConfigOption("antialias", False)
 
 ARCHIVE_CONTAINER_SUFFIXES = {
@@ -6143,10 +6143,6 @@ class MainWindow(QtWidgets.QMainWindow):
             else None
         )
         display_interval = self._acquisition_display_interval_seconds(session)
-        if average_run:
-            # Averaging must process every frame, but repainting every frame makes
-            # four-channel time/PSD views monopolize the Qt event loop.
-            display_interval = max(display_interval, 3.0)
         worker = AcquisitionWorker(
             self.controller,
             device_name,
@@ -7312,7 +7308,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "name": legend_name(trace_name),
                 "symbol": symbol,
                 "autoDownsample": True,
-                "autoDownsampleFactor": 0.25,
+                "autoDownsampleFactor": 5.0,
                 "downsampleMethod": "peak",
                 "clipToView": True,
             }
@@ -7541,11 +7537,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.overlay_action.setChecked(enabled)
         self._refresh_current_measurement_view()
 
-    def _curve_pen(self, color: str, trace_name: str, active_trace_name: str | None):
-        if self._acquisition_thread is not None:
-            width = 1.4 if active_trace_name == trace_name else 1.0
-        else:
-            width = TRACE_ACTIVE_WIDTH if active_trace_name == trace_name else TRACE_CURVE_WIDTH
+    @staticmethod
+    def _curve_pen(color: str, trace_name: str, active_trace_name: str | None):
+        width = TRACE_ACTIVE_WIDTH if active_trace_name == trace_name else TRACE_CURVE_WIDTH
         return trace_pen(color, width=width)
 
     def _trace_combo_for_key(self, key: str):

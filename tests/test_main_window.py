@@ -1167,7 +1167,7 @@ class MainWindowTests(unittest.TestCase):
 
             self.assertTrue(captured["average_run"])
             self.assertEqual(captured["target_average_count"], 20)
-            self.assertAlmostEqual(captured["display_interval_seconds"], 3.0)
+            self.assertAlmostEqual(captured["display_interval_seconds"], 1.0)
         finally:
             main_window_module.AcquisitionWorker = original_worker
             main_window_module.QtCore.QThread = original_thread
@@ -3837,25 +3837,7 @@ class MainWindowTests(unittest.TestCase):
 
         self.assertIs(refreshed_curve, original_curve)
         np.testing.assert_allclose(refreshed_curve.getData()[1], [4.0, 3.0, 2.0, 1.0])
-        self.assertEqual(refreshed_curve.opts["autoDownsampleFactor"], 0.25)
-
-    def test_live_acquisition_uses_lightweight_curve_pens(self):
-        measurement = self._measurement()
-        self.window.top_display_combo.setCurrentText("time")
-        self.window._acquisition_thread = object()
-        try:
-            self.window._active_trace_names["top"] = "ai0"
-            self.window._plot_measurement(measurement)
-            self.assertAlmostEqual(
-                self.window._plot_curve_items["top"]["ai0"].opts["pen"].widthF(),
-                1.4,
-            )
-            self.assertAlmostEqual(
-                self.window._plot_curve_items["top"]["ai1"].opts["pen"].widthF(),
-                1.0,
-            )
-        finally:
-            self.window._acquisition_thread = None
+        self.assertEqual(refreshed_curve.opts["autoDownsampleFactor"], 5.0)
 
     def test_live_plot_refresh_removes_stale_curve_items(self):
         measurement = self._measurement()

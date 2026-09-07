@@ -4,7 +4,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from python_vna.app import default_vna_path, load_startup_session, parse_args, resource_path
+from python_vna.app import (
+    configure_live_plot_rendering,
+    default_vna_path,
+    load_startup_session,
+    parse_args,
+    resource_path,
+)
 from python_vna.conversion_app import parse_args as parse_conversion_args
 import sys
 
@@ -47,6 +53,26 @@ class AppArgumentTests(unittest.TestCase):
     def test_startup_falls_back_when_default_vna_missing(self):
         with mock.patch.object(Path, "exists", return_value=False):
             self.assertIsNone(load_startup_session(Path("D:/fake/default.vna")))
+
+    def test_live_plot_rendering_uses_opengl_by_default(self):
+        fake_pg = mock.Mock()
+        with mock.patch("python_vna.app.require", return_value=fake_pg), mock.patch.dict(
+            "os.environ", {}, clear=True
+        ):
+            enabled = configure_live_plot_rendering()
+
+        self.assertTrue(enabled)
+        fake_pg.setConfigOptions.assert_called_once_with(useOpenGL=True, antialias=True)
+
+    def test_live_plot_rendering_can_disable_opengl(self):
+        fake_pg = mock.Mock()
+        with mock.patch("python_vna.app.require", return_value=fake_pg), mock.patch.dict(
+            "os.environ", {"PYTHON_VNA_DISABLE_OPENGL": "1"}, clear=True
+        ):
+            enabled = configure_live_plot_rendering()
+
+        self.assertFalse(enabled)
+        fake_pg.setConfigOptions.assert_called_once_with(useOpenGL=False, antialias=False)
 
     def test_conversion_app_accepts_startup_paths(self):
         args = parse_conversion_args(["one.vna", "two.vna"])
