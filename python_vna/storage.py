@@ -3,9 +3,11 @@ from __future__ import annotations
 import csv
 from io import BytesIO
 import json
+import os
 from dataclasses import asdict
 from pathlib import Path
 import struct
+import tempfile
 from typing import Any
 
 import numpy as np
@@ -582,10 +584,21 @@ def _parse_legacy_display_state(
 
 def save_session_json(session: SavedSession, path: str | Path) -> Path:
     destination = Path(path)
-    destination.write_text(
-        json.dumps(asdict(session), indent=2, default=_json_default),
-        encoding="utf-8",
-    )
+    payload = json.dumps(asdict(session), indent=2, default=_json_default)
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=destination.parent,
+            prefix=f".{destination.name}.", suffix=".tmp", delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, destination)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
     return destination
 
 

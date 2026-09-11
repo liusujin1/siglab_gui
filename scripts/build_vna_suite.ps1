@@ -17,6 +17,16 @@ $ensureArchive = Join-Path $PSScriptRoot 'ensure_vna_suite_archive.ps1'
 $distRoot = Join-Path $root 'dist'
 $dist = Join-Path $distRoot 'PythonVNA_Suite'
 $latestPathFile = Join-Path $distRoot 'LATEST_SUITE_PATH.txt'
+$pySideRuntimeDir = Join-Path $root '.venv\Lib\site-packages\PySide6'
+$appLocalRuntimeNames = @(
+    'concrt140.dll'
+    'msvcp140.dll'
+    'msvcp140_1.dll'
+    'msvcp140_2.dll'
+    'msvcp140_codecvt_ids.dll'
+    'vcruntime140.dll'
+    'vcruntime140_1.dll'
+)
 
 function Get-SuiteVersion {
     $initPath = Join-Path $root 'python_vna\__init__.py'
@@ -132,6 +142,14 @@ try {
 
     if (-not (Test-Path $dist)) {
         throw "Expected suite output directory was not created: $dist"
+    }
+
+    foreach ($runtimeName in $appLocalRuntimeNames) {
+        $runtimeSource = Join-Path $pySideRuntimeDir $runtimeName
+        if (-not (Test-Path -LiteralPath $runtimeSource)) {
+            throw "Required app-local runtime was not found: $runtimeSource"
+        }
+        Copy-Item -LiteralPath $runtimeSource -Destination (Join-Path $dist $runtimeName) -Force
     }
 
     $suiteVersion = Get-SuiteVersion

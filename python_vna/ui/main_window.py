@@ -9279,10 +9279,16 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.statusBar().showMessage("Waiting for default setup to finish")
                     return
             if self._acquisition_thread is None and self._recording_thread is None:
-                self.controller.stop()
+                try:
+                    self.controller.stop()
+                except Exception as exc:
+                    append_log(f"main window stop failed during close: {exc!r}")
             self.controller.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            append_log(f"main window close cleanup failed: {exc!r}")
+            self.statusBar().showMessage(f"关闭失败，资源尚未释放：{exc}")
+            event.ignore()
+            return
         if hasattr(self, "_detached_plot_window"):
             self._detached_plot_window.close()
         if self._tray_icon is not None:

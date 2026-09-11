@@ -888,6 +888,38 @@ class MainWindowTests(unittest.TestCase):
         self.assertFalse(self.window._close_confirmed)
         self.window.hide()
 
+    def test_close_event_stop_failure_still_closes_controller(self):
+        event = QtGui.QCloseEvent()
+        with mock.patch.object(self.controller, "stop", side_effect=RuntimeError("stop failed")), mock.patch.object(
+            self.controller, "close"
+        ) as close, mock.patch.object(main_window_module, "append_log") as log:
+            self.window.closeEvent(event)
+        close.assert_called_once_with()
+        self.assertTrue(event.isAccepted())
+        self.assertIn("stop failed", log.call_args.args[0])
+
+    def test_close_event_close_failure_is_logged_and_rejected(self):
+        event = QtGui.QCloseEvent()
+        with mock.patch.object(self.controller, "close", side_effect=RuntimeError("close failed")), mock.patch.object(
+            main_window_module, "append_log"
+        ) as log:
+            self.window.closeEvent(event)
+        self.assertFalse(event.isAccepted())
+        self.assertIn("close failed", log.call_args.args[0])
+        self.assertIn("close failed", self.window.statusBar().currentMessage())
+
+    def test_close_event_thread_timeout_defers_controller_cleanup(self):
+        event = QtGui.QCloseEvent()
+        thread = mock.Mock()
+        thread.wait.return_value = False
+        with mock.patch.object(self.window, "_recording_thread", thread), mock.patch.object(
+            self.controller, "close"
+        ) as close, mock.patch.object(self.controller, "stop") as stop:
+            self.window.closeEvent(event)
+        self.assertFalse(event.isAccepted())
+        close.assert_not_called()
+        stop.assert_not_called()
+
     def test_close_event_can_minimize_to_tray_from_confirmation_dialog(self):
         self.window.show()
         QtWidgets.QApplication.processEvents()

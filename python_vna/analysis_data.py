@@ -2334,8 +2334,7 @@ def _infer_rbw(frequencies: np.ndarray) -> float:
 
 def _is_time_like(values: np.ndarray) -> bool:
     column = np.asarray(values, dtype=float).ravel()
-    column = column[np.isfinite(column)]
-    if column.size < 3:
+    if column.size < 3 or not np.all(np.isfinite(column)):
         return False
     diffs = np.diff(column)
     positive = diffs[np.isfinite(diffs)]

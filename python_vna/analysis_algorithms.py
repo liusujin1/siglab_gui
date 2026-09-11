@@ -374,11 +374,10 @@ def compute_mimo_transfer_function_welch(
         scale = float(np.real(np.trace(current_sxx))) / max(current_sxx.shape[0], 1)
         if floor > 0.0 and np.isfinite(scale) and scale > 0.0:
             current_sxx = current_sxx + floor * scale * np.eye(current_sxx.shape[0], dtype=complex)
-        for output_i in range(y.shape[0]):
-            try:
-                transfer[index, output_i, :] = np.linalg.solve(current_sxx, syx[index, output_i, :])
-            except np.linalg.LinAlgError:
-                transfer[index, output_i, :] = np.linalg.pinv(current_sxx) @ syx[index, output_i, :]
+        try:
+            transfer[index] = np.linalg.solve(current_sxx, syx[index].T).T
+        except np.linalg.LinAlgError:
+            transfer[index] = (np.linalg.pinv(current_sxx) @ syx[index].T).T
     finite_transfer = np.all(np.isfinite(np.real(transfer)) & np.isfinite(np.imag(transfer)), axis=(1, 2))
     return freqs[finite_transfer], transfer[finite_transfer]
 

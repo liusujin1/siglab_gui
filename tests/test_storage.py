@@ -4,6 +4,7 @@ import json
 import struct
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +23,26 @@ from python_vna.storage import (
 
 
 class StorageTests(unittest.TestCase):
+    def test_json_replace_failure_preserves_existing_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "session.json"
+            path.write_text("original", encoding="utf-8")
+            with mock.patch("python_vna.storage.os.replace", side_effect=OSError("disk error")):
+                with self.assertRaises(OSError):
+                    save_session_json(self._sample_session(), path)
+            self.assertEqual(path.read_text(encoding="utf-8"), "original")
+            self.assertEqual(list(Path(tmpdir).iterdir()), [path])
+
+    def test_json_flush_failure_preserves_existing_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "session.json"
+            path.write_text("original", encoding="utf-8")
+            with mock.patch("python_vna.storage.os.fsync", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    save_session_json(self._sample_session(), path)
+            self.assertEqual(path.read_text(encoding="utf-8"), "original")
+            self.assertEqual(list(Path(tmpdir).iterdir()), [path])
+
     def _sample_session(self) -> SavedSession:
         measurement = MeasurementSet(
             sample_rate=1024.0,

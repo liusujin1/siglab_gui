@@ -70,6 +70,20 @@ class _SequenceBackend:
 
 
 class SignalPipelineTests(unittest.TestCase):
+    def test_fft_rejects_invalid_sample_rates(self):
+        for sample_rate in (0.0, -1.0, np.nan, np.inf):
+            with self.subTest(sample_rate=sample_rate):
+                frame = BackendFrame(sample_rate, ["ai0"], np.ones((1, 4)), np.arange(4), 0)
+                with self.assertRaisesRegex(ValueError, "sample rate"):
+                    compute_fft(frame)
+
+    def test_fft_rejects_empty_or_malformed_data(self):
+        for data in (np.empty((1, 0)), np.ones(4), np.array(1.0)):
+            with self.subTest(shape=data.shape):
+                frame = BackendFrame(1000.0, ["ai0"], data, np.arange(4), 0)
+                with self.assertRaisesRegex(ValueError, "two-dimensional"):
+                    compute_fft(frame)
+
     def test_frf_matches_gain_for_scaled_signal(self):
         sample_rate = 1024.0
         samples = 1024

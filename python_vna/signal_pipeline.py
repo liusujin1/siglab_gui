@@ -45,6 +45,10 @@ LEGACY_AVG_FUNCTIONS = (
 
 def compute_fft(frame: BackendFrame) -> tuple[np.ndarray, np.ndarray]:
     """Return a one-sided complex RMS spectrum, matching VNA's stored FFT units."""
+    if not np.isfinite(frame.sample_rate) or frame.sample_rate <= 0:
+        raise ValueError("FFT sample rate must be finite and positive.")
+    if frame.data.ndim != 2 or frame.data.shape[1] == 0:
+        raise ValueError("FFT data must be a two-dimensional array with nonempty samples.")
     window = _processing_window(
         frame.data.shape[1],
         str(frame.metadata.get("processing_window", "boxcar")),

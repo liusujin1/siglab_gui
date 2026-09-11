@@ -21,6 +21,256 @@ from python_vna.updater import main as updater_main
 
 
 class UpdateClientTests(unittest.TestCase):
+    def test_backup_cleanup_failure_does_not_report_applied_update_as_failed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target, staging = root / "suite", root / "staging"
+            target.mkdir()
+            staging.mkdir()
+            (target / "app.txt").write_text("original")
+            (staging / "app.txt").write_text("new")
+            with mock.patch.object(updater.shutil, "rmtree", side_effect=PermissionError("backup busy")):
+                updater.apply_update(staging, target)
+            self.assertEqual((target / "app.txt").read_text(), "new")
+            self.assertIn("backup busy", (target / "UPDATE_LOG.txt").read_text())
+            backup = next(root.glob(".python_vna_rollback_*"))
+            self.assertTrue((backup / "RECOVERY.json").exists())
+
+    def test_backup_cleanup_failure_does_not_mask_original_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target, staging = root / "suite", root / "staging"
+            target.mkdir()
+            staging.mkdir()
+            (target / "app.txt").write_text("original")
+            (staging / "app.txt").write_text("new")
+            with mock.patch.object(updater.shutil, "copy2", side_effect=OSError("backup full")), mock.patch.object(
+                updater.shutil, "rmtree", side_effect=PermissionError("cleanup busy")
+            ):
+                with self.assertRaisesRegex(OSError, "backup full"):
+                    updater.apply_update(staging, target)
+            self.assertEqual((target / "app.txt").read_text(), "original")
+
+    def test_updater_failure_rolls_back_and_reports_without_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "suite"
+            target.mkdir()
+            (target / "app.txt").write_text("original")
+            archive = root / "update.zip"
+            with zipfile.ZipFile(archive, "w") as handle:
+                handle.writestr("app.txt", "new")
+            manifest = {
+                "latest": "9.0.1",
+                "full": {"url": archive.as_uri(), "sha256": updater.hashlib.sha256(archive.read_bytes()).hexdigest()},
+            }
+
+            def fail_copy(source, destination, **kwargs):
+                destination.write_text("partial")
+                raise OSError("disk full")
+
+            with mock.patch.object(updater, "fetch_manifest", return_value=manifest), mock.patch.object(
+                updater, "ProgressReporter"
+            ), mock.patch.object(updater, "show_error") as error, mock.patch.object(
+                updater, "restart_app"
+            ) as restart, mock.patch.object(updater, "copy_file_with_retry", side_effect=fail_copy):
+                result = updater.main([
+                    "--manifest-url", "file:///unused.json", "--current-version", "9.0.0",
+                    "--target-dir", str(target), "--wait-seconds", "0",
+                ])
+            self.assertEqual(result, 1)
+            self.assertEqual((target / "app.txt").read_text(), "original")
+            self.assertIn("disk full", (target / "UPDATE_LOG.txt").read_text(encoding="utf-8"))
+            error.assert_called_once()
+            restart.assert_not_called()
+
+    def test_transaction_restores_deleted_and_partially_written_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target, staging = root / "suite", root / "staging"
+            target.mkdir()
+            staging.mkdir()
+            (target / "old.txt").write_text("old")
+            (target / "app.txt").write_text("original")
+            (staging / "UPDATE_REMOVED_FILES.txt").write_text("old.txt\n")
+            (staging / "app.txt").write_text("new")
+
+            def fail_copy(source, destination, **kwargs):
+                destination.write_text("partial")
+                raise OSError("disk full")
+
+            with mock.patch.object(updater, "copy_file_with_retry", side_effect=fail_copy):
+                with self.assertRaisesRegex(OSError, "disk full"):
+                    updater.apply_update(staging, target)
+            self.assertEqual((target / "old.txt").read_text(), "old")
+            self.assertEqual((target / "app.txt").read_text(), "original")
+            self.assertFalse((target / ".python_vna_update.lock").exists())
+            self.assertEqual(list(root.glob(".python_vna_rollback_*")), [])
+
+    def test_transaction_removes_new_partial_file_and_created_directories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target, staging = root / "suite", root / "staging"
+            target.mkdir()
+            (staging / "new" / "nested").mkdir(parents=True)
+            (staging / "new" / "nested" / "app.txt").write_text("new")
+
+            def fail_copy(source, destination, **kwargs):
+                destination.write_text("partial")
+                raise OSError("write failed")
+
+            with mock.patch.object(updater, "copy_file_with_retry", side_effect=fail_copy):
+                with self.assertRaises(OSError):
+                    updater.apply_update(staging, target)
+            self.assertEqual(list(target.iterdir()), [])
+
+    def test_transaction_cancel_after_deletion_restores_original(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target, staging = root / "suite", root / "staging"
+            target.mkdir()
+            staging.mkdir()
+            (target / "old.txt").write_text("old")
+            (staging / "UPDATE_REMOVED_FILES.txt").write_text("old.txt\n")
+            progress = mock.Mock()
+            progress.set_progress.side_effect = updater.UpdateCancelled("cancel")
+            with self.assertRaises(updater.UpdateCancelled):
+                updater.apply_update(staging, target, progress=progress)
+            self.assertEqual((target / "old.txt").read_text(), "old")
+
+    def test_transaction_validates_entire_removed_list_before_deleting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target, staging = root / "suite", root / "staging"
+            target.mkdir()
+            staging.mkdir()
+            (target / "old.txt").write_text("old")
+            (staging / "UPDATE_REMOVED_FILES.txt").write_text("old.txt\n../outside.txt\n")
+            with self.assertRaisesRegex(RuntimeError, "escapes update root"):
+                updater.apply_update(staging, target)
+            self.assertEqual((target / "old.txt").read_text(), "old")
+
+    def test_transaction_preserves_backup_if_rollback_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target, staging = root / "suite", root / "staging"
+            target.mkdir()
+            staging.mkdir()
+            (target / "app.txt").write_text("original")
+            (staging / "app.txt").write_text("new")
+            real_copy = updater.shutil.copy2
+
+            def fail_restore(source, destination, **kwargs):
+                if Path(source).parent.name.startswith(".python_vna_rollback_"):
+                    raise PermissionError("locked")
+                return real_copy(source, destination, **kwargs)
+
+            with mock.patch.object(updater, "copy_file_with_retry", side_effect=OSError("write failed")), mock.patch.object(
+                updater.shutil, "copy2", side_effect=fail_restore
+            ):
+                with self.assertRaisesRegex(RuntimeError, "rollback incomplete"):
+                    updater.apply_update(staging, target)
+            backups = list(root.glob(".python_vna_rollback_*"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual((backups[0] / "0").read_text(), "original")
+            self.assertIn(str(target / "app.txt"), json.loads((backups[0] / "RECOVERY.json").read_text()))
+            self.assertTrue((target / ".python_vna_update.lock").exists())
+
+    def test_transaction_backup_failure_does_not_mutate_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target, staging = root / "suite", root / "staging"
+            target.mkdir()
+            staging.mkdir()
+            (target / "app.txt").write_text("original")
+            (staging / "app.txt").write_text("new")
+            with mock.patch.object(updater.shutil, "copy2", side_effect=OSError("backup full")):
+                with self.assertRaisesRegex(OSError, "backup full"):
+                    updater.apply_update(staging, target)
+            self.assertEqual((target / "app.txt").read_text(), "original")
+            self.assertEqual(list(root.glob(".python_vna_rollback_*")), [])
+
+    def test_transaction_cannot_replace_or_remove_its_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target, staging = root / "suite", root / "staging"
+            target.mkdir()
+            staging.mkdir()
+            lock_name = ".python_vna_update.lock"
+            (staging / lock_name).write_text("malicious")
+            with self.assertRaisesRegex(RuntimeError, "replace the update lock"):
+                updater.apply_update(staging, target)
+            (staging / lock_name).unlink()
+            (staging / "UPDATE_REMOVED_FILES.txt").write_text(lock_name)
+            with self.assertRaisesRegex(RuntimeError, "remove the update lock"):
+                updater.apply_update(staging, target)
+
+    def test_transaction_late_cancellation_restores_replaced_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target, staging = root / "suite", root / "staging"
+            target.mkdir()
+            staging.mkdir()
+            (target / "app.txt").write_text("original")
+            (staging / "app.txt").write_text("new")
+            progress = mock.Mock()
+
+            def cancel_after_apply(*args):
+                self.assertEqual((target / "app.txt").read_text(), "new")
+                progress.check_cancelled.side_effect = updater.UpdateCancelled("late cancel")
+
+            progress.set_progress.side_effect = cancel_after_apply
+            with self.assertRaises(updater.UpdateCancelled):
+                updater.apply_update(staging, target, progress=progress)
+            self.assertEqual((target / "app.txt").read_text(), "original")
+
+    def test_transaction_lock_prevents_concurrent_update(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            lock = target / ".python_vna_update.lock"
+            lock.write_text("other process")
+            with self.assertRaisesRegex(RuntimeError, "Another update"):
+                updater.apply_update(target / "unused", target)
+            self.assertEqual(lock.read_text(), "other process")
+
+    def test_transaction_success_deletes_replaces_and_protects_running_updater(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target, staging = root / "suite", root / "staging"
+            target.mkdir()
+            staging.mkdir()
+            (target / "old.txt").write_text("old")
+            (target / "runner.exe").write_text("running")
+            (staging / "UPDATE_REMOVED_FILES.txt").write_text("old.txt\nrunner.exe\n")
+            (staging / "app.txt").write_text("new")
+            (staging / "runner.exe").write_text("replacement")
+            updater.apply_update(staging, target, skip_names={"RUNNER.EXE"})
+            self.assertFalse((target / "old.txt").exists())
+            self.assertEqual((target / "app.txt").read_text(), "new")
+            self.assertEqual((target / "runner.exe").read_text(), "running")
+            self.assertFalse((target / "UPDATE_REMOVED_FILES.txt").exists())
+
+    def test_restart_cannot_escape_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "suite"
+            target.mkdir()
+            outside = Path(tmp) / "outside.exe"
+            outside.touch()
+            for name in (str(outside), "../outside.exe"):
+                with self.subTest(name=name), mock.patch.object(updater.subprocess, "Popen") as launch:
+                    with self.assertRaisesRegex(RuntimeError, "escapes update root"):
+                        updater.restart_app(target, name)
+                    launch.assert_not_called()
+
+    def test_restart_uses_existing_application_inside_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            executable = target / "VIanalysis.exe"
+            executable.touch()
+            with mock.patch.object(updater.subprocess, "Popen") as launch:
+                updater.restart_app(target, executable.name)
+                launch.assert_called_once_with([str(executable.resolve())], cwd=str(target), close_fds=True)
+
     def test_removed_file_list_cannot_escape_to_similarly_named_sibling(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

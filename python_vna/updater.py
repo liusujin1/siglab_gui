@@ -31,6 +31,10 @@ class UpdateCancelled(RuntimeError):
     pass
 
 
+class UpdateRollbackError(RuntimeError):
+    pass
+
+
 def _resolve_within(root: Path, relative_path: str | Path) -> Path:
     root_path = root.resolve()
     candidate = (root_path / relative_path).resolve()
@@ -288,7 +292,7 @@ def copy_tree_overlay(
         relative_path = source_path.relative_to(source)
         if relative_path.parts and relative_path.parts[0].startswith("UPDATE_"):
             continue
-        target_path = target / relative_path
+        target_path = _resolve_within(target, relative_path)
         target_path.parent.mkdir(parents=True, exist_ok=True)
         copy_file_with_retry(
             source_path,
@@ -316,6 +320,149 @@ def apply_removed_files(staging: Path, target: Path) -> None:
             target_path.unlink()
 
 
+def apply_update(
+    staging: Path,
+    target: Path,
+    *,
+    skip_names: set[str] | None = None,
+    progress: ProgressReporter | None = None,
+) -> None:
+    lock_path = target.resolve() / ".python_vna_update.lock"
+    try:
+        lock = lock_path.open("x", encoding="utf-8")
+    except FileExistsError as exc:
+        raise RuntimeError(f"Another update or an interrupted update owns {lock_path}") from exc
+    preserve_lock = False
+    try:
+        with lock:
+            lock.write(str(os.getpid()))
+            lock.flush()
+            _apply_update(staging, target, skip_names=skip_names, progress=progress)
+    except UpdateRollbackError:
+        preserve_lock = True
+        raise
+    finally:
+        if not preserve_lock:
+            try:
+                lock_path.unlink(missing_ok=True)
+            except OSError as exc:
+                _log_cleanup_warning(target, f"Update lock cleanup failed: {lock_path}: {exc}")
+
+
+def _apply_update(
+    staging: Path,
+    target: Path,
+    *,
+    skip_names: set[str] | None = None,
+    progress: ProgressReporter | None = None,
+) -> None:
+    target = target.resolve()
+    skipped = {name.lower() for name in (skip_names or set())}
+    operations: dict[Path, Path | None] = {}
+    removed_path = staging / "UPDATE_REMOVED_FILES.txt"
+    if removed_path.exists():
+        for line in removed_path.read_text(encoding="utf-8").splitlines():
+            relative = line.strip()
+            if not relative:
+                continue
+            destination = _resolve_within(target, relative)
+            if destination == target / ".python_vna_update.lock":
+                raise RuntimeError("Update cannot remove the update lock.")
+            if destination.name.lower() not in skipped and destination.is_file():
+                operations[destination] = None
+    for source in staging.rglob("*"):
+        relative = source.relative_to(staging)
+        if relative.parts[0].startswith("UPDATE_") or source.name.lower() in skipped:
+            continue
+        if source.is_symlink():
+            raise RuntimeError(f"Update source is a symbolic link: {relative}")
+        if not source.is_file():
+            continue
+        _resolve_within(staging, relative)
+        destination = _resolve_within(target, relative)
+        if destination == target / ".python_vna_update.lock":
+            raise RuntimeError("Update cannot replace the update lock.")
+        if destination.exists() and not destination.is_file():
+            raise RuntimeError(f"Update destination is not a file: {destination}")
+        operations[destination] = source
+    if progress is not None:
+        progress.check_cancelled()
+    backup = Path(tempfile.mkdtemp(prefix=".python_vna_rollback_", dir=target.parent)).resolve()
+    originals: dict[Path, Path | None] = {}
+    touched: list[Path] = []
+    created_directories: list[Path] = []
+    preserve_backup = False
+    try:
+        for index, destination in enumerate(operations):
+            if progress is not None:
+                progress.check_cancelled()
+            original = backup / str(index) if destination.exists() else None
+            if original is not None:
+                shutil.copy2(destination, original)
+            originals[destination] = original
+        recovery = {str(path): str(original) if original else None for path, original in originals.items()}
+        (backup / "RECOVERY.json").write_text(json.dumps(recovery, indent=2), encoding="utf-8")
+        for index, (destination, source) in enumerate(operations.items(), start=1):
+            if progress is not None:
+                progress.check_cancelled()
+            if source is None:
+                destination.unlink()
+                touched.append(destination)
+            else:
+                missing = []
+                parent = destination.parent
+                while not parent.exists():
+                    missing.append(parent)
+                    parent = parent.parent
+                for directory in reversed(missing):
+                    directory.mkdir()
+                    created_directories.append(directory)
+                touched.append(destination)
+                copy_file_with_retry(source, destination, progress=progress)
+            if progress is not None:
+                progress.set_progress(index, len(operations), f"正在应用文件：{destination.relative_to(target)}")
+        if progress is not None:
+            progress.check_cancelled()
+    except Exception:
+        failures = []
+        for destination in reversed(touched):
+            try:
+                original = originals[destination]
+                if original is None:
+                    destination.unlink(missing_ok=True)
+                else:
+                    shutil.copy2(original, destination)
+            except OSError as exc:
+                failures.append(f"{destination}: {exc}")
+        for directory in reversed(created_directories):
+            try:
+                directory.rmdir()
+            except OSError as exc:
+                failures.append(f"{directory}: {exc}")
+        if failures:
+            preserve_backup = True
+            recovery = {str(path): str(original) if original else None for path, original in originals.items()}
+            try:
+                (backup / "RECOVERY.json").write_text(json.dumps(recovery, indent=2), encoding="utf-8")
+            except OSError as exc:
+                failures.append(f"Could not write recovery index: {exc}")
+            raise UpdateRollbackError(f"Update rollback incomplete; backups retained at {backup}: {'; '.join(failures)}")
+        raise
+    finally:
+        if not preserve_backup and backup.parent == target.parent and backup.name.startswith(".python_vna_rollback_"):
+            try:
+                shutil.rmtree(backup)
+            except OSError as exc:
+                _log_cleanup_warning(target, f"Update backup cleanup failed: {backup}: {exc}")
+
+
+def _log_cleanup_warning(target: Path, message: str) -> None:
+    try:
+        write_update_log(target, message)
+    except OSError:
+        pass
+
+
 def normalize_staging_root(staging: Path) -> Path:
     children = [path for path in staging.iterdir()]
     directories = [path for path in children if path.is_dir()]
@@ -334,8 +481,8 @@ def write_update_log(target: Path, message: str) -> None:
 def restart_app(target: Path, restart_name: str) -> None:
     if not restart_name:
         return
-    restart_path = target / restart_name
-    if restart_path.exists():
+    restart_path = _resolve_within(target, restart_name)
+    if restart_path.is_file():
         subprocess.Popen([str(restart_path)], cwd=str(target), close_fds=True)
 
 
@@ -398,10 +545,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     progress = ProgressReporter()
     target: Path | None = None
+    update_applied = False
     cleanup_root = Path(args.cleanup_root).resolve() if args.cleanup_root else None
     try:
         target = Path(args.target_dir).resolve()
-        if not target.exists():
+        if not target.is_dir():
             raise FileNotFoundError(f"Target directory does not exist: {target}")
 
         progress.set_busy("正在检查更新...")
@@ -437,9 +585,9 @@ def main(argv: list[str] | None = None) -> int:
             extract_archive(archive_path, staging, package.archive_type)
             update_root = normalize_staging_root(staging)
             progress.set_busy("正在应用文件...")
-            apply_removed_files(update_root, target)
             skip_names = {Path(sys.executable).name} if getattr(sys, "frozen", False) else set()
-            copy_tree_overlay(update_root, target, skip_names=skip_names, progress=progress)
+            apply_update(update_root, target, skip_names=skip_names, progress=progress)
+            update_applied = True
 
         write_update_log(
             target,
@@ -458,6 +606,10 @@ def main(argv: list[str] | None = None) -> int:
         time.sleep(0.3)
         return 0
     except UpdateCancelled as exc:
+        if update_applied:
+            progress.close()
+            show_info("PythonVNA 更新", "更新已应用；自动启动已取消，请手动启动程序。")
+            return 0
         if target is not None:
             write_update_log(target, f"Update cancelled: {exc}")
         progress.close()
@@ -465,6 +617,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except Exception as exc:
         message = f"{exc}\n\n{traceback.format_exc()}"
+        if target is not None and target.is_dir():
+            try:
+                write_update_log(target, f"Update failed: {message}")
+            except OSError as log_error:
+                message += f"\nCould not write update log: {log_error}"
         progress.close()
         show_error(message)
         return 1

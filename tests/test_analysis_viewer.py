@@ -104,6 +104,32 @@ def _dark_analysis_theme() -> dict[str, object]:
 
 
 class AnalysisAlgorithmTests(unittest.TestCase):
+    def test_mimo_transfer_with_phase_correlated_inputs(self):
+        from python_vna.analysis_algorithms import compute_mimo_transfer_function_welch
+
+        generator = np.random.default_rng(42)
+        reference = generator.normal(size=16384)
+        other = 0.7 * np.roll(reference, 3) + generator.normal(size=reference.size)
+        inputs = np.vstack((reference, other))
+        expected = np.array([[2.0, -0.5], [0.3, 1.5]])
+        frequencies, transfer = compute_mimo_transfer_function_welch(
+            inputs, expected @ inputs, 1024.0, 512, regularization_floor=0.0,
+        )
+        self.assertGreater(frequencies.size, 0)
+        np.testing.assert_allclose(transfer, np.broadcast_to(expected, transfer.shape), atol=1e-10)
+
+    def test_mimo_transfer_singular_inputs_use_pseudoinverse(self):
+        from python_vna.analysis_algorithms import compute_mimo_transfer_function_welch
+
+        reference = np.random.default_rng(42).normal(size=4096)
+        inputs = np.vstack((reference, np.zeros_like(reference)))
+        expected = np.array([[2.0, 0.0], [-0.5, 0.0]])
+        frequencies, transfer = compute_mimo_transfer_function_welch(
+            inputs, expected @ inputs, 1024.0, 256, regularization_floor=0.0,
+        )
+        self.assertGreater(frequencies.size, 0)
+        np.testing.assert_allclose(transfer, np.broadcast_to(expected, transfer.shape), atol=1e-10)
+
     def test_periodogram_and_cumulative_spectrum_are_stable(self):
         sample_rate = 1000.0
         time_s = np.arange(1000, dtype=float) / sample_rate
@@ -619,6 +645,16 @@ class AnalysisAlgorithmTests(unittest.TestCase):
 
 
 class AnalysisDataTests(unittest.TestCase):
+    def test_nonfinite_time_column_does_not_produce_nan_sample_rate(self):
+        from python_vna.analysis_data import load_numeric_text_dataset
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "data.csv"
+            path.write_text("0,1\n1,2\nnan,3\n2,4\n3,5\n", encoding="utf-8")
+            dataset = load_numeric_text_dataset(path, fs_hint=200.0, import_kind="time")
+            self.assertEqual(dataset.sample_rate, 200.0)
+            self.assertTrue(np.all(np.isfinite(dataset.time_s)))
+
     def test_load_numeric_text_with_time_column(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "data.csv"
