@@ -1587,6 +1587,43 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_condition_panel()
         self._update_window_title()
 
+        self.device_status_light = QtWidgets.QLabel()
+        self.device_status_light.setFixedSize(12, 12)
+        self.device_status_label = QtWidgets.QLabel()
+        self.statusBar().addPermanentWidget(self.device_status_light)
+        self.statusBar().addPermanentWidget(self.device_status_label)
+        self._set_device_connected(False)
+        self._device_poll_timer = QtCore.QTimer(self)
+        self._device_poll_timer.setInterval(5000)
+        self._device_poll_timer.timeout.connect(self._poll_device_connection)
+        self._device_poll_timer.start()
+
+    def _set_device_connected(self, connected: bool) -> None:
+        if not hasattr(self, "device_status_light"):
+            return
+        hardware = self.controller.backend.__class__.__name__ == "NIDaqBackend"
+        connected = bool(connected and hardware)
+        self.device_status_light.setProperty("connected", connected)
+        color = "#16803c" if connected else "#d32f2f"
+        self.device_status_light.setStyleSheet(
+            f"background-color: {color}; border: 1px solid {color}; border-radius: 6px;"
+        )
+        self.device_status_label.setText(
+            "设备已连接" if connected else ("设备未连接" if hardware else "模拟模式")
+        )
+        self.device_status_label.setToolTip(
+            "空闲时每 5 秒检查所选 NI 设备；采集时根据数据和错误更新状态。"
+        )
+
+    def _poll_device_connection(self) -> None:
+        if (self._acquisition_thread is not None or self._recording_thread is not None
+                or self._close_confirmed):
+            return
+        if self.controller.backend.__class__.__name__ != "NIDaqBackend":
+            self._set_device_connected(False)
+            return
+        self.refresh_devices_async(connection_only=True)
+
     def _show_status_message(self, message: str) -> None:
         self.statusBar().showMessage(message)
 
@@ -1707,6 +1744,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._apply_plot_theme(plot, theme)
         if hasattr(self, "_cursor_lines"):
             self._apply_cursor_theme()
+        for items in self._plot_overlay_items.values():
+            for item in items:
+                item.setPen(self._overlay_pen(item.property("overlayTrace")))
         detached = getattr(self, "_detached_plot_window", None)
         if detached is not None:
             detached.apply_theme(theme)
@@ -5816,6 +5856,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for device in devices:
             self.device_combo.addItem(f"{device.name} ({device.product_type})", device.name)
         preferred = self.controller.preferred_device(devices)
+        self._set_device_connected(preferred is not None)
         if preferred is not None:
             for index in range(self.device_combo.count()):
                 if self.device_combo.itemData(index) == preferred:
@@ -5836,14 +5877,17 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._apply_device_list(devices)
 
-    def refresh_devices_async(self) -> None:
+    def refresh_devices_async(self, *, connection_only: bool = False) -> None:
         if self._device_refresh_thread is not None:
             return
         append_log("device refresh async: schedule")
-        self.device_combo.clear()
-        self.device_combo.addItem("正在加载设备...", None)
-        self.refresh_devices_button.setEnabled(False)
-        self.statusBar().showMessage("正在刷新 NI 设备...")
+        self._device_refresh_connection_only = connection_only
+        if not connection_only:
+            self._set_device_connected(False)
+            self.device_combo.clear()
+            self.device_combo.addItem("正在加载设备...", None)
+            self.refresh_devices_button.setEnabled(False)
+            self.statusBar().showMessage("正在刷新 NI 设备...")
         thread = QtCore.QThread(self)
         worker = DeviceRefreshWorker(self.controller)
         worker.moveToThread(thread)
@@ -5860,10 +5904,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot(object)
     def _handle_devices_ready(self, devices) -> None:
+        if getattr(self, "_device_refresh_connection_only", False):
+            selected = self.device_combo.currentData()
+            self._set_device_connected(any(device.name == selected for device in (devices or [])))
+            return
         self._apply_device_list(list(devices or []))
 
     @QtCore.Slot(str)
     def _handle_device_refresh_error(self, message: str) -> None:
+        self._set_device_connected(False)
+        if getattr(self, "_device_refresh_connection_only", False):
+            return
         self.device_combo.clear()
         self.statusBar().showMessage(f"Device refresh failed: {message}")
 
@@ -6237,6 +6288,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot(object)
     def _handle_worker_measurement(self, measurement) -> None:
+        self._set_device_connected(True)
         if self._stop_requested_for_current_run:
             return
         if "manual" in self._current_combo_value(self.trigger_mode_combo).strip().lower() and self.trigger_enable.isChecked():
@@ -6326,6 +6378,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot(object)
     def _handle_recording_status(self, status: RecordingStatus) -> None:
+        self._set_device_connected(True)
         elapsed = int(status.elapsed_seconds)
         hours, remainder = divmod(elapsed, 3600)
         minutes, seconds = divmod(remainder, 60)
@@ -6339,6 +6392,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot(str)
     def _handle_worker_error(self, message: str) -> None:
+        self._set_device_connected(False)
         self.start_button.setEnabled(True)
         self.avg_button.setEnabled(True)
         self.record_button.setEnabled(True)
@@ -7269,8 +7323,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._configure_plot_xscale(plot, cache_key)
         if self.overlay_checkbox.isChecked():
-            for history_index, overlay_curves in enumerate(self._stored_overlays[cache_key]):
-                alpha = max(45, 165 - history_index * 22)
+            for overlay_curves in self._stored_overlays[cache_key]:
                 for name, (x_data, y_data) in overlay_curves.items():
                     x_plot, y_plot = self._prepare_curve_xy(cache_key, x_data, y_data)
                     if x_plot.size == 0:
@@ -7278,8 +7331,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     curve_item = pg.PlotDataItem(
                         x_plot,
                         y_plot,
-                        pen=pg.mkPen((220, 220, 220, alpha), width=1.0, style=QtCore.Qt.DashLine),
+                        pen=self._overlay_pen(name),
                     )
+                    curve_item.setProperty("overlayTrace", name)
                     plot.addItem(curve_item)
                     curve_item.setZValue(CURVE_Z - 1)
                     curve_item.setCurveClickable(False)
@@ -8857,6 +8911,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(
             f"{key.title()} {mode} cursor on {trace_name}: x={cursor_x:.4g}, y={cursor_y:.4g}"
         )
+
+    def _overlay_pen(self, name: str):
+        return pg.mkPen(self._color_for_trace(name), width=1.6, style=QtCore.Qt.DashLine)
 
     def _capture_overlay(self, key: str) -> None:
         trace_name, curve = self._selected_curve(key)

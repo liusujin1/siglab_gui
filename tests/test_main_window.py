@@ -1896,6 +1896,56 @@ class MainWindowTests(unittest.TestCase):
         labels = axis.tickStrings([0.0, 1.25e-6, -2.5e5, 12.5], 1.0, 1.0)
         self.assertEqual(labels, ["0", "1.250e-6", "-2.500e+5", "12.5"])
 
+    def test_overlay_colors_follow_theme_in_both_plots(self):
+        measurement = self._measurement()
+        self.controller.state.measurement = measurement
+        self.window._plot_measurement(measurement)
+        self.window._capture_top_overlay()
+        self.window._capture_bottom_overlay()
+        for theme in ("light", "dark", "light"):
+            self.window._set_theme(theme, persist=False)
+            for key in ("top", "bottom"):
+                items = self.window._plot_overlay_items[key]
+                self.assertTrue(items)
+                for item in items:
+                    pen = item.opts["pen"]
+                    self.assertEqual(pen.color().alpha(), 255)
+                    self.assertEqual(pen.style(), QtCore.Qt.DashLine)
+                    self.assertEqual(pen.color().name(), self.window._color_for_trace(
+                        item.property("overlayTrace")).lower())
+                    self.assertNotEqual(pen.color().name(), self.window._theme()["plot_bg"])
+
+    def test_device_indicator_tracks_selected_hardware_and_simulation(self):
+        self.window._set_device_connected(True)
+        self.assertFalse(self.window.device_status_light.property("connected"))
+        self.assertEqual(self.window.device_status_label.text(), "模拟模式")
+        backend = type("NIDaqBackend", (_DummyBackend,), {})()
+        self.controller.backend = backend
+        device = BackendDevice("Dev1", "USB-4431")
+        self.window._apply_device_list([device])
+        self.assertTrue(self.window.device_status_light.property("connected"))
+        self.window._device_refresh_connection_only = True
+        self.window._handle_devices_ready([BackendDevice("Dev2", "USB-4431")])
+        self.assertFalse(self.window.device_status_light.property("connected"))
+        self.assertEqual(self.window.device_combo.currentData(), "Dev1")
+        self.window._handle_devices_ready([device])
+        self.assertTrue(self.window.device_status_light.property("connected"))
+        self.window._handle_device_refresh_error("disconnected")
+        self.assertFalse(self.window.device_status_light.property("connected"))
+
+    def test_connection_poll_does_not_probe_during_acquisition(self):
+        self.controller.backend = type("NIDaqBackend", (_DummyBackend,), {})()
+        with mock.patch.object(self.window, "refresh_devices_async") as refresh:
+            self.window._poll_device_connection()
+            refresh.assert_called_once_with(connection_only=True)
+            refresh.reset_mock()
+            self.window._acquisition_thread = object()
+            try:
+                self.window._poll_device_connection()
+                refresh.assert_not_called()
+            finally:
+                self.window._acquisition_thread = None
+
     def test_overlay_capture_and_clear(self):
         measurement = self._measurement()
         self.controller.state.measurement = measurement
