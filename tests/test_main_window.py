@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -1291,7 +1292,7 @@ class MainWindowTests(unittest.TestCase):
         self.assertFalse(controller.aborted)
         self.assertTrue(controller.stopped)
 
-    def test_worker_user_stop_does_not_close_controller_immediately(self):
+    def test_worker_user_stop_closes_controller_before_finished(self):
         class _Controller:
             def __init__(self):
                 self.stop_calls = 0
@@ -1321,12 +1322,82 @@ class MainWindowTests(unittest.TestCase):
 
         controller = _Controller()
         worker = AcquisitionWorker(controller, "Dev1")
+        closed_at_finish = []
+        worker.finished.connect(lambda: closed_at_finish.append(controller.close_calls))
 
         worker.request_stop()
         worker.run()
 
         self.assertEqual(controller.stop_calls, 1)
-        self.assertEqual(controller.close_calls, 0)
+        self.assertEqual(controller.close_calls, 1)
+        self.assertEqual(closed_at_finish, [1])
+
+    def test_error_keeps_device_controls_locked_until_thread_finishes(self):
+        self.window._acquisition_thread = object()
+        try:
+            with mock.patch.object(QtWidgets.QMessageBox, "critical"):
+                self.window._handle_worker_error("read failed")
+            for control in (self.window.start_button, self.window.avg_button,
+                            self.window.record_button, self.window.backend_combo,
+                            self.window.device_combo, self.window.refresh_devices_button):
+                self.assertFalse(control.isEnabled())
+            self.window._acquisition_worker_finished()
+            self.assertEqual(self.window.run_info_label.text(), "State: error")
+        finally:
+            self.window._acquisition_thread_finished()
+        self.assertTrue(self.window.start_button.isEnabled())
+        self.assertTrue(self.window.backend_combo.isEnabled())
+
+    def test_real_threads_repeated_stop_releases_tasks_on_owner_thread(self):
+        from python_vna.daq.simulated import SimulatedDaqBackend
+
+        class TrackingBackend(SimulatedDaqBackend):
+            def __init__(self):
+                super().__init__()
+                self.violations = []
+                self.closed_runs = 0
+                self.owner = None
+
+            def configure(self, session, device_name=None):
+                if self._state is not None:
+                    self.violations.append("previous task was retained")
+                self.owner = threading.get_ident()
+                super().configure(session, device_name)
+                time.sleep(0.01)
+
+            def close(self):
+                if self._state is not None:
+                    if threading.get_ident() != self.owner:
+                        self.violations.append("task closed from another thread")
+                    self.closed_runs += 1
+                super().close()
+
+        backend = TrackingBackend()
+        self.controller.backend = backend
+        self.window.average_count_edit.setValue(10000)
+        self.window._device_poll_timer.stop()
+        with tempfile.TemporaryDirectory() as folder:
+            with mock.patch.object(main_window_module, "get_existing_directory", return_value=folder):
+                for mode in ("inst", "avg", "record"):
+                    for delay in (0.0, 0.03, 0.1):
+                        with self.subTest(mode=mode, delay=delay):
+                            if mode == "record":
+                                self.window._start_continuous_recording()
+                                thread = self.window._recording_thread
+                            else:
+                                self.window._start_run(average_run=mode == "avg")
+                                thread = self.window._acquisition_thread
+                            self.assertIsNotNone(thread)
+                            time.sleep(delay)
+                            self.window._stop_acquisition()
+                            self.assertTrue(thread.wait(10000), "worker requires UI event loop to exit")
+                            self.assertIsNone(backend._state)
+                            self.app.processEvents()
+                            self.assertIsNone(self.window._acquisition_thread)
+                            self.assertIsNone(self.window._recording_thread)
+                            self.assertTrue(self.window.start_button.isEnabled())
+        self.assertEqual(backend.closed_runs, 9)
+        self.assertEqual(backend.violations, [])
 
     def test_worker_normal_completion_closes_controller(self):
         class _Controller:

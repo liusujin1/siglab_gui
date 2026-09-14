@@ -1052,22 +1052,24 @@ class AcquisitionWorker(QtCore.QObject):
             if not self._stop_requested.is_set():
                 self.error.emit(str(exc))
         finally:
-            user_requested_stop = self._stop_requested.is_set()
+            append_log("acquisition cleanup: begin")
             try:
                 self._controller.stop()
-            except Exception:
-                pass
-            if not user_requested_stop:
-                try:
-                    self._controller.close()
-                except Exception:
-                    pass
+            except Exception as exc:
+                append_log(f"acquisition stop failed: {exc!r}")
+            try:
+                self._controller.close()
+            except Exception as exc:
+                append_log(f"acquisition close failed: {exc!r}")
             try:
                 self._set_controller_stop_event(None)
             except Exception:
                 pass
-            self._controller.set_averaging_enabled(False)
-            self.finished.emit()
+            try:
+                self._controller.set_averaging_enabled(False)
+            finally:
+                append_log("acquisition cleanup: end")
+                self.finished.emit()
 
     def request_stop(self) -> None:
         self._stop_requested.set()
@@ -1174,16 +1176,15 @@ class ContinuousRecordingWorker(QtCore.QObject):
                 error_message = str(exc)
                 self.error.emit(error_message)
         finally:
-            user_requested_stop = self._stop_requested.is_set()
+            append_log("recording cleanup: begin")
             try:
                 self._controller.stop()
-            except Exception:
-                pass
-            if not user_requested_stop:
-                try:
-                    self._controller.close()
-                except Exception:
-                    pass
+            except Exception as exc:
+                append_log(f"recording stop failed: {exc!r}")
+            try:
+                self._controller.close()
+            except Exception as exc:
+                append_log(f"recording close failed: {exc!r}")
             try:
                 if self._writer is not None:
                     self._writer.close(completed=completed, error=error_message)
@@ -1194,8 +1195,11 @@ class ContinuousRecordingWorker(QtCore.QObject):
                 self._set_controller_stop_event(None)
             except Exception:
                 pass
-            self._controller.set_averaging_enabled(False)
-            self.finished.emit()
+            try:
+                self._controller.set_averaging_enabled(False)
+            finally:
+                append_log("recording cleanup: end")
+                self.finished.emit()
 
     def request_stop(self) -> None:
         self._stop_requested.set()
@@ -5925,7 +5929,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _backend_changed(self, backend_name: str) -> None:
         append_log(f"backend changed: begin {backend_name}")
-        if self._acquisition_thread is not None:
+        if self._acquisition_thread is not None or self._recording_thread is not None:
             self._stop_acquisition()
             return
         self.controller.close()
@@ -6133,7 +6137,7 @@ class MainWindow(QtWidgets.QMainWindow):
         worker.status_changed.connect(self.run_info_label.setText)
         worker.error.connect(self._handle_worker_error)
         worker.finished.connect(self._recording_worker_finished)
-        worker.finished.connect(thread.quit)
+        worker.finished.connect(thread.quit, QtCore.Qt.DirectConnection)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(self._recording_thread_finished)
         thread.finished.connect(thread.deleteLater)
@@ -6210,7 +6214,7 @@ class MainWindow(QtWidgets.QMainWindow):
         worker.status_changed.connect(self.run_info_label.setText)
         worker.error.connect(self._handle_worker_error)
         worker.finished.connect(self._acquisition_worker_finished)
-        worker.finished.connect(thread.quit)
+        worker.finished.connect(thread.quit, QtCore.Qt.DirectConnection)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(self._acquisition_thread_finished)
         thread.finished.connect(thread.deleteLater)
@@ -6244,6 +6248,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return threading.Event()
 
     def _stop_acquisition(self) -> None:
+        append_log("stop acquisition: requested")
         if self._recording_worker is not None:
             self.stop_button.setEnabled(False)
             self.avg_button.setEnabled(False)
@@ -6393,23 +6398,26 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.Slot(str)
     def _handle_worker_error(self, message: str) -> None:
         self._set_device_connected(False)
-        self.start_button.setEnabled(True)
-        self.avg_button.setEnabled(True)
-        self.record_button.setEnabled(True)
+        idle = self._acquisition_thread is None and self._recording_thread is None
+        self.start_button.setEnabled(idle)
+        self.avg_button.setEnabled(idle)
+        self.record_button.setEnabled(idle)
         self.stop_button.setEnabled(False)
-        self.backend_combo.setEnabled(True)
-        self.device_combo.setEnabled(True)
-        self.refresh_devices_button.setEnabled(True)
+        self.backend_combo.setEnabled(idle)
+        self.device_combo.setEnabled(idle)
+        self.refresh_devices_button.setEnabled(idle)
         self.run_info_label.setText("State: error")
         self.statusBar().showMessage(f"Acquisition error: {message}")
         QtWidgets.QMessageBox.critical(self, "Acquisition Failed", message)
 
     @QtCore.Slot()
     def _acquisition_worker_finished(self) -> None:
-        self.run_info_label.setText("State: finalizing")
+        if self.run_info_label.text() != "State: error":
+            self.run_info_label.setText("State: finalizing")
 
     @QtCore.Slot()
     def _acquisition_thread_finished(self) -> None:
+        append_log("acquisition thread: finished")
         self._acquisition_worker = None
         self._acquisition_thread = None
         self._acquisition_stop_event = None
@@ -6426,10 +6434,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot()
     def _recording_worker_finished(self) -> None:
-        self.run_info_label.setText("State: finalizing record")
+        if self.run_info_label.text() != "State: error":
+            self.run_info_label.setText("State: finalizing record")
 
     @QtCore.Slot()
     def _recording_thread_finished(self) -> None:
+        append_log("recording thread: finished")
         output_dir = self._recording_output_dir
         self._recording_worker = None
         self._recording_thread = None
