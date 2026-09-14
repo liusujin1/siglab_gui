@@ -2,7 +2,10 @@ param(
     [Parameter(Mandatory=$true)]
     [string]$ReleasePath,
 
-    [switch]$Force
+    [switch]$Force,
+
+    [ValidateSet('7z', 'zip')]
+    [string]$ArchiveType = '7z'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -42,7 +45,7 @@ if ($releaseName -notmatch '^PythonVNA_Suite_v.+$') {
     throw "Unexpected release folder name: $releaseName"
 }
 
-$archivePath = Join-Path $distRoot "$releaseName.7z"
+$archivePath = Join-Path $distRoot "$releaseName.$ArchiveType"
 if ((Test-Path -LiteralPath $archivePath -PathType Leaf) -and -not $Force) {
     Write-Host "Using existing full release archive: $archivePath"
     Write-Output $archivePath
@@ -59,7 +62,12 @@ if (Test-Path -LiteralPath $archivePath) {
 }
 
 Write-Host "Creating full release archive from: $release"
-& $sevenZip a -t7z -mx=9 -m0=LZMA2 -md=256m -mfb=273 -ms=on $archivePath $release | Out-Host
+if ($ArchiveType -eq 'zip') {
+    & $sevenZip a -tzip -mm=Deflate -mx=7 $archivePath $release | Out-Host
+}
+else {
+    & $sevenZip a -t7z -mx=9 -m0=LZMA2 -md=256m -mfb=273 -ms=on $archivePath $release | Out-Host
+}
 if ($LASTEXITCODE -ne 0) {
     throw "7-Zip failed with exit code $LASTEXITCODE"
 }

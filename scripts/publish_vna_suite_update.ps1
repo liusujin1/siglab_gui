@@ -37,7 +37,7 @@ param(
 
     [switch]$SkipRemotePrune,
 
-    [int]$KeepRemoteFullReleases = 2
+    [int]$KeepRemoteFullReleases = 4
 )
 
 $ErrorActionPreference = 'Stop'
@@ -189,15 +189,11 @@ function Get-IncrementalArchivePath {
     )
 
     $archiveStem = Join-Path $distRoot "updates\PythonVNA_Update_v${BaseVersion}_to_v${TargetVersion}"
-    $sevenZipArchive = "$archiveStem.7z"
-    if (Test-Path -LiteralPath $sevenZipArchive -PathType Leaf) {
-        return $sevenZipArchive
-    }
     $zipArchive = "$archiveStem.zip"
     if (Test-Path -LiteralPath $zipArchive -PathType Leaf) {
         return $zipArchive
     }
-    throw "Incremental update archive was not found: $sevenZipArchive or $zipArchive"
+    throw "Online incremental ZIP archive was not found: $zipArchive"
 }
 
 function Get-ReleaseItemVersion {
@@ -246,8 +242,17 @@ function Remove-LocalReleaseArtifacts {
     )
 
     $removed = New-Object System.Collections.Generic.List[string]
+    $distPrefix = [System.IO.Path]::GetFullPath($distRoot).TrimEnd('\') + '\'
     foreach ($item in $releaseItems) {
         if ($versionsToKeep -contains $item.Version) {
+            continue
+        }
+        $resolvedTarget = [System.IO.Path]::GetFullPath($item.FullName)
+        if (-not $resolvedTarget.StartsWith($distPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Cleanup target escapes dist: $resolvedTarget"
+        }
+        if ($item.IsDirectory -and ((Get-Item -LiteralPath $resolvedTarget).Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+            Write-Warning "Skipping reparse-point release directory during local cleanup: $resolvedTarget"
             continue
         }
         if ($item.IsDirectory) {
@@ -267,7 +272,7 @@ function Remove-LocalReleaseArtifacts {
         }
         $fromVersion = $match.Groups[1].Value
         $toVersion = $match.Groups[2].Value
-        if (($versionsToKeep -contains $fromVersion) -and ($versionsToKeep -contains $toVersion)) {
+        if ($versionsToKeep -contains $toVersion) {
             return
         }
         Remove-Item -LiteralPath $_.FullName -Force
@@ -575,6 +580,11 @@ if ($ensuredArchive.Count -eq 0) {
     throw "Full release archive preparation did not return a path for v$latestVersion."
 }
 $releaseArchive = Get-FullReleaseArchivePath -ReleaseVersion $latestVersion
+$onlineArchives = @(& $ensureArchiveScript -ReleasePath $latestRelease -ArchiveType zip)
+$onlineArchive = Join-Path $distRoot "$(Split-Path -Leaf $latestRelease).zip"
+if (-not (Test-Path -LiteralPath $onlineArchive -PathType Leaf)) {
+    throw "Online full ZIP archive was not created: $onlineArchive"
+}
 $releaseArchiveUrl = "$BaseUrl/$(Split-Path -Leaf $releaseArchive)"
 
 $manifestParams = @{
@@ -583,6 +593,7 @@ $manifestParams = @{
     OutputPath = (Join-Path $distRoot 'manifest.json')
 }
 $uploadFiles = New-Object System.Collections.Generic.List[string]
+$uploadFiles.Add($onlineArchive)
 $uploadFullArchive = -not [bool]$SkipFullUpload
 if ($SkipFullUpload) {
     if (Test-RemoteHttpFile -Url $releaseArchiveUrl) {
@@ -604,10 +615,7 @@ if (-not $fullOnlyMode) {
     }
 
     $baseReleasePaths = New-Object System.Collections.Generic.List[string]
-    if ($UseExistingArtifacts -and -not [string]::IsNullOrWhiteSpace($previousRelease)) {
-        $baseReleasePaths.Add($previousRelease)
-    }
-    elseif ($fastMode -and -not [string]::IsNullOrWhiteSpace($previousRelease)) {
+    if ($fastMode -and -not [string]::IsNullOrWhiteSpace($previousRelease)) {
         $baseReleasePaths.Add($previousRelease)
     }
     elseif (-not [string]::IsNullOrWhiteSpace($BasePath)) {

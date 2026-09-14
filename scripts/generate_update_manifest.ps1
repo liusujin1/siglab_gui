@@ -112,12 +112,7 @@ $version = Get-ReleaseVersion -Path $release
 $releaseLeaf = Split-Path -Leaf $release
 $fullZipArchive = Join-Path $distRoot "$releaseLeaf.zip"
 $fullSevenZipArchive = Join-Path $distRoot "$releaseLeaf.7z"
-$fullArchive = if (Test-Path -LiteralPath $fullSevenZipArchive -PathType Leaf) {
-    $fullSevenZipArchive
-}
-else {
-    $fullZipArchive
-}
+$fullArchive = $fullZipArchive
 $manifestPath = if ([string]::IsNullOrWhiteSpace($OutputPath)) {
     Join-Path $distRoot 'manifest.json'
 }
@@ -145,6 +140,9 @@ if ($basePaths.Count -gt 0) {
     for ($i = 0; $i -lt $basePaths.Count; $i++) {
         $base = Resolve-PathStrict -Path $basePaths[$i]
         $updateArchive = Resolve-PathStrict -Path $updateArchivePaths[$i]
+        if ([System.IO.Path]::GetExtension($updateArchive) -ne '.zip') {
+            throw "Online updates require ZIP archives: $updateArchive"
+        }
         $baseVersion = Get-ReleaseVersion -Path $base
         $updateInfo = Get-ArchiveInfo -Path $updateArchive -Url (Join-Url -BaseUrl $BaseUrl -Leaf (Split-Path -Leaf $updateArchive))
         $updateInfo['from'] = $baseVersion

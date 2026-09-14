@@ -113,7 +113,7 @@ class RepositoryConfigTests(unittest.TestCase):
             r"&\s+\$ensureArchiveScript\s+-ReleasePath\s+\$latestRelease",
         )
 
-    def test_publish_prefers_compact_7z_incremental_archives(self):
+    def test_publish_requires_zip_incremental_archives(self):
         text = (ROOT / "scripts" / "publish_vna_suite_update.ps1").read_text(
             encoding="utf-8"
         )
@@ -121,9 +121,16 @@ class RepositoryConfigTests(unittest.TestCase):
         helper_end = text.index("function Get-ReleaseItemVersion", helper_start)
         helper = text[helper_start:helper_end]
 
-        self.assertLess(helper.index('"$archiveStem.7z"'), helper.index('"$archiveStem.zip"'))
+        self.assertIn('"$archiveStem.zip"', helper)
+        self.assertNotIn('"$archiveStem.7z"', helper)
         self.assertIn("Get-IncrementalArchivePath -BaseVersion", text)
         self.assertNotIn("'-SkipSevenZip'", text)
+
+        manifest_text = (ROOT / "scripts" / "generate_update_manifest.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("$fullArchive = $fullZipArchive", manifest_text)
+        self.assertIn("Online updates require ZIP archives", manifest_text)
 
     def test_vianalysis_bundle_collects_scipy_array_api_compat_modules(self):
         text = (ROOT / "PythonVNA_Suite.spec").read_text(encoding="utf-8")
