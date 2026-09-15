@@ -2202,8 +2202,100 @@ class DiagnosticAppTests(unittest.TestCase):
             float(item.size) for item in view._render_items if isinstance(item, gl.GLScatterPlotItem)
         ]
 
-        self.assertIn(22.0, scatter_sizes)
-        self.assertIn(13.0, scatter_sizes)
+        self.assertIn(19.0, scatter_sizes)
+        self.assertIn(12.0, scatter_sizes)
+
+    def test_modal_session_roundtrip_without_source_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "modal.vna"
+            self._write_modal_vna(source)
+            page = ModalShapePage()
+            restored = ModalShapePage()
+            try:
+                page.load_paths([source])
+                page.mode_gain_spin.setValue(4.5)
+                page.point_table.item(0, 6).setText("-2")
+                mode = page.extract_mode()
+                self.assertIsNotNone(mode)
+                page._manual_peaks = [7.25, 12.5]
+                page.mode_plot.setCameraPosition(distance=8, elevation=32, azimuth=-42)
+                destination = page.export_session(Path(tmp) / "session.vnamodal")
+                source.unlink()
+                restored.import_session(destination)
+                self.assertEqual(len(restored.files), 1)
+                self.assertEqual(restored.point_table.item(0, 6).text(), "-2")
+                self.assertEqual(restored._manual_peaks, [7.25, 12.5])
+                self.assertEqual(restored.mode_gain_spin.value(), 4.5)
+                self.assertEqual(restored.mode_plot.opts["distance"], 8)
+                self.assertEqual(restored.mode_plot.opts["elevation"], 32)
+                np.testing.assert_array_equal(restored.last_mode["disp_complex"], mode["disp_complex"])
+                for key, values in page.files[0].dataset.frf.items():
+                    np.testing.assert_array_equal(restored.files[0].dataset.frf[key], values)
+                self.assertIsNotNone(restored.extract_mode())
+                self.assertTrue(restored.export_mode_gif(Path(tmp) / "restored.gif").exists())
+            finally:
+                page.close()
+                restored.close()
+
+    def test_modal_session_restores_shared_store_and_remains_after_sync(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "modal.vna"
+            self._write_modal_vna(source)
+            shell = DiagnosticMainWindow()
+            try:
+                page = shell.modal_page
+                page.load_paths([source])
+                page.extract_mode()
+                destination = page.export_session(Path(tmp) / "shared.vnamodal")
+                source.unlink()
+                page.import_session(destination)
+                self.app.processEvents()
+                self.assertEqual(len(page.files), 1)
+                dataset = page.files[0].dataset
+                self.assertIn(dataset, shell.analysis_data_store.datasets)
+                self.assertTrue(all(series.dataset_id == dataset.id for series in dataset.series))
+                self.assertIsNotNone(page.last_mode)
+                page.sync_from_data_store(show_status=False, refresh_candidates=False)
+                self.assertEqual(len(page.files), 1)
+                self.assertIsNotNone(page.extract_mode())
+            finally:
+                shell.close()
+
+    def test_invalid_modal_session_preserves_current_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "modal.vna"
+            self._write_modal_vna(source)
+            page = ModalShapePage()
+            try:
+                page.load_paths([source])
+                invalid = Path(tmp) / "broken.vnamodal"
+                invalid.write_bytes(b"not a session")
+                with self.assertRaises(Exception):
+                    page.import_session(invalid)
+                self.assertEqual(len(page.files), 1)
+                self.assertGreater(page.point_table.rowCount(), 0)
+            finally:
+                page.close()
+
+    def test_vibration_same_channel_in_two_logs_has_distinct_stable_colors(self):
+        page = VibrationAnalysisPage()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                paths = [Path(tmp) / name for name in ("first.csv", "second.csv")]
+                for path in paths:
+                    path.write_text("Time,ACC_X\n0,1\n1,2\n2,3\n", encoding="utf-8")
+                page.load_paths(paths)
+                page.tabs.setCurrentWidget(page.log_plot)
+                page.file_list.selectAll()
+                page.plot_current()
+                curves = [curve for curve in page.log_plot.listDataItems() if curve.name() in page._plot_curves[page.log_plot]]
+                self.assertEqual(len(curves), 2)
+                colors = [curve.opts["pen"].color().name() for curve in curves]
+                self.assertEqual(len(set(colors)), 2)
+                page.plot_current()
+                self.assertEqual(colors, [curve.opts["pen"].color().name() for curve in page.log_plot.listDataItems() if curve.name() in page._plot_curves[page.log_plot]])
+        finally:
+            page.close()
 
     def test_modal_layout_3d_view_shows_all_point_labels(self):
         labels = [f"P{index}" for index in range(1, 16)]
@@ -2215,9 +2307,13 @@ class DiagnosticAppTests(unittest.TestCase):
         point_labels = {
             str(getattr(item, "text", ""))
             for item in view._render_items
-            if item.__class__.__name__ == "GLTextItem" and str(getattr(item, "text", "")).startswith("P")
+            if item.__class__.__name__ == "ModalPointLabel" and str(getattr(item, "text", "")).startswith("P")
         }
         self.assertEqual(point_labels, set(labels))
+        text_items = [item for item in view._render_items if item.__class__.__name__ == "ModalPointLabel"]
+        np.testing.assert_allclose(text_items[0].pos, coords[0] - np.mean(coords, axis=0))
+        offset = text_items[0].align_text(QtCore.QPointF(100, 100))
+        self.assertEqual(offset, QtCore.QPointF(109, 93))
 
     def _write_minimal_mapping_xlsx(self, path: Path) -> None:
         headers = ["point_id", "file_name", "x_ch", "y_ch", "z_ch", "x_scale", "y_scale", "z_scale", "x", "y", "z", "use"]
