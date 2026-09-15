@@ -95,6 +95,11 @@ class RotatableProjectionPlot(pg.PlotWidget):
         return QtCore.QPointF(event.pos())
 
 
+class ModalPointLabel(gl.GLTextItem):
+    def align_text(self, pos):
+        return super().align_text(pos) + QtCore.QPointF(9.0, -7.0)
+
+
 class Modal3DView(gl.GLViewWidget):
     cameraChanged = QtCore.Signal(float, float)
 
@@ -184,19 +189,21 @@ class Modal3DView(gl.GLViewWidget):
             self.add_render_item(
                 gl.GLScatterPlotItem(
                     pos=base_draw,
-                    color=(0.10, 0.35, 0.95, 0.22),
-                    size=22.0,
+                    color=(0.04, 0.20, 0.60, 1.0),
+                    size=19.0,
                     pxMode=True,
+                    glOptions="translucent",
                 )
             )
-            base_color = (0.05, 0.28, 0.85, 1.0)
-            base_size = 13.0
+            base_color = (0.02, 0.48, 0.98, 1.0)
+            base_size = 12.0
             self.add_render_item(
                 gl.GLScatterPlotItem(
                     pos=base_draw,
                     color=base_color,
                     size=base_size,
                     pxMode=True,
+                    glOptions="translucent",
                 )
             )
         else:
@@ -307,7 +314,6 @@ class Modal3DView(gl.GLViewWidget):
     def _add_point_labels(self, labels: list[str], points: np.ndarray, span: float, *, label_limit: int | None = None) -> None:
         if points.size == 0:
             return
-        offset = np.array([0.025, 0.025, 0.035], dtype=float) * max(span, 1.0)
         selected = list(range(len(labels))) if label_limit is None else sparse_label_indices(len(labels), label_limit=label_limit)
         for index in selected:
             if index >= points.shape[0]:
@@ -316,14 +322,14 @@ class Modal3DView(gl.GLViewWidget):
             point = points[index]
             if not str(label).strip() or not np.all(np.isfinite(point)):
                 continue
-            self._add_text(str(label), np.asarray(point, dtype=float) + offset, "#334155")
+            self._add_text(str(label), np.asarray(point, dtype=float), "#102b54", point_label=True)
 
-    def _add_text(self, text: str, pos: np.ndarray, color: str) -> None:
+    def _add_text(self, text: str, pos: np.ndarray, color: str, *, point_label: bool = False) -> None:
         if not hasattr(gl, "GLTextItem"):
             return
         try:
             self.add_render_item(
-                gl.GLTextItem(
+                (ModalPointLabel if point_label else gl.GLTextItem)(
                     pos=np.asarray(pos, dtype=float),
                     text=str(text),
                     color=QtGui.QColor(color),
@@ -1403,6 +1409,7 @@ class DiagnosticPage(QtWidgets.QWidget):
 class VibrationAnalysisPage(DiagnosticPage):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._vibration_colors: dict[str, str] = {}
         self.files: list[VibrationAnalysisFile] = []
         self._updating_controls = False
         self._suppress_auto_plot = False
@@ -1411,6 +1418,17 @@ class VibrationAnalysisPage(DiagnosticPage):
         self._preferred_log_labels: set[str] = set()
         self._log_ranges: dict[str, tuple[int, int]] = {}
         self._build_ui()
+
+    def _color_for_label(self, label: str) -> str:
+        if label not in self._vibration_colors:
+            palette = self._trace_colors()
+            preferred = super()._color_for_label(label)
+            used = set(self._vibration_colors.values())
+            self._vibration_colors[label] = preferred if preferred not in used else next(
+                (color for color in palette if color not in used),
+                palette[len(self._vibration_colors) % len(palette)],
+            )
+        return self._vibration_colors[label]
 
     def _build_ui(self) -> None:
         layout = QtWidgets.QHBoxLayout(self)
@@ -1743,6 +1761,8 @@ class VibrationAnalysisPage(DiagnosticPage):
                     )
                 )
             render_curves = prior + render_curves
+        active_labels = {curve.label for curve in render_curves}
+        self._vibration_colors = {label: color for label, color in self._vibration_colors.items() if label in active_labels}
         return self._plot_curves_on_widget(
             plot,
             render_curves,
@@ -4675,6 +4695,12 @@ class ModalShapePage(DiagnosticPage):
         file_button_grid.addWidget(self.import_mapping_button, 1, 0)
         file_button_grid.addWidget(self.export_mapping_button, 1, 1)
         file_button_grid.addWidget(self.clear_button, 1, 2)
+        self.export_session_button = QtWidgets.QPushButton("导出模态会话")
+        self.import_session_button = QtWidgets.QPushButton("导入模态会话")
+        file_button_grid.addWidget(self.export_session_button, 2, 0)
+        file_button_grid.addWidget(self.import_session_button, 2, 1, 1, 2)
+        self.export_session_button.clicked.connect(lambda: self._choose_modal_session(export=True))
+        self.import_session_button.clicked.connect(lambda: self._choose_modal_session(export=False))
         for column in range(3):
             file_button_grid.setColumnStretch(column, 1)
         control_layout.addLayout(file_button_grid)
@@ -5352,6 +5378,8 @@ class ModalShapePage(DiagnosticPage):
         self._show_status(f"已加载模态文件：{loaded} 个")
 
     def _on_shared_data_store_changed(self, reason: str, payload: object) -> None:
+        if getattr(self, "_restoring_modal_session", False):
+            return
         append_log(f"modal.shared.begin reason={reason} payload_self={payload is self}")
         if payload is self:
             append_log(f"modal.shared.self_sync.begin reason={reason}")
@@ -5376,6 +5404,8 @@ class ModalShapePage(DiagnosticPage):
             QtCore.QTimer.singleShot(0, self._flush_data_store_sync)
 
     def _flush_data_store_sync(self) -> None:
+        if self._pending_data_store_sync_reason is None:
+            return
         reason = self._pending_data_store_sync_reason or "refresh"
         self._pending_data_store_sync_reason = None
         self.sync_from_data_store(show_status=False, refresh_candidates=reason not in {"delete", "clear"})
@@ -5659,6 +5689,127 @@ class ModalShapePage(DiagnosticPage):
         self._render_mode(mode, phase=0.0)
         self._show_status(f"已提取 {target:.6g} Hz 附近的模态")
         return mode
+
+    def _choose_modal_session(self, *, export: bool) -> None:
+        dialog = QtWidgets.QFileDialog.getSaveFileName if export else QtWidgets.QFileDialog.getOpenFileName
+        path, _filter = dialog(self, "导出模态会话" if export else "导入模态会话", str(self._last_directory), "模态会话 (*.vnamodal)")
+        if not path:
+            return
+        if not export and self.files:
+            answer = QtWidgets.QMessageBox.question(self, "导入模态会话", "将替换当前模态数据、测点表及结果，并同步对应的共享数据。是否继续？")
+            if answer != QtWidgets.QMessageBox.Yes:
+                return
+        try:
+            if export:
+                self.export_session(path if path.lower().endswith(".vnamodal") else path + ".vnamodal")
+            else:
+                self.import_session(path)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "模态会话操作失败", str(exc))
+
+    def export_session(self, path: str | Path) -> Path:
+        from dataclasses import replace
+        from python_vna.diagnostic.modal_session import save_modal_session
+
+        datasets = []
+        for modal_file in self.files:
+            dataset = modal_file.dataset
+            if dataset.is_continuous:
+                channels = {}
+                time_axis = None
+                for key in dataset.channel_keys:
+                    time_axis, channels[key] = dataset.load_time_series(key)
+                dataset = replace(dataset, channels=channels, time_s=time_axis, continuous_segments=[])
+            datasets.append(dataset)
+
+        def table_rows(table):
+            return [[self._table_bool(table, row, 0, True)] + [self._table_text(table, row, column, "") for column in range(1, table.columnCount())] for row in range(table.rowCount())]
+
+        controls = {name: getattr(self, name).value() for name in (
+            "frequency_edit", "view_azimuth_spin", "view_elevation_spin", "mode_gain_spin", "gif_frame_count_spin"
+        )}
+        cameras = {}
+        for name in ("layout_plot", "mode_plot"):
+            view = getattr(self, name)
+            if isinstance(view, Modal3DView):
+                center = view.opts["center"]
+                cameras[name] = {key: float(view.opts[key]) for key in ("distance", "elevation", "azimuth", "fov")}
+                cameras[name]["center"] = [center.x(), center.y(), center.z()]
+        state = {
+            "datasets": datasets, "points": table_rows(self.point_table), "lines": table_rows(self.line_table),
+            "auto_peaks": self._auto_peaks, "manual_peaks": self._manual_peaks,
+            "active_frequency": self._active_frequency, "last_mode": self.last_mode,
+            "controls": controls, "cameras": cameras, "phase_index": self._preview_phase_index,
+            "preview_tab": self.preview_tabs.currentIndex(), "work_tab": self.left_work_tabs.currentIndex(),
+        }
+        destination = save_modal_session(path, state)
+        self._show_status(f"已导出模态会话：{destination.name}")
+        return destination
+
+    def import_session(self, path: str | Path) -> None:
+        from python_vna.diagnostic.modal_session import load_modal_session
+
+        state = load_modal_session(path)
+        controls = state.get("controls", {})
+        allowed_controls = ("frequency_edit", "view_azimuth_spin", "view_elevation_spin", "mode_gain_spin", "gif_frame_count_spin")
+        if any(not isinstance(controls.get(name), (int, float)) or not np.isfinite(controls[name]) for name in allowed_controls):
+            raise ValueError("模态会话参数无效")
+        previous_ids = {modal_file.dataset.id for modal_file in self.files}
+        self._restoring_modal_session = True
+        self._bulk_table_update = True
+        blockers = [QtCore.QSignalBlocker(widget) for widget in (self.point_table, self.line_table, self.file_list, self.candidate_list, *(getattr(self, name) for name in allowed_controls))]
+        try:
+            self.clear()
+            self._pending_data_store_sync_reason = None
+            self.files = [ModalFile(dataset.path, dataset) for dataset in state["datasets"]]
+            for modal_file in self.files:
+                self.file_list.addItem(modal_file.path.name)
+            for row in state["points"]:
+                self._insert_point_row(row)
+            for row in state["lines"]:
+                self._insert_line_row(row)
+            for name in allowed_controls:
+                getattr(self, name).setValue(controls[name])
+            self._view_azimuth = float(controls["view_azimuth_spin"])
+            self._view_elevation = float(controls["view_elevation_spin"])
+            self._auto_peaks = list(state.get("auto_peaks", []))
+            self._manual_peaks = list(state.get("manual_peaks", []))
+            self._active_frequency = state.get("active_frequency")
+            self.last_mode = state.get("last_mode")
+            self._preview_phase_index = int(state.get("phase_index", 0))
+            if self._data_store is not None:
+                self._data_store.datasets[:] = [dataset for dataset in self._data_store.datasets if dataset.id not in previous_ids]
+                for modal_file in self.files:
+                    dataset = modal_file.dataset
+                    dataset.id = self._data_store.next_dataset_id
+                    self._data_store.next_dataset_id += 1
+                    for series in dataset.series:
+                        series.dataset_id = dataset.id
+                    self._data_store.datasets.append(dataset)
+                self._data_store.changed.emit("load", self)
+        finally:
+            del blockers
+            self._bulk_table_update = False
+            self._restoring_modal_session = False
+        self._refresh_candidate_list()
+        frequency, magnitude = self._aggregate_frf_curve()
+        if frequency.size:
+            self._render_frf_candidates(frequency, magnitude, moving_average(magnitude, 5))
+        self._refresh_layout_plot()
+        if self.last_mode is not None:
+            self._render_mode(self.last_mode, phase=2 * np.pi * self._preview_phase_index / self._gif_frame_count())
+        for name, camera in state.get("cameras", {}).items():
+            if name not in ("layout_plot", "mode_plot"):
+                continue
+            view = getattr(self, name)
+            if isinstance(view, Modal3DView):
+                view.opts.update({key: camera[key] for key in ("distance", "elevation", "azimuth", "fov")})
+                view.opts["center"] = QtGui.QVector3D(*camera["center"])
+                view._has_camera_fit = True
+                view.update()
+        self.preview_tabs.setCurrentIndex(int(state.get("preview_tab", 0)))
+        self.left_work_tabs.setCurrentIndex(int(state.get("work_tab", 0)))
+        self._show_status(f"已恢复模态会话：{Path(path).name}")
 
     def export_mode_gif(self, path: str | Path) -> Path:
         if self.last_mode is None:
