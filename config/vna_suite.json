@@ -43,6 +43,7 @@
         "python_vna/updater.py",
         "tests/test_condition_notes.py",
         "tests/test_display_transforms.py",
+        "tests/test_lan_update.py",
         "tests/test_repository_config.py",
         "tests/test_storage.py",
         "tests/test_update_client.py"
@@ -50,6 +51,7 @@
       "tests": [
         "tests/test_condition_notes.py",
         "tests/test_display_transforms.py",
+        "tests/test_lan_update.py",
         "tests/test_repository_config.py",
         "tests/test_storage.py",
         "tests/test_update_client.py"
