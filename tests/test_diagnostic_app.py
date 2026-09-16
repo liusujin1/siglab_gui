@@ -157,6 +157,67 @@ class DiagnosticAppTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
+    def test_large_log_rendering_keeps_raw_data_peaks_and_time_labels(self):
+        from python_vna.diagnostic.data import NumericTableFile, VibrationAnalysisFile
+
+        page = VibrationAnalysisPage()
+        try:
+            page.resize(1200, 720)
+            count = 42019
+            sample_index = np.arange(1, count + 1, dtype=float)
+            values = np.sin(sample_index * 0.1)
+            values[12345] = 1000.0
+            values[23456] = -900.0
+            times = np.asarray([f"time-{index}" for index in range(count)], dtype=object)
+            table = NumericTableFile(Path("large.dat"), "large.dat", ["PS_X"], values[:, None], metadata={"sample_index": sample_index, "raw_time_text": times})
+            page.files = [VibrationAnalysisFile(table, [], {"PS Position": [0]}, {"PS Position": ["PS_X"]})]
+            page.file_list.addItem(table.name)
+            page.file_list.setCurrentRow(0)
+            page._refresh_controls()
+            page.tabs.setCurrentWidget(page.log_plot)
+            page.show()
+            page.plot_current()
+            self.app.processEvents()
+            item = next(item for item in page.log_plot.listDataItems() if item.name() == "PS_X")
+            self.assertTrue(item.opts["autoDownsample"])
+            self.assertEqual(item.opts["downsampleMethod"], "peak")
+            self.assertTrue(item.opts["clipToView"])
+            self.assertEqual(item.curve.opts["segmentedLineMode"], "on")
+            display_x, display_y = item.getData()
+            self.assertLess(display_x.size, count // 2)
+            self.assertEqual(float(display_y.max()), 1000.0)
+            self.assertEqual(float(display_y.min()), -900.0)
+            np.testing.assert_array_equal(page._plot_curves[page.log_plot]["PS_X"][0], sample_index)
+            np.testing.assert_array_equal(page._plot_curves[page.log_plot]["PS_X"][1], values)
+            np.testing.assert_array_equal(page._plot_point_times[page.log_plot]["PS_X"][1], times)
+            page._active_trace[page.log_plot] = "PS_X"
+            snapped = page._nearest_curve_point_2d(page.log_plot, 12346.0, 1000.0)
+            self.assertEqual(snapped, (12346.0, 1000.0, "PS_X"))
+            with tempfile.TemporaryDirectory() as tmp:
+                destination = Path(tmp) / "export.csv"
+                page.export_plot_csv(page.log_plot, destination)
+                exported = np.loadtxt(destination, delimiter=",", skiprows=1)
+                self.assertEqual(exported.shape[0], count)
+                np.testing.assert_array_equal(exported[:, 1], values)
+            page.log_plot.setXRange(12340, 12360, padding=0)
+            self.app.processEvents()
+            zoom_x, zoom_y = item.getData()
+            self.assertIn(12346.0, zoom_x)
+            self.assertIn(1000.0, zoom_y)
+            self.assertLess(zoom_x.size, 100)
+        finally:
+            page.close()
+
+    def test_log_render_optimization_does_not_change_frequency_plot(self):
+        page = VibrationAnalysisPage()
+        try:
+            page._plot_curves_on_widget(page.frequency_plot, [CurvePair("FRF", np.arange(1, 100), np.ones(99))], title="FRF", x_label="Hz", y_label="dB")
+            item = next(item for item in page.frequency_plot.listDataItems() if item.name() == "FRF")
+            self.assertFalse(item.opts["autoDownsample"])
+            self.assertFalse(item.opts["clipToView"])
+        finally:
+            page.close()
+
     def test_diagnostic_app_accepts_startup_paths(self):
         args = parse_args(["one.vna", "trace.csv"])
 

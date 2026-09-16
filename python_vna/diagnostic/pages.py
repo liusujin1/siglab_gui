@@ -598,7 +598,8 @@ class DiagnosticPage(QtWidgets.QWidget):
                     y_plot = ((y - y_min) / span - 0.5) * 0.72 + center
                 color = self._color_for_label(curve.label)
                 label = self._unique_saved_label(saved, curve.label)
-                plot.plot(x, y_plot, pen=trace_pen(color), name=label)
+                item = plot.plot(x, y_plot, pen=trace_pen(color), name=label)
+                self._configure_curve_rendering(plot, item)
                 text = pg.TextItem(label, color=color, anchor=(0.0, 0.5))
                 text.setZValue(20)
                 text.setPos(float(x[0]), center)
@@ -639,7 +640,8 @@ class DiagnosticPage(QtWidgets.QWidget):
         for index, (curve, x, y, point_times) in enumerate(prepared):
             color = self._color_for_label(curve.label)
             label = self._unique_saved_label(saved, curve.label)
-            plot.plot(x, y, pen=trace_pen(color), name=label)
+            item = plot.plot(x, y, pen=trace_pen(color), name=label)
+            self._configure_curve_rendering(plot, item)
             saved[label] = (x, y)
             if point_times is not None:
                 saved_point_times[label] = (x.copy(), point_times.copy())
@@ -658,6 +660,9 @@ class DiagnosticPage(QtWidgets.QWidget):
         else:
             plot.enableAutoRange()
         return plotted
+
+    def _configure_curve_rendering(self, plot: pg.PlotWidget, item: pg.PlotDataItem) -> None:
+        pass
 
     @staticmethod
     def _finite_curve_point_times(
@@ -1407,6 +1412,14 @@ class DiagnosticPage(QtWidgets.QWidget):
 
 
 class VibrationAnalysisPage(DiagnosticPage):
+    def _configure_curve_rendering(self, plot: pg.PlotWidget, item: pg.PlotDataItem) -> None:
+        if plot is not getattr(self, "log_plot", None):
+            return
+        item.opts["autoDownsampleFactor"] = 1.0
+        item.setDownsampling(auto=True, method="peak")
+        item.setClipToView(True)
+        item.curve.setSegmentedLineMode("on")
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._vibration_colors: dict[str, str] = {}
