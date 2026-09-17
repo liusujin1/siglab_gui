@@ -1415,9 +1415,9 @@ class VibrationAnalysisPage(DiagnosticPage):
     def _configure_curve_rendering(self, plot: pg.PlotWidget, item: pg.PlotDataItem) -> None:
         if plot is not getattr(self, "log_plot", None):
             return
-        item.opts["autoDownsampleFactor"] = 1.0
-        item.setDownsampling(auto=True, method="peak")
-        item.setClipToView(True)
+        # Keep every sample; independent segments avoid costly wide path joins.
+        item.setDownsampling(ds=1, auto=False)
+        item.setClipToView(False)
         item.curve.setSegmentedLineMode("on")
 
     def __init__(self, parent=None):
