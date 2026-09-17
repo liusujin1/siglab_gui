@@ -183,6 +183,8 @@ class DiagnosticAppTests(unittest.TestCase):
             self.assertEqual(item.opts["downsample"], 1)
             self.assertFalse(item.opts["clipToView"])
             self.assertEqual(item.curve.opts["segmentedLineMode"], "on")
+            self.assertFalse(item.opts["antialias"])
+            self.assertFalse(item.curve.opts["antialias"])
             display_x, display_y = item.getData()
             np.testing.assert_array_equal(display_x, sample_index)
             np.testing.assert_array_equal(display_y, values)
@@ -207,6 +209,7 @@ class DiagnosticAppTests(unittest.TestCase):
             self.assertIn(1000.0, zoom_y)
             np.testing.assert_array_equal(zoom_x, sample_index)
             np.testing.assert_array_equal(zoom_y, values)
+            self.assertFalse(item.curve.opts["antialias"])
         finally:
             page.close()
 

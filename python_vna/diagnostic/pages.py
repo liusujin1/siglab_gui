@@ -1418,6 +1418,8 @@ class VibrationAnalysisPage(DiagnosticPage):
         # Keep every sample; independent segments avoid costly wide path joins.
         item.setDownsampling(ds=1, auto=False)
         item.setClipToView(False)
+        item.opts["antialias"] = False
+        item.updateItems(styleUpdate=True)
         item.curve.setSegmentedLineMode("on")
 
     def __init__(self, parent=None):
