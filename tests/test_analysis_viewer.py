@@ -1682,15 +1682,19 @@ class AnalysisViewerUiTests(unittest.TestCase):
                 self.assertEqual(viewer.rename_edit.text(), "第一工况")
 
                 self.assertTrue(viewer.readme_panel.isHidden())
-                central_layout = viewer.readme_panel.parentWidget().layout()
-                self.assertIs(central_layout.itemAt(0).widget(), viewer.readme_panel)
                 self.assertIsInstance(viewer.content_splitter, QtWidgets.QSplitter)
+                self.assertIs(viewer.content_splitter.widget(0), viewer.readme_panel)
+                self.assertEqual(viewer.content_splitter.count(), 3)
                 viewer.show_readme_button.click()
                 self.assertFalse(viewer.readme_panel.isHidden())
+                QtWidgets.QApplication.processEvents()
+                self.assertGreater(viewer.content_splitter.sizes()[0], 0)
                 self.assertIn("006", viewer.readme_summary_label.text())
                 self.assertIn("006:第一工况", viewer.readme_panel_preview.toPlainText())
                 viewer.show_readme_button.click()
                 self.assertTrue(viewer.readme_panel.isHidden())
+                QtWidgets.QApplication.processEvents()
+                self.assertEqual(viewer.content_splitter.sizes()[0], 0)
             finally:
                 viewer.close()
 

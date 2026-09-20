@@ -257,6 +257,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         self._rename_edit_autofill_text = ""
         self._readme_panel_restore_size: QtCore.QSize | None = None
         self._readme_panel_restore_minimum_size: QtCore.QSize | None = None
+        self._readme_splitter_restore_sizes: list[int] | None = None
         self._derived_result_cache: dict[tuple[object, ...], tuple[object, ...]] = {}
         self._last_derived_results: list[dict[str, object]] | None = None
         self._delete_in_progress = False
@@ -465,7 +466,6 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         layout.setSpacing(6)
 
         self.readme_panel = self._build_readme_panel()
-        layout.addWidget(self.readme_panel)
 
         self.left_panel = QtWidgets.QWidget()
         self.left_panel.setMinimumWidth(0 if self._derived_only else 240)
@@ -519,16 +519,18 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         self.content_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         self.content_splitter.setObjectName("analysisContentSplitter")
         self.content_splitter.setChildrenCollapsible(False)
+        self.content_splitter.addWidget(self.readme_panel)
         if self._derived_only:
             self.content_splitter.addWidget(left_scroll)
             self.content_splitter.addWidget(self.derived_tab)
-            self.content_splitter.setSizes([326, 900])
+            self.content_splitter.setSizes([0, 326, 900])
         else:
             self.content_splitter.addWidget(self.left_panel)
             self.content_splitter.addWidget(self.tabs)
-            self.content_splitter.setSizes([300, 900])
+            self.content_splitter.setSizes([0, 300, 900])
         self.content_splitter.setStretchFactor(0, 0)
-        self.content_splitter.setStretchFactor(1, 1)
+        self.content_splitter.setStretchFactor(1, 0)
+        self.content_splitter.setStretchFactor(2, 1)
         layout.addWidget(self.content_splitter, 1)
         if not self._derived_only:
             self._build_main_tab()
@@ -3629,10 +3631,19 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         if visible and self.readme_panel.isHidden():
             self._readme_panel_restore_size = self.size()
             self._readme_panel_restore_minimum_size = self.minimumSize()
+            current_sizes = self.content_splitter.sizes()
+            if len(current_sizes) == 3:
+                self._readme_splitter_restore_sizes = list(current_sizes)
         self.show_readme_button.setText("收起 readme" if visible else "查看 readme")
         self.readme_panel.setVisible(bool(visible))
         self._refresh_readme_panel(self._dataset_for_readme_panel())
+        if visible:
+            self._expand_readme_panel()
         if not visible:
+            current_sizes = self.content_splitter.sizes()
+            if len(current_sizes) == 3 and current_sizes[0] > 0:
+                self._readme_splitter_restore_sizes = list(current_sizes)
+            self._collapse_readme_panel()
             restore_size = self._readme_panel_restore_size
             restore_minimum_size = self._readme_panel_restore_minimum_size
             self._readme_panel_restore_size = None
@@ -3914,6 +3925,29 @@ class AnalysisWorkbench(QtWidgets.QWidget):
                     )
                 )
         return options
+
+    def _expand_readme_panel(self) -> None:
+        if self.readme_panel.isHidden() or self.content_splitter.count() != 3:
+            return
+        sizes = self.content_splitter.sizes()
+        if len(sizes) != 3:
+            return
+        saved = self._readme_splitter_restore_sizes
+        target = int(saved[0]) if saved is not None and len(saved) == 3 else 0
+        target = max(target, self.readme_panel.minimumWidth())
+        if target >= sum(sizes):
+            target = max(self.readme_panel.minimumWidth(), sum(sizes) // 3)
+        sizes[0] = target
+        self.content_splitter.setSizes(sizes)
+
+    def _collapse_readme_panel(self) -> None:
+        if self.content_splitter.count() != 3:
+            return
+        sizes = self.content_splitter.sizes()
+        if len(sizes) != 3:
+            return
+        sizes[0] = 0
+        self.content_splitter.setSizes(sizes)
 
     def _dataset_by_id(self, dataset_id: int | None) -> AnalysisDataset | None:
         if dataset_id is None:
