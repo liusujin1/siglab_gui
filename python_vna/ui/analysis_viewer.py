@@ -500,15 +500,12 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             left_scroll.setMaximumWidth(326)
             left_scroll.setWidget(self.left_panel)
             self.left_panel_scroll = left_scroll
-            layout.addWidget(left_scroll)
         else:
             left_layout.addWidget(self.processing_controls_group)
-            layout.addWidget(self.left_panel)
 
         if self._derived_only:
             self.derived_tab = QtWidgets.QWidget()
             self.tabs = None
-            layout.addWidget(self.derived_tab, 1)
         else:
             self.tabs = QtWidgets.QTabWidget()
             self.main_tab = QtWidgets.QWidget()
@@ -518,7 +515,21 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             if self._include_derived_tab:
                 self.derived_tab = QtWidgets.QWidget()
                 self.tabs.addTab(self.derived_tab, "换算")
-            layout.addWidget(self.tabs, 1)
+
+        self.content_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self.content_splitter.setObjectName("analysisContentSplitter")
+        self.content_splitter.setChildrenCollapsible(False)
+        if self._derived_only:
+            self.content_splitter.addWidget(left_scroll)
+            self.content_splitter.addWidget(self.derived_tab)
+            self.content_splitter.setSizes([326, 900])
+        else:
+            self.content_splitter.addWidget(self.left_panel)
+            self.content_splitter.addWidget(self.tabs)
+            self.content_splitter.setSizes([300, 900])
+        self.content_splitter.setStretchFactor(0, 0)
+        self.content_splitter.setStretchFactor(1, 1)
+        layout.addWidget(self.content_splitter, 1)
         if not self._derived_only:
             self._build_main_tab()
             self._build_foundation_tab()

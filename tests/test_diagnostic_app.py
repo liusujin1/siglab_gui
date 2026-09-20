@@ -247,6 +247,8 @@ class DiagnosticAppTests(unittest.TestCase):
                 self.assertTrue(page.action_group.isVisible())
                 expected_max_width = 300 if page is window.trace_page else 310
                 self.assertLessEqual(page.controls_column.width(), expected_max_width)
+                self.assertIsInstance(page.main_splitter, QtWidgets.QSplitter)
+                self.assertEqual(page.main_splitter.count(), 2)
                 self.assertLessEqual(page.action_group.geometry().bottom(), page.controls_column.height())
                 self.assertEqual(
                     page.controls_scroll.horizontalScrollBarPolicy(),
