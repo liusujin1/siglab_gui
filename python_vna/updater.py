@@ -162,6 +162,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--cleanup-root", default="")
     parser.add_argument("--restart", default="")
     parser.add_argument("--wait-seconds", type=float, default=3.0)
+    parser.add_argument("--ready-file", default="")
     return parser.parse_args(argv)
 
 
@@ -543,7 +544,7 @@ def schedule_runner_cleanup(executable: Path | None = None, cleanup_root: Path |
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    progress = ProgressReporter()
+    progress = None
     target: Path | None = None
     update_applied = False
     cleanup_root = Path(args.cleanup_root).resolve() if args.cleanup_root else None
@@ -552,7 +553,11 @@ def main(argv: list[str] | None = None) -> int:
         if not target.is_dir():
             raise FileNotFoundError(f"Target directory does not exist: {target}")
 
+        write_update_log(target, f"Updater started: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        progress = ProgressReporter()
         progress.set_busy("正在检查更新...")
+        if args.ready_file:
+            Path(args.ready_file).write_text("ready", encoding="utf-8")
         time.sleep(max(0.0, args.wait_seconds))
         manifest = fetch_manifest(args.manifest_url, timeout=30.0)
         decision = select_update(
@@ -622,11 +627,13 @@ def main(argv: list[str] | None = None) -> int:
                 write_update_log(target, f"Update failed: {message}")
             except OSError as log_error:
                 message += f"\nCould not write update log: {log_error}"
-        progress.close()
+        if progress is not None:
+            progress.close()
         show_error(message)
         return 1
     finally:
-        progress.close()
+        if progress is not None:
+            progress.close()
         schedule_runner_cleanup(cleanup_root=cleanup_root)
 
 

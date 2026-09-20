@@ -9,7 +9,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import traceback
 from urllib.parse import urljoin
 from urllib.request import Request, urlopen
 
@@ -221,13 +223,43 @@ def cleanup_stale_updater_runner(root: Path | None = None) -> None:
 def prepare_isolated_updater_runtime(root: Path, updater: Path) -> tuple[Path, Path]:
     runtime_root = Path(tempfile.mkdtemp(prefix="python_vna_updater_runtime_")).resolve()
     launch_path = runtime_root / "PythonVNAUpdaterRunner.exe"
-    shutil.copy2(updater, launch_path)
-
-    internal_source = root / "_internal"
-    if internal_source.exists():
-        shutil.copytree(internal_source, runtime_root / "_internal")
+    try:
+        shutil.copy2(updater, launch_path)
+        for dependency in root.iterdir():
+            if dependency.is_file() and dependency.suffix.lower() == ".dll":
+                shutil.copy2(dependency, runtime_root / dependency.name)
+        internal_source = root / "_internal"
+        if internal_source.exists():
+            shutil.copytree(internal_source, runtime_root / "_internal")
+    except Exception:
+        shutil.rmtree(runtime_root, ignore_errors=True)
+        raise
 
     return launch_path, runtime_root
+
+
+def write_startup_log(root: Path, message: str) -> Path | None:
+    for log_path in (root / "UPDATE_STARTUP_LOG.txt", Path(tempfile.gettempdir()) / "PythonVNA_UPDATE_STARTUP_LOG.txt"):
+        try:
+            with log_path.open("a", encoding="utf-8") as handle:
+                handle.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
+            return log_path
+        except OSError:
+            continue
+    return None
+
+
+def wait_for_updater_ready(process, ready_file: Path, timeout: float = 60.0) -> None:
+    deadline = time.monotonic() + timeout
+    while True:
+        return_code = process.poll()
+        if return_code is not None:
+            raise RuntimeError(f"更新器启动失败，退出码：{return_code} (0x{return_code & 0xFFFFFFFF:08X})。")
+        if ready_file.is_file():
+            return
+        if time.monotonic() >= deadline:
+            raise TimeoutError("等待更新器启动超时，当前程序不会退出。请检查安全软件拦截及运行库。")
+        time.sleep(0.05)
 
 
 def launch_updater(
@@ -241,26 +273,84 @@ def launch_updater(
     updater = updater_executable(root)
     if not updater.exists():
         raise FileNotFoundError(f"Updater executable was not found: {updater}")
+    write_startup_log(root, f"Preparing updater: {updater}")
     launch_path = updater
     cleanup_root: Path | None = None
-    if getattr(sys, "frozen", False) and os.name == "nt":
-        try:
+    process = None
+    try:
+        if getattr(sys, "frozen", False) and os.name == "nt":
             cleanup_stale_updater_runner(root)
             launch_path, cleanup_root = prepare_isolated_updater_runtime(root, updater)
-        except OSError:
-            launch_path = updater
+        with tempfile.TemporaryDirectory(prefix="python_vna_updater_startup_") as startup_dir:
+            ready_file = Path(startup_dir) / "ready"
+            args = [
+                str(launch_path),
+                "--manifest-url", manifest_url,
+                "--current-version", current_version,
+                "--target-dir", str(root),
+                "--ready-file", str(ready_file),
+            ]
+            if cleanup_root is not None:
+                args += ["--cleanup-root", str(cleanup_root)]
+            if restart_executable:
+                args += ["--restart", restart_executable]
+            write_startup_log(root, f"Starting updater: {launch_path}")
+            process = subprocess.Popen(args, cwd=str(launch_path.parent), close_fds=True)
+            wait_for_updater_ready(process, ready_file)
+        write_startup_log(root, "Updater window ready; handing over update.")
+    except Exception as exc:
+        if process is not None and process.poll() is None:
+            try:
+                process.terminate()
+                process.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        if cleanup_root is not None and (process is None or process.poll() is not None):
+            shutil.rmtree(cleanup_root, ignore_errors=True)
+        log_path = write_startup_log(root, traceback.format_exc())
+        details = f"\n启动日志：{log_path}" if log_path is not None else ""
+        raise RuntimeError(f"无法启动更新器，当前程序保持打开。\n{exc}{details}") from exc
 
-    args = [
-        str(launch_path),
-        "--manifest-url",
-        manifest_url,
-        "--current-version",
-        current_version,
-        "--target-dir",
-        str(root),
-    ]
-    if cleanup_root is not None:
-        args += ["--cleanup-root", str(cleanup_root)]
-    if restart_executable:
-        args += ["--restart", restart_executable]
-    subprocess.Popen(args, cwd=str(launch_path.parent), close_fds=True)
+
+def launch_updater_with_progress(parent, **kwargs) -> None:
+    from PySide6 import QtCore, QtWidgets
+
+    class StartupDialog(QtWidgets.QDialog):
+        def reject(self) -> None:
+            pass
+
+        def closeEvent(self, event) -> None:
+            event.ignore()
+
+    dialog = StartupDialog(parent)
+    dialog.setWindowTitle("准备更新")
+    dialog.setWindowFlag(QtCore.Qt.WindowCloseButtonHint, False)
+    layout = QtWidgets.QVBoxLayout(dialog)
+    layout.addWidget(QtWidgets.QLabel("正在准备并启动更新器，请稍候…\n网络共享目录可能耗时较长，启动失败时不会关闭当前程序。"))
+    progress = QtWidgets.QProgressBar(dialog)
+    progress.setRange(0, 0)
+    layout.addWidget(progress)
+    completed = threading.Event()
+    errors = []
+
+    def prepare() -> None:
+        try:
+            launch_updater(**kwargs)
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            completed.set()
+
+    worker = threading.Thread(target=prepare, name="updater-startup", daemon=True)
+    timer = QtCore.QTimer(dialog)
+    timer.timeout.connect(lambda: dialog.accept() if completed.is_set() else None)
+    timer.start(50)
+    worker.start()
+    try:
+        dialog.exec()
+    finally:
+        worker.join()
+        timer.stop()
+        dialog.deleteLater()
+    if errors:
+        raise errors[0]

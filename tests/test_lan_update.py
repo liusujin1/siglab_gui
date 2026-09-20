@@ -240,3 +240,103 @@ class LanUpdateTests(unittest.TestCase):
              'if($errors){throw $errors} }'], capture_output=True, text=True, timeout=30,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_diagnostic_probes_manifest_and_selected_zip_without_changing_install(self):
+        webroot = self.folder / 'web'
+        webroot.mkdir()
+        with zipfile.ZipFile(webroot / 'update.zip', 'w') as archive:
+            archive.writestr('app.txt', 'new')
+        manifest = {'latest': '1.0.2', 'full': {'url': 'missing-full.zip'},
+                    'updates': [{'from': '1.0.1', 'to': '1.0.2', 'url': 'update.zip'}]}
+        (webroot / 'manifest.json').write_text(json.dumps(manifest))
+        handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(webroot))
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        installed = self.folder / 'software with spaces'
+        installed.mkdir()
+        (installed / 'PythonVNAUpdater.exe').write_bytes(b'not executed in network-only mode')
+        (installed / 'VERSION.txt').write_text('Version: 1.0.1\n')
+        (installed / 'update_config.json').write_text(json.dumps({
+            'manifest_url': f'http://127.0.0.1:{server.server_port}/manifest.json'}))
+        before = {path.name: path.read_bytes() for path in installed.iterdir()}
+        report = self.folder / 'report'
+        self.run_script('diagnose-client.ps1', '-InstallPath', installed, '-ReportRoot', report, '-SkipRuntime')
+        summary = (report / 'RESULT.txt').read_text(encoding='utf-8')
+        self.assertIn('VERSION: 1.0.1', summary)
+        self.assertIn('MANIFEST_DIRECT: HTTP 200; latest=1.0.2', summary)
+        self.assertIn('first bytes=50-4B-03-04', summary)
+        self.assertNotIn('FAILED:', summary)
+        self.assertEqual(before, {path.name: path.read_bytes() for path in installed.iterdir()})
+
+    def test_diagnostic_rejects_existing_report_without_overwriting_it(self):
+        installed = self.folder / 'installed'
+        installed.mkdir()
+        (installed / 'PythonVNAUpdater.exe').touch()
+        report = self.folder / 'report'
+        report.mkdir()
+        result_file = report / 'RESULT.txt'
+        result_file.write_text('keep')
+        self.run_script('diagnose-client.ps1', '-InstallPath', installed, '-ReportRoot', report,
+                        '-SkipRuntime', '-SkipNetwork')
+        self.assertEqual(result_file.read_text(), 'keep')
+
+    def test_rescue_launcher_preserves_update_lock(self):
+        installed = self.folder / 'installed'
+        installed.mkdir()
+        (installed / 'PythonVNAUpdater.exe').touch()
+        (installed / '_internal').mkdir()
+        lock = installed / '.python_vna_update.lock'
+        lock.write_text('keep')
+        self.run_script('start-update-with-runtime.ps1', '-InstallPath', installed, success=False)
+        self.assertEqual(lock.read_text(), 'keep')
+
+    def test_rescue_launcher_copies_root_dlls_and_passes_existing_settings(self):
+        import os
+
+        installed = self.folder / 'software with spaces'
+        installed.mkdir()
+        internal = installed / '_internal'
+        internal.mkdir()
+        (internal / 'runtime.txt').write_text('runtime')
+        (installed / 'msvcp140.dll').write_text('dependency')
+        (installed / 'VERSION.txt').write_bytes(b'PythonVNA Suite\r\nVersion: 3.2.23\r\n')
+        config = installed / 'update_config.json'
+        config.write_text('{"manifest_url":"http://server.invalid:8095/pythonvna/manifest.json"}')
+        source = self.folder / 'Probe.cs'
+        source.write_text('''using System;
+using System.IO;
+public class Probe {
+    public static int Main(string[] args) {
+        string root = AppDomain.CurrentDomain.BaseDirectory;
+        if (!File.Exists(Path.Combine(root, "msvcp140.dll"))) return 10;
+        if (!File.Exists(Path.Combine(root, "_internal", "runtime.txt"))) return 11;
+        string target = args[Array.IndexOf(args, "--target-dir") + 1];
+        File.WriteAllLines(Path.Combine(target, "LAUNCH_ARGUMENTS.txt"), args);
+        return 0;
+    }
+}''')
+        compile_result = subprocess.run([
+            POWERSHELL, '-NoProfile', '-Command',
+            "Add-Type -Path '" + str(source) + "' -OutputAssembly '" +
+            str(installed / 'PythonVNAUpdater.exe') + "' -OutputType ConsoleApplication",
+        ], capture_output=True, text=True, timeout=30)
+        self.assertEqual(compile_result.returncode, 0, compile_result.stderr)
+        environment = dict(os.environ, TEMP=str(self.folder), TMP=str(self.folder))
+        environment.pop('PYTHON_VNA_UPDATE_MANIFEST_URL', None)
+        result = subprocess.run([
+            POWERSHELL, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+            str(TOOLS / 'start-update-with-runtime.ps1'), '-InstallPath', str(installed),
+        ], env=environment, capture_output=True, text=True, errors='replace', timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        arguments = (installed / 'LAUNCH_ARGUMENTS.txt').read_text().splitlines()
+        self.assertEqual(arguments[arguments.index('--current-version') + 1], '3.2.23')
+        self.assertEqual(arguments[arguments.index('--manifest-url') + 1],
+                         'http://server.invalid:8095/pythonvna/manifest.json')
+        self.assertEqual(arguments[arguments.index('--target-dir') + 1], str(installed))
+        self.assertEqual(Path(arguments[arguments.index('--cleanup-root') + 1]).name, 'runtime')
+        self.assertIn('0x00000000', result.stdout)
+        self.assertEqual(json.loads(config.read_text())['manifest_url'],
+                         'http://server.invalid:8095/pythonvna/manifest.json')

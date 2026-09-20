@@ -88,7 +88,7 @@ from python_vna.ui.diagnostic_theme import (
 )
 from python_vna.update_client import (
     fetch_manifest,
-    launch_updater,
+    launch_updater_with_progress,
     load_update_settings,
     select_update,
 )
@@ -2230,7 +2230,8 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             if reply != QtWidgets.QMessageBox.Yes:
                 return
-            launch_updater(
+            launch_updater_with_progress(
+                self,
                 manifest_url=settings.manifest_url,
                 current_version=PYTHON_VNA_VERSION,
                 restart_executable="PythonVNATest.exe",
