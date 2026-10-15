@@ -16,6 +16,17 @@ from python_vna.diagnostic.modal_identification import (
 )
 
 
+class _ModalFactorSpinBox(QtWidgets.QDoubleSpinBox):
+    def textFromValue(self, value):
+        return self.locale().toString(value, "f", self.decimals()).rstrip("0").rstrip(self.locale().decimalPoint())
+
+
+class _ModalStatusLabel(QtWidgets.QLabel):
+    def setText(self, text):
+        super().setText(text)
+        self.setToolTip(text)
+
+
 class ModalIdentificationTask(QtCore.QThread):
     resultReady = QtCore.Signal(object)
     failed = QtCore.Signal(str)
@@ -56,8 +67,10 @@ class ModalIdentificationMixin:
         self.modal_input_table.setHorizontalHeaderLabels(["文件", "力通道", "力单位", "追加力系数", "响应单位", "追加响应系数"])
         self.modal_input_table.setToolTip("文件已有工程系数自动应用；表内系数为追加修正。响应单位选择只改变单位解释，不重复应用灵敏度。")
         self.modal_input_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
-        for i, width in enumerate((110, 85, 70, 70, 100, 75)):
+        for i, width in enumerate((110, 150, 80, 110, 120, 120)):
             self.modal_input_table.setColumnWidth(i, width)
+        self.modal_input_table.verticalHeader().setDefaultSectionSize(38)
+        self.modal_input_table.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
         self.modal_input_table.setMinimumHeight(100)
         self.modal_input_table.setMaximumHeight(150)
         layout.addWidget(self.modal_input_table)
@@ -125,8 +138,9 @@ class ModalIdentificationMixin:
         self.modal_progress.setRange(0, 100)
         self.modal_progress.hide()
         layout.addWidget(self.modal_progress)
-        self.modal_identification_status = QtWidgets.QLabel("尚未识别")
-        self.modal_identification_status.setWordWrap(True)
+        self.modal_identification_status = _ModalStatusLabel()
+        self.modal_identification_status.setText("尚未识别")
+        self.modal_identification_status.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
         layout.addWidget(self.modal_identification_status)
         details_row = QtWidgets.QHBoxLayout()
         details_button = QtWidgets.QPushButton("诊断详情")
@@ -137,7 +151,7 @@ class ModalIdentificationMixin:
         layout.addLayout(details_row)
         self.modal_identification_details = QtWidgets.QPlainTextEdit()
         self.modal_identification_details.setReadOnly(True)
-        self.modal_identification_details.setMaximumHeight(100)
+        self.modal_identification_details.setFixedHeight(100)
         self.modal_identification_details.hide()
         details_button.toggled.connect(self.modal_identification_details.setVisible)
         copy_details.clicked.connect(lambda: QtWidgets.QApplication.clipboard().setText(self.modal_identification_details.toPlainText()))
@@ -149,6 +163,8 @@ class ModalIdentificationMixin:
         scroll.setMinimumWidth(0)
         scroll.setWidget(panel)
         self.modal_settings_scroll = scroll
+        details_button.toggled.connect(lambda visible: QtCore.QTimer.singleShot(
+            0, lambda: scroll.ensureWidgetVisible(self.modal_identification_details)) if visible else None)
         host = QtWidgets.QWidget()
         host_layout = QtWidgets.QVBoxLayout(host)
         host_layout.setContentsMargins(4, 4, 4, 4)
@@ -157,13 +173,14 @@ class ModalIdentificationMixin:
         # Keep the task controls visible even when the settings need scrolling.
         layout.removeItem(actions)
         layout.removeItem(details_row)
-        for widget in (self.modal_progress, self.modal_identification_status, self.modal_identification_details):
+        for widget in (self.modal_progress, self.modal_identification_status):
             layout.removeWidget(widget)
         host_layout.addLayout(actions)
         host_layout.addWidget(self.modal_progress)
         host_layout.addWidget(self.modal_identification_status)
         host_layout.addLayout(details_row)
-        host_layout.addWidget(self.modal_identification_details)
+        layout.addStretch(1)
+        layout.setSizeConstraint(QtWidgets.QLayout.SetMinimumSize)
         self.left_work_tabs.addTab(host, "识别设置")
         self.identify_button.clicked.connect(lambda: self.start_modal_identification())
         self.modal_cancel_button.clicked.connect(self.cancel_modal_identification)
@@ -178,7 +195,7 @@ class ModalIdentificationMixin:
 
     @staticmethod
     def _modal_decimal(value, low, high, decimals):
-        box = QtWidgets.QDoubleSpinBox()
+        box = _ModalFactorSpinBox() if decimals == 12 else QtWidgets.QDoubleSpinBox()
         box.setDecimals(decimals)
         box.setRange(low, high)
         box.setValue(value)
@@ -226,7 +243,7 @@ class ModalIdentificationMixin:
         layout = QtWidgets.QVBoxLayout(stability)
         layout.setContentsMargins(0, 0, 0, 0)
         self.modal_stability_plot = self._create_plot_widget("稳定图")
-        self.modal_stability_plot.setMinimumHeight(130)
+        self.modal_stability_plot.setMinimumHeight(100)
         layout.addWidget(self.modal_stability_plot, 1)
         self.modal_pole_table = QtWidgets.QTableWidget(0, 5)
         self.modal_pole_table.setHorizontalHeaderLabels(["拟合", "模型阶次", "频率 Hz", "阻尼 %", "连续稳定阶次"])

@@ -4683,6 +4683,7 @@ class ModalShapePage(ModalIdentificationMixin, DiagnosticPage):
 
         left_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         left_splitter.setChildrenCollapsible(False)
+        self.modal_left_splitter = left_splitter
         left_layout.addWidget(left_splitter)
 
         self.left_work_tabs = QtWidgets.QTabWidget()
@@ -4741,7 +4742,11 @@ class ModalShapePage(ModalIdentificationMixin, DiagnosticPage):
         self.file_list.setAlternatingRowColors(True)
         self.file_list.setMinimumHeight(110)
         control_layout.addWidget(self.file_list, 1)
-        self.left_work_tabs.addTab(control_tab, "控制区")
+        control_scroll = QtWidgets.QScrollArea()
+        control_scroll.setWidgetResizable(True)
+        control_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        control_scroll.setWidget(control_tab)
+        self.left_work_tabs.addTab(control_scroll, "控制区")
 
         point_tab = QtWidgets.QWidget()
         point_layout = QtWidgets.QVBoxLayout(point_tab)
@@ -4869,6 +4874,10 @@ class ModalShapePage(ModalIdentificationMixin, DiagnosticPage):
         freq_group, freq_layout = create_group_box("频率区", layout_type=QtWidgets.QVBoxLayout)
         freq_group.setMinimumHeight(285)
         freq_group.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        frequency_controls = QtWidgets.QWidget()
+        frequency_controls_layout = QtWidgets.QVBoxLayout(frequency_controls)
+        frequency_controls_layout.setContentsMargins(0, 0, 0, 0)
+        frequency_controls_layout.setSpacing(6)
         self.frequency_edit.setMinimumWidth(120)
         self.frequency_edit.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         for button in (
@@ -4892,7 +4901,7 @@ class ModalShapePage(ModalIdentificationMixin, DiagnosticPage):
         freq_row.addWidget(QtWidgets.QLabel("模态频率"))
         freq_row.addWidget(self.frequency_edit, 1)
         freq_row.addWidget(self.apply_freq_button)
-        freq_layout.addLayout(freq_row)
+        frequency_controls_layout.addLayout(freq_row)
 
         view_grid = QtWidgets.QGridLayout()
         view_grid.setHorizontalSpacing(6)
@@ -4917,7 +4926,7 @@ class ModalShapePage(ModalIdentificationMixin, DiagnosticPage):
         preview_settings_content.hide()
         preview_settings_layout.addWidget(preview_settings_content)
         preview_settings.toggled.connect(preview_settings_content.setVisible)
-        freq_layout.addWidget(preview_settings)
+        frequency_controls_layout.addWidget(preview_settings)
 
         action_grid = QtWidgets.QGridLayout()
         action_grid.setHorizontalSpacing(6)
@@ -4930,9 +4939,17 @@ class ModalShapePage(ModalIdentificationMixin, DiagnosticPage):
         action_grid.addWidget(self.view_reset_button, 1, 2)
         for column in range(3):
             action_grid.setColumnStretch(column, 1)
-        freq_layout.addLayout(action_grid)
+        frequency_controls_layout.addLayout(action_grid)
 
-        freq_layout.addWidget(QtWidgets.QLabel("频率候选"))
+        # Only the parameters scroll; candidates/results retain their own space.
+        frequency_controls_layout.setSizeConstraint(QtWidgets.QLayout.SetMinimumSize)
+        self.modal_frequency_scroll = QtWidgets.QScrollArea()
+        self.modal_frequency_scroll.setWidgetResizable(True)
+        self.modal_frequency_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.modal_frequency_scroll.setMinimumHeight(72)
+        self.modal_frequency_scroll.setWidget(frequency_controls)
+        freq_layout.addWidget(self.modal_frequency_scroll, 1)
+
         self.candidate_list = QtWidgets.QListWidget()
         self.candidate_list.setAlternatingRowColors(True)
         self.candidate_list.setMinimumHeight(180)
@@ -4941,7 +4958,7 @@ class ModalShapePage(ModalIdentificationMixin, DiagnosticPage):
         left_splitter.addWidget(freq_group)
         left_splitter.setStretchFactor(0, 1)
         left_splitter.setStretchFactor(1, 0)
-        left_splitter.setSizes([280, 430])
+        left_splitter.setSizes([260, 450])
 
         right_column = QtWidgets.QWidget()
         right_column.setMinimumWidth(360)
@@ -4964,8 +4981,8 @@ class ModalShapePage(ModalIdentificationMixin, DiagnosticPage):
         self.preview_tabs.setObjectName("modalPreviewTabs")
         self.layout_plot = self._create_modal_preview_widget("结构布局")
         self.mode_plot = self._create_modal_preview_widget("模态振型")
-        self.layout_plot.setMinimumSize(320, 240)
-        self.mode_plot.setMinimumSize(320, 240)
+        self.layout_plot.setMinimumSize(280, 140)
+        self.mode_plot.setMinimumSize(280, 140)
         self.layout_preview_tab = QtWidgets.QWidget()
         layout_preview_layout = QtWidgets.QVBoxLayout(self.layout_preview_tab)
         layout_preview_layout.setContentsMargins(6, 6, 6, 6)

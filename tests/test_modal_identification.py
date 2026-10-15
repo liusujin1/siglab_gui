@@ -324,6 +324,85 @@ def test_identification_settings_fit_control_panel_and_invalid_mass_is_visible(m
     assert page.modal_result_table.item(0, 3).text() == "不可可靠估计"
 
 
+@pytest.mark.parametrize("window_size", [(960, 600), (1200, 720), (1366, 768)])
+def test_modal_layout_expanded_controls_do_not_overlap_in_shell(modal_page, window_size):
+    from itertools import combinations
+    from PySide6 import QtCore, QtGui, QtWidgets
+    from python_vna.diagnostic.shell import DiagnosticMainWindow
+
+    page, app = modal_page
+    # The offscreen Windows plugin has no system fonts unless loaded explicitly.
+    font_ids = [QtGui.QFontDatabase.addApplicationFont(str(path)) for path in (
+        Path("C:/Windows/Fonts/segoeui.ttf"), Path("C:/Windows/Fonts/msyh.ttc")) if path.exists()]
+    old_font = app.font()
+    app.setFont(QtGui.QFont("Segoe UI", 9))
+    window = DiagnosticMainWindow()
+    window.stack.removeWidget(window.modal_page)
+    page.setParent(None)
+    window.stack.insertWidget(2, page)
+    window.nav_list.setCurrentRow(2)
+    window.resize(*window_size)
+    window.show()
+    try:
+        page.left_work_tabs.setCurrentIndex(3)
+        app.processEvents()
+        if window_size[0] >= 1200:
+            viewport = page.modal_frequency_scroll.viewport()
+            for button in (page.apply_freq_button, page.find_peaks_button, page.extract_button,
+                           page.preview_button, page.export_gif_button, page.delete_peak_button,
+                           page.view_reset_button):
+                assert viewport.rect().contains(QtCore.QRect(button.mapTo(viewport, QtCore.QPoint()), button.size()))
+        for group in page.findChildren(QtWidgets.QGroupBox):
+            if group.title() in {"高级拟合参数", "预览设置"}:
+                group.setChecked(True)
+        details = next(b for b in page.findChildren(QtWidgets.QPushButton) if b.text() == "诊断详情")
+        details.setChecked(True)
+        page.modal_identification_status.setText("校验失败，请检查驱动点及输入通道。" * 30)
+        page.modal_progress.show()
+        app.processEvents()
+        app.processEvents()
+
+        def bounds(widget, parent):
+            return QtCore.QRect(widget.mapTo(parent, QtCore.QPoint()), widget.size())
+
+        host = page.identify_button.parentWidget()
+        footer = [page.modal_settings_scroll, page.identify_button, page.modal_cancel_button,
+                  page.modal_progress, page.modal_identification_status, details]
+        for widget in footer:
+            assert host.rect().contains(bounds(widget, host))
+        for first, second in combinations(footer, 2):
+            assert not bounds(first, host).intersects(bounds(second, host))
+        assert page.modal_identification_status.toolTip() == page.modal_identification_status.text()
+        assert page.modal_settings_scroll.verticalScrollBar().maximum() > 0
+        assert page.modal_settings_scroll.widget().height() >= page.modal_settings_scroll.widget().minimumSizeHint().height()
+        assert page.modal_frequency_scroll.widget().height() >= page.modal_frequency_scroll.widget().minimumSizeHint().height()
+        for tab in (0, 1):
+            page.modal_result_tabs.setCurrentIndex(tab)
+            app.processEvents()
+            visible_table = page.candidate_list if tab == 0 else page.modal_result_table
+            assert page.rect().contains(bounds(visible_table, page))
+            assert visible_table.height() >= visible_table.minimumHeight()
+            assert bounds(page.modal_frequency_scroll, page).bottom() < bounds(page.modal_result_tabs, page).top()
+        for tab in (0, 1, 2):
+            page.modal_plot_tabs.setCurrentIndex(tab)
+            app.processEvents()
+            assert page.rect().contains(bounds(page.modal_plot_tabs, page))
+            assert page.rect().contains(bounds(page.preview_tabs, page))
+            assert bounds(page.modal_plot_tabs, page).bottom() < bounds(page.preview_tabs, page).top()
+        factor = page.modal_input_table.cellWidget(0, 3)
+        assert factor.cleanText() == "1"
+        factor.setValue(.000001)
+        assert abs(factor.valueFromText(factor.text()) - .000001) < 1e-12
+        assert factor.height() <= page.modal_input_table.rowHeight(0)
+    finally:
+        page.setParent(None)
+        window.close()
+        app.setFont(old_font)
+        for font_id in font_ids:
+            if font_id >= 0:
+                QtGui.QFontDatabase.removeApplicationFont(font_id)
+
+
 def test_low_coherence_and_high_error_withhold_mass():
     raw = [replace(m, coherence=np.full(m.frequency_hz.size, .5)) for m in measurements()]
     poles = [{"frequency_hz": 10., "damping_ratio": .02, "order": 6}]
