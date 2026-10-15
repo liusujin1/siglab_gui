@@ -97,16 +97,20 @@
         "python_vna/conversion_app.py",
         "python_vna/diagnostic/processing_workflow.py",
         "python_vna/diagnostic/modal_session.py",
+        "python_vna/diagnostic/modal_identification.py",
+        "python_vna/diagnostic/modal_identification_ui.py",
         "python_vna/diagnostic/**",
         "python_vna/ui/analysis_viewer.py",
         "tests/test_analysis_viewer.py",
         "tests/test_diagnostic_app.py",
-        "tests/test_processing_workflow.py"
+        "tests/test_processing_workflow.py",
+        "tests/test_modal_identification.py"
       ],
       "tests": [
         "tests/test_analysis_viewer.py",
         "tests/test_diagnostic_app.py",
-        "tests/test_processing_workflow.py"
+        "tests/test_processing_workflow.py",
+        "tests/test_modal_identification.py"
       ]
     }
   ],

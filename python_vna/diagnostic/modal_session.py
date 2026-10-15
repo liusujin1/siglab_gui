@@ -123,4 +123,99 @@ def load_modal_session(path: str | Path) -> dict:
             raise ValueError("Invalid modal result points")
         if not isinstance(mode.get("scale"), (int, float)) or not np.isfinite(mode["scale"]):
             raise ValueError("Invalid modal display scale")
+    if "identification" in state:
+        _validate_identification_state(state["identification"])
     return state
+
+
+def _validate_identification_state(state: dict) -> None:
+    """Validate optional additive v1 state before a page replaces its data."""
+    def fail():
+        raise ValueError("Invalid modal identification session")
+
+    def finite_array(value, shape):
+        array = np.asarray(value)
+        if array.shape != shape or not np.issubdtype(array.dtype, np.number) or not np.all(np.isfinite(array)):
+            fail()
+
+    if not isinstance(state, dict) or state.get("schema_version") != 1:
+        fail()
+    if not isinstance(state.get("files"), dict) or not isinstance(state.get("controls"), dict):
+        fail()
+    if not isinstance(state.get("driver"), str) or state.get("direction") not in (0, 1, 2):
+        fail()
+    for key in ("force_confirm", "driver_confirm", "stale"):
+        if not isinstance(state.get(key), bool):
+            fail()
+    for key, value in state["controls"].items():
+        if not isinstance(key, str) or not isinstance(value, (int, float)) or not np.isfinite(value):
+            fail()
+    for key, options in state["files"].items():
+        if not isinstance(key, str) or not isinstance(options, dict):
+            fail()
+        for name in ("force_key", "force_unit", "response_unit"):
+            if not isinstance(options.get(name), str):
+                fail()
+        for name in ("force_factor", "response_factor"):
+            if not isinstance(options.get(name), (int, float)) or not np.isfinite(options[name]) or options[name] <= 0:
+                fail()
+    result = state.get("result")
+    if result is None:
+        return
+    if not isinstance(result, dict) or not isinstance(result.get("fingerprint"), str):
+        fail()
+    measurements, modes, poles = result.get("measurements"), result.get("modes"), result.get("poles")
+    if not isinstance(measurements, list) or not measurements or not isinstance(modes, list) or not isinstance(poles, list):
+        fail()
+    channels = len(measurements)
+    if not isinstance(result.get("driving_index"), int) or not 0 <= result["driving_index"] < channels:
+        fail()
+    frequency = np.asarray(result.get("frequency_hz"))
+    if frequency.ndim != 1 or frequency.size < 2:
+        fail()
+    finite_array(frequency, frequency.shape)
+    if np.any(frequency <= 0) or np.any(np.diff(frequency) <= 0):
+        fail()
+    finite_array(result.get("measured"), (frequency.size, channels))
+    if result.get("reconstructed") is not None:
+        finite_array(result["reconstructed"], (frequency.size, channels))
+        finite_array(result.get("channel_errors"), (channels,))
+        finite_array(result.get("residual_coefficients"), (2, channels))
+    finite_array(result.get("automac"), (len(modes), len(modes)))
+    if not isinstance(result.get("warnings"), list) or any(not isinstance(w, str) for w in result["warnings"]):
+        fail()
+    if not isinstance(result.get("settings"), dict) or "frequency_tolerance" not in result["settings"]:
+        fail()
+    for key in ("minimum_hz", "maximum_hz", "maximum_order", "frequency_tolerance", "damping_tolerance", "mac_tolerance",
+                "stable_orders", "maximum_fit_error", "maximum_complexity"):
+        value = result["settings"].get(key)
+        if not isinstance(value, (int, float)) or not np.isfinite(value):
+            fail()
+    if not 0 < result["settings"]["frequency_tolerance"] < 1:
+        fail()
+    for measurement in measurements:
+        if not isinstance(measurement, dict) or measurement.get("axis") not in (0, 1, 2):
+            fail()
+        finite_array(measurement.get("coordinates"), (3,))
+        for key in ("label", "point", "file_name", "force_key", "response_key"):
+            if not isinstance(measurement.get(key), str):
+                fail()
+    for pole in poles:
+        if not isinstance(pole, dict) or not isinstance(pole.get("order"), int) or not isinstance(pole.get("stable_count"), int) or not isinstance(pole.get("stable"), bool):
+            fail()
+        finite_array([pole.get("frequency_hz"), pole.get("damping_ratio")], (2,))
+        if pole["frequency_hz"] <= 0 or not 0 < pole["damping_ratio"] < .5:
+            fail()
+        finite_array(pole.get("vector"), (channels,))
+    for mode in modes:
+        if not isinstance(mode, dict) or not isinstance(mode.get("status"), str) or mode.get("normalization") != "driving_point_unity":
+            fail()
+        finite_array([mode.get(key) for key in ("frequency_hz", "damping_ratio", "fit_error", "local_error", "complexity")], (5,))
+        finite_array(mode.get("shape"), (channels,))
+        finite_array(mode.get("coefficients"), (channels,))
+        if not isinstance(mode.get("source_order"), int):
+            fail()
+        for key in ("mass_kg", "stiffness_n_m", "damping_n_s_m", "coherence"):
+            value = mode.get(key)
+            if value is not None and (not isinstance(value, (int, float)) or not np.isfinite(value)):
+                fail()

@@ -21,6 +21,7 @@ from python_vna.diagnostic.data import (
     load_trace_analysis_file,
     load_vibration_analysis_file,
 )
+from python_vna.diagnostic.modal_identification_ui import ModalIdentificationMixin
 from python_vna.diagnostics import append_log
 from python_vna.optional import require
 from python_vna.ui.plot_interactions import (
@@ -4636,7 +4637,7 @@ class ModalFile:
     dataset: AnalysisDataset
 
 
-class ModalShapePage(DiagnosticPage):
+class ModalShapePage(ModalIdentificationMixin, DiagnosticPage):
     POINT_HEADERS = ["启用", "测点", "文件", "X通道", "Y通道", "Z通道", "X系数", "Y系数", "Z系数", "X", "Y", "Z"]
     LINE_HEADERS = ["启用", "起点", "终点", "来源"]
     POINT_CSV_HEADERS = ["point_id", "file_name", "x_ch", "y_ch", "z_ch", "x_scale", "y_scale", "z_scale", "x", "y", "z", "use"]
@@ -4659,6 +4660,7 @@ class ModalShapePage(DiagnosticPage):
         self._bulk_table_update = False
         self._pending_data_store_sync_reason: str | None = None
         self._retired_candidate_items: list[QtWidgets.QListWidgetItem] = []
+        self._init_identification()
         self._build_ui_matlab_style()
         if self._data_store is not None:
             self._data_store.changed.connect(self._on_shared_data_store_changed)
@@ -4820,6 +4822,7 @@ class ModalShapePage(DiagnosticPage):
             self.line_table.setColumnWidth(column, width)
         line_layout.addWidget(self.line_table, 1)
         self.left_work_tabs.addTab(line_tab, "连线表")
+        self._build_identification_settings()
         left_splitter.addWidget(self.left_work_tabs)
 
         self.frequency_edit = QtWidgets.QDoubleSpinBox()
@@ -4848,7 +4851,7 @@ class ModalShapePage(DiagnosticPage):
         self.mode_gain_spin.setSingleStep(0.5)
         self.mode_gain_spin.setValue(3.0)
         self.mode_gain_spin.setSuffix(" x")
-        self.extract_button = QtWidgets.QPushButton("提取振型")
+        self.extract_button = QtWidgets.QPushButton("单频振型预览")
         self.preview_button = QtWidgets.QPushButton("动画预览")
         self.export_gif_button = QtWidgets.QPushButton("导出 GIF")
         for button in (
@@ -4865,7 +4868,7 @@ class ModalShapePage(DiagnosticPage):
 
         freq_group, freq_layout = create_group_box("频率区", layout_type=QtWidgets.QVBoxLayout)
         freq_group.setMinimumHeight(285)
-        freq_group.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        freq_group.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         self.frequency_edit.setMinimumWidth(120)
         self.frequency_edit.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         for button in (
@@ -4904,7 +4907,17 @@ class ModalShapePage(DiagnosticPage):
         view_grid.addWidget(self.gif_frame_count_spin, 1, 3)
         view_grid.setColumnStretch(1, 1)
         view_grid.setColumnStretch(3, 1)
-        freq_layout.addLayout(view_grid)
+        preview_settings = QtWidgets.QGroupBox("预览设置")
+        preview_settings.setCheckable(True)
+        preview_settings.setChecked(False)
+        preview_settings_layout = QtWidgets.QVBoxLayout(preview_settings)
+        preview_settings_layout.setContentsMargins(6, 14, 6, 4)
+        preview_settings_content = QtWidgets.QWidget()
+        preview_settings_content.setLayout(view_grid)
+        preview_settings_content.hide()
+        preview_settings_layout.addWidget(preview_settings_content)
+        preview_settings.toggled.connect(preview_settings_content.setVisible)
+        freq_layout.addWidget(preview_settings)
 
         action_grid = QtWidgets.QGridLayout()
         action_grid.setHorizontalSpacing(6)
@@ -4924,11 +4937,11 @@ class ModalShapePage(DiagnosticPage):
         self.candidate_list.setAlternatingRowColors(True)
         self.candidate_list.setMinimumHeight(180)
         self.candidate_list.setMaximumHeight(320)
-        freq_layout.addWidget(self.candidate_list, 1)
+        self._build_identification_results(self.candidate_list, freq_layout)
         left_splitter.addWidget(freq_group)
         left_splitter.setStretchFactor(0, 1)
         left_splitter.setStretchFactor(1, 0)
-        left_splitter.setSizes([360, 330])
+        left_splitter.setSizes([280, 430])
 
         right_column = QtWidgets.QWidget()
         right_column.setMinimumWidth(360)
@@ -4943,7 +4956,7 @@ class ModalShapePage(DiagnosticPage):
         frf_group, frf_layout = create_group_box("FRF图", layout_type=QtWidgets.QVBoxLayout)
         self.frf_plot = self._create_plot_widget("模态 FRF 候选图")
         self.frf_plot.setMinimumHeight(170)
-        frf_layout.addWidget(self.frf_plot)
+        self._build_identification_plots(frf_layout)
         right_splitter.addWidget(frf_group)
 
         preview_group, preview_group_layout = create_group_box("3D预览区", layout_type=QtWidgets.QVBoxLayout)
@@ -5580,6 +5593,14 @@ class ModalShapePage(DiagnosticPage):
 
     def clear(self) -> None:
         self._preview_timer.stop()
+        self.cancel_modal_identification()
+        self._mark_identification_stale()
+        self._identification_result = None
+        self._identification_data = None
+        self.modal_result_table.setRowCount(0)
+        self.modal_pole_table.setRowCount(0)
+        for plot in (self.modal_fit_plot, self.modal_phase_plot, self.modal_stability_plot):
+            plot.clear()
         self.files.clear()
         self.file_list.clear()
         self._clear_candidate_list_safely("clear")
@@ -5618,6 +5639,7 @@ class ModalShapePage(DiagnosticPage):
         return peaks
 
     def apply_frequency(self) -> None:
+        self.modal_result_tabs.setCurrentIndex(0)
         value = float(self.frequency_edit.value())
         if not np.isfinite(value) or value <= 0.0:
             self._show_status("模态频率必须为正数")
@@ -5628,7 +5650,7 @@ class ModalShapePage(DiagnosticPage):
         freq, db_values = self._aggregate_frf_curve()
         if freq.size:
             self._render_frf_candidates(freq, db_values, moving_average(db_values, 5))
-        self._invalidate_mode()
+        self._invalidate_mode(identification_changed=False)
         self._show_status(f"已应用模态频率：{value:.8g} Hz")
 
     def delete_selected_peak(self) -> None:
@@ -5649,7 +5671,16 @@ class ModalShapePage(DiagnosticPage):
         self._show_status(f"已删除峰值候选：{freq:.8g} Hz")
 
     def preview_mode(self) -> None:
-        mode = self.extract_mode()
+        identified_selection = self.modal_result_tabs.currentIndex() == 1 and self._identification_result is not None
+        if identified_selection or (self.last_mode is not None and self.last_mode.get("identified")):
+            try:
+                self._require_current_identification()
+            except ValueError as exc:
+                self._show_status(str(exc))
+                return
+            if self.last_mode is None or not self.last_mode.get("identified"):
+                self._select_identified_mode()
+        mode = self.last_mode if self.last_mode is not None and self.last_mode.get("identified") and not self._identification_stale else self.extract_mode()
         if mode is None:
             return
         if hasattr(self, "preview_tabs") and hasattr(self, "mode_preview_tab"):
@@ -5659,6 +5690,7 @@ class ModalShapePage(DiagnosticPage):
         self._show_status("正在预览模态动画")
 
     def extract_mode(self) -> dict[str, object] | None:
+        self.modal_result_tabs.setCurrentIndex(0)
         if self._active_frequency is None:
             self.apply_frequency()
         target = float(self._active_frequency if self._active_frequency is not None else self.frequency_edit.value())
@@ -5770,6 +5802,7 @@ class ModalShapePage(DiagnosticPage):
             "active_frequency": self._active_frequency, "last_mode": self.last_mode,
             "controls": controls, "cameras": cameras, "phase_index": self._preview_phase_index,
             "preview_tab": self.preview_tabs.currentIndex(), "work_tab": self.left_work_tabs.currentIndex(),
+            "identification": self._identification_session_state(),
         }
         destination = save_modal_session(path, state)
         self._show_status(f"已导出模态会话：{destination.name}")
@@ -5838,9 +5871,15 @@ class ModalShapePage(DiagnosticPage):
                 view.update()
         self.preview_tabs.setCurrentIndex(int(state.get("preview_tab", 0)))
         self.left_work_tabs.setCurrentIndex(int(state.get("work_tab", 0)))
+        self._restore_identification_session(state.get("identification", {}))
         self._show_status(f"已恢复模态会话：{Path(path).name}")
 
     def export_mode_gif(self, path: str | Path) -> Path:
+        identified_selection = self.modal_result_tabs.currentIndex() == 1 and self._identification_result is not None
+        if identified_selection or (self.last_mode is not None and self.last_mode.get("identified")):
+            self._require_current_identification()
+            if self.last_mode is None or not self.last_mode.get("identified"):
+                self._select_identified_mode()
         if self.last_mode is None:
             extracted = self.extract_mode()
             if extracted is None:
@@ -6253,7 +6292,7 @@ class ModalShapePage(DiagnosticPage):
         self.frequency_edit.setValue(value)
         self._active_frequency = value
         self._refresh_candidate_list()
-        self._invalidate_mode()
+        self._invalidate_mode(identification_changed=False)
         self.extract_mode()
 
     def _choose_export_gif(self) -> None:
@@ -6269,7 +6308,10 @@ class ModalShapePage(DiagnosticPage):
             "GIF 文件 (*.gif)",
         )
         if path:
-            self.export_mode_gif(path)
+            try:
+                self.export_mode_gif(path)
+            except ValueError as exc:
+                self._show_status(str(exc))
 
     def _delete_selected(self) -> None:
         rows = sorted({item.row() for item in self.file_list.selectedIndexes()}, reverse=True)
@@ -6483,7 +6525,7 @@ class ModalShapePage(DiagnosticPage):
             self._bulk_table_update = previous_bulk
         if refresh:
             self._refresh_layout_plot()
-        self._invalidate_mode()
+        self._update_mode_lines()
         if show_status:
             self._show_status("已自动生成结构连线")
 
@@ -6491,6 +6533,8 @@ class ModalShapePage(DiagnosticPage):
         selected = self.file_list.currentRow()
         file_name = self.files[selected].path.name if 0 <= selected < len(self.files) else ""
         self._insert_point_row(self._default_point_values(file_name))
+        self._invalidate_mode()
+        self._refresh_identification_sources()
         self._refresh_layout_plot()
         self._show_status("已新增测点行")
 
@@ -6527,7 +6571,7 @@ class ModalShapePage(DiagnosticPage):
         for row in rows:
             if 0 <= row < self.line_table.rowCount():
                 self.line_table.removeRow(row)
-        self._invalidate_mode()
+        self._update_mode_lines()
         self._refresh_layout_plot()
         self._show_status(f"已删除连线行：{len(rows)} 行")
 
@@ -6619,7 +6663,13 @@ class ModalShapePage(DiagnosticPage):
                 self.line_table.blockSignals(True)
                 item.setText(normalized)
                 self.line_table.blockSignals(False)
-        self._mapping_changed()
+        self._update_mode_lines()
+        self._refresh_layout_plot()
+
+    def _update_mode_lines(self) -> None:
+        if self.last_mode is not None:
+            self.last_mode["lines"] = self._line_rows(require_enabled=True)
+            self._render_mode(self.last_mode, phase=0.0)
 
     def _normalize_line_point_text(self, text: str) -> str:
         raw = str(text or "").strip()
@@ -6640,11 +6690,14 @@ class ModalShapePage(DiagnosticPage):
         if self._bulk_table_update:
             return
         self._invalidate_mode()
+        self._refresh_identification_sources()
         self._refresh_layout_plot()
 
-    def _invalidate_mode(self) -> None:
+    def _invalidate_mode(self, *, identification_changed: bool = True) -> None:
         self._preview_timer.stop()
         self.last_mode = None
+        if identification_changed:
+            self._mark_identification_stale()
 
     def _advance_preview(self) -> None:
         if self.last_mode is None:
@@ -6761,6 +6814,7 @@ class ModalShapePage(DiagnosticPage):
             if not np.isfinite(y_min) or not np.isfinite(y_max) or y_min == y_max:
                 y_min, y_max = -1.0, 1.0
             self.frf_plot.plot([active, active], [y_min, y_max], pen=pg.mkPen("#d7263d", width=1.5), name="当前频率")
+        self._draw_modal_cmif()
 
     def _clear_candidate_list_safely(self, reason: str) -> None:
         if not hasattr(self, "candidate_list"):
