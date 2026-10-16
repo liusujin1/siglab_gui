@@ -229,6 +229,50 @@ def lsfd(f: np.ndarray, receptance: np.ndarray, frequencies: np.ndarray, damping
     return coefficients, basis @ coefficients
 
 
+def fit_local_preview(data: ModalInput, target_hz: float, *, cancel=None, progress=None) -> dict:
+    """Explicit SDOF preview, with rejected coefficients left missing, never FRF fallback."""
+    f = data.frequency_hz
+    if not np.isfinite(target_hz) or not f[0] < target_hz < f[-1]:
+        raise ValueError("局部预览频率必须位于有效 FRF 频段内部")
+    df = float(np.median(np.diff(f)))
+    use = abs(f - target_hz) <= max(target_hz * .06, 10 * df)
+    if np.count_nonzero(use) < 12:
+        raise ValueError("局部拟合频段不足 12 个有效频率点；未使用原始 FRF 回退")
+    local_f, measured = f[use], data.receptance[use]
+    scale = np.maximum(np.linalg.norm(measured * (2 * np.pi * local_f[:, None]) ** 2, axis=0), 1e-300)
+    width = max(target_hz * .02, 2 * df)
+
+    def residual(params):
+        _check_cancel(cancel)
+        _, estimate = lsfd(local_f, measured, params[:1], params[1:])
+        error = (estimate - measured) * (2 * np.pi * local_f[:, None]) ** 2 / scale
+        return np.r_[error.real.ravel(), error.imag.ravel()]
+
+    if progress:
+        progress(10, "局部单模态拟合，仅供预览")
+    optimum = optimize.least_squares(residual, [target_hz, .02],
+        bounds=([max(local_f[0], target_hz - width), 1e-5], [min(local_f[-1], target_hz + width), .3]),
+        max_nfev=80, x_scale="jac")
+    _check_cancel(cancel)
+    coefficients, estimate = lsfd(local_f, measured, optimum.x[:1], optimum.x[1:])
+    errors = np.linalg.norm((estimate - measured) * (2 * np.pi * local_f[:, None]) ** 2, axis=0) / scale
+    accepted = np.isfinite(coefficients[0]) & (errors <= data.settings.maximum_fit_error) & bool(optimum.success)
+    values = coefficients[0].copy()
+    values[~accepted] = complex(np.nan, np.nan)
+    warnings = [f"{m.label}：局部拟合误差 {100 * error:.3g}%，未纳入预览"
+                for m, error, good in zip(data.measurements, errors, accepted) if not good]
+    if not optimum.success:
+        warnings.append("局部拟合未收敛")
+    if not accepted.any():
+        raise ValueError("局部拟合没有通过误差校核的通道；未使用原始 FRF 回退，请改用多模态识别")
+    if progress:
+        progress(100, "局部预览拟合完成")
+    return {"fingerprint": data.fingerprint, "frequency_hz": float(optimum.x[0]),
+            "damping_ratio": float(optimum.x[1]), "coefficients": values, "accepted": accepted,
+            "errors": errors, "warnings": warnings, "preview_only": True,
+            "normalization": "display_only", "mass_kg": None}
+
+
 def _pole_rows(data: ModalInput, cancel=None, progress=None) -> list[dict]:
     rows, previous = [], []
     settings = data.settings

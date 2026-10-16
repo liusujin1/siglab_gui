@@ -353,7 +353,7 @@ def test_modal_layout_expanded_controls_do_not_overlap_in_shell(modal_page, wind
                            page.view_reset_button):
                 assert viewport.rect().contains(QtCore.QRect(button.mapTo(viewport, QtCore.QPoint()), button.size()))
         for group in page.findChildren(QtWidgets.QGroupBox):
-            if group.title() in {"高级拟合参数", "预览设置"}:
+            if group.title() in {"高级拟合参数", "预览设置", "候选搜索参数"}:
                 group.setChecked(True)
         details = next(b for b in page.findChildren(QtWidgets.QPushButton) if b.text() == "诊断详情")
         details.setChecked(True)

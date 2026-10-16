@@ -125,7 +125,79 @@ def load_modal_session(path: str | Path) -> dict:
             raise ValueError("Invalid modal display scale")
     if "identification" in state:
         _validate_identification_state(state["identification"])
+    if "candidate_search" in state:
+        _validate_candidate_state(state["candidate_search"])
+    if mode is not None and mode.get("preview_only"):
+        local = mode.get("local_fit")
+        if not isinstance(local, dict) or not isinstance(local.get("fingerprint"), str):
+            raise ValueError("Invalid local modal preview")
+        try:
+            accepted = np.asarray(local["accepted"])
+            coefficients, errors = np.asarray(local["coefficients"]), np.asarray(local["errors"])
+            if (accepted.ndim != 1 or accepted.dtype != bool or not accepted.any()
+                    or coefficients.shape != accepted.shape or errors.shape != accepted.shape
+                    or not np.isfinite(coefficients[accepted]).all() or not np.isfinite(errors).all()
+                    or local.get("mass_kg") is not None or local.get("normalization") != "display_only"):
+                raise ValueError("Invalid local modal preview")
+        except (KeyError, TypeError):
+            raise ValueError("Invalid local modal preview") from None
     return state
+
+
+def _validate_candidate_state(state):
+    from python_vna.diagnostic.modal_candidates import CandidateSettings, validate_candidate_settings
+
+    def fail():
+        raise ValueError("Invalid modal candidate session")
+
+    try:
+        if not isinstance(state, dict) or not isinstance(state.get("settings"), dict):
+            fail()
+        validate_candidate_settings(CandidateSettings(**state["settings"]))
+        result = state.get("result")
+        if result is None:
+            return
+        if (not isinstance(result, dict) or not isinstance(result.get("fingerprint"), str)
+                or not isinstance(result.get("stale"), bool)):
+            fail()
+        validate_candidate_settings(CandidateSettings(**result["settings"]))
+        if not result["stale"] and result["settings"] != state["settings"]:
+            fail()
+        f = np.asarray(result["frequency_hz"], dtype=float)
+        db = np.asarray(result["indicator_db"], dtype=float)
+        if f.ndim != 1 or f.size < 8 or not np.isfinite(f).all() or np.any(f <= 0) or np.any(np.diff(f) <= 0):
+            fail()
+        if db.shape != f.shape or np.isinf(db).any():
+            fail()
+        labels = result["labels"]
+        if not isinstance(labels, list) or not labels or any(not isinstance(label, str) for label in labels):
+            fail()
+        if not isinstance(result["warnings"], list) or any(not isinstance(w, str) for w in result["warnings"]):
+            fail()
+        if not isinstance(result["candidates"], list) or len(result["candidates"]) > 200:
+            fail()
+        for row in result["candidates"]:
+            if not f[0] <= row["frequency_hz"] <= f[-1] or not np.isfinite(row["score"]):
+                fail()
+            if not isinstance(row["methods"], list) or not row["methods"] or set(row["methods"]) - {"CMIF", "突出度", "分频段极点"}:
+                fail()
+            families = row["families"]
+            if not isinstance(families, list) or not families or set(families) - {"spectral", "pole"}:
+                fail()
+            if not isinstance(row["confirmed"], bool) or row["confirmed"] != (len(set(families)) >= 2):
+                fail()
+            if not isinstance(row["stable_orders"], int) or row["stable_orders"] < 0:
+                fail()
+            if row["damping_ratio"] is not None and not 0 < row["damping_ratio"] < .3:
+                fail()
+            if (not isinstance(row["channels"], list) or any(not isinstance(j, int) or not 0 <= j < len(labels) for j in row["channels"])
+                    or not isinstance(row["bands"], list)):
+                fail()
+            for band in row["bands"]:
+                if len(band) != 2 or not np.isfinite(band).all() or band[0] >= band[1]:
+                    fail()
+    except (TypeError, KeyError, OverflowError):
+        fail()
 
 
 def _validate_identification_state(state: dict) -> None:

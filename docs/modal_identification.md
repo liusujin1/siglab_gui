@@ -98,3 +98,40 @@ animation or a low reconstruction error alone does not validate absolute mass.
 References: Peeters et al., *The PolyMAX frequency-domain method*, 2004,
 https://doi.org/10.1155/2004/523692; ARTeMIS Modal documentation, *Modal mass
 computation*, https://www.svibs.com/resources/ARTeMIS_Modal_Help/Modal%20mass%20computation.html.
+
+## Candidate search and local preview
+
+The identification-settings tab contains a candidate-method selector and
+collapsible search parameters. The existing Find Peaks action uses this
+selection. CMIF is the default; alternatives are per-channel prominence,
+overlapping-band common-denominator poles, and spectral/pole cross-checks.
+CMIF here is the norm of the SIMO FRF vector after per-channel median scaling;
+the scaling is confined to candidate indicators and never changes absolute
+FRFs, LSFD coefficients or masses. It cannot separate repeated roots by itself.
+
+The frequency range follows the existing automatic/manual analysis limits.
+There is no fixed 10 Hz cutoff or 10 Hz spacing. Automatic bands use 25%
+frequency-band overlap, independent of time-record FFT overlap settings.
+Missing samples remain missing; no extrapolation or interpolation across gaps
+is used. Local pole fits require contiguous common data and consecutive-order
+frequency/damping stability. They are candidate evidence, not formal poles
+with full shape/MAC validation. Cross-checks require both spectral and pole
+evidence; CMIF plus prominence alone does not count as two independent families.
+No agreement yields an explicit empty result, not a silent single-method fallback.
+
+Candidates retain method, supporting channels, band and stability provenance in
+tooltips, CSV export and additive optional `candidate_search` session state.
+Search parameters have separate invalidation from formal identification:
+editing prominence does not invalidate a calibrated mass, but changed input
+data invalidates both. Stale candidates cannot be exported as current results.
+Slower searches run in a cancellable worker on a copied snapshot; input changes
+discard the returned snapshot while errors/cancellation preserve old results.
+
+The optional local-fit action uses shared-pole single-mode variable-projection
+LSFD over a local band. Every output retains a fit error and acceptance flag.
+Rejected coefficients remain NaN and are excluded from the displayed shape;
+there is no substitution of raw frequency-bin FRFs. This is explicitly labelled
+as a non-authoritative preview, never supplies kg, never overwrites formal
+results, and may be inaccurate for overlapping modes. Use formal multi-mode
+identification and reconstruction checks for engineering results. The legacy
+single-frequency ratio preview remains available and is labelled separately.

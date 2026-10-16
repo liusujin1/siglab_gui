@@ -103,6 +103,7 @@ class ModalIdentificationMixin:
         self.modal_driver_confirm = QtWidgets.QCheckBox("驱动点为同点同向响应")
         layout.addWidget(self.modal_force_confirm)
         layout.addWidget(self.modal_driver_confirm)
+        self._build_candidate_search_controls(layout)
         advanced = QtWidgets.QGroupBox("高级拟合参数")
         advanced.setCheckable(True)
         advanced.setChecked(False)
@@ -435,6 +436,10 @@ class ModalIdentificationMixin:
             return
         self._identification_stale = True
         self._identification_generation += 1
+        self._invalidate_candidate_search()
+        if self.last_mode is not None and self.last_mode.get("preview_only"):
+            self._preview_timer.stop()
+            self.last_mode = None
         if hasattr(self, "modal_identification_status"):
             self.modal_identification_status.setText("结果待更新" if self._identification_result is not None else "尚未识别")
             self.modal_export_result_button.setEnabled(False)
@@ -444,7 +449,7 @@ class ModalIdentificationMixin:
                 self.modal_phase_plot.setTitle("相位校核 · 结果待更新")
 
     def start_modal_identification(self, selected=None):
-        if self._identification_task is not None:
+        if self._identification_task is not None or self._candidate_task is not None:
             return
         try:
             self._refresh_identification_sources()
@@ -470,8 +475,11 @@ class ModalIdentificationMixin:
         self.identify_button.setEnabled(False)
         self.modal_delete_result_button.setEnabled(False)
         self.modal_refit_button.setEnabled(False)
+        self.find_peaks_button.setEnabled(False)
+        self.modal_local_preview_button.setEnabled(False)
         self.modal_cancel_button.setEnabled(True)
         self.modal_progress.setValue(0)
+        self.modal_progress.setFormat("%p%")
         self.modal_progress.show()
         self.modal_identification_status.setText("正在识别模态")
         task.start()
@@ -481,11 +489,17 @@ class ModalIdentificationMixin:
         self.modal_identification_status.setText(text)
 
     def cancel_modal_identification(self):
+        if self._candidate_task is not None:
+            self._candidate_task.requestInterruption()
+            self.modal_cancel_button.setEnabled(False)
         if self._identification_task is not None:
             self._identification_task.requestInterruption()
             self.modal_cancel_button.setEnabled(False)
 
     def _shutdown_identification(self):
+        if self._candidate_task is not None:
+            self._candidate_task.requestInterruption()
+            self._candidate_task.wait()
         if self._identification_task is not None:
             self._identification_task.requestInterruption()
             self._identification_task.wait()
@@ -503,6 +517,8 @@ class ModalIdentificationMixin:
         self.identify_button.setEnabled(True)
         self.modal_delete_result_button.setEnabled(True)
         self.modal_refit_button.setEnabled(True)
+        self.find_peaks_button.setEnabled(True)
+        self.modal_local_preview_button.setEnabled(True)
         self.modal_cancel_button.setEnabled(False)
         self.modal_progress.hide()
 

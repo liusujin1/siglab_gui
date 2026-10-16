@@ -22,6 +22,7 @@ from python_vna.diagnostic.data import (
     load_vibration_analysis_file,
 )
 from python_vna.diagnostic.modal_identification_ui import ModalIdentificationMixin
+from python_vna.diagnostic.modal_candidate_ui import ModalCandidateMixin
 from python_vna.diagnostics import append_log
 from python_vna.optional import require
 from python_vna.ui.plot_interactions import (
@@ -4637,7 +4638,7 @@ class ModalFile:
     dataset: AnalysisDataset
 
 
-class ModalShapePage(ModalIdentificationMixin, DiagnosticPage):
+class ModalShapePage(ModalCandidateMixin, ModalIdentificationMixin, DiagnosticPage):
     POINT_HEADERS = ["启用", "测点", "文件", "X通道", "Y通道", "Z通道", "X系数", "Y系数", "Z系数", "X", "Y", "Z"]
     LINE_HEADERS = ["启用", "起点", "终点", "来源"]
     POINT_CSV_HEADERS = ["point_id", "file_name", "x_ch", "y_ch", "z_ch", "x_scale", "y_scale", "z_scale", "x", "y", "z", "use"]
@@ -4661,6 +4662,7 @@ class ModalShapePage(ModalIdentificationMixin, DiagnosticPage):
         self._pending_data_store_sync_reason: str | None = None
         self._retired_candidate_items: list[QtWidgets.QListWidgetItem] = []
         self._init_identification()
+        self._init_candidate_search()
         self._build_ui_matlab_style()
         if self._data_store is not None:
             self._data_store.changed.connect(self._on_shared_data_store_changed)
@@ -4994,6 +4996,10 @@ class ModalShapePage(ModalIdentificationMixin, DiagnosticPage):
         self.preview_tabs.addTab(self.layout_preview_tab, "测点骨架图")
         self.preview_tabs.addTab(self.mode_preview_tab, "振型预览")
         preview_group_layout.addWidget(self.preview_tabs)
+        self.modal_preview_status = QtWidgets.QLabel()
+        self.modal_preview_status.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
+        self.modal_preview_status.hide()
+        preview_group_layout.addWidget(self.modal_preview_status)
         right_splitter.addWidget(preview_group)
         right_splitter.setStretchFactor(0, 1)
         right_splitter.setStretchFactor(1, 1)
@@ -5018,7 +5024,7 @@ class ModalShapePage(ModalIdentificationMixin, DiagnosticPage):
         self.add_line_button.clicked.connect(self._add_line_row)
         self.delete_line_button.clicked.connect(self._delete_line_rows)
         self.apply_freq_button.clicked.connect(self.apply_frequency)
-        self.find_peaks_button.clicked.connect(lambda _checked=False: self.find_peaks())
+        self.find_peaks_button.clicked.connect(self._on_candidate_search)
         self.delete_peak_button.clicked.connect(self.delete_selected_peak)
         self.view_azimuth_spin.valueChanged.connect(lambda _value: self._view_changed())
         self.view_elevation_spin.valueChanged.connect(lambda _value: self._view_changed())
@@ -5612,6 +5618,8 @@ class ModalShapePage(ModalIdentificationMixin, DiagnosticPage):
         self._preview_timer.stop()
         self.cancel_modal_identification()
         self._mark_identification_stale()
+        self._candidate_search_result = None
+        self.modal_candidate_status.setText("候选尚未搜索")
         self._identification_result = None
         self._identification_data = None
         self.modal_result_table.setRowCount(0)
@@ -5633,27 +5641,7 @@ class ModalShapePage(ModalIdentificationMixin, DiagnosticPage):
         self._show_status("模态振型页面已清空")
 
     def find_peaks(self) -> list[float]:
-        freq, db_values = self._aggregate_frf_curve()
-        self._clear_candidate_list_safely("find_peaks")
-        self._auto_peaks = []
-        if freq.size < 3:
-            self._show_status("没有可用于峰值搜索的有效 FRF 曲线")
-            return []
-        aggregate_peaks, smooth = find_prominent_modal_peaks(freq, db_values, max_count=12)
-        local_peaks = self._individual_peak_frequencies(max_per_curve=4)
-        peaks = merge_frequency_candidates(aggregate_peaks + local_peaks, max_count=24)
-        if not peaks:
-            peaks = local_peak_frequencies(freq, db_values, max_count=1)
-        self._auto_peaks = peaks
-        self._refresh_candidate_list()
-        self._render_frf_candidates(freq, db_values, smooth)
-        if peaks:
-            self._active_frequency = float(peaks[0])
-            self.frequency_edit.setValue(float(peaks[0]))
-            self._refresh_candidate_list()
-            self._render_frf_candidates(freq, db_values, smooth)
-        self._show_status(f"已找到模态峰值候选：{len(peaks)} 个")
-        return peaks
+        return self._find_modal_candidates()
 
     def apply_frequency(self) -> None:
         self.modal_result_tabs.setCurrentIndex(0)
@@ -5697,7 +5685,15 @@ class ModalShapePage(ModalIdentificationMixin, DiagnosticPage):
                 return
             if self.last_mode is None or not self.last_mode.get("identified"):
                 self._select_identified_mode()
-        mode = self.last_mode if self.last_mode is not None and self.last_mode.get("identified") and not self._identification_stale else self.extract_mode()
+        if self.last_mode is not None and self.last_mode.get("preview_only"):
+            try:
+                self._require_current_local_preview()
+            except ValueError as exc:
+                self._show_status(str(exc))
+                return
+            mode = self.last_mode
+        else:
+            mode = self.last_mode if self.last_mode is not None and self.last_mode.get("identified") and not self._identification_stale else self.extract_mode()
         if mode is None:
             return
         if hasattr(self, "preview_tabs") and hasattr(self, "mode_preview_tab"):
@@ -5760,12 +5756,13 @@ class ModalShapePage(ModalIdentificationMixin, DiagnosticPage):
             "labels": labels,
             "scale": scale,
             "lines": self._line_rows(require_enabled=True),
+            "raw_frequency_preview": True,
         }
         self.last_mode = mode
         self._preview_timer.stop()
         self._render_layout(coord_arr, labels)
         self._render_mode(mode, phase=0.0)
-        self._show_status(f"已提取 {target:.6g} Hz 附近的模态")
+        self._show_status(f"单频振型预览：{target:.6g} Hz（原始频点比值，非正式模态识别）")
         return mode
 
     def _choose_modal_session(self, *, export: bool) -> None:
@@ -5820,6 +5817,7 @@ class ModalShapePage(ModalIdentificationMixin, DiagnosticPage):
             "controls": controls, "cameras": cameras, "phase_index": self._preview_phase_index,
             "preview_tab": self.preview_tabs.currentIndex(), "work_tab": self.left_work_tabs.currentIndex(),
             "identification": self._identification_session_state(),
+            "candidate_search": self._candidate_session_state(),
         }
         destination = save_modal_session(path, state)
         self._show_status(f"已导出模态会话：{destination.name}")
@@ -5889,9 +5887,12 @@ class ModalShapePage(ModalIdentificationMixin, DiagnosticPage):
         self.preview_tabs.setCurrentIndex(int(state.get("preview_tab", 0)))
         self.left_work_tabs.setCurrentIndex(int(state.get("work_tab", 0)))
         self._restore_identification_session(state.get("identification", {}))
+        self._restore_candidate_session(state.get("candidate_search", {}))
         self._show_status(f"已恢复模态会话：{Path(path).name}")
 
     def export_mode_gif(self, path: str | Path) -> Path:
+        if self.last_mode is not None and self.last_mode.get("preview_only"):
+            self._require_current_local_preview()
         identified_selection = self.modal_result_tabs.currentIndex() == 1 and self._identification_result is not None
         if identified_selection or (self.last_mode is not None and self.last_mode.get("identified")):
             self._require_current_identification()
@@ -6241,6 +6242,15 @@ class ModalShapePage(ModalIdentificationMixin, DiagnosticPage):
         self.layout_plot.enableAutoRange()
 
     def _render_mode(self, mode: dict[str, object], *, phase: float) -> None:
+        if mode.get("preview_only"):
+            text = f"非正式局部预览 | 最大拟合误差 {100 * max(mode['local_fit']['errors']):.3g}% | 不计算质量"
+        elif mode.get("identified"):
+            text = "已识别振型（质量与可靠性请见模态结果及拟合校核）"
+        else:
+            text = "单频点预览（非正式模态识别，不计算质量）"
+        self.modal_preview_status.setText(text)
+        self.modal_preview_status.setToolTip(text)
+        self.modal_preview_status.show()
         coords = np.asarray(mode["coords"], dtype=float)
         disp_complex = np.asarray(mode.get("disp_complex", mode.get("displacements")), dtype=complex)
         scale = float(mode.get("scale", 1.0))
@@ -6832,6 +6842,7 @@ class ModalShapePage(ModalIdentificationMixin, DiagnosticPage):
                 y_min, y_max = -1.0, 1.0
             self.frf_plot.plot([active, active], [y_min, y_max], pen=pg.mkPen("#d7263d", width=1.5), name="当前频率")
         self._draw_modal_cmif()
+        self._draw_candidate_indicator()
 
     def _clear_candidate_list_safely(self, reason: str) -> None:
         if not hasattr(self, "candidate_list"):
@@ -6862,7 +6873,8 @@ class ModalShapePage(ModalIdentificationMixin, DiagnosticPage):
         for freq in self._manual_peaks:
             display.append((f"[手动] {freq:.8g} Hz", float(freq)))
         for index, freq in enumerate(self._auto_peaks, start=1):
-            display.append((f"Peak {index:02d}: {freq:.8g} Hz", float(freq)))
+            description, _tooltip = self._candidate_description(freq)
+            display.append((f"{index:02d}: {freq:.8g} Hz {description}".rstrip(), float(freq)))
         seen: list[float] = []
         selected_row = 0
         for label, freq in display:
@@ -6870,6 +6882,8 @@ class ModalShapePage(ModalIdentificationMixin, DiagnosticPage):
                 continue
             item = QtWidgets.QListWidgetItem(label)
             item.setData(QtCore.Qt.UserRole, float(freq))
+            _description, tooltip = self._candidate_description(freq)
+            item.setToolTip(tooltip)
             self.candidate_list.addItem(item)
             if selected is not None and frequencies_match(freq, selected):
                 selected_row = self.candidate_list.count() - 1
