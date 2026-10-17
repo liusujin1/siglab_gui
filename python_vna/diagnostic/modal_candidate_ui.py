@@ -38,7 +38,7 @@ class ModalCandidateMixin:
         self._candidate_task = None
         self._candidate_generation = 0
 
-    def _build_candidate_search_controls(self, layout):
+    def _build_candidate_search_controls(self, layout, *, collapsible=True):
         row = QtWidgets.QHBoxLayout()
         row.addWidget(QtWidgets.QLabel("候选算法"))
         self.modal_candidate_method = QtWidgets.QComboBox()
@@ -48,8 +48,8 @@ class ModalCandidateMixin:
         row.addWidget(self.modal_candidate_method, 1)
         layout.addLayout(row)
         group = QtWidgets.QGroupBox("候选搜索参数")
-        group.setCheckable(True)
-        group.setChecked(False)
+        group.setCheckable(collapsible)
+        group.setChecked(not collapsible)
         group_layout = QtWidgets.QVBoxLayout(group)
         content = QtWidgets.QWidget()
         form = QtWidgets.QFormLayout(content)
@@ -72,8 +72,9 @@ class ModalCandidateMixin:
             form.addRow(title, control)
             control.editingFinished.connect(self._invalidate_candidate_search)
         group_layout.addWidget(content)
-        content.hide()
-        group.toggled.connect(content.setVisible)
+        if collapsible:
+            content.hide()
+            group.toggled.connect(content.setVisible)
         layout.addWidget(group)
         self.modal_candidate_method.currentIndexChanged.connect(self._invalidate_candidate_search)
         self.modal_candidate_status = QtWidgets.QLabel("候选尚未搜索")

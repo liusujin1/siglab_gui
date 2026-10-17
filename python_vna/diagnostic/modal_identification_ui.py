@@ -62,7 +62,10 @@ class ModalIdentificationMixin:
     def _build_identification_settings(self):
         panel = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(panel)
-        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setContentsMargins(4, 4, 4, 4)
+        self.modal_sources_panel = QtWidgets.QWidget()
+        source_layout = QtWidgets.QVBoxLayout(self.modal_sources_panel)
+        source_layout.setContentsMargins(0, 0, 0, 0)
         self.modal_input_table = QtWidgets.QTableWidget(0, 6)
         self.modal_input_table.setHorizontalHeaderLabels(["文件", "力通道", "力单位", "追加力系数", "响应单位", "追加响应系数"])
         self.modal_input_table.setToolTip("文件已有工程系数自动应用；表内系数为追加修正。响应单位选择只改变单位解释，不重复应用灵敏度。")
@@ -73,7 +76,21 @@ class ModalIdentificationMixin:
         self.modal_input_table.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
         self.modal_input_table.setMinimumHeight(100)
         self.modal_input_table.setMaximumHeight(150)
-        layout.addWidget(self.modal_input_table)
+        self.modal_show_corrections = QtWidgets.QCheckBox("显示追加系数")
+        self.modal_show_corrections.setToolTip("原文件的工程系数始终生效；只有额外修正时才需要修改这两列")
+        self.modal_show_corrections.toggled.connect(lambda visible: [self.modal_input_table.setColumnHidden(c, not visible) for c in (3, 5)])
+        for column in (3, 5):
+            self.modal_input_table.setColumnHidden(column, True)
+        source_layout.addWidget(self.modal_show_corrections)
+        source_layout.addWidget(self.modal_input_table)
+        self.modal_sources_toggle = self._modal_disclosure("输入与标定", self.modal_sources_panel)
+        self.modal_source_summary = QtWidgets.QLabel("尚未加载 FRF")
+        self.modal_source_summary.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
+        source_heading = QtWidgets.QHBoxLayout()
+        source_heading.addWidget(self.modal_sources_toggle)
+        source_heading.addWidget(self.modal_source_summary, 1)
+        layout.addLayout(source_heading)
+        layout.addWidget(self.modal_sources_panel)
         grid = QtWidgets.QGridLayout()
         self.modal_driver_combo = QtWidgets.QComboBox()
         self.modal_driver_combo.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
@@ -93,20 +110,40 @@ class ModalIdentificationMixin:
             spin.setKeyboardTracking(False)
             spin.setMinimumWidth(0)
             spin.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
-        grid.addWidget(QtWidgets.QLabel("分析频段"), 1, 0)
-        grid.addWidget(self.modal_frequency_min, 1, 1)
-        grid.addWidget(QtWidgets.QLabel("至"), 1, 2)
-        grid.addWidget(self.modal_frequency_max, 1, 3)
         layout.addLayout(grid)
-        self.modal_force_confirm = QtWidgets.QCheckBox("力已标定，固定施力与工况")
+        self.modal_limit_frequency = QtWidgets.QCheckBox("限定分析频段")
+        self.modal_limit_frequency.setToolTip("未勾选时，正式识别自动取各 FRF 的共同有效频段")
+        self.modal_range_panel = QtWidgets.QWidget()
+        range_layout = QtWidgets.QHBoxLayout(self.modal_range_panel)
+        range_layout.setContentsMargins(0, 0, 0, 0)
+        range_layout.addWidget(self.modal_frequency_min, 1)
+        range_layout.addWidget(QtWidgets.QLabel("至"))
+        range_layout.addWidget(self.modal_frequency_max, 1)
+        self.modal_range_panel.hide()
+        layout.addWidget(self.modal_range_panel)
+        self._modal_manual_frequency_range = (0., 0.)
+        self.modal_force_confirm = QtWidgets.QCheckBox("力已标定，固定施力与工况", panel)
         self.modal_force_confirm.setToolTip("各次测试施力位置、方向和结构工况一致，输入为标定后的实际激励力")
-        self.modal_driver_confirm = QtWidgets.QCheckBox("驱动点为同点同向响应")
-        layout.addWidget(self.modal_force_confirm)
-        layout.addWidget(self.modal_driver_confirm)
-        self._build_candidate_search_controls(layout)
+        self.modal_driver_confirm = QtWidgets.QCheckBox("驱动点为同点同向响应", panel)
+        self.modal_force_confirm.hide()
+        self.modal_driver_confirm.hide()
+        self.modal_physical_confirm = QtWidgets.QCheckBox("确认标定、固定施力及同点同向响应")
+        self.modal_physical_confirm.setToolTip("仅在全部满足时勾选：力已标定；施力位置、方向及测试工况一致；所选驱动点响应与施力同点同向。")
+        layout.addWidget(self.modal_physical_confirm)
+        self.modal_advanced_panel = QtWidgets.QWidget()
+        advanced_layout = QtWidgets.QVBoxLayout(self.modal_advanced_panel)
+        advanced_layout.setContentsMargins(0, 0, 0, 0)
+        self.modal_advanced_toggle = self._modal_disclosure("高级设置", self.modal_advanced_panel)
+        self.modal_algorithm_summary = QtWidgets.QLabel("候选：CMIF | 默认参数")
+        self.modal_algorithm_summary.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
+        algorithm_heading = QtWidgets.QHBoxLayout()
+        algorithm_heading.addWidget(self.modal_advanced_toggle)
+        algorithm_heading.addWidget(self.modal_algorithm_summary, 1)
+        algorithm_heading.addWidget(self.modal_limit_frequency)
+        layout.addLayout(algorithm_heading)
+        layout.addWidget(self.modal_advanced_panel)
+        self._build_candidate_search_controls(advanced_layout, collapsible=False)
         advanced = QtWidgets.QGroupBox("高级拟合参数")
-        advanced.setCheckable(True)
-        advanced.setChecked(False)
         form = QtWidgets.QFormLayout(advanced)
         self.modal_max_order = QtWidgets.QSpinBox()
         self.modal_max_order.setRange(6, 80)
@@ -123,11 +160,11 @@ class ModalIdentificationMixin:
                                ("MAC 下限", self.modal_mac_tol), ("拟合误差上限", self.modal_fit_tol),
                                ("复模态特征上限", self.modal_complexity_tol)):
             form.addRow(title, control)
-            control.setVisible(False)
-        for i in range(form.rowCount()):
-            form.itemAt(i, QtWidgets.QFormLayout.LabelRole).widget().setVisible(False)
-        advanced.toggled.connect(lambda visible: [form.itemAt(i).widget().setVisible(visible) for i in range(form.count())])
-        layout.addWidget(advanced)
+        advanced_layout.addWidget(advanced)
+        self.modal_reset_algorithm_button = QtWidgets.QPushButton("恢复算法默认值")
+        self.modal_reset_algorithm_button.setToolTip("恢复 CMIF 和算法参数默认值，不更改标定、驱动点或分析频段")
+        self.modal_reset_algorithm_button.clicked.connect(self._reset_modal_algorithm_defaults)
+        advanced_layout.addWidget(self.modal_reset_algorithm_button)
         self.identify_button = QtWidgets.QPushButton("识别模态")
         self.modal_cancel_button = QtWidgets.QPushButton("取消")
         self.modal_cancel_button.setEnabled(False)
@@ -147,6 +184,8 @@ class ModalIdentificationMixin:
         details_button = QtWidgets.QPushButton("诊断详情")
         details_button.setCheckable(True)
         copy_details = QtWidgets.QPushButton("复制详情")
+        details_button.setMaximumWidth(80)
+        copy_details.setMaximumWidth(80)
         details_row.addWidget(details_button)
         details_row.addWidget(copy_details)
         layout.addLayout(details_row)
@@ -178,7 +217,7 @@ class ModalIdentificationMixin:
             layout.removeWidget(widget)
         host_layout.addLayout(actions)
         host_layout.addWidget(self.modal_progress)
-        host_layout.addWidget(self.modal_identification_status)
+        details_row.insertWidget(0, self.modal_identification_status, 1)
         host_layout.addLayout(details_row)
         layout.addStretch(1)
         layout.setSizeConstraint(QtWidgets.QLayout.SetMinimumSize)
@@ -187,12 +226,108 @@ class ModalIdentificationMixin:
         self.modal_cancel_button.clicked.connect(self.cancel_modal_identification)
         for spin in self._identification_spins().values():
             spin.editingFinished.connect(self._mark_identification_stale)
+            spin.valueChanged.connect(self._update_modal_settings_summary)
+        self.modal_limit_frequency.toggled.connect(self._toggle_modal_frequency_range)
+        for spin in (self.modal_frequency_min, self.modal_frequency_max):
+            spin.valueChanged.connect(self._sync_modal_frequency_controls)
+        self.modal_candidate_method.currentIndexChanged.connect(self._update_modal_settings_summary)
+        for spin in (self.modal_candidate_prominence, self.modal_candidate_spacing, self.modal_candidate_band,
+                     self.modal_candidate_count, self.modal_candidate_order):
+            spin.valueChanged.connect(self._update_modal_settings_summary)
         for control in (self.modal_driver_combo, self.modal_direction_combo):
             control.currentIndexChanged.connect(self._mark_identification_stale)
         self.modal_force_confirm.toggled.connect(self._mark_identification_stale)
         self.modal_driver_confirm.toggled.connect(self._mark_identification_stale)
+        self.modal_force_confirm.toggled.connect(self._sync_modal_physical_confirmation)
+        self.modal_driver_confirm.toggled.connect(self._sync_modal_physical_confirmation)
+        self.modal_physical_confirm.toggled.connect(self._set_modal_physical_confirmation)
         self.left_work_tabs.currentChanged.connect(lambda _index: self._refresh_identification_sources())
         QtWidgets.QApplication.instance().aboutToQuit.connect(self._shutdown_identification)
+
+    @staticmethod
+    def _modal_disclosure(text, content):
+        button = QtWidgets.QToolButton()
+        button.setText(text)
+        button.setCheckable(True)
+        button.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+        button.setArrowType(QtCore.Qt.RightArrow)
+        button.toggled.connect(content.setVisible)
+        button.toggled.connect(lambda opened: button.setArrowType(QtCore.Qt.DownArrow if opened else QtCore.Qt.RightArrow))
+        content.hide()
+        return button
+
+    def _sync_modal_frequency_controls(self, *_args):
+        manual = bool(self.modal_frequency_min.value() or self.modal_frequency_max.value())
+        with QtCore.QSignalBlocker(self.modal_limit_frequency):
+            self.modal_limit_frequency.setChecked(manual)
+        self.modal_range_panel.setVisible(manual)
+
+    def _toggle_modal_frequency_range(self, limited):
+        self.modal_range_panel.setVisible(limited)
+        if limited:
+            values = self._modal_manual_frequency_range
+        else:
+            self._modal_manual_frequency_range = (self.modal_frequency_min.value(), self.modal_frequency_max.value())
+            values = (0., 0.)
+        for spin, value in zip((self.modal_frequency_min, self.modal_frequency_max), values):
+            with QtCore.QSignalBlocker(spin):
+                spin.setValue(value)
+        self._mark_identification_stale()
+
+    def _sync_modal_physical_confirmation(self, *_args):
+        confirmed = self.modal_force_confirm.isChecked() and self.modal_driver_confirm.isChecked()
+        with QtCore.QSignalBlocker(self.modal_physical_confirm):
+            self.modal_physical_confirm.setChecked(confirmed)
+
+    def _set_modal_physical_confirmation(self, confirmed):
+        for widget in (self.modal_force_confirm, self.modal_driver_confirm):
+            with QtCore.QSignalBlocker(widget):
+                widget.setChecked(confirmed)
+        self._mark_identification_stale()
+
+    def _reset_modal_algorithm_defaults(self):
+        formal = {"modal_max_order": 24, "modal_frequency_tol": .01, "modal_damping_tol": .1,
+                  "modal_mac_tol": .95, "modal_fit_tol": .15, "modal_complexity_tol": .2}
+        candidate = {"modal_candidate_prominence": 1, "modal_candidate_spacing": 0, "modal_candidate_band": 0,
+                     "modal_candidate_count": 24, "modal_candidate_order": 16}
+        formal_changed = any(getattr(self, name).value() != value for name, value in formal.items())
+        candidate_changed = any(getattr(self, name).value() != value for name, value in candidate.items())
+        for name, value in {**formal, **candidate}.items():
+            getattr(self, name).setValue(value)
+        self.modal_candidate_method.setCurrentIndex(self.modal_candidate_method.findData("cmif"))
+        if formal_changed:
+            self._mark_identification_stale()
+        elif candidate_changed:
+            self._invalidate_candidate_search()
+
+    def _update_modal_settings_summary(self, *_args):
+        defaults = {"modal_max_order": 24, "modal_frequency_tol": .01, "modal_damping_tol": .1,
+                    "modal_mac_tol": .95, "modal_fit_tol": .15, "modal_complexity_tol": .2,
+                    "modal_candidate_prominence": 1, "modal_candidate_spacing": 0, "modal_candidate_band": 0,
+                    "modal_candidate_count": 24, "modal_candidate_order": 16}
+        changed = [name for name, value in defaults.items() if getattr(self, name).value() != value]
+        text = f"候选：{self.modal_candidate_method.currentText()} | " + ("参数已自定义" if changed else "默认参数")
+        self.modal_algorithm_summary.setText(text)
+        self.modal_algorithm_summary.setToolTip(text + "\n" + "\n".join(f"{name}: {getattr(self, name).value()}" for name in changed))
+
+    def _update_modal_source_summary(self):
+        ready, corrections, details = 0, 0, []
+        for row in range(self.modal_input_table.rowCount()):
+            widgets = [self.modal_input_table.cellWidget(row, i) for i in range(1, 6)]
+            if any(widget is None for widget in widgets):
+                continue
+            force, unit, force_factor, response, response_factor = widgets
+            ready += bool(force.currentData() and unit.currentText() in {"N", "kN", "mN"})
+            corrections += int(force_factor.value() != 1 or response_factor.value() != 1)
+            details.append(f"{self.modal_input_table.item(row, 0).text()}: {force.currentText()} / {unit.currentText()}；响应 {response.currentText()}；追加系数 {force_factor.value():g}, {response_factor.value():g}")
+        count = self.modal_input_table.rowCount()
+        text = f"{count} 个文件 | 力参考就绪 {ready}/{count}" if count else "尚未加载 FRF"
+        if corrections:
+            text += f" | {corrections} 项系数修正"
+        self.modal_source_summary.setText(text)
+        self.modal_source_summary.setToolTip("\n".join(details))
+        if corrections:
+            self.modal_show_corrections.setChecked(True)
 
     @staticmethod
     def _modal_decimal(value, low, high, decimals):
@@ -300,12 +435,22 @@ class ModalIdentificationMixin:
                 options = self._identification_file_options.get(file_id, {})
                 force = QtWidgets.QComboBox()
                 force.addItem("请选择", "")
-                for key in sorted({key.split("->")[0] for key in dataset.frf if "->" in key}):
+                force_keys = sorted({key.split("->")[0] for key in dataset.frf if "->" in key})
+                for key in force_keys:
                     force.addItem(f"{key} ({self._endpoint_unit_scale(dataset, key)[0] or '单位未知'})", key)
-                force.setCurrentIndex(max(0, force.findData(options.get("force_key", ""))))
+                selected_force = options.get("force_key", "")
+                if selected_force not in force_keys and len(force_keys) == 1:
+                    selected_force = force_keys[0]
+                force.setCurrentIndex(max(0, force.findData(selected_force)))
                 unit = QtWidgets.QComboBox()
                 unit.addItems(["请选择", "N", "kN", "mN"])
-                unit.setCurrentText(options.get("force_unit", "请选择"))
+                declared_unit = str(self._endpoint_unit_scale(dataset, force.currentData())[0] or "").strip()
+                inferred_unit = declared_unit if declared_unit in {"N", "kN", "mN"} else "请选择"
+                selected_unit = options.get("force_unit", "请选择")
+                automatic_unit = options.get("force_unit_auto", selected_unit == "请选择")
+                unit.setCurrentText(inferred_unit if automatic_unit or selected_unit == "请选择" else selected_unit)
+                unit.setProperty("inferredUnit", automatic_unit or unit.currentText() == inferred_unit)
+                unit.currentIndexChanged.connect(lambda _index, box=unit: box.setProperty("inferredUnit", False))
                 force_factor = self._modal_decimal(options.get("force_factor", 1), 1e-12, 1e12, 12)
                 response = QtWidgets.QComboBox()
                 response.addItems(["按通道单位", "g", "m/s^2", "mm/s^2", "m/s", "mm/s", "um/s", "m", "mm", "um"])
@@ -313,10 +458,14 @@ class ModalIdentificationMixin:
                 factor = self._modal_decimal(options.get("response_factor", 1), 1e-12, 1e12, 12)
                 for column, widget in enumerate((force, unit, force_factor, response, factor), 1):
                     self.modal_input_table.setCellWidget(row, column, widget)
-                    if isinstance(widget, QtWidgets.QComboBox):
+                    if widget is force:
+                        widget.currentIndexChanged.connect(lambda _index, ds=dataset, f=force, u=unit: self._modal_force_reference_changed(ds, f, u))
+                    elif isinstance(widget, QtWidgets.QComboBox):
                         widget.currentIndexChanged.connect(self._mark_identification_stale)
+                        widget.currentIndexChanged.connect(self._update_modal_source_summary)
                     else:
                         widget.editingFinished.connect(self._mark_identification_stale)
+                        widget.valueChanged.connect(self._update_modal_source_summary)
             old = self.modal_driver_combo.currentText()
             self.modal_driver_combo.blockSignals(True)
             self.modal_driver_combo.clear()
@@ -328,6 +477,16 @@ class ModalIdentificationMixin:
             self.modal_driver_combo.blockSignals(False)
         finally:
             self._identification_refreshing = False
+        self._update_modal_source_summary()
+
+    def _modal_force_reference_changed(self, dataset, force, unit):
+        if unit.property("inferredUnit") or unit.currentText() == "请选择":
+            declared = str(self._endpoint_unit_scale(dataset, force.currentData())[0] or "").strip()
+            with QtCore.QSignalBlocker(unit):
+                unit.setCurrentText(declared if declared in {"N", "kN", "mN"} else "请选择")
+            unit.setProperty("inferredUnit", True)
+        self._mark_identification_stale()
+        self._update_modal_source_summary()
 
     def _capture_identification_file_options(self):
         if not hasattr(self, "modal_input_table"):
@@ -339,7 +498,8 @@ class ModalIdentificationMixin:
             widgets = [self.modal_input_table.cellWidget(row, i) for i in range(1, 6)]
             self._identification_file_options[item.data(QtCore.Qt.UserRole)] = {
                 "force_key": widgets[0].currentData(), "force_unit": widgets[1].currentText(),
-                "force_factor": widgets[2].value(), "response_unit": widgets[3].currentText(), "response_factor": widgets[4].value()}
+                "force_factor": widgets[2].value(), "response_unit": widgets[3].currentText(), "response_factor": widgets[4].value(),
+                "force_unit_auto": bool(widgets[1].property("inferredUnit"))}
 
     @staticmethod
     def _endpoint_unit_scale(dataset, key):
@@ -777,13 +937,19 @@ class ModalIdentificationMixin:
         # Discard old widgets before refresh, otherwise they overwrite restored settings.
         self.modal_input_table.setRowCount(0)
         self._refresh_identification_sources()
-        for name, value in state.get("controls", {}).items():
-            if name in self._identification_spins():
-                getattr(self, name).setValue(value)
-        self.modal_driver_combo.setCurrentText(state.get("driver", "请选择"))
-        self.modal_direction_combo.setCurrentIndex(state.get("direction", 0))
-        self.modal_force_confirm.setChecked(state.get("force_confirm", False))
-        self.modal_driver_confirm.setChecked(state.get("driver_confirm", False))
+        self._identification_refreshing = True
+        try:
+            for name, value in state.get("controls", {}).items():
+                if name in self._identification_spins():
+                    getattr(self, name).setValue(value)
+            self.modal_driver_combo.setCurrentText(state.get("driver", "请选择"))
+            self.modal_direction_combo.setCurrentIndex(state.get("direction", 0))
+            self.modal_force_confirm.setChecked(state.get("force_confirm", False))
+            self.modal_driver_confirm.setChecked(state.get("driver_confirm", False))
+        finally:
+            self._identification_refreshing = False
+        self._sync_modal_frequency_controls()
+        self._sync_modal_physical_confirmation()
         result = state.get("result")
         if result is not None:
             self._identification_result = result

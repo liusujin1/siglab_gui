@@ -4918,17 +4918,12 @@ class ModalShapePage(ModalCandidateMixin, ModalIdentificationMixin, DiagnosticPa
         view_grid.addWidget(self.gif_frame_count_spin, 1, 3)
         view_grid.setColumnStretch(1, 1)
         view_grid.setColumnStretch(3, 1)
-        preview_settings = QtWidgets.QGroupBox("预览设置")
-        preview_settings.setCheckable(True)
-        preview_settings.setChecked(False)
-        preview_settings_layout = QtWidgets.QVBoxLayout(preview_settings)
-        preview_settings_layout.setContentsMargins(6, 14, 6, 4)
         preview_settings_content = QtWidgets.QWidget()
+        view_grid.setContentsMargins(0, 0, 0, 0)
         preview_settings_content.setLayout(view_grid)
-        preview_settings_content.hide()
-        preview_settings_layout.addWidget(preview_settings_content)
-        preview_settings.toggled.connect(preview_settings_content.setVisible)
-        frequency_controls_layout.addWidget(preview_settings)
+        self.modal_preview_settings_toggle = self._modal_disclosure("预览设置", preview_settings_content)
+        frequency_controls_layout.addWidget(self.modal_preview_settings_toggle, 0, QtCore.Qt.AlignLeft)
+        frequency_controls_layout.addWidget(preview_settings_content)
 
         action_grid = QtWidgets.QGridLayout()
         action_grid.setHorizontalSpacing(6)
@@ -5046,6 +5041,17 @@ class ModalShapePage(ModalCandidateMixin, ModalIdentificationMixin, DiagnosticPa
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         self._update_layout_mode(self.width())
         super().resizeEvent(event)
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:
+        super().showEvent(event)
+        if not getattr(self, "_initial_modal_split_done", False):
+            self._initial_modal_split_done = True
+            QtCore.QTimer.singleShot(0, self._set_initial_modal_split)
+
+    def _set_initial_modal_split(self) -> None:
+        available = self.modal_left_splitter.height() - self.modal_left_splitter.handleWidth()
+        if available >= 620:
+            self.modal_left_splitter.setSizes([240, available - 240])
 
     def _build_ui(self) -> None:
         layout = QtWidgets.QHBoxLayout(self)

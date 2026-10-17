@@ -135,3 +135,25 @@ as a non-authoritative preview, never supplies kg, never overwrites formal
 results, and may be inaccurate for overlapping modes. Use formal multi-mode
 identification and reconstruction checks for engineering results. The legacy
 single-frequency ratio preview remains available and is labelled separately.
+
+## Compact settings
+
+New pages default to CMIF candidate search. The basic panel retains the driving
+point/direction and one explicit confirmation covering calibrated force, fixed
+test conditions and collocated/same-direction driving response. Those physical
+facts are never guessed. A unique force-reference channel and its explicitly
+declared N/kN/mN unit can be inferred from file metadata. Multiple references
+or unknown force units still require user selection. Manual unit overrides
+survive refresh and session restore; automatically inferred units follow their
+source metadata.
+
+Input/calibration and advanced settings are collapsed by default. Additional
+coefficients default to one and are hidden until requested or non-default;
+the input summary flags overrides. Without the frequency-limit checkbox,
+the existing automatic frequency rules apply. Turning off a manual limit
+restores zero/automatic values; turning it back on recalls the last manual
+range. Non-default algorithm parameters and saved non-CMIF methods remain
+visible in the compact summary, even with advanced settings collapsed.
+Resetting algorithm defaults selects CMIF but does not clear calibration,
+driving-point confirmation or frequency limits. Older sessions retain their
+explicit choices rather than being silently reset to CMIF.

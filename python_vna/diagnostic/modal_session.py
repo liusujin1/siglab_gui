@@ -225,6 +225,8 @@ def _validate_identification_state(state: dict) -> None:
     for key, options in state["files"].items():
         if not isinstance(key, str) or not isinstance(options, dict):
             fail()
+        if "force_unit_auto" in options and not isinstance(options["force_unit_auto"], bool):
+            fail()
         for name in ("force_key", "force_unit", "response_unit"):
             if not isinstance(options.get(name), str):
                 fail()

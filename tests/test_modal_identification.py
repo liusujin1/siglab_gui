@@ -308,6 +308,7 @@ def test_identification_settings_fit_control_panel_and_invalid_mass_is_visible(m
     page.resize(960, 680)
     page.show()
     page.left_work_tabs.setCurrentIndex(3)
+    page.modal_limit_frequency.setChecked(True)
     app.processEvents()
     scroll = page.modal_settings_scroll
     for widget in (page.modal_driver_combo, page.modal_direction_combo, page.modal_frequency_min,
@@ -346,12 +347,17 @@ def test_modal_layout_expanded_controls_do_not_overlap_in_shell(modal_page, wind
     try:
         page.left_work_tabs.setCurrentIndex(3)
         app.processEvents()
+        app.processEvents()
         if window_size[0] >= 1200:
             viewport = page.modal_frequency_scroll.viewport()
             for button in (page.apply_freq_button, page.find_peaks_button, page.extract_button,
                            page.preview_button, page.export_gif_button, page.delete_peak_button,
                            page.view_reset_button):
                 assert viewport.rect().contains(QtCore.QRect(button.mapTo(viewport, QtCore.QPoint()), button.size()))
+        page.modal_sources_toggle.setChecked(True)
+        page.modal_advanced_toggle.setChecked(True)
+        page.modal_limit_frequency.setChecked(True)
+        page.modal_preview_settings_toggle.setChecked(True)
         for group in page.findChildren(QtWidgets.QGroupBox):
             if group.title() in {"高级拟合参数", "预览设置", "候选搜索参数"}:
                 group.setChecked(True)
@@ -413,3 +419,142 @@ def test_low_coherence_and_high_error_withhold_mass():
     result = fit_selected_poles(prepare_modal_input(raw, 0, ModalSettings()), poles)
     assert result["modes"][0]["mass_kg"] is None
     assert "误差" in result["modes"][0]["status"]
+
+
+def test_compact_defaults_use_cmif_and_hide_optional_configuration():
+    from python_vna.diagnostic.pages import ModalShapePage
+    from PySide6 import QtWidgets
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    page = ModalShapePage()
+    try:
+        assert page.modal_candidate_method.currentData() == "cmif"
+        assert "CMIF" in page.modal_algorithm_summary.text()
+        assert page.modal_sources_panel.isHidden()
+        assert page.modal_advanced_panel.isHidden()
+        assert page.modal_range_panel.isHidden()
+        assert not page.modal_physical_confirm.isChecked()
+        assert page.modal_input_table.isColumnHidden(3)
+        assert page.modal_input_table.isColumnHidden(5)
+    finally:
+        page.close()
+        app.processEvents()
+
+
+def test_unique_force_and_declared_unit_are_inferred_but_driver_is_not(modal_page):
+    page, app = modal_page
+    page.modal_input_table.setRowCount(0)
+    page._identification_file_options.clear()
+    page.modal_driver_combo.setCurrentIndex(0)
+    page.modal_physical_confirm.setChecked(False)
+    page._refresh_identification_sources()
+    assert page.modal_input_table.cellWidget(0, 1).currentData() == "force"
+    assert page.modal_input_table.cellWidget(0, 2).currentText() == "N"
+    assert page.modal_driver_combo.currentIndex() == 0
+    assert not page.modal_force_confirm.isChecked()
+    assert not page.modal_driver_confirm.isChecked()
+    assert "1/1" in page.modal_source_summary.text()
+
+
+def test_ambiguous_force_and_unknown_units_are_not_guessed(modal_page):
+    page, app = modal_page
+    dataset = page.files[0].dataset
+    dataset.frf["other->0"] = dataset.frf["force->0"].copy()
+    page.modal_input_table.setRowCount(0)
+    page._identification_file_options.clear()
+    page._refresh_identification_sources()
+    assert page.modal_input_table.cellWidget(0, 1).currentData() == ""
+    del dataset.frf["other->0"]
+    dataset.series[0].unit = "V"
+    page.modal_input_table.setRowCount(0)
+    page._identification_file_options.clear()
+    page._refresh_identification_sources()
+    assert page.modal_input_table.cellWidget(0, 2).currentText() == "请选择"
+    with pytest.raises(ValueError, match="力单位"):
+        page._modal_input_snapshot()
+
+
+def test_automatic_force_units_follow_metadata_manual_overrides_survive_refresh(modal_page):
+    page, app = modal_page
+    dataset = page.files[0].dataset
+    dataset.series[0].unit = "kN"
+    page._refresh_identification_sources()
+    assert page.modal_input_table.cellWidget(0, 2).currentText() == "kN"
+    page.modal_input_table.cellWidget(0, 2).setCurrentText("mN")
+    page._refresh_identification_sources()
+    assert page.modal_input_table.cellWidget(0, 2).currentText() == "mN"
+    page.modal_input_table.cellWidget(0, 3).setValue(2)
+    assert page.modal_show_corrections.isChecked()
+    assert "系数修正" in page.modal_source_summary.text()
+    assert not page.modal_input_table.isColumnHidden(3)
+
+
+def test_frequency_limit_is_optional_and_restores_manual_values(modal_page):
+    page, app = modal_page
+    page.modal_limit_frequency.setChecked(True)
+    page.modal_frequency_min.setValue(5)
+    page.modal_frequency_max.setValue(25)
+    page.modal_limit_frequency.setChecked(False)
+    assert page.modal_frequency_min.value() == page.modal_frequency_max.value() == 0
+    assert page.modal_range_panel.isHidden()
+    page.modal_limit_frequency.setChecked(True)
+    assert (page.modal_frequency_min.value(), page.modal_frequency_max.value()) == (5, 25)
+
+
+def test_combined_physical_confirmation_preserves_both_safety_checks(modal_page):
+    page, app = modal_page
+    page.modal_physical_confirm.setChecked(False)
+    assert not page.modal_force_confirm.isChecked() and not page.modal_driver_confirm.isChecked()
+    with pytest.raises(ValueError, match="力已标定"):
+        page._modal_input_snapshot()
+    page.modal_physical_confirm.setChecked(True)
+    assert page.modal_force_confirm.isChecked() and page.modal_driver_confirm.isChecked()
+    page.modal_driver_confirm.setChecked(False)
+    assert not page.modal_physical_confirm.isChecked()
+    with pytest.raises(ValueError, match="同点同向"):
+        page._modal_input_snapshot()
+
+
+def test_reset_algorithm_defaults_restores_cmif_without_clearing_measurement_settings(modal_page):
+    page, app = modal_page
+    page.modal_max_order.setValue(24)
+    page.modal_candidate_method.setCurrentIndex(page.modal_candidate_method.findData("segmented"))
+    page.modal_candidate_prominence.setValue(3)
+    page.modal_frequency_min.setValue(2)
+    page._identification_stale = False
+    assert "参数已自定义" in page.modal_algorithm_summary.text()
+    page.modal_reset_algorithm_button.click()
+    assert page.modal_candidate_method.currentData() == "cmif"
+    assert page.modal_candidate_prominence.value() == 1
+    assert page.modal_frequency_min.value() == 2
+    assert page.modal_driver_combo.currentText() == "P0"
+    assert page.modal_physical_confirm.isChecked()
+    assert not page._identification_stale
+
+
+def test_compact_settings_restore_saved_frequency_units_and_preview_on_fresh_page(modal_page, tmp_path):
+    from python_vna.diagnostic.pages import ModalShapePage
+    page, app = modal_page
+    page.modal_frequency_min.setValue(2)
+    page.modal_frequency_max.setValue(30)
+    page.modal_input_table.cellWidget(0, 3).setValue(2)
+    page.frequency_edit.setValue(10)
+    page._start_candidate_task(preview=True)
+    deadline = time.monotonic() + 20
+    while page._candidate_task is not None and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(.01)
+    assert page.last_mode["preview_only"]
+    path = page.export_session(tmp_path / "compact.vnamodal")
+    restored = ModalShapePage()
+    try:
+        restored.import_session(path)
+        assert restored.modal_physical_confirm.isChecked()
+        assert restored.modal_limit_frequency.isChecked()
+        assert not restored.modal_range_panel.isHidden()
+        assert restored.modal_show_corrections.isChecked()
+        assert restored.last_mode["preview_only"]
+        restored.preview_mode()
+        assert restored.last_mode["preview_only"]
+    finally:
+        restored._shutdown_identification()
+        restored.close()
