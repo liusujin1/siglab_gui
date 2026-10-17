@@ -2459,18 +2459,92 @@ class MainWindow(QtWidgets.QMainWindow):
             form.addRow(label, edit)
         layout.addLayout(form)
 
+        smart_group = QtWidgets.QGroupBox("智能选锤 · 平均采集")
+        smart_form = QtWidgets.QFormLayout(smart_group)
+        modal = self.session.acquisition.modal
+        smart_enable = QtWidgets.QCheckBox("启用智能选锤")
+        smart_enable.setObjectName("smartHitEnabled")
+        smart_enable.setChecked(modal.smart_hit_enabled)
+        smart_form.addRow(smart_enable)
+        explanation = QtWidgets.QLabel("每帧触发＋线性平均≥3次时生效；自动检查过载和双击。")
+        explanation.setWordWrap(True)
+        smart_form.addRow(explanation)
+        smart_edits = {}
+        reference = next((channel for channel in self.session.ai_channels
+                          if channel.name == self.session.acquisition.reference_channel), None)
+        unit = reference.engineering_unit if reference is not None else "V"
+        smart_specs = [
+            ("smart_hit_tolerance", "FRF 一致性容差 %", modal.smart_hit_tolerance * 100, 0.1, 200.0),
+            ("smart_hit_min_hz", "判定频率下限 Hz", modal.smart_hit_min_hz, 0.0, 1e6),
+            ("smart_hit_max_hz", "判定频率上限 Hz（0=跟随带宽）", modal.smart_hit_max_hz, 0.0, 1e6),
+            ("smart_hit_force_min", f"力峰值下限 {unit}", modal.smart_hit_force_min, 0.0, 1e12),
+            ("smart_hit_force_max", f"力峰值上限 {unit}", modal.smart_hit_force_max, 0.0, 1e12),
+        ]
+        for key, text, value, minimum, maximum in smart_specs:
+            edit = CompactDoubleSpinBox()
+            edit.setObjectName(key)
+            edit.setRange(minimum, maximum)
+            edit.setDecimals(2)
+            edit.setValue(value)
+            edit.setMinimumWidth(100)
+            smart_edits[key] = edit
+            smart_form.addRow(text, edit)
+        force_limits = QtWidgets.QCheckBox("限制敲击力范围（使用参考通道工程单位）")
+        force_limits.setChecked(modal.smart_hit_force_limits)
+        smart_form.insertRow(5, force_limits)
+        for key in ("smart_hit_force_min", "smart_hit_force_max"):
+            smart_edits[key].setEnabled(force_limits.isChecked())
+            force_limits.toggled.connect(smart_edits[key].setEnabled)
+        response_list = QtWidgets.QListWidget()
+        response_list.setObjectName("smartHitResponses")
+        response_list.setMaximumHeight(78)
+        response_list.setStyleSheet(self._trace_list_stylesheet(theme))
+        for channel in self.session.ai_channels:
+            if not channel.enabled or channel.name == self.session.acquisition.reference_channel:
+                continue
+            item = QtWidgets.QListWidgetItem(f"{channel.name}  {channel.label}")
+            item.setData(QtCore.Qt.UserRole, channel.name)
+            item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
+            checked = modal.smart_hit_response_channels is None or channel.name in modal.smart_hit_response_channels
+            item.setCheckState(QtCore.Qt.Checked if checked else QtCore.Qt.Unchecked)
+            response_list.addItem(item)
+        smart_form.addRow("参与判定通道（勾选项均须通过）", response_list)
+        layout.addWidget(smart_group)
+
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Apply | QtWidgets.QDialogButtonBox.Cancel
         )
         buttons.button(QtWidgets.QDialogButtonBox.Apply).setText("应用")
         buttons.button(QtWidgets.QDialogButtonBox.Cancel).setText("取消")
+        buttons.button(QtWidgets.QDialogButtonBox.Apply).setEnabled(
+            self._acquisition_thread is None and self._recording_thread is None
+        )
 
         def apply_values() -> None:
+            selected = [response_list.item(index).data(QtCore.Qt.UserRole)
+                        for index in range(response_list.count())
+                        if response_list.item(index).checkState() == QtCore.Qt.Checked]
+            if smart_enable.isChecked() and not selected:
+                QtWidgets.QMessageBox.warning(dialog, "智能选锤", "请至少选择一个判定响应通道")
+                return
+            if force_limits.isChecked() and smart_edits["smart_hit_force_min"].value() >= smart_edits["smart_hit_force_max"].value():
+                QtWidgets.QMessageBox.warning(dialog, "智能选锤", "力峰值下限必须小于上限")
+                return
+            maximum = smart_edits["smart_hit_max_hz"].value() or self.session.acquisition.bandwidth_hz
+            if smart_enable.isChecked() and smart_edits["smart_hit_min_hz"].value() >= min(maximum, self.session.acquisition.bandwidth_hz):
+                QtWidgets.QMessageBox.warning(dialog, "智能选锤", "判定频率下限必须小于有效频率上限")
+                return
             self.double_hit_threshold_edit.setValue(edits["double_hit_threshold"].value() / 100.0)
             self.double_hit_delay_edit.setValue(edits["double_hit_delay"].value() / 100.0)
             self.force_window_fraction_edit.setValue(edits["force_window"].value() / 100.0)
             self.exp_window_decay_edit.setValue(edits["exp_decay"].value() / 100.0)
             self._read_session_from_widgets()
+            settings = self.session.acquisition.modal
+            settings.smart_hit_enabled = smart_enable.isChecked()
+            settings.smart_hit_response_channels = None if len(selected) == response_list.count() else selected
+            settings.smart_hit_force_limits = force_limits.isChecked()
+            for key, edit in smart_edits.items():
+                setattr(settings, key, edit.value() / 100 if key == "smart_hit_tolerance" else edit.value())
             self.statusBar().showMessage("模态参数已应用")
 
         buttons.clicked.connect(
@@ -2482,8 +2556,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         layout.addWidget(buttons)
         dialog.setMinimumSize(380, 170)
-        dialog.resize(400, 180)
+        dialog.resize(490, 570)
         dialog.exec()
+        dialog.deleteLater()
 
     def _toggle_grids(self, enabled: bool) -> None:
         alpha = float(self._theme().get("grid_alpha", 0.14))
@@ -5308,7 +5383,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.average_count_edit.setRange(1, 1024)
         self.average_count_edit.setValue(20)
         self.average_count_edit.setToolTip(
-            "平均采集使用的帧数；线性平均/峰值保持到该次数后停止，指数平均会持续运行直到点击停止。"
+            "平均采集使用的帧数；智能选锤开启时仅合格敲击计数。线性平均/峰值保持到目标次数后停止。"
         )
         average_help = QtWidgets.QLabel(
             "Avg：线性平均为算术平均，指数平均为持续加权平均，峰值保持为峰值保留，不平均则直接显示。"
@@ -5899,7 +5974,7 @@ class MainWindow(QtWidgets.QMainWindow):
         thread.started.connect(worker.run)
         worker.devices_ready.connect(self._handle_devices_ready)
         worker.error.connect(self._handle_device_refresh_error)
-        worker.finished.connect(thread.quit)
+        worker.finished.connect(thread.quit, QtCore.Qt.DirectConnection)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(self._device_refresh_finished)
         thread.finished.connect(thread.deleteLater)
@@ -6343,7 +6418,13 @@ class MainWindow(QtWidgets.QMainWindow):
             f" | ovld={measurement.metadata.get('overload_rejected', False)}"
             f"{double_hit_suffix}"
         )
-        if measurement.metadata.get("rejected", False):
+        if measurement.metadata.get("smart_hit_active", False):
+            status = self._smart_hit_status(measurement)
+            self.run_info_label.setText(
+                f"智能选锤 {average_count}/{average_target} | {measurement.metadata.get('smart_hit_reason', '')}"
+            )
+            self.run_info_label.setToolTip(status)
+        elif measurement.metadata.get("rejected", False):
             reasons = []
             if measurement.metadata.get("double_hit_rejected", False):
                 reasons.append("double hit")
@@ -6366,6 +6447,21 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             status = f"Frame {measurement.metadata.get('frame_index', '?')} acquired"
         self.statusBar().showMessage(status)
+
+    @staticmethod
+    def _smart_hit_status(measurement) -> str:
+        info = measurement.metadata
+        state = {"pending": "暂存", "accepted": "接受", "rejected": "剔除"}.get(info.get("smart_hit_state"), "")
+        text = (f"已接受 {info.get('average_count', 0)}/{info.get('average_target', 0)}"
+                f"，已尝试 {info.get('smart_hit_attempted', 0)}，最近一锤：{state} {info.get('smart_hit_reason', '')}"
+                f"，力峰值 {info.get('smart_hit_force_peak', 0):.3g} {info.get('smart_hit_force_unit', '')}")
+        if info.get("smart_hit_deviation") is not None:
+            text += f"，{info.get('smart_hit_channel', '')} 偏差 {info['smart_hit_deviation']:.1%}"
+        if info.get("smart_hit_warnings"):
+            text += "；" + "；".join(info["smart_hit_warnings"])
+        if info.get("smart_hit_consecutive_rejections", 0) >= 10:
+            text = "【连续10锤以上未合格，请检查敲击及参数】" + text
+        return text
 
     @QtCore.Slot(object)
     def _handle_recording_preview(self, measurement) -> None:
@@ -6432,6 +6528,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.run_info_label.text() not in {"State: error"}:
             self.run_info_label.setText("State: stopped")
             self.statusBar().showMessage("Acquisition stopped")
+            measurement = self.controller.state.measurement
+            if measurement is not None and measurement.metadata.get("smart_hit_active"):
+                incomplete = measurement.metadata.get("smart_hit_incomplete", True)
+                self.run_info_label.setText("智能选锤：未完成" if incomplete else "智能选锤：完成")
+                self.statusBar().showMessage(self.run_info_label.text() + " | " + self._smart_hit_status(measurement))
 
     @QtCore.Slot()
     def _recording_worker_finished(self) -> None:
@@ -9175,7 +9276,7 @@ class MainWindow(QtWidgets.QMainWindow):
         worker.session_ready.connect(self._apply_loaded_startup_session)
         worker.skipped.connect(self.statusBar().showMessage)
         worker.error.connect(lambda message: self.statusBar().showMessage(f"默认设置未加载：{message}"))
-        worker.finished.connect(thread.quit)
+        worker.finished.connect(thread.quit, QtCore.Qt.DirectConnection)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(self._startup_session_finished)
         thread.finished.connect(thread.deleteLater)
@@ -9315,6 +9416,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._minimize_to_tray()
                 return
             self._close_confirmed = True
+        self._device_poll_timer.stop()
         try:
             if self._recording_worker is not None:
                 if self._recording_stop_event is not None:

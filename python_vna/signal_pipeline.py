@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass, field
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
 from python_vna.daq.base import BackendFrame
+from python_vna.impact_selection import ImpactCandidate, ImpactSelector, smart_hit_active
 from python_vna.models import (
     AcquisitionConfig,
     AveragingConfig,
+    ChannelConfig,
     MeasurementSet,
     ModalProcessingConfig,
 )
@@ -483,6 +486,9 @@ class RollingAverager:
 class FrameProcessor:
     acquisition: AcquisitionConfig = field(default_factory=AcquisitionConfig)
     averaging_enabled: bool = True
+    channel_configs: list[ChannelConfig] = field(default_factory=list)
+    _impact_selector: ImpactSelector | None = field(default=None, init=False)
+    _smart_last_valid: MeasurementSet | None = field(default=None, init=False)
     _processed_frames: int = field(default=0, init=False)
     _accepted_frames: int = field(default=0, init=False)
     _fft_averager: RunningAverager = field(init=False)
@@ -492,6 +498,9 @@ class FrameProcessor:
     _coherence_cross_spectrum_averager: RollingAverager = field(init=False)
 
     def __post_init__(self) -> None:
+        if smart_hit_active(self.acquisition, self.averaging_enabled):
+            self.acquisition = deepcopy(self.acquisition)
+            self.channel_configs = deepcopy(self.channel_configs)
         averaging = self.acquisition.averaging if self.averaging_enabled else AveragingConfig(mode="off")
         self._fft_averager = RunningAverager(averaging)
         self._autospectrum_averager = RunningAverager(averaging)
@@ -499,8 +508,88 @@ class FrameProcessor:
         coherence_count = max(2, int(self.acquisition.averaging.count))
         self._coherence_autospectrum_averager = RollingAverager(coherence_count)
         self._coherence_cross_spectrum_averager = RollingAverager(coherence_count)
+        if smart_hit_active(self.acquisition, self.averaging_enabled):
+            self._impact_selector = ImpactSelector(self.acquisition)
 
     def process(self, frame: BackendFrame) -> MeasurementSet:
+        if self._impact_selector is None:
+            return self._process_accepted(frame)
+        selector = self._impact_selector
+        reference = self.acquisition.reference_channel
+        responses = [name for name in self.acquisition.response_channels if name in frame.channel_names
+                     and name != reference]
+        indices = {name: index for index, name in enumerate(frame.channel_names)}
+        valid = (frame.data.ndim == 2 and frame.data.shape[0] == len(frame.channel_names)
+                 and frame.data.shape[1] > 0 and np.all(np.isfinite(frame.data))
+                 and np.isfinite(frame.sample_rate) and frame.sample_rate > 0)
+        peak = 0.0
+        if valid and reference in indices:
+            force = frame.data[indices[reference]]
+            peak = float(np.max(np.abs(force - np.median(force)), initial=0.0))
+        scale = 1.0
+        unit = "V"
+        for channel in self.channel_configs:
+            if channel.name == reference:
+                unit = channel.engineering_unit
+                mode = (channel.per_eu_mode or "/Volt").lower()
+                scale = (1.0 if mode in {"", "off", "none"} else channel.sensitivity *
+                         {"/mv": 1000.0, "/millivolt": 1000.0, "/uv": 1e6,
+                          "/microvolt": 1e6, "/kv": 0.001, "/kilovolt": 0.001}.get(mode, 1.0))
+                break
+        peak *= abs(scale)
+        selector.begin(frame, peak if np.isfinite(peak) else 0.0)
+        accepted = []
+        flags = {}
+        if not valid or reference not in indices or not np.isfinite(peak):
+            report = selector.reject("无效数据或参考通道")
+        else:
+            modal = replace(self.acquisition.modal, reject_double_hit=True, reject_overload=True)
+            prepared, flags = apply_modal_processing(frame, indices, reference, modal)
+            if flags["rejected"]:
+                report = selector.reject("过载" if flags["overload_rejected"] else "双击")
+            elif modal.smart_hit_force_limits and not (modal.smart_hit_force_min <= peak <= modal.smart_hit_force_max):
+                report = selector.reject("力峰值超限")
+            else:
+                prepared.metadata["processing_window"] = self.acquisition.processing_window
+                frequencies, spectrum = compute_fft(prepared)
+                warnings = []
+                force_centered = force - np.median(force)
+                peak_index = int(np.argmax(np.abs(force_centered)))
+                if peak_index < 3 or peak_index >= force.size - 3:
+                    warnings.append("力脉冲靠近记录边界，检查预触发及延迟")
+                centered = frame.data - np.median(frame.data, axis=1, keepdims=True)
+                tail = centered[:, -max(1, frame.data.shape[1] // 10):]
+                for name in responses:
+                    index = indices[name]
+                    rms = float(np.sqrt(np.mean(centered[index] ** 2)))
+                    if rms > 0 and np.sqrt(np.mean(tail[index] ** 2)) > rms * 0.05:
+                        warnings.append(f"{name} 末尾衰减不足，检查记录长度")
+                force_spectrum = np.abs(spectrum[indices[reference]])
+                band = (frequencies > 0) & (frequencies <= self.acquisition.bandwidth_hz)
+                if band.any() and np.mean(force_spectrum[band] >= np.max(force_spectrum[band]) * 0.01) < 0.8:
+                    warnings.append("激励频带不足，检查锤头及判定频带")
+                candidate = ImpactCandidate(selector.attempted, frame, spectrum, peak, warnings)
+                accepted, report = selector.offer(candidate, frequencies, frame.channel_names,
+                                                  reference, responses)
+        for candidate in accepted:
+            self._smart_last_valid = self._process_accepted(candidate.frame)
+            candidate.frame = None
+        preview_frame = frame if valid else replace(
+            frame, data=np.empty((len(frame.channel_names), 0)), timestamps=np.array([], dtype=float)
+        )
+        preview = self._rejected_measurement(preview_frame, reference, responses, flags)
+        base = self._smart_last_valid or preview
+        result = replace(base, time_data=preview.time_data, metadata={
+            **base.metadata, **flags, **report,
+            "frame_index": frame.frame_index,
+            "average_count": self._accepted_frames,
+            "legacy_measured_average_count": self._accepted_frames,
+            "smart_hit_force_unit": unit,
+            "smart_hit_incomplete": self._accepted_frames < self.acquisition.averaging.count,
+        })
+        return result
+
+    def _process_accepted(self, frame: BackendFrame) -> MeasurementSet:
         self._processed_frames += 1
         channel_index = {
             name: idx for idx, name in enumerate(frame.channel_names)

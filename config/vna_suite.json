@@ -68,12 +68,14 @@
         "python_vna/controller.py",
         "python_vna/daq/**",
         "python_vna/signal_pipeline.py",
+        "python_vna/impact_selection.py",
         "python_vna/ui/main_window.py",
         "tests/test_app.py",
         "tests/test_continuous_recording.py",
         "tests/test_controller.py",
         "tests/test_main_window.py",
         "tests/test_signal_pipeline.py",
+        "tests/test_impact_selection.py",
         "tests/test_simulated_backend.py"
       ],
       "tests": [
@@ -82,6 +84,7 @@
         "tests/test_controller.py",
         "tests/test_main_window.py",
         "tests/test_signal_pipeline.py",
+        "tests/test_impact_selection.py",
         "tests/test_simulated_backend.py"
       ]
     },

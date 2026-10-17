@@ -22,7 +22,7 @@ class VnaController:
     def __init__(self, backend: BaseDaqBackend, session: SessionConfig) -> None:
         self.backend = backend
         self.state = ControllerState(session=session)
-        self.processor = FrameProcessor(session.acquisition, averaging_enabled=False)
+        self.processor = FrameProcessor(session.acquisition, averaging_enabled=False, channel_configs=session.ai_channels)
         self.device_name: str | None = None
         self._overlap_data: np.ndarray | None = None
         self._overlap_channel_names: list[str] | None = None
@@ -43,7 +43,21 @@ class VnaController:
         self._set_backend_stop_event(self._stop_requested)
 
     def set_averaging_enabled(self, enabled: bool) -> None:
-        self.processor = FrameProcessor(self.state.session.acquisition, averaging_enabled=enabled)
+        self.processor = FrameProcessor(self.state.session.acquisition, averaging_enabled=enabled,
+                                        channel_configs=self.state.session.ai_channels)
+        if self.processor._impact_selector is not None:
+            self.state.measurement = MeasurementSet(
+                sample_rate=self.state.session.acquisition.sample_rate,
+                time_data={"t": np.array([], dtype=float), "channels": {}},
+                spectra={"f": np.array([], dtype=float), "fft": {}, "autospectrum": {}},
+                frf={}, coherence={}, cross_spectra={}, correlations={}, impulse_responses={},
+                metadata={"smart_hit_active": True, "average_count": 0,
+                          "legacy_measured_average_count": 0,
+                          "average_target": self.state.session.acquisition.averaging.count,
+                          "averaging_enabled": True, "smart_hit_incomplete": True,
+                          "smart_hit_complete": False, "smart_hit_state": "pending",
+                          "smart_hit_reason": "等待敲击", "smart_hit_attempted": 0},
+            )
         self._reset_overlap_processing()
 
     def start(self) -> None:
@@ -53,7 +67,8 @@ class VnaController:
     def read_and_process(self) -> MeasurementSet:
         frame = self._read_processing_frame()
         measurement = self.processor.process(frame)
-        if measurement.metadata.get("rejected", False) and self.state.measurement is not None:
+        if (measurement.metadata.get("rejected", False) and self.state.measurement is not None
+                and not measurement.metadata.get("smart_hit_active", False)):
             retained = self.state.measurement
             retained.metadata = {
                 **retained.metadata,
@@ -98,7 +113,7 @@ class VnaController:
     def set_session(self, session: SessionConfig) -> None:
         self.state.session = session
         self.state.measurement = None
-        self.processor = FrameProcessor(session.acquisition, averaging_enabled=False)
+        self.processor = FrameProcessor(session.acquisition, averaging_enabled=False, channel_configs=session.ai_channels)
         self._reset_overlap_processing()
 
     def _read_processing_frame(self) -> BackendFrame:

@@ -1235,6 +1235,14 @@ def save_legacy_vna(session: SavedSession, path: str | Path) -> Path:
         "forcewin": np.array([[config.acquisition.modal.force_window_fraction * 100.0]], dtype=float),
         "expdecay": np.array([[config.acquisition.modal.exponential_decay_fraction * 100.0]], dtype=float),
     }
+    impact_extension = {
+        "version": 1,
+        "settings": {key: value for key, value in asdict(config.acquisition.modal).items()
+                     if key.startswith("smart_hit_")},
+        "summary": {key: value for key, value in metadata.items()
+                    if key.startswith("smart_hit_") or key in {"average_count", "average_target", "averaging_enabled"}},
+    }
+    modal["py_hit_selection_json"] = json.dumps(impact_extension, ensure_ascii=True, default=_json_default)
     rbw_hz = (
         float(np.asarray(fdxvec, dtype=float)[1] - np.asarray(fdxvec, dtype=float)[0])
         if np.asarray(fdxvec).size > 1
@@ -1245,7 +1253,9 @@ def save_legacy_vna(session: SavedSession, path: str | Path) -> Path:
         if isinstance(metadata, dict)
         else 0
     )
-    if measured_average_count <= 0:
+    if metadata.get("smart_hit_active", False):
+        measured_average_count = max(0, int(metadata.get("average_count", 0)))
+    elif measured_average_count <= 0:
         measured_average_count = max(1, int(config.acquisition.averaging.count))
     slm = {
         "fdxvec": np.ravel(fdxvec).reshape((1, -1)),
@@ -1804,6 +1814,7 @@ def load_legacy_vna(path: str | Path) -> SavedSession:
 
     modal_raw = getattr(slm, "modal", None)
     modal = ModalProcessingConfig()
+    impact_summary = {}
     modal.force_window_enabled = window_index in {17, 18, 19}
     modal.exponential_window_enabled = window_index in {15, 16, 17, 18, 19}
     if reject_index in {3, 4}:
@@ -1824,6 +1835,19 @@ def load_legacy_vna(path: str | Path) -> SavedSession:
         modal.double_hit_delay_fraction = _legacy_scalar(
             getattr(modal_entry, "dbldelay", np.array([[20.0]])), 20.0
         ) / 100.0
+        try:
+            extension = json.loads(_legacy_string(getattr(modal_entry, "py_hit_selection_json", "{}")))
+            if isinstance(extension, dict) and extension.get("version") == 1:
+                for key, value in extension.get("settings", {}).items():
+                    if key.startswith("smart_hit_") and hasattr(modal, key):
+                        setattr(modal, key, value)
+                summary = extension.get("summary", {})
+                if isinstance(summary, dict):
+                    impact_summary = {key: value for key, value in summary.items()
+                                      if key.startswith("smart_hit_") or key in
+                                      {"average_count", "average_target", "averaging_enabled"}}
+        except (ValueError, TypeError, AttributeError):
+            pass
     modal.enabled = (
         modal.force_window_enabled
         or modal.exponential_window_enabled
@@ -1949,6 +1973,7 @@ def load_legacy_vna(path: str | Path) -> SavedSession:
             "reference_channels": reference_names,
             "response_channels": sorted(set(response_names)),
             "legacy_display_state": legacy_display_state,
+            **impact_summary,
         },
     )
     return SavedSession(config=session, measurement=measurement, source_path=Path(path))

@@ -1879,6 +1879,148 @@ class MainWindowTests(unittest.TestCase):
         self.assertAlmostEqual(self.window.exp_window_decay_edit.minimum(), 0.001)
         self.assertAlmostEqual(self.window.exp_window_decay_edit.maximum(), 1.0)
 
+    def test_closing_while_device_probe_runs_finishes_thread_and_stops_polling(self):
+        def slow_devices():
+            time.sleep(0.05)
+            return []
+
+        self.backend.list_devices = slow_devices
+        self.window.refresh_devices_async()
+        thread = self.window._device_refresh_thread
+        try:
+            self.assertTrue(self.window.close())
+            self.assertFalse(self.window._device_poll_timer.isActive())
+            self.assertFalse(thread.isRunning())
+        finally:
+            self.app.processEvents()
+            if self.window._device_refresh_thread is not None:
+                self.window._device_refresh_thread.quit()
+                self.window._device_refresh_thread.wait(2000)
+
+    def test_modal_smart_settings_apply_and_reopen(self):
+        def fake_exec(dialog):
+            enabled = dialog.findChild(QtWidgets.QCheckBox, "smartHitEnabled")
+            self.assertTrue(enabled.isChecked())
+            enabled.setChecked(False)
+            dialog.findChild(QtWidgets.QDoubleSpinBox, "smart_hit_tolerance").setValue(15)
+            responses = dialog.findChild(QtWidgets.QListWidget, "smartHitResponses")
+            self.assertGreaterEqual(responses.count(), 2)
+            for index in range(responses.count()):
+                responses.item(index).setCheckState(QtCore.Qt.Checked if index == 0 else QtCore.Qt.Unchecked)
+            buttons = dialog.findChild(QtWidgets.QDialogButtonBox)
+            buttons.button(QtWidgets.QDialogButtonBox.Apply).click()
+            return 0
+
+        with mock.patch.object(QtWidgets.QDialog, "exec", fake_exec):
+            self.window._open_modal_parameters_dialog()
+        modal = self.window.session.acquisition.modal
+        self.assertFalse(modal.smart_hit_enabled)
+        self.assertEqual(modal.smart_hit_tolerance, 0.15)
+        self.assertEqual(len(modal.smart_hit_response_channels), 1)
+        self.window._read_session_from_widgets()
+        self.assertFalse(self.window.session.acquisition.modal.smart_hit_enabled)
+
+    def test_smart_hit_status_reports_reason_and_consecutive_rejections(self):
+        measurement = self._measurement()
+        measurement.metadata.update(
+            smart_hit_active=True, average_count=2, average_target=3,
+            smart_hit_attempted=12, smart_hit_reason="FRF 不一致",
+            smart_hit_state="rejected", smart_hit_force_peak=800,
+            smart_hit_force_unit="N", smart_hit_deviation=0.4,
+            smart_hit_channel="ai1", smart_hit_consecutive_rejections=10,
+        )
+        self.window._handle_worker_measurement(measurement)
+        self.app.processEvents()
+        status = self.window.statusBar().currentMessage()
+        self.assertIn("已接受 2/3", status)
+        self.assertIn("已尝试 12", status)
+        self.assertIn("连续10锤", status)
+        self.assertIn("800 N", status)
+        self.assertIn("40.0%", status)
+
+    def test_smart_average_worker_waits_for_three_accepted_not_three_attempts(self):
+        from test_impact_selection import impact_config, impact_frame
+
+        class Backend:
+            def __init__(self):
+                self.reads = 0
+
+            def configure(self, session, device_name=None):
+                pass
+
+            def start(self):
+                pass
+
+            def read_frame(self):
+                index = self.reads
+                self.reads += 1
+                if index > 3:
+                    raise AssertionError("worker did not stop at target")
+                return impact_frame(index, gain=9 if index == 2 else 2)
+
+            def stop(self):
+                pass
+
+            def close(self):
+                pass
+
+        session = default_session_config()
+        session.acquisition = impact_config()
+        backend = Backend()
+        controller = VnaController(backend, session)
+        worker = AcquisitionWorker(controller, "Dev1", average_run=True, target_average_count=3)
+        errors = []
+        worker.error.connect(errors.append)
+        worker.run()
+        self.assertEqual(errors, [])
+        self.assertEqual(backend.reads, 4)
+        self.assertEqual(controller.state.measurement.metadata["average_count"], 3)
+        self.assertEqual(controller.state.measurement.metadata["smart_hit_attempted"], 4)
+
+    def test_smart_stop_before_hit_during_pending_and_after_rejections(self):
+        from test_impact_selection import impact_config, impact_frame
+
+        for mode, expected_count in (("before", 0), ("pending", 0), ("rejecting", 2)):
+            with self.subTest(mode=mode):
+                class Backend:
+                    def __init__(self):
+                        self.reads = 0
+                        self.closed = False
+
+                    def configure(self, session, device_name=None):
+                        pass
+
+                    def start(self):
+                        pass
+
+                    def read_frame(self):
+                        index = self.reads
+                        self.reads += 1
+                        if mode == "pending" or self.reads >= 12:
+                            worker.request_stop()
+                        return impact_frame(index, gain=9 if index >= 2 else 2)
+
+                    def stop(self):
+                        pass
+
+                    def close(self):
+                        self.closed = True
+
+                session = default_session_config()
+                session.acquisition = impact_config()
+                backend = Backend()
+                controller = VnaController(backend, session)
+                worker = AcquisitionWorker(controller, "Dev1", average_run=True, target_average_count=3)
+                errors = []
+                worker.error.connect(errors.append)
+                if mode == "before":
+                    worker.request_stop()
+                worker.run()
+                self.assertEqual(errors, [])
+                self.assertTrue(backend.closed)
+                self.assertEqual(controller.state.measurement.metadata["average_count"], expected_count)
+                self.assertTrue(controller.state.measurement.metadata["smart_hit_incomplete"])
+
     def test_modal_parameters_dialog_uses_readable_legacy_style_and_spin_arrows(self):
         captured: dict[str, QtWidgets.QDialog] = {}
         original_exec = QtWidgets.QDialog.exec
