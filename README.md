@@ -35,6 +35,32 @@ Simulated backend:
 & 'D:\SynologyDrive\codex\vna\.venv\Scripts\python.exe' -m python_vna.app --backend simulated
 ```
 
+## Smart impact selection
+
+The Modal parameter dialog contains the smart impact selection switch, FRF
+deviation tolerance, evaluation frequency band, response-channel selection and
+optional force limits. It is enabled by default for Avg acquisition with Every
+Frame triggering, linear averaging and a target of at least three accepted hits.
+Use independent frames (No Overlap), and configure the hammer reference channel
+and its engineering-unit sensitivity before enabling force limits.
+
+The first hit is provisional. A consistent pair establishes the reference group;
+if the first two hits disagree, the third can establish a better pair. Subsequent
+hits must agree with every accepted hit on all selected, enabled responses.
+The default 25% tolerance controls symmetric complex-FRF RMS deviation, including
+amplitude and phase. DC, weakly excited bins and response zeros are excluded.
+The force must cover 20% of the evaluation band, and each selected response needs
+at least eight usable bins. Narrow resonances can therefore remain valid.
+
+Only accepted spectra contribute to the existing H1/coherence averages. Overload,
+double-hit and optional force-limit failures do not advance the average count.
+The status bar shows acceptance progress and rejection reasons, and highlights
+ten consecutive rejections. Acquisition waits until the target is met or Stop is
+pressed. An early stop preserves the actual count and an incomplete marker.
+VNA/JSON saves retain the settings and up to 200 hit summaries; VNA stores the
+extension as ASCII JSON in `SLm.modal.py_hit_selection_json` alongside the existing
+MATLAB fields. The latest hit remains available as the time-domain preview.
+
 ## Repository layout
 
 The repository root is the only build and release source of truth. Product code is

@@ -56,6 +56,14 @@ class ModalProcessingConfig:
     double_hit_threshold: float = 0.5
     double_hit_delay_fraction: float = 0.2
     reject_overload: bool = False
+    smart_hit_enabled: bool = True
+    smart_hit_tolerance: float = 0.25
+    smart_hit_min_hz: float = 0.0
+    smart_hit_max_hz: float = 0.0
+    smart_hit_response_channels: list[str] | None = None
+    smart_hit_force_limits: bool = False
+    smart_hit_force_min: float = 0.0
+    smart_hit_force_max: float = 1000.0
 
 
 @dataclass(slots=True)

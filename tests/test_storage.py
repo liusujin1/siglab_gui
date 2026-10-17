@@ -8,7 +8,7 @@ from unittest import mock
 from pathlib import Path
 
 import numpy as np
-from scipy.io import loadmat
+from scipy.io import loadmat, savemat
 
 from python_vna.models import MeasurementSet, SavedSession
 from python_vna.storage import (
@@ -23,6 +23,56 @@ from python_vna.storage import (
 
 
 class StorageTests(unittest.TestCase):
+    def test_smart_hit_settings_and_audit_roundtrip_in_legacy_vna(self):
+        session = self._sample_session()
+        modal = session.config.acquisition.modal
+        modal.smart_hit_enabled = False
+        modal.smart_hit_tolerance = 0.15
+        modal.smart_hit_response_channels = ["ai1"]
+        modal.smart_hit_force_limits = True
+        modal.smart_hit_force_min = 200.0
+        modal.smart_hit_force_max = 900.0
+        modal.smart_hit_min_hz = 10.0
+        modal.smart_hit_max_hz = 200.0
+        session.config.acquisition.averaging.count = 3
+        session.measurement.metadata.update(
+            smart_hit_active=True, average_count=2, average_target=3,
+            smart_hit_incomplete=True, smart_hit_reasons={"双击": 1},
+            smart_hit_history=[{"number": 1, "state": "rejected", "reason": "双击"}],
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "impact.vna"
+            save_legacy_vna(session, path)
+            mat = loadmat(path, squeeze_me=True, struct_as_record=False)
+            self.assertTrue(str(mat["SLm"].modal.py_hit_selection_json).isascii())
+            self.assertEqual(float(mat["SLm"].navg), 2.0)
+            loaded = load_legacy_vna(path)
+        self.assertEqual(loaded.config.acquisition.modal, modal)
+        self.assertEqual(loaded.config.acquisition.averaging.count, 3)
+        self.assertEqual(loaded.measurement.metadata["smart_hit_reasons"], {"双击": 1})
+        self.assertEqual(loaded.measurement.metadata["average_count"], 2)
+
+    def test_smart_hit_zero_accepted_does_not_save_target_as_measured_count(self):
+        session = self._sample_session()
+        session.config.acquisition.averaging.count = 3
+        session.measurement.metadata.update(smart_hit_active=True, average_count=0, smart_hit_incomplete=True)
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "zero.vna"
+            save_legacy_vna(session, path)
+            mat = loadmat(path, squeeze_me=True, struct_as_record=False)
+            self.assertEqual(float(mat["SLm"].navg), 0.0)
+            self.assertEqual(load_legacy_vna(path).measurement.metadata["average_count"], 0)
+
+    def test_old_vna_without_smart_extension_uses_new_default(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "old.vna"
+            save_legacy_vna(self._sample_session(), path)
+            data = loadmat(path, simplify_cells=True)
+            del data["SLm"]["modal"]["py_hit_selection_json"]
+            savemat(path, {key: value for key, value in data.items() if not key.startswith("__")})
+            loaded = load_legacy_vna(path)
+        self.assertTrue(loaded.config.acquisition.modal.smart_hit_enabled)
+
     def test_json_replace_failure_preserves_existing_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "session.json"
