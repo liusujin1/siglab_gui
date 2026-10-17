@@ -4921,9 +4921,10 @@ class ModalShapePage(ModalCandidateMixin, ModalIdentificationMixin, DiagnosticPa
         preview_settings_content = QtWidgets.QWidget()
         view_grid.setContentsMargins(0, 0, 0, 0)
         preview_settings_content.setLayout(view_grid)
-        self.modal_preview_settings_toggle = self._modal_disclosure("预览设置", preview_settings_content)
-        frequency_controls_layout.addWidget(self.modal_preview_settings_toggle, 0, QtCore.Qt.AlignLeft)
-        frequency_controls_layout.addWidget(preview_settings_content)
+        self.modal_preview_dialog = self._modal_settings_dialog("预览设置", preview_settings_content, (480, 200))
+        self.modal_preview_settings_button = QtWidgets.QPushButton("预览设置…")
+        self.modal_preview_settings_button.clicked.connect(lambda: self._open_modal_settings_dialog(self.modal_preview_dialog))
+        frequency_controls_layout.addWidget(self.modal_preview_settings_button, 0, QtCore.Qt.AlignLeft)
 
         action_grid = QtWidgets.QGridLayout()
         action_grid.setHorizontalSpacing(6)
@@ -5049,9 +5050,12 @@ class ModalShapePage(ModalCandidateMixin, ModalIdentificationMixin, DiagnosticPa
             QtCore.QTimer.singleShot(0, self._set_initial_modal_split)
 
     def _set_initial_modal_split(self) -> None:
+        required = self.modal_settings_host.minimumSizeHint().height() + self.left_work_tabs.tabBar().sizeHint().height() + 8
+        self.left_work_tabs.setMinimumHeight(max(200, required))
         available = self.modal_left_splitter.height() - self.modal_left_splitter.handleWidth()
         if available >= 620:
-            self.modal_left_splitter.setSizes([240, available - 240])
+            upper = max(240, required)
+            self.modal_left_splitter.setSizes([upper, available - upper])
 
     def _build_ui(self) -> None:
         layout = QtWidgets.QHBoxLayout(self)

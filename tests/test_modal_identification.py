@@ -310,10 +310,9 @@ def test_identification_settings_fit_control_panel_and_invalid_mass_is_visible(m
     page.left_work_tabs.setCurrentIndex(3)
     page.modal_limit_frequency.setChecked(True)
     app.processEvents()
-    scroll = page.modal_settings_scroll
-    for widget in (page.modal_driver_combo, page.modal_direction_combo, page.modal_frequency_min,
-                   page.modal_frequency_max):
-        assert widget.mapTo(scroll.widget(), QPoint(0, 0)).x() + widget.width() <= scroll.viewport().width()
+    panel = page.modal_settings_panel
+    for widget in (page.modal_driver_combo, page.modal_direction_combo):
+        assert widget.mapTo(panel, QPoint(0, 0)).x() + widget.width() <= panel.width()
     for button in (page.identify_button, page.modal_cancel_button):
         assert button.isVisible()
         assert button.geometry().right() < button.parentWidget().width()
@@ -354,15 +353,13 @@ def test_modal_layout_expanded_controls_do_not_overlap_in_shell(modal_page, wind
                            page.preview_button, page.export_gif_button, page.delete_peak_button,
                            page.view_reset_button):
                 assert viewport.rect().contains(QtCore.QRect(button.mapTo(viewport, QtCore.QPoint()), button.size()))
-        page.modal_sources_toggle.setChecked(True)
-        page.modal_advanced_toggle.setChecked(True)
         page.modal_limit_frequency.setChecked(True)
-        page.modal_preview_settings_toggle.setChecked(True)
+        page.modal_frequency_min.setValue(2)
+        page.modal_candidate_method.setCurrentIndex(page.modal_candidate_method.findData("consensus"))
         for group in page.findChildren(QtWidgets.QGroupBox):
             if group.title() in {"高级拟合参数", "预览设置", "候选搜索参数"}:
                 group.setChecked(True)
         details = next(b for b in page.findChildren(QtWidgets.QPushButton) if b.text() == "诊断详情")
-        details.setChecked(True)
         page.modal_identification_status.setText("校验失败，请检查驱动点及输入通道。" * 30)
         page.modal_progress.show()
         app.processEvents()
@@ -372,15 +369,46 @@ def test_modal_layout_expanded_controls_do_not_overlap_in_shell(modal_page, wind
             return QtCore.QRect(widget.mapTo(parent, QtCore.QPoint()), widget.size())
 
         host = page.identify_button.parentWidget()
-        footer = [page.modal_settings_scroll, page.identify_button, page.modal_cancel_button,
+        assert host.parentWidget().rect().contains(host.geometry())
+        footer = [page.modal_settings_panel, page.identify_button, page.modal_cancel_button,
                   page.modal_progress, page.modal_identification_status, details]
         for widget in footer:
             assert host.rect().contains(bounds(widget, host))
         for first, second in combinations(footer, 2):
             assert not bounds(first, host).intersects(bounds(second, host))
         assert page.modal_identification_status.toolTip() == page.modal_identification_status.text()
-        assert page.modal_settings_scroll.verticalScrollBar().maximum() > 0
-        assert page.modal_settings_scroll.widget().height() >= page.modal_settings_scroll.widget().minimumSizeHint().height()
+        assert page.modal_settings_panel.height() >= page.modal_settings_panel.minimumSizeHint().height()
+        for widget in (page.modal_sources_button, page.modal_advanced_button, page.modal_frequency_button,
+                       page.modal_driver_combo, page.modal_direction_combo, page.modal_physical_confirm):
+            assert page.modal_settings_panel.rect().contains(bounds(widget, page.modal_settings_panel))
+        for button, dialog in ((page.modal_sources_button, page.modal_sources_dialog),
+                               (page.modal_advanced_button, page.modal_advanced_dialog),
+                               (page.modal_frequency_button, page.modal_frequency_dialog),
+                               (page.modal_preview_settings_button, page.modal_preview_dialog),
+                               (details, page.modal_details_dialog)):
+            button.click()
+            app.processEvents()
+            assert dialog.isVisible()
+            assert dialog.screen().availableGeometry().contains(dialog.frameGeometry())
+            if dialog is page.modal_sources_dialog:
+                page.modal_show_corrections.setChecked(True)
+                app.processEvents()
+                table = page.modal_input_table
+                assert table.columnViewportPosition(5) + table.columnWidth(5) <= table.viewport().width()
+            for widget in dialog.findChildren(QtWidgets.QWidget):
+                if widget.isVisible() and isinstance(widget, (QtWidgets.QAbstractButton, QtWidgets.QAbstractSpinBox,
+                                                               QtWidgets.QComboBox, QtWidgets.QPlainTextEdit)):
+                    assert dialog.rect().contains(bounds(widget, dialog))
+            if dialog is page.modal_advanced_dialog:
+                for index in range(page.modal_advanced_panel.count()):
+                    page.modal_advanced_panel.setCurrentIndex(index)
+                    app.processEvents()
+                    for spin in dialog.findChildren(QtWidgets.QAbstractSpinBox):
+                        if spin.isVisible():
+                            assert dialog.rect().contains(bounds(spin, dialog))
+                            assert spin.height() >= spin.minimumSizeHint().height()
+            dialog.accept()
+            app.processEvents()
         assert page.modal_frequency_scroll.widget().height() >= page.modal_frequency_scroll.widget().minimumSizeHint().height()
         for tab in (0, 1):
             page.modal_result_tabs.setCurrentIndex(tab)
@@ -429,8 +457,10 @@ def test_compact_defaults_use_cmif_and_hide_optional_configuration():
     try:
         assert page.modal_candidate_method.currentData() == "cmif"
         assert "CMIF" in page.modal_algorithm_summary.text()
-        assert page.modal_sources_panel.isHidden()
-        assert page.modal_advanced_panel.isHidden()
+        assert page.modal_sources_dialog.isHidden()
+        assert page.modal_advanced_dialog.isHidden()
+        assert page.modal_frequency_dialog.isHidden()
+        assert page.modal_details_dialog.isHidden()
         assert page.modal_range_panel.isHidden()
         assert not page.modal_physical_confirm.isChecked()
         assert page.modal_input_table.isColumnHidden(3)
@@ -438,6 +468,41 @@ def test_compact_defaults_use_cmif_and_hide_optional_configuration():
     finally:
         page.close()
         app.processEvents()
+
+
+def test_modal_settings_dialogs_reuse_controls_and_keep_edits_on_close(modal_page):
+    from PySide6 import QtCore, QtWidgets
+    page, app = modal_page
+    page.show()
+    page.left_work_tabs.setCurrentIndex(3)
+    table = page.modal_input_table
+    dialog_count = len(page.findChildren(QtWidgets.QDialog))
+    for _ in range(2):
+        page.modal_sources_button.click()
+        app.processEvents()
+        assert table.isVisible()
+        assert table.parentWidget() is page.modal_sources_panel
+        assert table.height() > 150
+        assert page.modal_sources_dialog.windowModality() == QtCore.Qt.WindowModal
+        table.cellWidget(0, 3).setValue(2)
+        page.modal_sources_dialog.close()
+        app.processEvents()
+    assert table.cellWidget(0, 3).value() == 2
+    assert "系数修正" in page.modal_source_summary.text()
+    assert len(page.findChildren(QtWidgets.QDialog)) == dialog_count
+    page.modal_advanced_button.click()
+    app.processEvents()
+    page.modal_candidate_method.setCurrentIndex(page.modal_candidate_method.findData("consensus"))
+    page.modal_advanced_dialog.accept()
+    assert page.modal_candidate_method.currentText() in page.modal_algorithm_summary.text()
+    page.modal_frequency_button.click()
+    page.modal_limit_frequency.setChecked(True)
+    page.modal_frequency_min.setValue(2)
+    page.modal_frequency_max.setValue(30)
+    page.modal_frequency_dialog.accept()
+    assert "自定义" in page.modal_frequency_button.text()
+    assert "2.0 至 30.0" in page.modal_frequency_button.toolTip()
+    assert page.modal_frequency_min.value() == 2
 
 
 def test_unique_force_and_declared_unit_are_inferred_but_driver_is_not(modal_page):
