@@ -274,6 +274,8 @@ def _validate_identification_state(state: dict) -> None:
             fail()
         if measurement.get("force_axis") is not None and measurement["force_axis"] not in (0, 1, 2):
             fail()
+        if not isinstance(measurement.get("mass_warning", ""), str):
+            fail()
         finite_array(measurement.get("coordinates"), (3,))
         for key in ("label", "point", "file_name", "force_key", "response_key"):
             if not isinstance(measurement.get(key), str):

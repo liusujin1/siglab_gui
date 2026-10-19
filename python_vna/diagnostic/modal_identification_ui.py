@@ -604,6 +604,27 @@ class ModalIdentificationMixin:
             return {series.channel_key} | (legacy_keys or {f"ai{number - 1}"})
         return {f"ai{number - 1}"}
 
+    @staticmethod
+    def _modal_impact_window_warning(dataset, force_key):
+        metadata = dataset.metadata
+        config = metadata.get("legacy_config_state", {})
+        index = config.get("window_index", metadata.get("legacy_winsel"))
+        if index != 2 and str(metadata.get("processing_window", "")).lower() not in {"hann", "hanning"}:
+            return ""
+        label = metadata.get("legacy_channels", {}).get(force_key, {}).get("label", force_key)
+        force = np.asarray(dataset.channels.get(label, []), dtype=float).ravel()
+        if force.size < 32 or not np.isfinite(force).all():
+            return ""
+        force = force - np.median(force)
+        peak = float(np.max(abs(force)))
+        rms = float(np.sqrt(np.mean(force ** 2)))
+        position = float(np.argmax(abs(force)) / force.size)
+        # A transient at a Hann-window edge is not a stationary FRF amplitude correction.
+        if peak <= 8 * rms or not (position < .1 or position > .9):
+            return ""
+        return (f"锤击位于记录 {100 * position:.2f}% 处且使用 Hanning 窗，绝对留数可能受瞬态加窗偏差影响；"
+                "需用合适的锤击窗重新处理完整记录/重新测量，不能用统一幅值系数校正")
+
     def _modal_input_snapshot(self):
         self._capture_identification_file_options()
         if not self.modal_force_confirm.isChecked():
@@ -614,6 +635,7 @@ class ModalIdentificationMixin:
         unassigned = set()
         excluded = set()
         mapped_axes = self._mapped_modal_force_axes()
+        window_warnings = {}
         for row_index in range(self.point_table.rowCount()):
             if not self._table_bool(self.point_table, row_index, 0, True):
                 continue
@@ -657,6 +679,9 @@ class ModalIdentificationMixin:
                 if len(keys) != 1:
                     raise ValueError(f"{row['point']}-{'XYZ'[axis]}：响应通道存在多个 FRF，无法唯一匹配")
                 key = keys[0]
+                file_id = str(matching_file.path)
+                if file_id not in window_warnings:
+                    window_warnings[file_id] = self._modal_impact_window_warning(dataset, force_key)
                 response_key = key.split("->")[1]
                 response_unit, response_scale = self._endpoint_unit_scale(dataset, response_key)
                 _force_unit, force_scale = self._endpoint_unit_scale(dataset, force_key)
@@ -674,7 +699,7 @@ class ModalIdentificationMixin:
                     float(row[f"{name}_scale"]) * response_scale * float(options["response_factor"]),
                     force_scale * float(options["force_factor"]),
                     np.asarray(dataset.coherence[key]).copy() if key in dataset.coherence else None,
-                    force_axis=self.modal_direction_combo.currentIndex()))
+                    force_axis=self.modal_direction_combo.currentIndex(), mass_warning=window_warnings[file_id]))
         if driver_index is None:
             raise ValueError(f"{self.modal_direction_combo.currentText()} 力参考组缺少同点同向驱动点 FRF；请检查文件敲击方向、驱动点及响应通道")
         settings = ModalSettings(self.modal_frequency_min.value(), self.modal_frequency_max.value(), self.modal_max_order.value(),

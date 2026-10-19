@@ -1,7 +1,7 @@
 """SIMO experimental modal identification on calibrated complex FRFs.
 
-The LSCF common denominator uses a bilinear frequency mapping (rather than
-assuming the measured continuous-time FRF is an exact sampled-data model).
+The LSCF common denominator uses a band-centered complex bilinear mapping
+(rather than assuming a continuous-time FRF is an exact sampled-data model).
 LSFD coefficients use the second-order receptance convention: A_dd = 1/m
 when the driving-point component is unity. They are not first-order residues.
 """
@@ -14,6 +14,9 @@ from typing import Callable
 
 import numpy as np
 from scipy import linalg, optimize
+
+
+_IDENTIFICATION_ALGORITHM = "complex-zoom-lscf-v2"
 
 
 class ModalCancelled(Exception):
@@ -50,6 +53,7 @@ class FRFMeasurement:
     force_factor: float = 1.0
     coherence: np.ndarray | None = None
     force_axis: int | None = None
+    mass_warning: str = ""
 
 
 @dataclass(frozen=True)
@@ -105,6 +109,7 @@ def prepare_modal_input(
     converted, axes, coherences, frozen = [], [], [], []
     identities = set()
     digest = hashlib.sha256()
+    digest.update(_IDENTIFICATION_ALGORITHM.encode())
     digest.update(json.dumps(asdict(settings), sort_keys=True).encode())
     digest.update(str(driving_index).encode())
     for measurement in measurements:
@@ -165,6 +170,8 @@ def prepare_modal_input(
         coherences.append(coh)
         digest.update(repr((m.label, m.file_name, m.force_key, m.response_key, m.point, m.axis, m.coordinates,
                             m.response_unit, m.force_unit, m.response_factor, m.force_factor)).encode())
+        if m.mass_warning:
+            digest.update(m.mass_warning.encode())
         if m.force_axis is not None:
             digest.update(f"force_axis={m.force_axis}".encode())
         for array in (f, h, coh):
@@ -186,6 +193,9 @@ def prepare_modal_input(
         warnings.append("各文件频率网格不同，已在共同频段按最粗原始网格插值；不补齐带外数据")
     if np.any(~np.isfinite(quality)):
         warnings.append("部分或全部相干性未提供")
+    affected = sum(bool(m.mass_warning) for m in frozen)
+    if affected:
+        warnings.append(f"{affected} 条 FRF 存在锤击加窗引起的绝对幅值风险；驱动点若受影响，不输出未经校正的模态质量")
     for array in (grid, matrix, quality):
         array.setflags(write=False)
     return ModalInput(grid, matrix, quality, tuple(frozen), driving_index, settings, digest.hexdigest(), tuple(warnings))
@@ -202,25 +212,32 @@ def _check_cancel(cancel: Callable[[], bool] | None) -> None:
 
 
 def common_denominator_poles(f: np.ndarray, h: np.ndarray, order: int) -> np.ndarray:
-    """Real SIMO LSCF, eliminating channel numerators by QR projection."""
-    omega_scale = 2 * np.pi * float(f[-1])
-    s = 2j * np.pi * f
-    z = (omega_scale + s) / (omega_scale - s)
+    """Complex SIMO LSCF with frequency zoom and QR-eliminated numerators.
+
+    Center the selected band and spread it around the unit circle. The former
+    real-coefficient quarter-circle basis became nearly rank-deficient when
+    zooming a high-frequency band. Complex coefficients allow the frequency
+    shift; the inverse bilinear map returns continuous-time poles without
+    logarithmic branch ambiguity or a sampled-data approximation.
+    """
+    omega_center = np.pi * float(f[0] + f[-1])
+    # Band edges map to +/-2*atan(5), leaving a gap around the inverse-map singularity.
+    omega_scale = 2 * np.pi * float(f[-1] - f[0]) * .1
+    s_relative = 2j * np.pi * f - 1j * omega_center
+    z = (omega_scale + s_relative) / (omega_scale - s_relative)
     basis = z[:, None] ** np.arange(order + 1)
-    numerator = np.vstack((basis.real, basis.imag))
-    q, _ = linalg.qr(numerator, mode="economic")
+    q, _ = linalg.qr(basis, mode="economic")
     blocks, rhs = [], []
     for channel in h.T:
         scale = max(float(np.linalg.norm(channel)), np.finfo(float).tiny)
         design = channel[:, None] * basis / scale
-        real_design = np.vstack((design.real, design.imag))
-        projected = real_design - q @ (q.T @ real_design)
+        projected = design - q @ (q.conj().T @ design)
         blocks.append(projected[:, :-1])
         rhs.append(-projected[:, -1])
     coefficients = linalg.lstsq(np.vstack(blocks), np.concatenate(rhs), cond=1e-11)[0]
     roots = np.polynomial.polynomial.polyroots(np.r_[coefficients, 1.0])
     roots = roots[abs(roots + 1) > 1e-10]
-    poles = omega_scale * (roots - 1) / (roots + 1)
+    poles = omega_scale * (roots - 1) / (roots + 1) + 1j * omega_center
     return poles[(poles.real < 0) & (poles.imag > 0)]
 
 
@@ -291,6 +308,8 @@ def _pole_rows(data: ModalInput, cancel=None, progress=None) -> list[dict]:
     settings = data.settings
     # Identification on accelerance prevents 1/omega^2 conditioning penalties.
     accelerance = data.receptance * -(2 * np.pi * data.frequency_hz[:, None]) ** 2
+    omega = 2 * np.pi * data.frequency_hz
+    response_norm = max(float(np.linalg.norm(accelerance)), np.finfo(float).tiny)
     orders = list(range(2, settings.maximum_order + 1, 2))
     for step, order in enumerate(orders):
         _check_cancel(cancel)
@@ -313,8 +332,17 @@ def _pole_rows(data: ModalInput, cancel=None, progress=None) -> list[dict]:
             for i, row in enumerate(current):
                 shape = coeff[i].copy()
                 row["vector"] = shape
+                wn = 2 * np.pi * row["frequency_hz"]
+                basis = -omega ** 2 / (wn ** 2 - omega ** 2 + 2j * row["damping_ratio"] * wn * omega)
+                contribution = float(np.linalg.norm(basis[:, None] * shape[None, :]) / response_norm)
+                row["relative_contribution"] = contribution
+                if contribution <= 1e-8:
+                    row["stability_reason"] = "留数近零，极点/零点抵消，不作为可观测模态"
+                    continue
                 matches = sorted(enumerate(previous), key=lambda pair: abs(pair[1]["frequency_hz"] - row["frequency_hz"]))
                 for j, old in matches:
+                    if old.get("relative_contribution", 1.) <= 1e-8:
+                        continue
                     df = abs(row["frequency_hz"] / old["frequency_hz"] - 1)
                     dz = abs(row["damping_ratio"] / old["damping_ratio"] - 1)
                     mac = modal_mac(shape, old["vector"])
@@ -354,7 +382,8 @@ def _identification_diagnostics(data: ModalInput, rows: list[dict]) -> dict:
     damping_ok = [p for p in frequency_ok if p["damping_change"] <= settings.damping_tolerance]
     shape_ok = [p for p in damping_ok if p["shape_mac"] >= settings.mac_tolerance]
     stable = [p for p in rows if p["stable"]]
-    lines = [f"实际频段 {f[0]:.6g}~{f[-1]:.6g} Hz；{len(f)} 个频点；频率间隔中位数 {spacing:.6g} Hz；{len(data.measurements)} 条复数 FRF",
+    lines = ["识别算法：频带中心化复数 LSCF；频率/阻尼/MAC 和连续阶次判据未放宽",
+             f"实际频段 {f[0]:.6g}~{f[-1]:.6g} Hz；{len(f)} 个频点；频率间隔中位数 {spacing:.6g} Hz；{len(data.measurements)} 条复数 FRF",
              f"模型阶次 2~{settings.maximum_order}（步长 2）；频率差 ≤{100 * settings.frequency_tolerance:g}%，阻尼相对差 ≤{100 * settings.damping_tolerance:g}%，MAC ≥{settings.mac_tolerance:g}；要求连续 {settings.stable_orders} 阶",
              f"带内有效极点 {len(rows)} 个；可比较 {len(comparable)}；依次通过频率/阻尼/MAC：{len(frequency_ok)}/{len(damping_ok)}/{len(shape_ok)}；连续稳定 {len(stable)} 个"]
     if not stable:
@@ -415,6 +444,8 @@ def fit_selected_poles(data: ModalInput, poles: list[dict], *, cancel=None, prog
             reasons.append("所选极点尚未连续稳定")
         if not optimum.success:
             reasons.append("非线性精修未收敛")
+        if data.measurements[data.driving_index].mass_warning:
+            reasons.append(data.measurements[data.driving_index].mass_warning)
         if driver.real <= 0:
             reasons.append("驱动点系数非正，检查力/响应极性")
         if abs(driver) <= max(np.max(abs(values)) * 1e-3, np.finfo(float).tiny):
@@ -454,10 +485,13 @@ def fit_selected_poles(data: ModalInput, poles: list[dict], *, cancel=None, prog
     for i, mode in enumerate(modes):
         if any(automac[i, j] > .98 and abs(mode["frequency_hz"] / modes[j]["frequency_hz"] - 1) < .01
                for j in range(len(modes)) if j != i):
-            mode.update(mass_kg=None, stiffness_n_m=None, damping_n_s_m=None, status="相邻结果高度相关，检查重复极点")
+            reason = "相邻结果高度相关，检查重复极点"
+            status = reason if mode["status"] == "有效" else mode["status"] + "；" + reason
+            mode.update(mass_kg=None, stiffness_n_m=None, damping_n_s_m=None, status=status)
     if progress:
         progress(100, "模态拟合与校核完成")
-    return {"fingerprint": data.fingerprint, "settings": asdict(data.settings), "frequency_hz": f.copy(),
+    return {"fingerprint": data.fingerprint, "algorithm": _IDENTIFICATION_ALGORITHM,
+            "settings": asdict(data.settings), "frequency_hz": f.copy(),
             "measured": data.receptance.copy(), "reconstructed": estimate, "channel_errors": error,
             "residual_coefficients": coefficients[-2:].copy(), "modes": modes, "automac": automac,
             "driving_index": data.driving_index, "warnings": list(data.warnings),
@@ -475,7 +509,8 @@ def identify_modes(data: ModalInput, *, cancel=None, progress=None) -> dict:
     if selected:
         result = fit_selected_poles(data, selected, cancel=cancel, progress=progress)
     else:
-        result = {"fingerprint": data.fingerprint, "settings": asdict(data.settings), "frequency_hz": data.frequency_hz.copy(),
+        result = {"fingerprint": data.fingerprint, "algorithm": _IDENTIFICATION_ALGORITHM,
+                  "settings": asdict(data.settings), "frequency_hz": data.frequency_hz.copy(),
                   "measured": data.receptance.copy(), "reconstructed": None, "channel_errors": None,
                   "residual_coefficients": None, "modes": [], "automac": np.empty((0, 0)),
                   "driving_index": data.driving_index, "warnings": list(data.warnings) + ["未达到连续稳定极点判据；请查看诊断详情和稳定图，未据此输出模态质量"],

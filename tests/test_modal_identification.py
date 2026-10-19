@@ -130,6 +130,35 @@ def test_mixed_force_references_and_noncollocated_direction_are_rejected():
     assert a.fingerprint != b.fingerprint
 
 
+def test_high_frequency_zoom_recovers_known_mass_without_zero_residue_modes():
+    f = np.linspace(300, 420, 1200)
+    w = 2 * np.pi * f
+    shapes = np.array([[1., .5, -.3], [1., -.7, .8], [1., .9, .2]])
+    modes = [(325., .004, 12.), (361., .002, 30.), (374., .003, 20.)]
+    h = np.zeros((f.size, 3), dtype=complex)
+    for phi, (frequency, zeta, mass) in zip(shapes, modes):
+        wn = 2 * np.pi * frequency
+        h += phi[None, :] / mass / (wn ** 2 - w[:, None] ** 2 + 2j * zeta * wn * w[:, None])
+    raw = [FRFMeasurement(f"P{i}-Z", "synthetic", "f", str(i), f"P{i}", 2, (i, 0, 0),
+                          f, h[:, i], "m", force_axis=2) for i in range(3)]
+    result = identify_modes(prepare_modal_input(raw, 0, ModalSettings()))
+    assert result["algorithm"] == "complex-zoom-lscf-v2"
+    assert len(result["modes"]) == 3
+    for actual, (frequency, zeta, mass) in zip(result["modes"], modes):
+        assert actual["frequency_hz"] == pytest.approx(frequency, rel=.002)
+        assert actual["damping_ratio"] == pytest.approx(zeta, rel=.05)
+        assert actual["mass_kg"] == pytest.approx(mass, rel=.02)
+    assert max(result["channel_errors"]) < 1e-6
+
+
+def test_exact_sdof_pole_zero_cancellations_never_become_identified_modes():
+    result = identify_modes(prepare_modal_input(measurements(), 0, ModalSettings(maximum_order=14)))
+    assert len(result["modes"]) == 1
+    cancelled = [p for p in result["poles"] if p["relative_contribution"] <= 1e-8]
+    assert cancelled
+    assert all(not p["stable"] and "抵消" in p["stability_reason"] for p in cancelled)
+
+
 def test_no_stable_poles_diagnoses_damping_without_relaxing_mass(monkeypatch):
     import python_vna.diagnostic.modal_identification as core
     data = prepare_modal_input(measurements(), 0, ModalSettings(maximum_order=6))
@@ -237,6 +266,65 @@ def test_multiple_response_axes_do_not_guess_force_direction_and_override_surviv
     assert not page._modal_reference_matches(file)
     with pytest.raises(ValueError, match="X 力参考组缺少"):
         page._modal_input_snapshot()
+
+
+def test_hann_edge_impact_blocks_mass_but_never_silently_recalculates_frf(modal_page, tmp_path):
+    from python_vna.diagnostic.pages import ModalShapePage
+    page, app = modal_page
+    dataset = page.files[0].dataset
+    dataset.metadata["processing_window"] = "hanning"
+    force = np.zeros(1024)
+    force[51] = 1
+    dataset.channels["force"] = force
+    original = {key: values.copy() for key, values in dataset.frf.items()}
+    data, _ = page._modal_input_snapshot()
+    assert "4.98%" in data.measurements[data.driving_index].mass_warning
+    assert any("绝对幅值风险" in w for w in data.warnings)
+    result = identify_modes(data)
+    assert result["modes"]
+    assert all(m["mass_kg"] is None and "Hanning" in m["status"] for m in result["modes"])
+    for key in original:
+        np.testing.assert_array_equal(dataset.frf[key], original[key])
+    path = page.export_session(tmp_path / "window-risk.vnamodal")
+    restored = ModalShapePage()
+    try:
+        restored.import_session(path)
+        restored_data, _ = restored._modal_input_snapshot()
+        assert restored_data.fingerprint == data.fingerprint
+        assert restored_data.measurements[restored_data.driving_index].mass_warning
+    finally:
+        restored.close()
+        app.processEvents()
+    dataset.metadata["processing_window"] = "boxcar"
+    assert not page._modal_impact_window_warning(dataset, "force")
+    clean, _ = page._modal_input_snapshot()
+    assert clean.fingerprint != data.fingerprint
+    assert identify_modes(clean)["modes"][0]["mass_kg"] == pytest.approx(12., rel=.02)
+    dataset.metadata["processing_window"] = "hanning"
+    dataset.channels["force"] = np.sin(np.arange(1024))
+    assert not page._modal_impact_window_warning(dataset, "force")
+
+
+@pytest.mark.skipif(not os.environ.get("VIANALYSIS_601B_MODAL_SESSION"), reason="Optional local 601B measurement regression")
+def test_601b_real_session_identification_and_mass_quality_are_separate(modal_page):
+    page, _app = modal_page
+    page.import_session(Path(os.environ["VIANALYSIS_601B_MODAL_SESSION"]))
+    page.modal_driver_combo.setCurrentText("P1")
+    page.modal_direction_combo.setCurrentIndex(2)
+    page.modal_physical_confirm.setChecked(True)
+    page.modal_frequency_min.setValue(300)
+    page.modal_frequency_max.setValue(420)
+    page.modal_max_order.setValue(24)
+    data, _ = page._modal_input_snapshot()
+    assert len(data.measurements) == 25
+    assert data.measurements[data.driving_index].mass_warning
+    result = identify_modes(data)
+    assert result["diagnostics"]["stable_pole_count"] > 0
+    for target in (301.8, 361.2, 374.4):
+        assert min(abs(m["frequency_hz"] - target) for m in result["modes"]) < 2
+    # These are fitted candidates, not independently validated physical masses.
+    assert all(m["mass_kg"] is None for m in result["modes"])
+    assert all("Hanning" in m["status"] for m in result["modes"])
 
 
 def test_no_stable_modes_shows_detailed_diagnosis_and_stability_plot(modal_page, monkeypatch):
