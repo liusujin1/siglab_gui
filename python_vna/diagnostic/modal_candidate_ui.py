@@ -100,11 +100,14 @@ class ModalCandidateMixin:
     def _candidate_input_snapshot(self):
         self._capture_identification_file_options()
         curves = []
+        mapped_axes = self._mapped_modal_force_axes()
         for row in self._point_rows(require_enabled=True, require_bound=True):
             dataset = self._dataset_by_name(str(row["file"]))
             if dataset is None:
                 continue
             file = next(f for f in self.files if f.dataset is dataset)
+            if not self._modal_reference_matches(file, mapped_axes):
+                continue
             force = self._identification_file_options.get(str(file.path), {}).get("force_key", "")
             for axis in "xyz":
                 number = int(row[f"{axis}_ch"])

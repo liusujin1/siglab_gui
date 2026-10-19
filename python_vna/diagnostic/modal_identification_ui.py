@@ -67,8 +67,10 @@ class ModalIdentificationMixin:
         self.modal_sources_panel = QtWidgets.QWidget()
         source_layout = QtWidgets.QVBoxLayout(self.modal_sources_panel)
         source_layout.setContentsMargins(0, 0, 0, 0)
-        self.modal_input_table = QtWidgets.QTableWidget(0, 6)
-        self.modal_input_table.setHorizontalHeaderLabels(["文件", "力通道", "力单位", "追加力系数", "响应单位", "追加响应系数"])
+        self.modal_input_table = QtWidgets.QTableWidget(0, 7)
+        self.modal_input_table.setHorizontalHeaderLabels(["文件", "力通道", "力单位", "追加力系数", "响应单位", "追加响应系数", "敲击方向"])
+        self.modal_input_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.modal_input_table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.modal_input_table.setToolTip("文件已有工程系数自动应用；表内系数为追加修正。响应单位选择只改变单位解释，不重复应用灵敏度。")
         self.modal_input_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
         self.modal_input_table.horizontalHeader().setMinimumSectionSize(90)
@@ -104,9 +106,10 @@ class ModalIdentificationMixin:
         self.modal_driver_combo.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
         self.modal_direction_combo = QtWidgets.QComboBox()
         self.modal_direction_combo.addItems(["X", "Y", "Z"])
+        self.modal_direction_combo.setToolTip("选择本次识别的力参考组。只合并相同敲击方向的数据，响应仍保留 X/Y/Z；模态质量以驱动点该方向分量为 1。")
         grid.addWidget(QtWidgets.QLabel("驱动点"), 0, 0)
         grid.addWidget(self.modal_driver_combo, 0, 1)
-        grid.addWidget(QtWidgets.QLabel("施力方向"), 0, 2)
+        grid.addWidget(QtWidgets.QLabel("力参考"), 0, 2)
         grid.addWidget(self.modal_direction_combo, 0, 3)
         self.modal_frequency_min = QtWidgets.QDoubleSpinBox()
         self.modal_frequency_max = QtWidgets.QDoubleSpinBox()
@@ -239,6 +242,7 @@ class ModalIdentificationMixin:
             spin.valueChanged.connect(self._update_modal_settings_summary)
         for control in (self.modal_driver_combo, self.modal_direction_combo):
             control.currentIndexChanged.connect(self._mark_identification_stale)
+        self.modal_direction_combo.currentIndexChanged.connect(self._update_modal_source_summary)
         self.modal_force_confirm.toggled.connect(self._mark_identification_stale)
         self.modal_driver_confirm.toggled.connect(self._mark_identification_stale)
         self.modal_force_confirm.toggled.connect(self._sync_modal_physical_confirmation)
@@ -347,22 +351,53 @@ class ModalIdentificationMixin:
 
     def _update_modal_source_summary(self):
         ready, corrections, details = 0, 0, []
+        selected_count = 0
+        reference = self.modal_direction_combo.currentText()
         for row in range(self.modal_input_table.rowCount()):
             widgets = [self.modal_input_table.cellWidget(row, i) for i in range(1, 6)]
             if any(widget is None for widget in widgets):
                 continue
             force, unit, force_factor, response, response_factor = widgets
-            ready += bool(force.currentData() and unit.currentText() in {"N", "kN", "mN"})
+            axis = self.modal_input_table.cellWidget(row, 6)
+            force_axis = axis.currentData() if axis is not None else ""
+            if not force_axis and axis is not None:
+                force_axis = axis.property("mappedForceAxis") or ""
+            selected = force_axis in {"", reference}
+            selected_count += selected
+            ready += bool(selected and force.currentData() and unit.currentText() in {"N", "kN", "mN"})
             corrections += int(force_factor.value() != 1 or response_factor.value() != 1)
-            details.append(f"{self.modal_input_table.item(row, 0).text()}: {force.currentText()} / {unit.currentText()}；响应 {response.currentText()}；追加系数 {force_factor.value():g}, {response_factor.value():g}")
+            details.append(f"{self.modal_input_table.item(row, 0).text()}: 敲击 {force_axis or '当前参考（未单独指定）'}；{force.currentText()} / {unit.currentText()}；响应 {response.currentText()}；追加系数 {force_factor.value():g}, {response_factor.value():g}")
         count = self.modal_input_table.rowCount()
-        text = f"{count} 个文件 | 力参考就绪 {ready}/{count}" if count else "尚未加载 FRF"
+        text = f"{reference} 参考就绪 {ready}/{selected_count} | 共 {count} 文件" if count else "尚未加载 FRF"
         if corrections:
             text += f" | {corrections} 项系数修正"
         self.modal_source_summary.setText(text)
         self.modal_source_summary.setToolTip("\n".join(details))
         if corrections:
             self.modal_show_corrections.setChecked(True)
+
+    def _mapped_modal_force_axes(self):
+        axes_by_dataset = {id(file.dataset): set() for file in self.files}
+        datasets_by_name = {}
+        for row in self._point_rows(require_enabled=True, require_bound=True):
+            file_name = str(row["file"])
+            if file_name not in datasets_by_name:
+                datasets_by_name[file_name] = self._dataset_by_name(file_name)
+            dataset = datasets_by_name[file_name]
+            if dataset is not None:
+                axes_by_dataset[id(dataset)].update(name.upper() for name in "xyz" if int(row[f"{name}_ch"]) > 0)
+        return {str(file.path): next(iter(axes)) if len(axes) == 1 else ""
+                for file in self.files for axes in (axes_by_dataset[id(file.dataset)],)}
+
+    def _modal_file_force_axis(self, modal_file, mapped_axes=None):
+        if mapped_axes is None:
+            mapped_axes = self._mapped_modal_force_axes()
+        return (self._identification_file_options.get(str(modal_file.path), {}).get("force_axis", "")
+                or mapped_axes.get(str(modal_file.path), ""))
+
+    def _modal_reference_matches(self, modal_file, mapped_axes=None):
+        axis = self._modal_file_force_axis(modal_file, mapped_axes)
+        return axis in {"", self.modal_direction_combo.currentText()}
 
     @staticmethod
     def _modal_decimal(value, low, high, decimals):
@@ -416,8 +451,8 @@ class ModalIdentificationMixin:
         self.modal_stability_plot = self._create_plot_widget("稳定图")
         self.modal_stability_plot.setMinimumHeight(100)
         layout.addWidget(self.modal_stability_plot, 1)
-        self.modal_pole_table = QtWidgets.QTableWidget(0, 5)
-        self.modal_pole_table.setHorizontalHeaderLabels(["拟合", "模型阶次", "频率 Hz", "阻尼 %", "连续稳定阶次"])
+        self.modal_pole_table = QtWidgets.QTableWidget(0, 6)
+        self.modal_pole_table.setHorizontalHeaderLabels(["拟合", "模型阶次", "频率 Hz", "阻尼 %", "连续稳定阶次", "稳定性诊断"])
         self.modal_pole_table.setMaximumHeight(100)
         self.modal_pole_table.setMinimumHeight(70)
         self.modal_pole_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
@@ -455,6 +490,7 @@ class ModalIdentificationMixin:
         try:
             self._capture_identification_file_options()
             self.modal_input_table.setRowCount(0)
+            mapped_axes = self._mapped_modal_force_axes()
             for modal_file in self.files:
                 dataset = modal_file.dataset
                 if not dataset.frf:
@@ -501,6 +537,17 @@ class ModalIdentificationMixin:
                     else:
                         widget.editingFinished.connect(self._mark_identification_stale)
                         widget.valueChanged.connect(self._update_modal_source_summary)
+                axis = QtWidgets.QComboBox()
+                mapped_axis = mapped_axes.get(str(modal_file.path), "")
+                axis.addItem(f"自动：{mapped_axis}" if mapped_axis else "沿当前参考", "")
+                axis.setProperty("mappedForceAxis", mapped_axis)
+                for name in "XYZ":
+                    axis.addItem(name, name)
+                axis.setCurrentIndex(max(0, axis.findData(options.get("force_axis", ""))))
+                axis.setToolTip("优先按测点表的唯一启用方向自动归组，不需重复填写。仅在该文件实际敲击方向与映射方向不同时手动覆盖；存在多方向响应时不能仅据响应通道猜测敲击方向。")
+                self.modal_input_table.setCellWidget(row, 6, axis)
+                axis.currentIndexChanged.connect(self._mark_identification_stale)
+                axis.currentIndexChanged.connect(self._update_modal_source_summary)
             old = self.modal_driver_combo.currentText()
             self.modal_driver_combo.blockSignals(True)
             self.modal_driver_combo.clear()
@@ -534,7 +581,8 @@ class ModalIdentificationMixin:
             self._identification_file_options[item.data(QtCore.Qt.UserRole)] = {
                 "force_key": widgets[0].currentData(), "force_unit": widgets[1].currentText(),
                 "force_factor": widgets[2].value(), "response_unit": widgets[3].currentText(), "response_factor": widgets[4].value(),
-                "force_unit_auto": bool(widgets[1].property("inferredUnit"))}
+                "force_unit_auto": bool(widgets[1].property("inferredUnit")),
+                "force_axis": self.modal_input_table.cellWidget(row, 6).currentData()}
 
     @staticmethod
     def _endpoint_unit_scale(dataset, key):
@@ -563,6 +611,9 @@ class ModalIdentificationMixin:
         if not self.modal_driver_confirm.isChecked() or self.modal_driver_combo.currentIndex() <= 0:
             raise ValueError("请选择并确认同点同向驱动点响应")
         measurements, skipped = [], []
+        unassigned = set()
+        excluded = set()
+        mapped_axes = self._mapped_modal_force_axes()
         for row_index in range(self.point_table.rowCount()):
             if not self._table_bool(self.point_table, row_index, 0, True):
                 continue
@@ -583,7 +634,12 @@ class ModalIdentificationMixin:
             if dataset is None:
                 raise ValueError(f"{row['point']}：找不到映射文件 {row['file']}")
             matching_file = next(item for item in self.files if item.dataset is dataset)
+            if not self._modal_reference_matches(matching_file, mapped_axes):
+                excluded.add(matching_file.path.name)
+                continue
             options = self._identification_file_options.get(str(matching_file.path), {})
+            if not self._modal_file_force_axis(matching_file, mapped_axes):
+                unassigned.add(matching_file.path.name)
             force_key = options.get("force_key")
             if not force_key:
                 raise ValueError(f"{row['file']}：请在识别设置选择力通道")
@@ -617,13 +673,18 @@ class ModalIdentificationMixin:
                     str(unit or ""), str(options["force_unit"]),
                     float(row[f"{name}_scale"]) * response_scale * float(options["response_factor"]),
                     force_scale * float(options["force_factor"]),
-                    np.asarray(dataset.coherence[key]).copy() if key in dataset.coherence else None))
+                    np.asarray(dataset.coherence[key]).copy() if key in dataset.coherence else None,
+                    force_axis=self.modal_direction_combo.currentIndex()))
         if driver_index is None:
-            raise ValueError("驱动点所选方向缺少有效 FRF，请检查测点通道、施力方向和力参考")
+            raise ValueError(f"{self.modal_direction_combo.currentText()} 力参考组缺少同点同向驱动点 FRF；请检查文件敲击方向、驱动点及响应通道")
         settings = ModalSettings(self.modal_frequency_min.value(), self.modal_frequency_max.value(), self.modal_max_order.value(),
                                  self.modal_frequency_tol.value(), self.modal_damping_tol.value(), self.modal_mac_tol.value(),
                                  maximum_fit_error=self.modal_fit_tol.value(), maximum_complexity=self.modal_complexity_tol.value())
         data = prepare_modal_input(measurements, driver_index, settings)
+        if excluded:
+            skipped.append(f"当前为 {self.modal_direction_combo.currentText()} 力参考，已排除其他敲击方向的 {len(excluded)} 个文件；未混合三个输入参考")
+        if unassigned:
+            skipped.append(f"{len(unassigned)} 个文件无法从测点表确定唯一敲击方向，暂按当前 {self.modal_direction_combo.currentText()} 力参考处理；请核实输入与标定中的敲击方向：" + "、".join(sorted(unassigned)))
         return data, skipped
 
     def _mark_identification_stale(self, *_args):
@@ -660,6 +721,7 @@ class ModalIdentificationMixin:
         self._identification_data = data
         self._identification_run_generation = self._identification_generation
         self._identification_run_poles = self._identification_result.get("poles", []) if selected is not None else None
+        self._identification_run_diagnostics = self._identification_result.get("diagnostics") if selected is not None else None
         self._identification_skipped = skipped
         task = ModalIdentificationTask(data, selected, self)
         self._identification_task = task
@@ -734,15 +796,19 @@ class ModalIdentificationMixin:
             return
         if self._identification_run_poles is not None:
             result["poles"] = self._identification_run_poles
+            if self._identification_run_diagnostics is not None:
+                result["diagnostics"] = self._identification_run_diagnostics
         result["warnings"].extend(self._identification_skipped)
         self._identification_result = result
         self._identification_stale = False
         self._refresh_identification_result_views()
         self.modal_result_tabs.setCurrentIndex(1)
-        text = f"已识别 {len(result['modes'])} 阶模态；质量参考：驱动点分量为 1"
+        text = f"{self.modal_direction_combo.currentText()} 力参考：已识别 {len(result['modes'])} 阶模态；驱动点分量为 1"
         if result["warnings"]:
             text += f"\n诊断提示 {len(result['warnings'])} 项"
-        details = [text, *result["warnings"]]
+        details = [text, *result.get("diagnostics", {}).get("lines", []), *result["warnings"]]
+        if not result["modes"]:
+            self.modal_plot_tabs.setCurrentIndex(1)
         details.extend(f"第 {i + 1} 阶：{m['status']}；相干性：{m['coherence'] if m['coherence'] is not None else '未提供'}"
                        for i, m in enumerate(result["modes"]))
         self.modal_identification_details.setPlainText("\n".join(details))
@@ -788,8 +854,10 @@ class ModalIdentificationMixin:
             if chosen:
                 selected.append(p["frequency_hz"])
             self.modal_pole_table.setItem(i, 0, check)
-            for j, value in enumerate((p["order"], f"{p['frequency_hz']:.6g}", f"{p['damping_ratio'] * 100:.4g}", p["stable_count"]), 1):
-                self.modal_pole_table.setItem(i, j, QtWidgets.QTableWidgetItem(str(value)))
+            for j, value in enumerate((p["order"], f"{p['frequency_hz']:.6g}", f"{p['damping_ratio'] * 100:.4g}", p["stable_count"], p.get("stability_reason", "稳定" if p["stable"] else "旧会话未记录")), 1):
+                item = QtWidgets.QTableWidgetItem(str(value))
+                item.setToolTip(str(value))
+                self.modal_pole_table.setItem(i, j, item)
         self.modal_validation_channel.blockSignals(True)
         self.modal_validation_channel.clear()
         for m in result["measurements"]:
@@ -931,7 +999,8 @@ class ModalIdentificationMixin:
         driver = result["measurements"][result["driving_index"]]
         with Path(path).open("w", newline="", encoding="utf-8-sig") as stream:
             writer = csv.writer(stream)
-            writer.writerow(["fingerprint", result["fingerprint"], "normalization", "driving_point_unity", "driver", driver["label"]])
+            writer.writerow(["fingerprint", result["fingerprint"], "normalization", "driving_point_unity", "driver", driver["label"],
+                             "force_axis", "XYZ"[driver["force_axis"]] if driver.get("force_axis") is not None else "unspecified"])
             writer.writerow(["mode", "frequency_hz", "damping_ratio", "mass_kg", "stiffness_n_m", "damping_n_s_m", "fit_error", "status", "coherence"])
             for i, mode in enumerate(result["modes"], 1):
                 writer.writerow([i] + [mode[key] for key in ("frequency_hz", "damping_ratio", "mass_kg", "stiffness_n_m", "damping_n_s_m", "fit_error", "status", "coherence")])

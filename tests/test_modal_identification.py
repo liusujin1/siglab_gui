@@ -118,6 +118,143 @@ def test_bad_polarity_complex_mode_node_and_band_edge_suppress_mass():
     assert "带宽" in result["modes"][0]["status"]
 
 
+def test_mixed_force_references_and_noncollocated_direction_are_rejected():
+    raw = [replace(m, force_axis=0) for m in measurements()]
+    raw[1] = replace(raw[1], force_axis=1)
+    with pytest.raises(ValueError, match="不能混合不同敲击方向"):
+        prepare_modal_input(raw, 0, ModalSettings())
+    with pytest.raises(ValueError, match="同点同向"):
+        prepare_modal_input([replace(m, force_axis=1) for m in measurements()], 0, ModalSettings())
+    a = prepare_modal_input(measurements(), 0, ModalSettings())
+    b = prepare_modal_input([replace(m, force_axis=0) for m in measurements()], 0, ModalSettings())
+    assert a.fingerprint != b.fingerprint
+
+
+def test_no_stable_poles_diagnoses_damping_without_relaxing_mass(monkeypatch):
+    import python_vna.diagnostic.modal_identification as core
+    data = prepare_modal_input(measurements(), 0, ModalSettings(maximum_order=6))
+
+    def changing_damping(_f, _h, order):
+        zeta = {2: .01, 4: .04, 6: .12}[order]
+        wn = 2 * np.pi * 10
+        return np.array([-zeta * wn + 1j * wn * np.sqrt(1 - zeta ** 2)])
+
+    monkeypatch.setattr(core, "common_denominator_poles", changing_damping)
+    result = identify_modes(data)
+    assert not result["modes"]
+    assert result["diagnostics"]["pole_count"] == 3
+    assert result["diagnostics"]["stable_pole_count"] == 0
+    assert "阻尼在相邻阶次间不稳定" in "\n".join(result["diagnostics"]["lines"])
+    assert "阻尼差" in result["poles"][-1]["stability_reason"]
+    manual = fit_selected_poles(data, [result["poles"][0]])
+    assert manual["modes"][0]["mass_kg"] is None
+    assert "尚未连续稳定" in manual["modes"][0]["status"]
+
+
+def test_no_poles_and_insufficient_consecutive_orders_have_specific_diagnosis(monkeypatch):
+    import python_vna.diagnostic.modal_identification as core
+    data = prepare_modal_input(measurements(), 0, ModalSettings(maximum_order=6))
+    monkeypatch.setattr(core, "common_denominator_poles", lambda *_: np.array([], dtype=complex))
+    result = identify_modes(data)
+    assert "所有阶次均未保留带内" in "\n".join(result["diagnostics"]["lines"])
+    assert result["diagnostics"]["spacing_hz"] == pytest.approx(np.median(np.diff(data.frequency_hz)))
+    wn, zeta = 2 * np.pi * 10, .02
+    monkeypatch.setattr(core, "common_denominator_poles", lambda _f, _h, order:
+                        np.array([]) if order == 2 else np.array([-zeta * wn + 1j * wn * np.sqrt(1 - zeta ** 2)]))
+    result = identify_modes(data)
+    assert not result["modes"]
+    assert "最长仅连续 2/3 阶" in "\n".join(result["diagnostics"]["lines"])
+
+
+def test_mapping_automatically_groups_three_force_directions_and_roundtrips(modal_page, tmp_path):
+    from copy import deepcopy
+    from python_vna.diagnostic.pages import ModalFile, ModalShapePage
+    page, app = modal_page
+    source = page.files[0].dataset
+    page._bulk_table_update = True
+    page.point_table.setRowCount(0)
+    for axis in range(3):
+        if axis == 0:
+            dataset = source
+        else:
+            dataset = deepcopy(source)
+            dataset.path = Path(f"measurement_{axis + 1}.vna")
+            dataset.name = dataset.path.name
+            dataset.frf = {key: values / 2 ** axis for key, values in dataset.frf.items()}
+            page.files.append(ModalFile(dataset.path, dataset))
+        for j in range(3):
+            channels = [0, 0, 0]
+            channels[axis] = j + 2
+            page._insert_point_row([True, f"P{j}", dataset.path.name, *channels, 1, 1, 1, j, 0, 0])
+    page._bulk_table_update = False
+    page._refresh_identification_sources()
+    fingerprints = []
+    for axis in range(3):
+        page.modal_direction_combo.setCurrentIndex(axis)
+        data, skipped = page._modal_input_snapshot()
+        assert len(data.measurements) == 3
+        assert {m.axis for m in data.measurements} == {axis}
+        assert {m.force_axis for m in data.measurements} == {axis}
+        assert len({m.file_name for m in data.measurements}) == 1
+        assert any("排除其他敲击方向" in message for message in skipped)
+        assert not any("无法从测点表确定" in message for message in skipped)
+        assert len(page._candidate_input_snapshot()["labels"]) == 3
+        box = page.modal_input_table.cellWidget(axis, 6)
+        assert box.currentData() == ""
+        assert box.currentText() == f"自动：{'XYZ'[axis]}"
+        result = identify_modes(data)
+        assert result["modes"][0]["mass_kg"] == pytest.approx(12 * 2 ** axis, rel=.02)
+        fingerprints.append(data.fingerprint)
+    assert len(set(fingerprints)) == 3
+    path = page.export_session(tmp_path / "three_directions.vnamodal")
+    restored = ModalShapePage()
+    try:
+        restored.import_session(path)
+        assert restored.modal_direction_combo.currentText() == "Z"
+        data, _ = restored._modal_input_snapshot()
+        assert {m.force_axis for m in data.measurements} == {2}
+        assert data.fingerprint == fingerprints[-1]
+    finally:
+        restored.close()
+        app.processEvents()
+
+
+def test_multiple_response_axes_do_not_guess_force_direction_and_override_survives_refresh(modal_page):
+    from PySide6 import QtWidgets
+    page, _app = modal_page
+    page._bulk_table_update = True
+    for row in range(page.point_table.rowCount()):
+        page.point_table.setItem(row, 4, QtWidgets.QTableWidgetItem("2"))
+    page._bulk_table_update = False
+    page._refresh_identification_sources()
+    file = page.files[0]
+    assert page._mapped_modal_force_axes()[str(file.path)] == ""
+    assert page.modal_input_table.cellWidget(0, 6).currentText() == "沿当前参考"
+    box = page.modal_input_table.cellWidget(0, 6)
+    box.setCurrentIndex(box.findData("Y"))
+    page._refresh_identification_sources()
+    assert page.modal_input_table.cellWidget(0, 6).currentData() == "Y"
+    assert not page._modal_reference_matches(file)
+    with pytest.raises(ValueError, match="X 力参考组缺少"):
+        page._modal_input_snapshot()
+
+
+def test_no_stable_modes_shows_detailed_diagnosis_and_stability_plot(modal_page, monkeypatch):
+    import python_vna.diagnostic.modal_identification as core
+    page, app = modal_page
+    monkeypatch.setattr(core, "common_denominator_poles", lambda *_: np.array([], dtype=complex))
+    page.start_modal_identification()
+    wait_for_task(page, app)
+    result = page._identification_result
+    assert result is not None and not result["modes"]
+    details = page.modal_identification_details.toPlainText()
+    assert "实际频段" in details and "频率间隔" in details
+    assert "所有阶次均未保留带内" in details
+    assert "力参考" in details
+    assert page.modal_plot_tabs.currentIndex() == 1
+    assert not page.modal_export_result_button.isEnabled()
+
+
 @pytest.fixture
 def modal_page():
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

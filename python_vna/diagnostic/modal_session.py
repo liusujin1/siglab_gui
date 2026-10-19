@@ -227,6 +227,8 @@ def _validate_identification_state(state: dict) -> None:
             fail()
         if "force_unit_auto" in options and not isinstance(options["force_unit_auto"], bool):
             fail()
+        if options.get("force_axis", "") not in ("", "X", "Y", "Z"):
+            fail()
         for name in ("force_key", "force_unit", "response_unit"):
             if not isinstance(options.get(name), str):
                 fail()
@@ -269,6 +271,8 @@ def _validate_identification_state(state: dict) -> None:
         fail()
     for measurement in measurements:
         if not isinstance(measurement, dict) or measurement.get("axis") not in (0, 1, 2):
+            fail()
+        if measurement.get("force_axis") is not None and measurement["force_axis"] not in (0, 1, 2):
             fail()
         finite_array(measurement.get("coordinates"), (3,))
         for key in ("label", "point", "file_name", "force_key", "response_key"):

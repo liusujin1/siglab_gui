@@ -49,6 +49,7 @@ class FRFMeasurement:
     response_factor: float = 1.0
     force_factor: float = 1.0
     coherence: np.ndarray | None = None
+    force_axis: int | None = None
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,14 @@ def prepare_modal_input(
 ) -> ModalInput:
     if not measurements or not 0 <= driving_index < len(measurements):
         raise ValueError("请选择有效的同点同向驱动点响应")
+    reference_axes = {m.force_axis for m in measurements}
+    if any(axis is not None and axis not in (0, 1, 2) for axis in reference_axes):
+        raise ValueError("敲击方向必须为 X/Y/Z")
+    if len(reference_axes) > 1:
+        raise ValueError("当前单输入识别不能混合不同敲击方向；请按 X/Y/Z 力参考分组")
+    reference_axis = measurements[driving_index].force_axis
+    if reference_axis is not None and measurements[driving_index].axis != reference_axis:
+        raise ValueError("驱动点响应必须与当前力参考同点同向")
     if settings.maximum_order < 6 or settings.maximum_order > 80 or settings.maximum_order % 2:
         raise ValueError("最大模型阶次必须为 6~80 之间的偶数")
     if (not 0 < settings.frequency_tolerance < 1 or not 0 < settings.damping_tolerance < 1
@@ -100,9 +109,11 @@ def prepare_modal_input(
     digest.update(str(driving_index).encode())
     for measurement in measurements:
         m = measurement
+        if m.axis not in (0, 1, 2):
+            raise ValueError(f"{m.label}：响应方向无效")
         identity = (m.point.upper(), m.axis)
         if identity in identities:
-            raise ValueError(f"测点 {m.point} 的 {'XYZ'[m.axis]} 方向重复；请仅启用一条物理响应")
+            raise ValueError(f"测点 {m.point} 的 {'XYZ'[m.axis]} 方向重复；请检查文件敲击方向分组，同一力参考只保留一条物理响应")
         identities.add(identity)
         if m.axis not in (0, 1, 2) or len(m.coordinates) != 3 or not np.isfinite(m.coordinates).all():
             raise ValueError(f"{m.label}：测点坐标或方向无效")
@@ -154,6 +165,8 @@ def prepare_modal_input(
         coherences.append(coh)
         digest.update(repr((m.label, m.file_name, m.force_key, m.response_key, m.point, m.axis, m.coordinates,
                             m.response_unit, m.force_unit, m.response_factor, m.force_factor)).encode())
+        if m.force_axis is not None:
+            digest.update(f"force_axis={m.force_axis}".encode())
         for array in (f, h, coh):
             digest.update(array.tobytes())
     low = max([f[0] for f in axes] + [settings.minimum_hz])
@@ -289,7 +302,9 @@ def _pole_rows(data: ModalInput, cancel=None, progress=None) -> list[dict]:
             if not data.frequency_hz[0] < frequency < data.frequency_hz[-1] or not 1e-5 < damping < .5:
                 continue
             current.append({"frequency_hz": frequency, "damping_ratio": damping, "order": order,
-                            "stable_count": 1, "stable": False})
+                            "stable_count": 1, "stable": False, "frequency_change": None,
+                            "damping_change": None, "shape_mac": None,
+                            "stability_reason": "前一阶次无可比较极点"})
         current.sort(key=lambda row: row["frequency_hz"])
         if current:
             coeff, _ = lsfd(data.frequency_hz, data.receptance, np.array([p["frequency_hz"] for p in current]),
@@ -300,13 +315,28 @@ def _pole_rows(data: ModalInput, cancel=None, progress=None) -> list[dict]:
                 row["vector"] = shape
                 matches = sorted(enumerate(previous), key=lambda pair: abs(pair[1]["frequency_hz"] - row["frequency_hz"]))
                 for j, old in matches:
+                    df = abs(row["frequency_hz"] / old["frequency_hz"] - 1)
+                    dz = abs(row["damping_ratio"] / old["damping_ratio"] - 1)
+                    mac = modal_mac(shape, old["vector"])
+                    if row["frequency_change"] is None:
+                        row.update(frequency_change=df, damping_change=dz, shape_mac=mac)
+                        reasons = []
+                        if df > settings.frequency_tolerance:
+                            reasons.append(f"频率差 {100 * df:.3g}% > {100 * settings.frequency_tolerance:g}%")
+                        if dz > settings.damping_tolerance:
+                            reasons.append(f"阻尼差 {100 * dz:.3g}% > {100 * settings.damping_tolerance:g}%")
+                        if mac < settings.mac_tolerance:
+                            reasons.append(f"MAC {mac:.4g} < {settings.mac_tolerance:g}")
+                        row["stability_reason"] = "；".join(reasons) or "相邻阶次极点已被匹配"
                     if j in used:
                         continue
-                    if (abs(row["frequency_hz"] / old["frequency_hz"] - 1) <= settings.frequency_tolerance
-                            and abs(row["damping_ratio"] / old["damping_ratio"] - 1) <= settings.damping_tolerance
-                            and modal_mac(shape, old["vector"]) >= settings.mac_tolerance):
+                    if (df <= settings.frequency_tolerance and dz <= settings.damping_tolerance
+                            and mac >= settings.mac_tolerance):
                         row["stable_count"] = old["stable_count"] + 1
                         row["stable"] = row["stable_count"] >= settings.stable_orders
+                        row.update(frequency_change=df, damping_change=dz, shape_mac=mac,
+                                   stability_reason="连续稳定" if row["stable"] else
+                                   f"连续稳定 {row['stable_count']}/{settings.stable_orders} 阶，尚不足")
                         used.add(j)
                         break
             rows.extend(current)
@@ -314,6 +344,38 @@ def _pole_rows(data: ModalInput, cancel=None, progress=None) -> list[dict]:
         if progress:
             progress(int(65 * (step + 1) / len(orders)), f"模型阶次 {order}")
     return rows
+
+
+def _identification_diagnostics(data: ModalInput, rows: list[dict]) -> dict:
+    settings, f = data.settings, data.frequency_hz
+    spacing = float(np.median(np.diff(f)))
+    comparable = [p for p in rows if p["frequency_change"] is not None]
+    frequency_ok = [p for p in comparable if p["frequency_change"] <= settings.frequency_tolerance]
+    damping_ok = [p for p in frequency_ok if p["damping_change"] <= settings.damping_tolerance]
+    shape_ok = [p for p in damping_ok if p["shape_mac"] >= settings.mac_tolerance]
+    stable = [p for p in rows if p["stable"]]
+    lines = [f"实际频段 {f[0]:.6g}~{f[-1]:.6g} Hz；{len(f)} 个频点；频率间隔中位数 {spacing:.6g} Hz；{len(data.measurements)} 条复数 FRF",
+             f"模型阶次 2~{settings.maximum_order}（步长 2）；频率差 ≤{100 * settings.frequency_tolerance:g}%，阻尼相对差 ≤{100 * settings.damping_tolerance:g}%，MAC ≥{settings.mac_tolerance:g}；要求连续 {settings.stable_orders} 阶",
+             f"带内有效极点 {len(rows)} 个；可比较 {len(comparable)}；依次通过频率/阻尼/MAC：{len(frequency_ok)}/{len(damping_ok)}/{len(shape_ok)}；连续稳定 {len(stable)} 个"]
+    if not stable:
+        if not rows:
+            lines.append("所有阶次均未保留带内、负实部且阻尼在 0.001%~50% 的极点；请检查复数 FRF 相位/符号、实际覆盖及所选力参考，不只是调整频段。")
+        elif not frequency_ok:
+            lines.append("相邻模型阶次频率不稳定；建议在 CMIF 峰两侧选取包含完整共振带宽的较小频段，并检查输入参考与 FRF 质量。")
+        elif not damping_ok:
+            lines.append("频率接近，但阻尼在相邻阶次间不稳定；检查频率分辨率、泄漏、相干性及频段边界，不能仅凭幅值峰输出模态质量。")
+        elif not shape_ok:
+            lines.append("频率和阻尼接近，但振型 MAC 不足；检查混合敲击方向、测点映射、极性和噪声通道。")
+        else:
+            longest = max(p["stable_count"] for p in rows)
+            lines.append(f"已有相邻阶次匹配，但最长仅连续 {longest}/{settings.stable_orders} 阶；可在数据分辨率允许时提高最大阶次，或缩小至完整共振频段。")
+        lines.append("可在稳定图查看灰色极点并手动选择一个极点拟合；未连续稳定时只供检查，质量仍标记不可可靠估计。")
+    narrow = [p for p in rows if 2 * p["damping_ratio"] * p["frequency_hz"] < 2 * spacing]
+    if narrow:
+        lines.append("部分候选的半功率带宽不足两个频率间隔，阻尼与质量可能难以分辨；应增加采样记录长度，而不是只插值加密。")
+    return {"frequency_min_hz": float(f[0]), "frequency_max_hz": float(f[-1]),
+            "spacing_hz": spacing, "point_count": len(f), "pole_count": len(rows),
+            "stable_pole_count": len(stable), "lines": lines}
 
 
 def fit_selected_poles(data: ModalInput, poles: list[dict], *, cancel=None, progress=None) -> dict:
@@ -416,7 +478,8 @@ def identify_modes(data: ModalInput, *, cancel=None, progress=None) -> dict:
         result = {"fingerprint": data.fingerprint, "settings": asdict(data.settings), "frequency_hz": data.frequency_hz.copy(),
                   "measured": data.receptance.copy(), "reconstructed": None, "channel_errors": None,
                   "residual_coefficients": None, "modes": [], "automac": np.empty((0, 0)),
-                  "driving_index": data.driving_index, "warnings": list(data.warnings) + ["没有连续稳定极点，请检查频段或手动选点拟合"],
+                  "driving_index": data.driving_index, "warnings": list(data.warnings) + ["未达到连续稳定极点判据；请查看诊断详情和稳定图，未据此输出模态质量"],
                   "measurements": [{k: v for k, v in vars(m).items() if k not in {"frequency_hz", "values", "coherence"}} for m in data.measurements]}
     result["poles"] = rows
+    result["diagnostics"] = _identification_diagnostics(data, rows)
     return result
