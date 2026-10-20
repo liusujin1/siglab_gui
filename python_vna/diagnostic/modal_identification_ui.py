@@ -1011,10 +1011,11 @@ class ModalIdentificationMixin:
             self.modal_export_result_button.setEnabled(False)
 
     def _choose_export_identification(self):
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "导出模态结果", str(self._last_directory / "modal_results.csv"), "CSV (*.csv)")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "导出模态结果", str(self._modal_dialog_directory("export") / "modal_results.csv"), "CSV (*.csv)")
         if path:
             try:
                 self.export_identification_results(path)
+                self._remember_modal_dialog_path(path, "export")
             except (ValueError, OSError) as exc:
                 self._show_status(str(exc))
 

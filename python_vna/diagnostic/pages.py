@@ -4643,9 +4643,14 @@ class ModalShapePage(ModalCandidateMixin, ModalIdentificationMixin, DiagnosticPa
     LINE_HEADERS = ["启用", "起点", "终点", "来源"]
     POINT_CSV_HEADERS = ["point_id", "file_name", "x_ch", "y_ch", "z_ch", "x_scale", "y_scale", "z_scale", "x", "y", "z", "use"]
 
-    def __init__(self, parent=None, *, data_store=None):
+    def __init__(self, parent=None, *, data_store=None, directory_settings=None):
         super().__init__(parent)
         self._data_store = data_store
+        self._modal_directory_settings = (directory_settings if directory_settings is not None
+                                          else QtCore.QSettings("PythonVNA", "VIanalysis"))
+        recent = self._modal_directory_settings.value("modal/directories/last", "")
+        if recent and Path(str(recent)).is_dir():
+            self._last_directory = Path(str(recent))
         self.files: list[ModalFile] = []
         self.last_mode: dict[str, object] | None = None
         self._active_frequency: float | None = None
@@ -4695,12 +4700,12 @@ class ModalShapePage(ModalCandidateMixin, ModalIdentificationMixin, DiagnosticPa
 
         control_tab = QtWidgets.QWidget()
         control_layout = QtWidgets.QVBoxLayout(control_tab)
-        control_layout.setContentsMargins(8, 8, 8, 8)
-        control_layout.setSpacing(7)
+        control_layout.setContentsMargins(4, 4, 4, 4)
+        control_layout.setSpacing(4)
 
         file_button_grid = QtWidgets.QGridLayout()
         file_button_grid.setHorizontalSpacing(8)
-        file_button_grid.setVerticalSpacing(6)
+        file_button_grid.setVerticalSpacing(4)
         self.load_button = QtWidgets.QPushButton("加载文件")
         self.load_folder_button = QtWidgets.QPushButton("加载文件夹")
         self.delete_button = QtWidgets.QPushButton("删除文件")
@@ -4731,8 +4736,10 @@ class ModalShapePage(ModalCandidateMixin, ModalIdentificationMixin, DiagnosticPa
         file_button_grid.addWidget(self.clear_button, 1, 2)
         self.export_session_button = QtWidgets.QPushButton("导出模态会话")
         self.import_session_button = QtWidgets.QPushButton("导入模态会话")
-        file_button_grid.addWidget(self.export_session_button, 2, 0)
-        file_button_grid.addWidget(self.import_session_button, 2, 1, 1, 2)
+        session_actions = QtWidgets.QHBoxLayout()
+        session_actions.addWidget(self.import_session_button, 1)
+        session_actions.addWidget(self.export_session_button, 1)
+        file_button_grid.addLayout(session_actions, 2, 0, 1, 3)
         self.export_session_button.clicked.connect(lambda: self._choose_modal_session(export=True))
         self.import_session_button.clicked.connect(lambda: self._choose_modal_session(export=False))
         for column in range(3):
@@ -4742,7 +4749,7 @@ class ModalShapePage(ModalCandidateMixin, ModalIdentificationMixin, DiagnosticPa
         self.file_list = QtWidgets.QListWidget()
         self.file_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.file_list.setAlternatingRowColors(True)
-        self.file_list.setMinimumHeight(110)
+        self.file_list.setMinimumHeight(72)
         control_layout.addWidget(self.file_list, 1)
         control_scroll = QtWidgets.QScrollArea()
         control_scroll.setWidgetResizable(True)
@@ -4786,6 +4793,7 @@ class ModalShapePage(ModalCandidateMixin, ModalIdentificationMixin, DiagnosticPa
         for column, width in enumerate((38, 54, 92, 48, 48, 48, 52, 52, 52, 46, 46, 46)):
             self.point_table.setColumnWidth(column, width)
         point_layout.addWidget(self.point_table, 1)
+        self._install_modal_table_batch_menu(self.point_table)
         self.left_work_tabs.addTab(point_tab, "测点表")
 
         line_tab = QtWidgets.QWidget()
@@ -4828,6 +4836,7 @@ class ModalShapePage(ModalCandidateMixin, ModalIdentificationMixin, DiagnosticPa
         for column, width in enumerate((42, 76, 76, 68)):
             self.line_table.setColumnWidth(column, width)
         line_layout.addWidget(self.line_table, 1)
+        self._install_modal_table_batch_menu(self.line_table)
         self.left_work_tabs.addTab(line_tab, "连线表")
         self._build_identification_settings()
         left_splitter.addWidget(self.left_work_tabs)
@@ -4874,12 +4883,14 @@ class ModalShapePage(ModalCandidateMixin, ModalIdentificationMixin, DiagnosticPa
         set_button_role(self.delete_peak_button, "danger")
 
         freq_group, freq_layout = create_group_box("频率区", layout_type=QtWidgets.QVBoxLayout)
+        freq_layout.setContentsMargins(8, 10, 8, 6)
+        freq_layout.setSpacing(4)
         freq_group.setMinimumHeight(285)
         freq_group.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         frequency_controls = QtWidgets.QWidget()
         frequency_controls_layout = QtWidgets.QVBoxLayout(frequency_controls)
         frequency_controls_layout.setContentsMargins(0, 0, 0, 0)
-        frequency_controls_layout.setSpacing(6)
+        frequency_controls_layout.setSpacing(4)
         self.frequency_edit.setMinimumWidth(120)
         self.frequency_edit.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         for button in (
@@ -4907,7 +4918,7 @@ class ModalShapePage(ModalCandidateMixin, ModalIdentificationMixin, DiagnosticPa
 
         view_grid = QtWidgets.QGridLayout()
         view_grid.setHorizontalSpacing(6)
-        view_grid.setVerticalSpacing(5)
+        view_grid.setVerticalSpacing(4)
         view_grid.addWidget(QtWidgets.QLabel("方位角"), 0, 0)
         view_grid.addWidget(self.view_azimuth_spin, 0, 1)
         view_grid.addWidget(QtWidgets.QLabel("俯仰角"), 0, 2)
@@ -4921,14 +4932,12 @@ class ModalShapePage(ModalCandidateMixin, ModalIdentificationMixin, DiagnosticPa
         preview_settings_content = QtWidgets.QWidget()
         view_grid.setContentsMargins(0, 0, 0, 0)
         preview_settings_content.setLayout(view_grid)
-        self.modal_preview_dialog = self._modal_settings_dialog("预览设置", preview_settings_content, (480, 200))
-        self.modal_preview_settings_button = QtWidgets.QPushButton("预览设置…")
-        self.modal_preview_settings_button.clicked.connect(lambda: self._open_modal_settings_dialog(self.modal_preview_dialog))
-        frequency_controls_layout.addWidget(self.modal_preview_settings_button, 0, QtCore.Qt.AlignLeft)
+        self.modal_preview_settings_panel = preview_settings_content
+        frequency_controls_layout.addWidget(preview_settings_content)
 
         action_grid = QtWidgets.QGridLayout()
         action_grid.setHorizontalSpacing(6)
-        action_grid.setVerticalSpacing(5)
+        action_grid.setVerticalSpacing(4)
         action_grid.addWidget(self.find_peaks_button, 0, 0)
         action_grid.addWidget(self.extract_button, 0, 1)
         action_grid.addWidget(self.preview_button, 0, 2)
@@ -5032,7 +5041,7 @@ class ModalShapePage(ModalCandidateMixin, ModalIdentificationMixin, DiagnosticPa
         self.preview_button.clicked.connect(self.preview_mode)
         self.export_gif_button.clicked.connect(self._choose_export_gif)
         self.candidate_list.currentItemChanged.connect(lambda item, _previous: self._candidate_selected(item))
-        self.point_table.itemChanged.connect(lambda _item: self._mapping_changed())
+        self.point_table.itemChanged.connect(self._point_mapping_item_changed)
         self.line_table.itemChanged.connect(self._line_mapping_changed)
         self._update_layout_mode(self.width())
 
@@ -5050,11 +5059,13 @@ class ModalShapePage(ModalCandidateMixin, ModalIdentificationMixin, DiagnosticPa
             QtCore.QTimer.singleShot(0, self._set_initial_modal_split)
 
     def _set_initial_modal_split(self) -> None:
-        required = self.modal_settings_host.minimumSizeHint().height() + self.left_work_tabs.tabBar().sizeHint().height() + 8
+        required = max(self.modal_settings_host.minimumSizeHint().height(),
+                       *(self.left_work_tabs.widget(index).minimumSizeHint().height() for index in (1, 2)))
+        required += self.left_work_tabs.tabBar().sizeHint().height() + 4
         self.left_work_tabs.setMinimumHeight(max(200, required))
         available = self.modal_left_splitter.height() - self.modal_left_splitter.handleWidth()
         if available >= 620:
-            upper = max(240, required)
+            upper = max(216, required)
             self.modal_left_splitter.setSizes([upper, available - upper])
 
     def _build_ui(self) -> None:
@@ -5359,22 +5370,41 @@ class ModalShapePage(ModalCandidateMixin, ModalIdentificationMixin, DiagnosticPa
         paths, _filter = QtWidgets.QFileDialog.getOpenFileNames(
             self,
             "加载模态 VNA 文件",
-            str(self._last_directory),
+            str(self._modal_dialog_directory("import")),
             "VNA 文件 (*.vna *.mat);;所有文件 (*.*)",
         )
         if paths:
             self.load_paths([Path(path) for path in paths])
+            self._remember_modal_dialog_path(paths[-1], "import")
 
     def _choose_folder(self) -> None:
-        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "加载模态 VNA 文件夹", str(self._last_directory))
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "加载模态 VNA 文件夹", str(self._modal_dialog_directory("import")))
         if not folder:
             return
+        self._remember_modal_dialog_path(folder, "import", is_directory=True)
         folder_path = Path(folder)
         paths = sorted(folder_path.glob("*.vna")) + sorted(folder_path.glob("*.mat"))
         if not paths:
             self._show_status("所选文件夹内没有 .vna 或 .mat 文件")
             return
         self.load_paths(paths)
+
+    def _modal_dialog_directory(self, purpose: str) -> Path:
+        stored = self._modal_directory_settings.value(f"modal/directories/{purpose}", "")
+        for candidate in (stored, self._last_directory, Path.cwd(), Path.home()):
+            if candidate and Path(str(candidate)).is_dir():
+                return Path(str(candidate))
+        return Path.home()
+
+    def _remember_modal_dialog_path(self, path, purpose: str, *, is_directory=False) -> None:
+        directory = Path(path) if is_directory else Path(path).parent
+        if not directory.is_dir():
+            return
+        directory = directory.resolve()
+        self._last_directory = directory
+        for key in (purpose, "last"):
+            self._modal_directory_settings.setValue(f"modal/directories/{key}", str(directory))
+        self._modal_directory_settings.sync()
 
     def load_paths(self, paths: list[Path]) -> None:
         if self._data_store is not None:
@@ -5777,7 +5807,11 @@ class ModalShapePage(ModalCandidateMixin, ModalIdentificationMixin, DiagnosticPa
 
     def _choose_modal_session(self, *, export: bool) -> None:
         dialog = QtWidgets.QFileDialog.getSaveFileName if export else QtWidgets.QFileDialog.getOpenFileName
-        path, _filter = dialog(self, "导出模态会话" if export else "导入模态会话", str(self._last_directory), "模态会话 (*.vnamodal)")
+        purpose = "export" if export else "import"
+        initial = self._modal_dialog_directory(purpose)
+        if export:
+            initial /= "model.vnamodal"
+        path, _filter = dialog(self, "导出模态会话" if export else "导入模态会话", str(initial), "模态会话 (*.vnamodal)")
         if not path:
             return
         if not export and self.files:
@@ -5789,6 +5823,7 @@ class ModalShapePage(ModalCandidateMixin, ModalIdentificationMixin, DiagnosticPa
                 self.export_session(path if path.lower().endswith(".vnamodal") else path + ".vnamodal")
             else:
                 self.import_session(path)
+            self._remember_modal_dialog_path(path, purpose)
         except Exception as exc:
             QtWidgets.QMessageBox.warning(self, "模态会话操作失败", str(exc))
 
@@ -6341,12 +6376,13 @@ class ModalShapePage(ModalCandidateMixin, ModalIdentificationMixin, DiagnosticPa
         path, _filter = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "导出模态振型 GIF",
-            str(self._last_directory / default_name),
+            str(self._modal_dialog_directory("export") / default_name),
             "GIF 文件 (*.gif)",
         )
         if path:
             try:
                 self.export_mode_gif(path)
+                self._remember_modal_dialog_path(path, "export")
             except ValueError as exc:
                 self._show_status(str(exc))
 
@@ -6366,7 +6402,7 @@ class ModalShapePage(ModalCandidateMixin, ModalIdentificationMixin, DiagnosticPa
         path, _filter = QtWidgets.QFileDialog.getOpenFileName(
             self,
             "导入测点映射",
-            str(self._last_directory),
+            str(self._modal_dialog_directory("import")),
             "映射表 (*.xlsx *.csv);;Excel 文件 (*.xlsx);;CSV 文件 (*.csv);;所有文件 (*.*)",
         )
         if not path:
@@ -6376,14 +6412,14 @@ class ModalShapePage(ModalCandidateMixin, ModalIdentificationMixin, DiagnosticPa
         except Exception as exc:
             self._show_status(f"导入测点映射失败：{exc}")
             return
-        self._remember_paths([Path(path)])
+        self._remember_modal_dialog_path(path, "import")
         self._show_status(f"已导入测点映射：{count} 行")
 
     def _choose_export_mapping(self) -> None:
         path, _filter = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "导出测点映射",
-            str(self._last_directory / "point_mapping.xlsx"),
+            str(self._modal_dialog_directory("export") / "point_mapping.xlsx"),
             "Excel 文件 (*.xlsx);;CSV 文件 (*.csv)",
         )
         if not path:
@@ -6393,6 +6429,7 @@ class ModalShapePage(ModalCandidateMixin, ModalIdentificationMixin, DiagnosticPa
         except Exception as exc:
             self._show_status(f"导出测点映射失败：{exc}")
             return
+        self._remember_modal_dialog_path(path, "export")
         self._show_status(f"已导出测点映射：{Path(path).name}")
 
     def import_point_mapping(self, path: str | Path) -> int:
@@ -6691,9 +6728,92 @@ class ModalShapePage(ModalCandidateMixin, ModalIdentificationMixin, DiagnosticPa
             if start not in valid_points or end not in valid_points:
                 self.line_table.removeRow(row)
 
+    def _install_modal_table_batch_menu(self, table) -> None:
+        table.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        table.customContextMenuRequested.connect(lambda pos: self._show_modal_table_batch_menu(table, pos))
+        table.viewport().installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        if (event.type() == QtCore.QEvent.MouseButtonRelease and event.button() == QtCore.Qt.LeftButton
+                and getattr(self, "_modal_batch_checkbox_viewport", None) is watched):
+            self._modal_batch_checkbox_viewport = None
+            return True
+        if event.type() in (QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonDblClick):
+            self._modal_batch_checkbox_viewport = None
+            for table in (getattr(self, "point_table", None), getattr(self, "line_table", None)):
+                if table is None or watched is not table.viewport() or event.button() != QtCore.Qt.LeftButton:
+                    continue
+                pos = event.position().toPoint()
+                index = table.indexAt(pos)
+                selected = {item.row() for item in table.selectedIndexes()}
+                if not index.isValid() or index.column() != 0 or index.row() not in selected or len(selected) < 2:
+                    break
+                option = QtWidgets.QStyleOptionViewItem()
+                option.initFrom(table)
+                option.rect = table.visualRect(index)
+                table.itemDelegate().initStyleOption(option, index)
+                indicator = table.style().subElementRect(QtWidgets.QStyle.SE_ItemViewItemCheckIndicator, option, table)
+                if indicator.contains(pos):
+                    # Consume both events so Qt does not collapse the multi-row selection.
+                    self._modal_batch_checkbox_viewport = watched
+                    self._set_modal_rows_enabled(table, table.item(index.row(), 0).checkState() != QtCore.Qt.Checked)
+                    return True
+        return super().eventFilter(watched, event)
+
+    def _modal_table_batch_menu(self, table):
+        menu = QtWidgets.QMenu(table)
+        selected = bool(table.selectedIndexes())
+        for title, enabled in (("启用所选行", True), ("取消启用所选行", False)):
+            action = menu.addAction(title)
+            action.setEnabled(selected)
+            action.triggered.connect(lambda _checked=False, enabled=enabled: self._set_modal_rows_enabled(table, enabled))
+        return menu
+
+    def _show_modal_table_batch_menu(self, table, pos) -> None:
+        index = table.indexAt(pos)
+        if index.isValid() and not table.selectionModel().isRowSelected(index.row(), QtCore.QModelIndex()):
+            table.selectRow(index.row())
+        menu = self._modal_table_batch_menu(table)
+        menu.exec(table.viewport().mapToGlobal(pos))
+        menu.deleteLater()
+
+    def _set_modal_rows_enabled(self, table, enabled: bool) -> int:
+        rows = sorted({index.row() for index in table.selectedIndexes()})
+        if not rows:
+            self._show_status("请先选择要修改启用状态的行，可用 Ctrl/Shift 多选")
+            return 0
+        state = QtCore.Qt.Checked if enabled else QtCore.Qt.Unchecked
+        changed = 0
+        with QtCore.QSignalBlocker(table):
+            for row in rows:
+                item = table.item(row, 0)
+                if item is not None and item.checkState() != state:
+                    item.setCheckState(state)
+                    changed += 1
+        if changed:
+            if table is self.point_table:
+                self._mapping_changed()
+            else:
+                self._line_mapping_changed(None)
+            self._show_status(f"已{'启用' if enabled else '取消启用'}所选{'测点' if table is self.point_table else '连线'}：{len(rows)} 行")
+        return changed
+
+    def _point_mapping_item_changed(self, item) -> None:
+        if self._bulk_table_update:
+            return
+        selected = {index.row() for index in self.point_table.selectedIndexes()}
+        if item.column() == 0 and item.row() in selected and len(selected) > 1:
+            if self._set_modal_rows_enabled(self.point_table, item.checkState() == QtCore.Qt.Checked):
+                return
+        self._mapping_changed()
+
     def _line_mapping_changed(self, item: QtWidgets.QTableWidgetItem | None) -> None:
         if self._bulk_table_update:
             return
+        selected = {index.row() for index in self.line_table.selectedIndexes()}
+        if item is not None and item.column() == 0 and item.row() in selected and len(selected) > 1:
+            if self._set_modal_rows_enabled(self.line_table, item.checkState() == QtCore.Qt.Checked):
+                return
         if item is not None and item.column() in (1, 2):
             normalized = self._normalize_line_point_text(item.text())
             if normalized and normalized != item.text().strip():

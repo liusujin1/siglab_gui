@@ -307,10 +307,11 @@ class ModalCandidateMixin:
             raise ValueError("局部预览输入已变化，请重新拟合")
 
     def _choose_export_candidates(self):
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "导出候选及来源", str(self._last_directory / "modal_candidates.csv"), "CSV (*.csv)")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "导出候选及来源", str(self._modal_dialog_directory("export") / "modal_candidates.csv"), "CSV (*.csv)")
         if path:
             try:
                 self.export_modal_candidates(path)
+                self._remember_modal_dialog_path(path, "export")
             except (ValueError, OSError) as exc:
                 self._candidate_failure(str(exc))
 

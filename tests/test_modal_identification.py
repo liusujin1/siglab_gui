@@ -576,7 +576,8 @@ def test_modal_layout_expanded_controls_do_not_overlap_in_shell(modal_page, wind
             viewport = page.modal_frequency_scroll.viewport()
             for button in (page.apply_freq_button, page.find_peaks_button, page.extract_button,
                            page.preview_button, page.export_gif_button, page.delete_peak_button,
-                           page.view_reset_button):
+                           page.view_reset_button, page.view_azimuth_spin, page.view_elevation_spin,
+                           page.mode_gain_spin, page.gif_frame_count_spin):
                 assert viewport.rect().contains(QtCore.QRect(button.mapTo(viewport, QtCore.QPoint()), button.size()))
         page.modal_limit_frequency.setChecked(True)
         page.modal_frequency_min.setValue(2)
@@ -609,7 +610,6 @@ def test_modal_layout_expanded_controls_do_not_overlap_in_shell(modal_page, wind
         for button, dialog in ((page.modal_sources_button, page.modal_sources_dialog),
                                (page.modal_advanced_button, page.modal_advanced_dialog),
                                (page.modal_frequency_button, page.modal_frequency_dialog),
-                               (page.modal_preview_settings_button, page.modal_preview_dialog),
                                (details, page.modal_details_dialog)):
             button.click()
             app.processEvents()
@@ -635,6 +635,13 @@ def test_modal_layout_expanded_controls_do_not_overlap_in_shell(modal_page, wind
             dialog.accept()
             app.processEvents()
         assert page.modal_frequency_scroll.widget().height() >= page.modal_frequency_scroll.widget().minimumSizeHint().height()
+        for tab_index, table in ((1, page.point_table), (2, page.line_table)):
+            page.left_work_tabs.setCurrentIndex(tab_index)
+            app.processEvents()
+            tab_widget = page.left_work_tabs.widget(tab_index)
+            assert tab_widget.parentWidget().rect().contains(tab_widget.geometry())
+            assert tab_widget.rect().contains(bounds(table, tab_widget))
+        page.left_work_tabs.setCurrentIndex(3)
         for tab in (0, 1):
             page.modal_result_tabs.setCurrentIndex(tab)
             app.processEvents()
