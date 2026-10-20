@@ -17,13 +17,21 @@ function Write-JsonFile([string]$Path, $Value) {
     [IO.File]::WriteAllText($Path, ($Value | ConvertTo-Json -Depth 12) + "`n", [Text.UTF8Encoding]::new($false))
 }
 
-function Assert-NoLink([string]$Path) {
+function Assert-NoLink([string]$Path, [switch]$AllowCloud) {
     $cursor = [IO.Path]::GetFullPath($Path)
     while ($cursor) {
         if (Test-Path -LiteralPath $cursor) {
             $item = Get-Item -LiteralPath $cursor -Force
             if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-                throw "Linked or cloud-managed path is not supported here: $cursor"
+                $cloud = $false
+                if ($AllowCloud) {
+                    $details = & "$env:windir/System32/fsutil.exe" reparsepoint query $cursor 2>&1
+                    if ($LASTEXITCODE -eq 0 -and ($details -join ' ') -match '0x([0-9a-fA-F]{8})') {
+                        $tag = [Convert]::ToUInt32($Matches[1], 16)
+                        $cloud = ($tag -band [Convert]::ToUInt32('ffff0fff', 16)) -eq [Convert]::ToUInt32('9000001a', 16)
+                    }
+                }
+                if (-not $cloud) { throw "Linked or cloud-managed path is not supported here: $cursor" }
             }
         }
         $cursor = Split-Path -Parent $cursor
@@ -84,7 +92,8 @@ function Get-Entries($Manifest) {
     return @($Manifest.full) + @($Manifest.updates)
 }
 
-function Test-LanBundle([string]$Folder) {
+function Read-LanManifest([string]$Folder) {
+    Assert-NoLink (Join-Path $Folder 'manifest.json') -AllowCloud
     $manifest = Read-JsonFile (Join-Path $Folder 'manifest.json')
     Assert-Version $manifest.latest
     if ($manifest.product -ne 'PythonVNA Suite' -or $manifest.channel -ne 'stable' -or -not $manifest.full) {
@@ -99,13 +108,7 @@ function Test-LanBundle([string]$Folder) {
         }
         if (-not $seen.Add($entry.url)) { throw 'Duplicate package reference' }
         if (-not $entry.url.EndsWith("_$($entry.sha256).zip")) { throw 'Package name/hash mismatch' }
-        $path = Join-Path $Folder $entry.url
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing package: $path" }
-        if ((Get-Item -LiteralPath $path).Length -ne [long]$entry.size -or
-            (Get-Sha256 $path) -ne $entry.sha256) {
-            throw "Package integrity check failed: $path"
-        }
-        Test-LanZip $path
+        if ($entry.size -notmatch '^\d+$' -or [long]$entry.size -le 0) { throw 'Invalid package size' }
     }
     if ($manifest.full.url -notlike "LAN_PythonVNA_Suite_v$($manifest.latest)_*") { throw 'Full package version mismatch' }
     $bases = [Collections.Generic.HashSet[string]]::new()
@@ -116,6 +119,20 @@ function Test-LanBundle([string]$Folder) {
             $entry.url -notlike "LAN_PythonVNA_Update_v$($entry.from)_to_v$($entry.to)_*") {
             throw 'Invalid incremental version route'
         }
+    }
+    return $manifest
+}
+
+function Test-LanBundle([string]$Folder) {
+    $manifest = Read-LanManifest $Folder
+    foreach ($entry in (Get-Entries $manifest)) {
+        $path = Join-Path $Folder $entry.url
+        Assert-NoLink $path -AllowCloud
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing package: $path" }
+        if ((Get-Item -LiteralPath $path).Length -ne [long]$entry.size -or (Get-Sha256 $path) -ne $entry.sha256) {
+            throw "Package integrity check failed: $path"
+        }
+        Test-LanZip $path
     }
     return $manifest
 }

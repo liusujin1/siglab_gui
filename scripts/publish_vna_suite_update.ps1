@@ -29,6 +29,8 @@ param(
 
     [switch]$SkipFullUpload,
 
+    [switch]$SkipLanExport,
+
     [int]$MaxIncrementalBases = 5,
 
     [switch]$PruneLocalArtifacts,
@@ -683,6 +685,7 @@ if ($PublishTransport -eq 'Https') {
 
     Write-Host "Published PythonVNA Suite v$latestVersion over HTTPS"
     Write-Host "Manifest: $BaseUrl/manifest.json"
+    & "$PSScriptRoot/export_published_lan_update.ps1" -ManifestPath (Join-Path $distRoot 'manifest.json') -SkipLanExport:$SkipLanExport
     if ($PruneLocalArtifacts) {
         $removedItems = Remove-LocalReleaseArtifacts -CurrentVersion $latestVersion -KeepCount $KeepLocalReleases
         if ($removedItems.Count -gt 0) {
@@ -1087,6 +1090,7 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host "Published PythonVNA Suite v$latestVersion"
 Write-Host "Manifest: $BaseUrl/manifest.json"
+& "$PSScriptRoot/export_published_lan_update.ps1" -ManifestPath (Join-Path $distRoot 'manifest.json') -SkipLanExport:$SkipLanExport
 
 if ($PruneLocalArtifacts) {
     $removedItems = Remove-LocalReleaseArtifacts -CurrentVersion $latestVersion -KeepCount $KeepLocalReleases

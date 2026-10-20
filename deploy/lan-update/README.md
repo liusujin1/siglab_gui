@@ -12,21 +12,38 @@
 D:\SynologyDrive\codex\vna\dist\manifest.json
 ```
 
-默认输出到清单旁的 `LAN_v版本号`，已有同名目录时停止，避免覆盖。
+HTTPS 和 SSH 公网发布成功后均自动导出到清单旁的 `LAN_v版本号_delivery`。
+发布脚本支持 `-SkipLanExport`；独立导出不会重新上传公网版本。
+同名目录仅在新格式完整、校验通过且源清单与工具内容一致时复用；旧格式或不同内容拒绝覆盖。
 也可以在 PowerShell 指定新的输出目录：
 
 ```powershell
 .\export.ps1 -ManifestPath 'D:\SynologyDrive\codex\vna\dist\manifest.json' -OutputPath 'D:\LANRelease\v3.2.23'
 ```
 
-成功后，将整个输出目录复制到 U 盘，必须包括全部 ZIP、manifest.json 和 tools 文件夹。
-只有出现 `LAN export verified` 才表示导出成功；失败的输出目录不可用于发布。
+**默认先把整个交付目录打成一个 ZIP，再对这个整体 ZIP 分片，减少逐个导入的次数。**
+完整包、增量包、manifest.json 和全部 tools 都在整体 ZIP 内，不再单独携带这些小文件。
+最终目录只有 `LAN_v版本号.zip.part00001` 等分片，以及一个 `deploy_to_server.bat`。
+例如整体压缩包介于 49 MB 和 98 MB 时，只需带入 **2 个分片 + 1 个部署入口，共 3 个文件**。
+传输校验信息和解包程序内嵌在部署入口中，没有额外的 JSON、说明或工具文件需要逐个导入。
+每个文件都不超过 49,000,000 字节（十进制 49 MB）；这是单文件上限，不是整批上限。
+默认使用最大分片大小，减少文件个数；新版工具仍可导入之前的 45 MB 分片。
+分片不会减少交付总量，无需手动运行 7-Zip、拆包或合包，服务器只用系统自带工具。
+旧的散文件布局仅作为兼容选项：`-DeliveryLayout Loose`，日常不需要使用。
+出现 `LAN export verified` 或 `LAN export reused and verified` 才表示成功。
+在唯一 `.staging` 目录生成与校验，成功才改名；失败保留 export-error.log 和暂存目录，
+不要交付失败目录。公网成功但 LAN 失败会分别报告并返回非零，只需重试独立导出。
 
 导出会重新生成 ZIP，移除任何位置的 update_config.json 及删除清单中的对应项，
 重新计算 SHA-256。清单使用相对下载地址，文件名包含内容哈希，与公网包互不混用。
 包内 VERSION.txt、exe 和业务代码不修改。更早版本没有匹配增量包时会下载完整 ZIP。
 
 ## 2. 服务器首次部署
+
+下面是从未安装过更新站点的首次操作，已有站点日常只需执行第 3 节。
+紧凑交付需要单独取出安装/配置工具时，先运行 `deploy_to_server.bat --extract-only`，
+按显示的 `EXTRACTED_BUNDLE` 路径找到解包后的 tools；这个模式不提权、不安装、不发布。
+下文 tools 路径均指解包后的目录，不需要逐个从外网带入。
 
 先由管理员确认固定 IPv4 地址及允许访问的客户端网段。端口默认 8095。
 在服务器上右键 tools\install_server.bat，选择“以管理员身份运行”，输入 IP 和 CIDR 网段。
@@ -52,14 +69,30 @@ D:\SynologyDrive\codex\vna\dist\manifest.json
 
 ## 3. 每次从 U 盘导入
 
-以管理员身份运行 tools\import_from_usb.bat，输入 U 盘上包含 manifest.json 的目录。
-若服务器目录不是默认值，用：
+日常双击交付目录根部 `deploy_to_server.bat`，确认管理员授权，取消即退出。
+根据自身位置找包，无需输入版本路径，支持中文、空格和不同 U 盘盘符。
+先校验分片并流式合并整个交付 ZIP，在本机临时目录解包，随后调用原来的部署流程。
+不会向 U 盘写入合并文件；所有分片必须和本次生成的部署入口放在同一个目录。
+首次识别已有 IIS 站点，验证根目录标记、server.json、物理路径和绑定；
+无法唯一确定时输入一次现有服务根目录，配置保存至
+`%ProgramData%\PythonVNA\LANDeployment\deployment.json`，仅管理员和 SYSTEM 可写。
+后续仍验证配置；站点迁移后由管理员检查并移除该配置，再重新选择。
+不重装 IIS、不修改防火墙、不增加外网连接、不修改源交付文件。
+解包后的手动入口 tools\import_from_usb.bat 保留，兼容旧完整 ZIP 和旧散文件分片目录。
+需要手动指定服务器目录时，先用 `--extract-only` 解包，再指定还原的 bundle 目录：
 
 ```powershell
 .\import.ps1 -BundlePath 'E:\LAN_v3.2.23' -ServerRoot 'C:\PythonVNAUpdate'
 ```
 
-导入先校验所有文件，复制到服务器暂存区，再次校验后放入下载目录，最后原子替换清单。
+导入校验清单、分片顺序/大小/SHA-256 和完整包哈希，并检查磁盘空间
+（系统临时盘需容纳整体 ZIP + 解包目录 + 16 MiB 余量；服务器部署盘另需下述空间）。
+（全部包大小的两倍加 16 MiB 余量）。流式合并到非公开 staging 唯一目录，
+再次校验正常 ZIP 内容，准备所有下载包，最后原子替换客户端清单。
+客户端仍下载正常 ZIP，不读取分片或 transport.json。
+进度显示 Validate / Merge / Publish；日志保存在服务器 logs，失败保留暂存数据，
+重试另建目录，成功清理本次暂存。磁盘发布和 HTTP 校验分别显示；
+退出码 2 表示磁盘发布成功但 HTTP 验证失败，0 表示两者均成功。
 导入期间原清单不变，之前的下载仍可使用。损坏包、越界路径、配置覆盖、降级被拒绝。
 相同版本、相同内容可重复导入；同版本不同内容必须另发新版本。
 导入进程中断后直接重跑，不要手动删除 import.lock；锁随进程退出自动释放。
@@ -70,6 +103,9 @@ staging 中未完成的目录及 public 内 .pending 文件不公开、不自动
 需要恢复时从保留的 U 盘备份取回。不要清理 history、根目录标记或当前清单。
 
 ## 4. 每台客户端首次配置
+
+上线验收：Server 2019 实机确认 UAC（含取消）、IIS 绑定和权限、内网其他电脑的
+HTTP 下载和软件更新。本机隔离验证不能替代现场验收。
 
 关闭两个软件，运行 tools\configure_client.bat：
 

@@ -79,7 +79,8 @@ if /I "%MODE%"=="full" (
 set "EXITCODE=%ERRORLEVEL%"
 echo.
 if not "%EXITCODE%"=="0" (
-    echo Publish failed with exit code %EXITCODE%.
+    echo Publish or LAN export incomplete; exit code %EXITCODE%. Check the separate stage results above.
+    echo If PUBLIC PUBLICATION succeeded, retry LAN export only; do not upload again.
 ) else (
     echo Publish finished successfully.
 )

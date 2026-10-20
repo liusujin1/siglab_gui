@@ -1,13 +1,22 @@
 param([string]$BundlePath = '', [string]$ServerRoot = 'C:\PythonVNAUpdate', [int]$KeepReleases = 2)
-. "$PSScriptRoot/common.ps1"
+. "$PSScriptRoot/transfer.ps1"
 if (-not $BundlePath) { $BundlePath = Read-Host 'USB bundle folder (contains manifest.json)' }
 if ($KeepReleases -lt 2) { throw 'KeepReleases must be at least 2' }
-$BundlePath = (Resolve-Path -LiteralPath $BundlePath).Path
+$BundlePath = (Get-Item -LiteralPath $BundlePath).FullName
 $ServerRoot = Initialize-LanRoot $ServerRoot
 $lockPath = Join-Path $ServerRoot 'import.lock'
-$lock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+Assert-NoLink $lockPath
+$logs = Join-Path $ServerRoot 'logs'
+Assert-NoLink $logs
+[void][IO.Directory]::CreateDirectory($logs)
+$logPath = Join-Path $logs ('import-' + [guid]::NewGuid().ToString('N') + '.log')
+$lock = $null
 try {
-    $manifest = Test-LanBundle $BundlePath
+    $lock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    Write-Host '[Validate] Checking delivery files'
+    $splitBundle = Test-Path -LiteralPath (Join-Path $BundlePath 'transport.json')
+    if ($splitBundle) { $manifest = Test-LanTransfer $BundlePath }
+    else { $manifest = Test-LanBundle $BundlePath }
     $public = Join-Path $ServerRoot 'public/pythonvna'
     $currentPath = Join-Path $public 'manifest.json'
     Assert-NoLink $currentPath
@@ -19,13 +28,18 @@ try {
             throw 'Same version has different content; publish a new version'
         }
     }
+    $required = [long]16777216
+    foreach ($entry in (Get-Entries $manifest)) { $required += 2 * [long]$entry.size }
+    Assert-LanSpace $ServerRoot $required
     $stage = Join-Path $ServerRoot ('staging/' + [guid]::NewGuid().ToString('N'))
     [void][IO.Directory]::CreateDirectory($stage)
-    foreach ($entry in (Get-Entries $manifest)) {
+    if ($splitBundle) { Restore-LanTransfer $BundlePath $stage }
+    else { foreach ($entry in (Get-Entries $manifest)) {
         Copy-Item -LiteralPath (Join-Path $BundlePath $entry.url) -Destination (Join-Path $stage $entry.url)
-    }
+    } }
     Write-JsonFile (Join-Path $stage 'manifest.json') $manifest
     [void](Test-LanBundle $stage)
+    Write-Host '[Publish] Preparing immutable packages; manifest switches last'
     foreach ($entry in (Get-Entries $manifest)) {
         $destination = Join-Path $public $entry.url
         Assert-NoLink $destination
@@ -52,6 +66,7 @@ try {
     [IO.File]::Copy((Join-Path $stage 'manifest.json'), $manifestPending)
     Set-AtomicFile $manifestPending $currentPath
     Write-Host "Published LAN version $($manifest.latest)"
+    [IO.File]::WriteAllText($logPath, "Disk publication succeeded: $($manifest.latest)")
     try {
         $histories = @(Get-ChildItem -LiteralPath (Join-Path $ServerRoot 'history') -File |
             Where-Object { $_.Name -match '^\d+\.\d+\.\d+(\.\d+)?\.json$' -and
@@ -72,4 +87,8 @@ try {
         foreach ($file in (Get-ChildItem -LiteralPath $stage -File)) { Remove-Item -LiteralPath $file.FullName }
         [IO.Directory]::Delete($stage)
     } catch { Write-Warning "Publication succeeded; cleanup incomplete: $_" }
-} finally { $lock.Dispose() }
+} catch {
+    [IO.File]::WriteAllText($logPath, ($_ | Out-String) + [Environment]::NewLine + "Staging: $stage")
+    Write-Warning "Import failed; log: $logPath"
+    throw
+} finally { if ($lock) { $lock.Dispose() } }
