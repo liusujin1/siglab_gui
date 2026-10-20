@@ -4890,7 +4890,8 @@ class ModalShapePage(ModalCandidateMixin, ModalIdentificationMixin, DiagnosticPa
         frequency_controls = QtWidgets.QWidget()
         frequency_controls_layout = QtWidgets.QVBoxLayout(frequency_controls)
         frequency_controls_layout.setContentsMargins(0, 0, 0, 0)
-        frequency_controls_layout.setSpacing(4)
+        frequency_controls_layout.setSpacing(3)
+        frequency_controls_layout.setAlignment(QtCore.Qt.AlignTop)
         self.frequency_edit.setMinimumWidth(120)
         self.frequency_edit.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         for button in (
@@ -4918,7 +4919,7 @@ class ModalShapePage(ModalCandidateMixin, ModalIdentificationMixin, DiagnosticPa
 
         view_grid = QtWidgets.QGridLayout()
         view_grid.setHorizontalSpacing(6)
-        view_grid.setVerticalSpacing(4)
+        view_grid.setVerticalSpacing(3)
         view_grid.addWidget(QtWidgets.QLabel("方位角"), 0, 0)
         view_grid.addWidget(self.view_azimuth_spin, 0, 1)
         view_grid.addWidget(QtWidgets.QLabel("俯仰角"), 0, 2)
@@ -4937,7 +4938,7 @@ class ModalShapePage(ModalCandidateMixin, ModalIdentificationMixin, DiagnosticPa
 
         action_grid = QtWidgets.QGridLayout()
         action_grid.setHorizontalSpacing(6)
-        action_grid.setVerticalSpacing(4)
+        action_grid.setVerticalSpacing(3)
         action_grid.addWidget(self.find_peaks_button, 0, 0)
         action_grid.addWidget(self.extract_button, 0, 1)
         action_grid.addWidget(self.preview_button, 0, 2)
@@ -4955,6 +4956,8 @@ class ModalShapePage(ModalCandidateMixin, ModalIdentificationMixin, DiagnosticPa
         self.modal_frequency_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         self.modal_frequency_scroll.setMinimumHeight(72)
         self.modal_frequency_scroll.setWidget(frequency_controls)
+        self.modal_frequency_controls = frequency_controls
+        frequency_controls.installEventFilter(self)
         freq_layout.addWidget(self.modal_frequency_scroll, 1)
 
         self.candidate_list = QtWidgets.QListWidget()
@@ -5059,6 +5062,7 @@ class ModalShapePage(ModalCandidateMixin, ModalIdentificationMixin, DiagnosticPa
             QtCore.QTimer.singleShot(0, self._set_initial_modal_split)
 
     def _set_initial_modal_split(self) -> None:
+        self._update_modal_frequency_height()
         required = max(self.modal_settings_host.minimumSizeHint().height(),
                        *(self.left_work_tabs.widget(index).minimumSizeHint().height() for index in (1, 2)))
         required += self.left_work_tabs.tabBar().sizeHint().height() + 4
@@ -6728,12 +6732,19 @@ class ModalShapePage(ModalCandidateMixin, ModalIdentificationMixin, DiagnosticPa
             if start not in valid_points or end not in valid_points:
                 self.line_table.removeRow(row)
 
+    def _update_modal_frequency_height(self) -> None:
+        height = max(72, self.modal_frequency_controls.minimumSizeHint().height())
+        self.modal_frequency_scroll.setMaximumHeight(height + 2 * self.modal_frequency_scroll.frameWidth())
+
     def _install_modal_table_batch_menu(self, table) -> None:
         table.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         table.customContextMenuRequested.connect(lambda pos: self._show_modal_table_batch_menu(table, pos))
         table.viewport().installEventFilter(self)
 
     def eventFilter(self, watched, event):
+        if (watched is getattr(self, "modal_frequency_controls", None)
+                and event.type() == QtCore.QEvent.LayoutRequest):
+            self._update_modal_frequency_height()
         if (event.type() == QtCore.QEvent.MouseButtonRelease and event.button() == QtCore.Qt.LeftButton
                 and getattr(self, "_modal_batch_checkbox_viewport", None) is watched):
             self._modal_batch_checkbox_viewport = None

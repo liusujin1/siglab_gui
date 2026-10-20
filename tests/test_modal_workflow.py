@@ -137,6 +137,24 @@ def test_session_import_button_precedes_export_and_preview_settings_are_inline(p
         assert spin.isVisible()
 
 
+def test_frequency_rows_stay_compact_when_window_grows(page):
+    rows = (page.frequency_edit, page.view_azimuth_spin, page.mode_gain_spin,
+            page.find_peaks_button, page.export_gif_button)
+    geometries = []
+    page.show()
+    for height in (720, 1000):
+        page.resize(1400, height)
+        QtWidgets.QApplication.processEvents()
+        QtWidgets.QApplication.processEvents()
+        positions = [(item.mapTo(page.modal_frequency_controls, QtCore.QPoint()).y(), item.height())
+                     for item in rows]
+        for (top, row_height), (next_top, _) in zip(positions, positions[1:]):
+            assert 0 <= next_top - top - row_height <= 6
+        assert page.modal_frequency_scroll.height() <= page.modal_frequency_controls.minimumSizeHint().height()
+        geometries.append(positions)
+    assert geometries[0] == geometries[1]
+
+
 def test_point_selection_can_be_enabled_and_disabled_with_one_refresh(page, monkeypatch):
     refresh = Mock(wraps=page._mapping_changed)
     monkeypatch.setattr(page, "_mapping_changed", refresh)
