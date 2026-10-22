@@ -1109,7 +1109,7 @@ class DiagnosticAppTests(unittest.TestCase):
 
         self.assertEqual(page.files[0].table.metadata["cangfu_mode"], "transfer")
         self.assertEqual(set(page._plot_curves[page.cangfu_time_plot]), {"Acceleration Z 传递函数"})
-        self.assertEqual(page._plot_curves[page.cangfu_psd_plot], {})
+        self.assertEqual(set(page._plot_curves[page.cangfu_psd_plot]), {"Acceleration Z 传递函数"})
 
     def test_trace_page_dedupes_cangfu_txt_mat_sidecar_pair(self):
         from scipy.io import savemat

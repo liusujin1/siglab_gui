@@ -1212,6 +1212,8 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         self.foundation_vib_file_combo = QtWidgets.QComboBox()
         self.foundation_stiff_file_combo = QtWidgets.QComboBox()
         self.foundation_vib_edit = QtWidgets.QLineEdit("2,3,4")
+        self._foundation_auto_vib_channels = "2,3,4"
+        self.foundation_vib_edit.setToolTip("选择振动响应通道。纯时域数据按加速度计算 PSD；未提供单位时按 m/s^2 处理。")
         self.foundation_resp_edit = QtWidgets.QLineEdit("4")
         self.foundation_vib_edit.setMinimumWidth(64)
         self.foundation_vib_edit.setMaximumWidth(86)
@@ -3255,14 +3257,17 @@ class AnalysisWorkbench(QtWidgets.QWidget):
     def _apply_loaded_dataset_ui_defaults(self, dataset: AnalysisDataset) -> None:
         if not hasattr(self, "foundation_vib_edit"):
             return
-        if str(dataset.metadata.get("source", "")) != "floor_response_eu_ascii":
-            return
         current = self.foundation_vib_edit.text().strip().replace(" ", "")
-        if current not in {"", "2,3,4"}:
+        if current not in {"", self._foundation_auto_vib_channels}:
             return
-        channel_count = min(3, len(dataset.series))
-        if channel_count >= 1:
-            self.foundation_vib_edit.setText(",".join(str(index) for index in range(1, channel_count + 1)))
+        time_only = not dataset.autospectrum and (bool(dataset.channels) or dataset.is_continuous)
+        first = 1 if (time_only or len(dataset.series) == 1
+                      or str(dataset.metadata.get("source", "")) == "floor_response_eu_ascii") else 2
+        channels = range(first, min(first + 3, len(dataset.series) + 1))
+        default = ",".join(str(index) for index in channels)
+        if default:
+            self.foundation_vib_edit.setText(default)
+            self._foundation_auto_vib_channels = default
 
     def set_current_measurement_provider(self, provider) -> None:
         self._current_measurement_provider = provider
@@ -3740,9 +3745,16 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         finally:
             self.foundation_vib_file_combo.blockSignals(False)
             self.foundation_stiff_file_combo.blockSignals(False)
+        dataset = self._foundation_selected_dataset(self.foundation_vib_file_combo)
+        if dataset is not None:
+            self._apply_loaded_dataset_ui_defaults(dataset)
 
     def _on_foundation_file_combo_changed(self, combo: QtWidgets.QComboBox) -> None:
         self._update_foundation_file_combo_tooltip(combo)
+        if combo is self.foundation_vib_file_combo:
+            dataset = self._foundation_selected_dataset(combo)
+            if dataset is not None:
+                self._apply_loaded_dataset_ui_defaults(dataset)
         self._auto_plot_from_control_change()
 
     @staticmethod
@@ -5127,7 +5139,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         f, psd = self._psd_for_series(dataset, series, scale=float(series.scale or 1.0))
         if f.size < 2:
             return np.array([], dtype=float), np.array([], dtype=float)
-        return compute_third_octave_velocity_rms(f, psd, dataset.rbw_hz if dataset.rbw_hz > 0.0 else _infer_rbw(f))
+        return compute_third_octave_velocity_rms(f, psd, _infer_rbw(f))
 
     def _transfer_curve(
         self,
@@ -7240,8 +7252,6 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             if channel_number < 1 or channel_number > len(dataset.series):
                 continue
             series = dataset.series[channel_number - 1]
-            if series.channel_key not in dataset.autospectrum:
-                continue
             centers, velocity = self._foundation_vibration_curve(dataset, series)
             if centers.size < 1:
                 continue
@@ -9553,6 +9563,8 @@ def _foundation_vibration_channel_name(
     channel_number: int,
     fallback: str,
 ) -> str:
+    if not dataset.autospectrum and (bool(dataset.channels) or dataset.is_continuous):
+        return fallback or f"Ch {channel_number}"
     if (
         str(dataset.metadata.get("source", "")) == "floor_response_eu_ascii"
         and str(dataset.metadata.get("plot_kind", "")) == "psd"

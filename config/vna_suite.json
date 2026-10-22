@@ -112,6 +112,7 @@
         "tests/test_modal_identification.py",
         "tests/test_modal_workflow.py",
         "tests/test_plot_usability.py",
+        "tests/test_foundation_time_and_cangfu.py",
         "tests/test_modal_candidates.py"
       ],
       "tests": [
@@ -121,6 +122,7 @@
         "tests/test_modal_identification.py",
         "tests/test_modal_workflow.py",
         "tests/test_plot_usability.py",
+        "tests/test_foundation_time_and_cangfu.py",
         "tests/test_modal_candidates.py"
       ]
     }

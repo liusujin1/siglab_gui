@@ -3345,6 +3345,16 @@ class TraceAnalysisPage(DiagnosticPage):
             curves.append(CurvePair(name, x, y, x_label, "工程值"))
         return curves
 
+    def _selected_cangfu_phase_curves(self, current: TraceAnalysisFile) -> list[CurvePair]:
+        phase_pairs = self._cangfu_phase_pairs(current)
+        transfer_pairs = self._cangfu_transfer_pairs(current)
+        selected = {item.text() for item in self.cangfu_channel_list.selectedItems()}
+        start, end = self._slice_bounds_for_file(current, "cangfu")
+        return [CurvePair(transfer_pairs[index].label, np.asarray(pair.x)[start:end], np.asarray(pair.y)[start:end],
+                          pair.x_label, pair.y_label)
+                for index, pair in enumerate(phase_pairs)
+                if index < len(transfer_pairs) and (not selected or transfer_pairs[index].label in selected)]
+
     def _psd_curves(self, current: TraceAnalysisFile, curves: list[CurvePair]) -> list[CurvePair]:
         psd_curves: list[CurvePair] = []
         fs = max(float(current.sample_rate), 1.0)
@@ -3480,6 +3490,11 @@ class TraceAnalysisPage(DiagnosticPage):
             selected_files[0],
         )
         transfer_mode = bool(self._cangfu_transfer_pairs(reference))
+        previous_mode = self.cangfu_time_plot.property("cangfuTransferMode")
+        if previous_mode is not None and previous_mode != transfer_mode:
+            self._clear_plot_widget(self.cangfu_time_plot)
+            self._clear_plot_widget(self.cangfu_psd_plot)
+        self.cangfu_time_plot.setProperty("cangfuTransferMode", transfer_mode)
         compatible_files = [
             current
             for current in selected_files
@@ -3506,18 +3521,25 @@ class TraceAnalysisPage(DiagnosticPage):
             plotted = self._plot_trace_curves_on_widget(
                 self.cangfu_time_plot,
                 curves,
-                title=f"Cangfu Trace 传递函数 - {title_source}",
-                x_label=curves[0].x_label,
-                y_label=curves[0].y_label,
+                title=f"Cangfu Trace 传递函数幅频响应 - {title_source}",
+                x_label="频率 (Hz)",
+                y_label="幅值 (dB)",
                 log_x=True,
                 log_y=False,
                 subplots=subplots,
                 hold=hold,
             )
-            self._clear_plot_widget(self.cangfu_psd_plot)
-            self.cangfu_psd_plot.setTitle("Cangfu Trace PSD - 传递函数模式不适用")
-            self.cangfu_psd_plot.setLabel("bottom", "Frequency (Hz)")
-            self.cangfu_psd_plot.setLabel("left", "PSD")
+            phase_curves = [curve for current in compatible_files
+                            for curve in self._curves_with_file_display_name(
+                                current, self._selected_cangfu_phase_curves(current), force=multiple_files)]
+            self._plot_trace_curves_on_widget(
+                self.cangfu_psd_plot, phase_curves,
+                title=f"Cangfu Trace 相频响应 - {title_source}" if phase_curves else "Cangfu Trace 相频响应 - 未提供相位",
+                x_label="频率 (Hz)", y_label="相位 (deg)", log_x=True,
+                subplots=subplots, hold=hold and bool(phase_curves),
+            )
+            if phase_curves and not subplots:
+                self.cangfu_psd_plot.setYRange(-180.0, 180.0, padding=0.02)
             self._update_cangfu_context(reference, plotted)
             self._show_status(f"已绘制 Cangfu Trace 传递函数：{plotted} 条，文件：{len(compatible_files)} 个")
             return
@@ -3956,8 +3978,10 @@ class TraceAnalysisPage(DiagnosticPage):
         self.cangfu_settings_group.setEnabled(current is not None)
         self.cangfu_x_axis_combo.setEnabled(True)
         transfer_mode = current is not None and bool(self._cangfu_transfer_pairs(current))
-        self.cangfu_time_window_button.setText("传函图" if transfer_mode else "时域图")
-        self.cangfu_psd_window_button.setEnabled(not transfer_mode)
+        self.cangfu_time_window_button.setText("幅频图" if transfer_mode else "时域图")
+        self.cangfu_psd_window_button.setText("相频图" if transfer_mode else "PSD图")
+        self.cangfu_psd_window_button.setEnabled(not transfer_mode or bool(self._cangfu_phase_pairs(current)))
+        self.cangfu_psd_window_button.setToolTip("文件未提供相位数据" if transfer_mode and not self._cangfu_phase_pairs(current) else "")
         if current is None:
             self._configure_range_controls(self.cangfu_range_start, self.cangfu_range_end, 1, (1, 1))
             self.cangfu_selected_label.setText("当前 Cangfu 文件：未选择")
@@ -4276,8 +4300,17 @@ class TraceAnalysisPage(DiagnosticPage):
             }
             default_name = default_names.get(plot, "ide_trans_plot.csv")
         elif self.tabs.currentWidget() is self.cangfu_tab:
-            plot = self.cangfu_psd_plot if self._plot_curves.get(self.cangfu_psd_plot) else self.cangfu_time_plot
-            default_name = "cangfu_trace_plot.csv"
+            plots = (self.cangfu_time_plot, self.cangfu_psd_plot)
+            current = self.current_file()
+            transfer_mode = current is not None and bool(self._cangfu_transfer_pairs(current))
+            fallback = self.cangfu_time_plot if transfer_mode else self.cangfu_psd_plot
+            plot = self._active_plot if self._active_plot in plots else fallback
+            if not self._plot_curves.get(plot):
+                plot = next((candidate for candidate in plots if self._plot_curves.get(candidate)), fallback)
+            if transfer_mode:
+                default_name = "cangfu_transfer_phase.csv" if plot is self.cangfu_psd_plot else "cangfu_transfer_magnitude.csv"
+            else:
+                default_name = "cangfu_trace_plot.csv"
         elif self.tabs.currentWidget() is self.hac_tab:
             plot = self.hac_plot
             default_name = "hac_trace_plot.csv"
@@ -4559,6 +4592,11 @@ class TraceAnalysisPage(DiagnosticPage):
         if not isinstance(pairs, list):
             return []
         return [pair for pair in pairs if isinstance(pair, CurvePair)]
+
+    @staticmethod
+    def _cangfu_phase_pairs(current: TraceAnalysisFile) -> list[CurvePair]:
+        pairs = current.table.metadata.get("cangfu_phase_pairs")
+        return [pair for pair in pairs if isinstance(pair, CurvePair)] if isinstance(pairs, list) else []
 
     def _configure_range_controls(
         self,

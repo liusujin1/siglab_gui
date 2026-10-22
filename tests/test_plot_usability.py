@@ -231,7 +231,8 @@ def test_cangfu_transfer_button_matches_actual_plot_and_restores_time_mode(app):
     current = TraceAnalysisFile(table, "cangfu_trace", np.array([]), {}, 100.)
     try:
         page._refresh_cangfu_controls(current)
-        assert page.cangfu_time_window_button.text() == "传函图"
+        assert page.cangfu_time_window_button.text() == "幅频图"
+        assert page.cangfu_psd_window_button.text() == "相频图"
         assert not page.cangfu_psd_window_button.isEnabled()
         page._plot_cangfu_current(current)
         page._open_plot_window(page.cangfu_time_plot, "Cangfu Trace 时域图")
