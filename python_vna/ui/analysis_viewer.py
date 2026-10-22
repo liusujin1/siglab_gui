@@ -210,6 +210,16 @@ class AnalysisLoadTask(QtCore.QRunnable):
         self.signals.finished.emit(cancelled or self._cancelled.is_set())
 
 
+class AnalysisPlotItem(pg.PlotItem):
+    def addItem(self, item, *args, **kwargs):  # noqa: N802 - pyqtgraph override
+        if isinstance(item, pg.PlotDataItem) and item.xData is not None and item.xData.size >= 512:
+            pen = item.curve.opts.get("pen")
+            if pen is not None and pen.style() == QtCore.Qt.SolidLine and pen.isSolid():
+                # Dense translucent paths are costly to stroke even with only a few thousand points.
+                item.curve.setSegmentedLineMode("on")
+        super().addItem(item, *args, **kwargs)
+
+
 class AnalysisWorkbench(QtWidgets.QWidget):
     def __init__(
         self,
@@ -544,7 +554,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
 
     def _create_plot_widget(self, title: str = "") -> pg.PlotWidget:
         view_box = VnaViewBox()
-        plot_item = pg.PlotItem(
+        plot_item = AnalysisPlotItem(
             title=title,
             viewBox=view_box,
             axisItems={

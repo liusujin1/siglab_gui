@@ -15,6 +15,7 @@ from python_vna.diagnostic.data import CurvePair, NumericTableFile, TraceAnalysi
 from python_vna.diagnostic.pages import TraceAnalysisPage, VibrationAnalysisPage
 from python_vna.ui.analysis_viewer import AnalysisWorkbench
 from python_vna.ui.plot_interactions import edit_legend_size
+from python_vna.ui.plot_interactions import trace_pen
 
 
 @pytest.fixture
@@ -241,4 +242,54 @@ def test_cangfu_transfer_button_matches_actual_plot_and_restores_time_mode(app):
         assert page.cangfu_psd_window_button.isEnabled()
     finally:
         page._close_plot_windows()
+        page.close()
+
+
+@pytest.mark.parametrize("count", [512, 8193])
+def test_dense_analysis_curves_keep_full_data_style_and_fast_paint_after_highlight(app, count):
+    page = AnalysisWorkbench(include_derived_tab=False)
+    x = np.linspace(0, 10, count)
+    y = np.sin(100 * x)
+    y[100] = np.nan
+    try:
+        plot = page.main_plots[0]
+        pen = trace_pen("#146ac8")
+        item = plot.plot(x, y, pen=pen, name="Dense", antialias=True)
+        page._plot_curves[plot]["Dense"] = (x, y)
+        assert item.curve.opts["segmentedLineMode"] == "on"
+        assert item.curve._shouldUseDrawLineSegments(item.curve.opts["pen"])
+        assert item.curve.opts["antialias"]
+        assert item.curve.opts["connect"] == "finite"
+        np.testing.assert_array_equal(item.xData, x)
+        np.testing.assert_array_equal(item.yData, y)
+        assert item.curve.opts["pen"].color() == pen.color()
+        assert item.curve.opts["pen"].widthF() == pen.widthF()
+        page._active_trace[plot] = "Dense"
+        page._refresh_active_curve_style(plot)
+        assert item.curve.opts["segmentedLineMode"] == "on"
+        page._open_plot_window_for_plot(plot)
+        assert page._single_plot_windows
+        detached = page._single_plot_windows[0].findChild(type(plot))
+        detached_item = page._plot_item_for_label(detached, "Dense")
+        assert detached_item.curve.opts["segmentedLineMode"] == "on"
+        np.testing.assert_array_equal(detached_item.xData, x)
+        np.testing.assert_array_equal(detached_item.yData, y)
+    finally:
+        for dialog in list(page._single_plot_windows):
+            dialog.close()
+        page.close()
+
+
+def test_analysis_rendering_preserves_dashed_reference_and_sparse_curve_strokes(app):
+    page = AnalysisWorkbench(include_derived_tab=False)
+    try:
+        plot = page.main_plots[1]
+        x = np.arange(1024, dtype=float)
+        dashed = plot.plot(x, x, pen=trace_pen("#146ac8", style=QtCore.Qt.DashLine), antialias=True)
+        sparse = plot.plot(x[:32], x[:32], pen=trace_pen("#146ac8"), antialias=True)
+        for item in (dashed, sparse):
+            assert item.curve.opts["segmentedLineMode"] == "auto"
+            assert not item.curve._shouldUseDrawLineSegments(item.curve.opts["pen"])
+        assert dashed.curve.opts["pen"].style() == QtCore.Qt.DashLine
+    finally:
         page.close()
