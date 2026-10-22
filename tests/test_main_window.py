@@ -113,6 +113,27 @@ class MainWindowTests(unittest.TestCase):
             metadata={"frame_index": 1},
         )
 
+    def test_data_annotations_disable_cursor_and_restore_it_when_closed(self):
+        window = self.window
+        self.assertTrue(window._set_cursor_position("top", 1., 2.))
+        window._toggle_data_tips(True)
+        self.assertFalse(window._cursor_enabled)
+        self.assertFalse(window.cursor_action.isEnabled())
+        self.assertFalse(window.cursor_action.isChecked())
+        self.assertEqual(window.data_tip_action.text(), "数据标注")
+        self.assertFalse(window._cursor_lines["top"].isVisible())
+        self.assertFalse(window._set_cursor_position("top", 2., 3.))
+        window._toggle_cursor_readout(True)
+        self.assertFalse(window._cursor_enabled)
+        menu, actions = window._build_plot_context_menu(window.top_plot, "top")
+        self.assertFalse(actions["cursor_readout"].isEnabled())
+        window._toggle_data_tips(False)
+        self.assertTrue(window._cursor_enabled)
+        self.assertTrue(window.cursor_action.isEnabled())
+        self.assertTrue(window.cursor_action.isChecked())
+        self.assertTrue(window._set_cursor_position("top", 2., 3.))
+        menu.deleteLater()
+
     def test_window_initializes_before_menu_actions_exist(self):
         self.assertEqual(self.window.windowTitle(), "VNA - USB-4431")
         self.assertEqual(self.window.top_cursor_label.text(), "Top Cursor: --")

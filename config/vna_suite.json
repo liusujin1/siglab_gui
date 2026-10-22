@@ -111,6 +111,7 @@
         "tests/test_processing_workflow.py",
         "tests/test_modal_identification.py",
         "tests/test_modal_workflow.py",
+        "tests/test_plot_usability.py",
         "tests/test_modal_candidates.py"
       ],
       "tests": [
@@ -119,6 +120,7 @@
         "tests/test_processing_workflow.py",
         "tests/test_modal_identification.py",
         "tests/test_modal_workflow.py",
+        "tests/test_plot_usability.py",
         "tests/test_modal_candidates.py"
       ]
     }

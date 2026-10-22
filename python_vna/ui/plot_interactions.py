@@ -64,15 +64,32 @@ class EditableLegendItem(pg.LegendItem):
     def __init__(self, *args, on_rename_requested=None, **kwargs):
         super().__init__(*args, **kwargs)
         self._on_rename_requested = on_rename_requested
+        self.setToolTip("双击文字编辑图例；滚轮调整图例大小")
+
+    def font_point_size(self) -> int:
+        return int(float(str(self.opts.get("labelTextSize", "7pt")).removesuffix("pt")))
+
+    def set_font_point_size(self, size: int) -> None:
+        self.setLabelTextSize(f"{max(6, min(30, int(size)))}pt")
+        for _sample, label in self.items:
+            label.setText(label.text, size=self.opts["labelTextSize"])
+        self.updateSize()
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        self.set_font_point_size(self.font_point_size() + (1 if event.delta() > 0 else -1))
+        event.accept()
 
     def addItem(self, item, name) -> None:  # noqa: N802 - pyqtgraph override
         super().addItem(item, name)
         _sample, label_item = self.items[-1]
         text_item = label_item.item
         text_item.installEventFilter(self)
-        text_item.setToolTip("双击编辑图例名称")
+        text_item.setToolTip("双击文字编辑图例；滚轮调整图例大小")
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt override
+        if event.type() == QtCore.QEvent.Type.GraphicsSceneWheel:
+            self.wheelEvent(event)
+            return True
         if (
             event.type() == QtCore.QEvent.Type.GraphicsSceneMouseDoubleClick
             and event.button() == QtCore.Qt.LeftButton
@@ -93,6 +110,52 @@ class EditableLegendItem(pg.LegendItem):
                     return True
                 break
         return super().eventFilter(watched, event)
+
+
+def edit_legend_size(plot) -> None:
+    legend = plot.plotItem.legend
+    if isinstance(legend, EditableLegendItem):
+        size, accepted = QtWidgets.QInputDialog.getInt(
+            plot.window(), "图例大小", "字号 (pt)：", legend.font_point_size(), 6, 30,
+        )
+        if accepted:
+            legend.set_font_point_size(size)
+
+
+class PlotTextEditor(QtCore.QObject):
+    """Edit graphics labels without activating a different plot's owner window."""
+
+    def __init__(self, plot):
+        super().__init__(plot)
+        self.plot = plot
+        self.targets = [(plot.plotItem.titleLabel.item, "title")]
+        self.targets.extend((plot.getAxis(name).label, name) for name in ("bottom", "left"))
+        for item, _name in self.targets:
+            item.installEventFilter(self)
+            item.setToolTip("双击编辑")
+
+    def eventFilter(self, watched, event):
+        if (event.type() == QtCore.QEvent.Type.GraphicsSceneMouseDoubleClick
+                and event.button() == QtCore.Qt.LeftButton):
+            for item, name in self.targets:
+                if item is watched:
+                    event.accept()
+                    self.edit(name)
+                    return True
+        return super().eventFilter(watched, event)
+
+    def edit(self, name):
+        plot_item = self.plot.plotItem
+        current = plot_item.titleLabel.text if name == "title" else self.plot.getAxis(name).labelText
+        title = {"title": "图窗标题", "bottom": "X 轴标签", "left": "Y 轴标签"}[name]
+        text, accepted = QtWidgets.QInputDialog.getText(
+            self.plot.window(), title, "文字：", QtWidgets.QLineEdit.Normal, str(current or ""),
+        )
+        if accepted:
+            if name == "title":
+                self.plot.setTitle(text)
+            else:
+                self.plot.setLabel(name, text)
 
 
 class VnaAxisItem(pg.AxisItem):

@@ -77,6 +77,7 @@ from python_vna.ui.plot_interactions import (
     DataTipPoint,
     DataTipText,
     EditableLegendItem,
+    PlotTextEditor,
     TRACE_ACTIVE_WIDTH,
     TRACE_CURVE_WIDTH,
     VnaAxisItem,
@@ -85,6 +86,7 @@ from python_vna.ui.plot_interactions import (
     _cursor_palette_for_background,
     _data_tip_anchor_for_label_drag,
     copy_widget_image_to_clipboard,
+    edit_legend_size,
     trace_pen,
 )
 from python_vna.ui.legend_placement import place_legend_away_from_curves
@@ -570,6 +572,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         )
         legend.setParentItem(plot_item.vb)
         plot_item.legend = legend
+        plot._text_editor = PlotTextEditor(plot)
         plot.showGrid(x=True, y=True, alpha=float(self._theme.get("grid_alpha", 0.14)))
         plot.scene().sigMouseClicked.connect(
             lambda event, plot_widget=plot: self._handle_plot_click(plot_widget, event)
@@ -646,9 +649,11 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         self.load_file_button = QtWidgets.QPushButton("加载文件")
         self.load_folder_button = QtWidgets.QPushButton("加载文件夹")
         self.clear_button = QtWidgets.QPushButton("删除所选")
+        self.clear_all_button = QtWidgets.QPushButton("清空全部")
         set_button_role(self.load_file_button, "primary")
         set_button_role(self.load_folder_button, "secondary")
         set_button_role(self.clear_button, "danger")
+        set_button_role(self.clear_all_button, "danger")
         if self._derived_only:
             self.derived_manage_data_button = QtWidgets.QPushButton("管理数据")
             set_button_role(self.derived_manage_data_button, "secondary")
@@ -667,11 +672,13 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             layout.addWidget(self.clear_button, 0, 2)
         if not self._derived_only:
             layout.addWidget(QtWidgets.QLabel("FFT块长"), 1, 0)
-            layout.addWidget(self.fs_hint_spin, 1, 1, 1, 2)
+            layout.addWidget(self.fs_hint_spin, 1, 1)
+            layout.addWidget(self.clear_all_button, 1, 2)
         self.load_file_button.clicked.connect(self._load_file)
         self.load_folder_button.clicked.connect(self._load_folder)
         if not self._derived_only:
             self.clear_button.clicked.connect(self._request_delete_selected_datasets)
+            self.clear_all_button.clicked.connect(self._clear_datasets)
         return group
 
     def _build_series_group(self) -> QtWidgets.QGroupBox:
@@ -3336,6 +3343,11 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             self.statusBar().showMessage("Refreshed analysis data")
 
     def _clear_datasets(self) -> None:
+        if self._background_load_task is not None:
+            self._background_load_task.cancel()
+            self._background_load_rows = []
+        for dialog in list(self._single_plot_windows):
+            dialog.close()
         self._discard_dataset_caches()
         self._datasets.clear()
         self._series_labels.clear()
@@ -3347,7 +3359,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         self._sync_workspace_operation_labels()
         self._clear_plots(show_status=False)
         self._notify_data_store_changed("clear", self)
-        self.statusBar().showMessage("Analysis data cleared")
+        self.statusBar().showMessage("已清空全部数据和图像")
 
     def _delete_selected_datasets(self) -> None:
         self._request_delete_selected_datasets()
@@ -3510,6 +3522,9 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         self.derived_config_dataset_list.blockSignals(False)
 
     def _refresh_dataset_lists(self) -> None:
+        current = self.series_list.currentItem()
+        current_id = current.data(QtCore.Qt.UserRole) if current is not None else None
+        scroll_position = (self.series_list.horizontalScrollBar().value(), self.series_list.verticalScrollBar().value())
         selected_ids = {
             item.data(QtCore.Qt.UserRole)
             for item in self.series_list.selectedItems()
@@ -3526,7 +3541,12 @@ class AnalysisWorkbench(QtWidgets.QWidget):
                 item.setToolTip(self._dataset_readme_tooltip(dataset))
                 self.series_list.addItem(item)
                 item.setSelected(series.id in selected_ids if selected_ids else False)
+                if series.id == current_id:
+                    self.series_list.setCurrentItem(item, QtCore.QItemSelectionModel.NoUpdate)
         self.series_list.blockSignals(False)
+        self.series_list.doItemsLayout()
+        self.series_list.horizontalScrollBar().setValue(scroll_position[0])
+        self.series_list.verticalScrollBar().setValue(scroll_position[1])
         self._refresh_config_dataset_list()
         self._refresh_foundation_file_selectors()
         self._refresh_derived_selectors()
@@ -6037,7 +6057,6 @@ class AnalysisWorkbench(QtWidgets.QWidget):
                 plot.plotItem.legend.clear()
             plot.addLegend(offset=(4, 2))
             self._plot_curves[plot] = {}
-            self._plot_curve_info[plot] = {}
             self._plot_export_excluded[plot] = set()
             self._plot_curve_kind[plot] = "transfer"
             self._time_curve_psd_sources[plot] = {}
@@ -6171,6 +6190,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
                 plot.plotItem.legend.clear()
             plot.addLegend(offset=(4, 2))
             self._plot_curves[plot] = {}
+            self._plot_curve_info[plot] = {}
             self._plot_export_excluded[plot] = set()
             self._active_trace[plot] = None
             self._data_tip_items[plot].clear()
@@ -7165,11 +7185,17 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             if plot.plotItem.legend is not None:
                 plot.plotItem.legend.clear()
             self._plot_curves[plot] = {}
+            self._plot_curve_info[plot] = {}
             self._plot_export_excluded[plot] = set()
             self._active_trace[plot] = None
             self._data_tip_items[plot] = []
             self._curve_edit_items[plot] = []
             self._readd_cursor_items(plot)
+            self._cursor_positions[plot] = None
+            self._axis_history[plot] = []
+            self._time_curve_psd_sources.pop(plot, None)
+            for item in self._cursor_items.get(plot, {}).values():
+                item.setVisible(False)
             self._apply_plot_theme(plot)
             plot.setTitle(title)
         finally:
@@ -8020,6 +8046,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         dialog.resize(900, 560)
         layout = QtWidgets.QVBoxLayout(dialog)
         detached_plot = self._create_plot_widget(str(plot.getPlotItem().titleLabel.text or "Analysis Plot"))
+        detached_plot.plotItem.legend.set_font_point_size(plot.plotItem.legend.font_point_size())
         layout.addWidget(detached_plot, 1)
         self._apply_plot_theme(detached_plot)
         log_x, log_y = self._log_modes.get(plot, (False, False))
@@ -8053,6 +8080,8 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         except RuntimeError:
             return
         for plot in plots:
+            if self._active_plot is plot:
+                self._active_plot = next(iter(self._all_analysis_plots()), None)
             self._plot_curves.pop(plot, None)
             self._plot_curve_info.pop(plot, None)
             self._active_trace.pop(plot, None)
@@ -8062,6 +8091,8 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             self._axis_history.pop(plot, None)
             self._log_modes.pop(plot, None)
             self._plot_export_excluded.pop(plot, None)
+            self._curve_edit_items.pop(plot, None)
+            self._time_curve_psd_sources.pop(plot, None)
 
     def _time_window(self) -> tuple[float | None, float | None]:
         return _parse_optional_float(self.time_start_edit.text()), _parse_optional_float(self.time_end_edit.text())
@@ -8178,7 +8209,10 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         try:
             if len(selected) == 1:
                 dataset, series = selected[0]
-                rename_text = dataset.condition_text or self._series_base_label(dataset, series)
+                rename_text = self._custom_series_labels.get(
+                    (dataset.id, series.channel_index + 1),
+                    dataset.condition_text or self._series_base_label(dataset, series),
+                )
                 self._rename_edit_autofill_text = rename_text
                 self.rename_edit.setText(rename_text)
                 scale = self._custom_series_scales.get(
@@ -8270,10 +8304,12 @@ class AnalysisWorkbench(QtWidgets.QWidget):
 
     def _toggle_data_tip_mode(self, enabled: bool) -> None:
         self._data_tip_enabled = bool(enabled)
-        self.statusBar().showMessage(f"数据提示模式：{'开启' if enabled else '关闭'}")
+        self._toggle_cursor_readout(not enabled)
+        self.statusBar().showMessage(f"数据标注模式：{'开启' if enabled else '关闭'}")
 
     def _toggle_cursor_readout(self, enabled: bool) -> None:
-        self._cursor_enabled = bool(enabled)
+        enabled = bool(enabled) and not self._data_tip_enabled
+        self._cursor_enabled = enabled
         for items in self._cursor_items.values():
             for item in items.values():
                 item.setVisible(False)
@@ -8321,6 +8357,8 @@ class AnalysisWorkbench(QtWidgets.QWidget):
     def _set_cursor_position(
         self, plot: pg.PlotWidget, cursor_x: float, cursor_y: float, trace: str | None = None
     ) -> bool:
+        if self._data_tip_enabled:
+            return False
         if trace:
             self._active_trace[plot] = trace
             self._refresh_active_curve_style(plot)
@@ -8408,6 +8446,8 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             trace = self._active_trace.get(plot)
             if trace:
                 self._prompt_rename_plot_curve(plot, trace)
+        elif action is actions["legend_size"]:
+            edit_legend_size(plot)
         elif action is actions["delete_curve"]:
             trace = self._active_trace.get(plot)
             if trace:
@@ -8529,7 +8569,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
 
     def _prompt_rename_plot_curve(self, plot: pg.PlotWidget, label: str) -> bool:
         new_label, accepted = QtWidgets.QInputDialog.getText(
-            self,
+            plot.window(),
             "重命名图例",
             "图例名称：",
             QtWidgets.QLineEdit.Normal,
@@ -8539,7 +8579,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
             return False
         if self._rename_plot_curve(plot, label, new_label):
             return True
-        QtWidgets.QMessageBox.warning(self, "重命名图例", "请输入非空且不重复的图例名称。")
+        QtWidgets.QMessageBox.warning(plot.window(), "重命名图例", "请输入非空且不重复的图例名称。")
         return False
 
     def _remove_plot_curves(self, plot: pg.PlotWidget, labels: set[str]) -> int:
@@ -8641,15 +8681,17 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         actions["back"] = menu.addAction("返回上一缩放")
         actions["auto"] = menu.addAction("自动缩放")
         menu.addSeparator()
-        actions["data_tip"] = menu.addAction("数据提示")
+        actions["data_tip"] = menu.addAction("数据标注")
         actions["data_tip"].setCheckable(True)
         actions["data_tip"].setChecked(self._data_tip_enabled)
         actions["cursor"] = menu.addAction("读数游标")
         actions["cursor"].setCheckable(True)
         actions["cursor"].setChecked(self._cursor_enabled)
-        actions["clear_tips"] = menu.addAction("清除数据提示")
+        actions["cursor"].setEnabled(not self._data_tip_enabled)
+        actions["clear_tips"] = menu.addAction("清除数据标注")
         menu.addSeparator()
         actions["rename_curve"] = menu.addAction("重命名图例")
+        actions["legend_size"] = menu.addAction("图例大小…")
         actions["delete_curve"] = menu.addAction("删除当前曲线")
         actions["manage_curves"] = menu.addAction("管理当前图窗曲线")
         trace = self._active_trace.get(plot)
@@ -8841,7 +8883,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         data_tip["point"] = point
         data_tip["text"] = text
         self._data_tip_items[plot].append(data_tip)
-        self.statusBar().showMessage(f"数据提示：x={tip_x:.4g}, y={tip_y:.4g}")
+        self.statusBar().showMessage(f"数据标注：x={tip_x:.4g}, y={tip_y:.4g}")
         return True
 
     def _drag_data_tip_to_scene_pos(
@@ -8868,7 +8910,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
                 else self._data_tip_anchor_for_plot_point(plot, tip_x, tip_y)
             )
         text.setPos(self._to_plot_x(plot, tip_x), self._to_plot_y(plot, tip_y))
-        self.statusBar().showMessage(f"数据提示已移动：x={tip_x:.4g}, y={tip_y:.4g}")
+        self.statusBar().showMessage(f"数据标注已移动：x={tip_x:.4g}, y={tip_y:.4g}")
         return True
 
     def _drag_data_tip_label_to_scene_pos(
@@ -8888,15 +8930,15 @@ class AnalysisWorkbench(QtWidgets.QWidget):
         text = data_tip["text"]
         if hasattr(text, "setAnchor"):
             text.setAnchor(anchor)
-        self.statusBar().showMessage("数据提示标签已移动")
+        self.statusBar().showMessage("数据标注标签已移动")
         return True
 
     def _show_data_tip_menu(self, plot: pg.PlotWidget, data_tip: dict[str, object], screen_pos) -> None:
         self._active_plot = plot
         self._suppress_plot_context_menu_once()
         menu = QtWidgets.QMenu(self)
-        delete_this = menu.addAction("删除此数据提示")
-        delete_all = menu.addAction("删除全部数据提示")
+        delete_this = menu.addAction("删除此数据标注")
+        delete_all = menu.addAction("删除全部数据标注")
         action = menu.exec(QtCore.QPoint(int(screen_pos.x()), int(screen_pos.y())))
         if action is delete_this:
             self._delete_data_tip(plot, data_tip)
@@ -8917,7 +8959,7 @@ class AnalysisWorkbench(QtWidgets.QWidget):
     def _clear_data_tips(self, plot: pg.PlotWidget) -> None:
         for data_tip in list(self._data_tip_items.get(plot, [])):
             self._delete_data_tip(plot, data_tip)
-        self.statusBar().showMessage("已清除数据提示")
+        self.statusBar().showMessage("已清除数据标注")
 
     def _data_tip_anchor_for_plot_point(
         self, plot: pg.PlotWidget, value_x: float, value_y: float

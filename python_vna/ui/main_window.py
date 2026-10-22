@@ -2126,7 +2126,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.markers_action.triggered.connect(
             lambda _checked=False: self._toggle_mark_at_cursor("top")
         )
-        self.data_tip_action = QtGui.QAction("Data Tip", self)
+        self.data_tip_action = QtGui.QAction("数据标注", self)
         self.data_tip_action.setCheckable(True)
         self.data_tip_action.setChecked(False)
         self.data_tip_action.triggered.connect(self._toggle_data_tips)
@@ -2566,7 +2566,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bottom_plot.showGrid(x=enabled, y=enabled, alpha=alpha)
 
     def _toggle_cursor_readout(self, enabled: bool) -> None:
+        enabled = bool(enabled) and not self._data_tip_enabled
         self._cursor_enabled = enabled
+        if hasattr(self, "cursor_action"):
+            with QtCore.QSignalBlocker(self.cursor_action):
+                self.cursor_action.setChecked(enabled)
+                self.cursor_action.setEnabled(not self._data_tip_enabled)
         if not enabled:
             self.top_cursor_label.setText("Top Cursor: off")
             self.bottom_cursor_label.setText("Bottom Cursor: off")
@@ -2580,6 +2585,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._cursor_points[key].setVisible(False)
                 if self._cursor_texts[key] is not None:
                     self._cursor_texts[key].setVisible(False)
+        else:
+            self.top_cursor_label.setText("Top Cursor: --")
+            self.bottom_cursor_label.setText("Bottom Cursor: --")
 
     def _create_cursor_items(self, plot, key: str) -> None:
         palette = self._cursor_palette()
@@ -2653,6 +2661,8 @@ class MainWindow(QtWidgets.QMainWindow):
         trace_name: str | None = None,
         announce: bool = True,
     ) -> bool:
+        if self._data_tip_enabled:
+            return False
         if trace_name:
             self._set_active_trace(key, trace_name)
         self._cursor_positions[key] = (cursor_x, cursor_y)
@@ -2811,6 +2821,7 @@ class MainWindow(QtWidgets.QMainWindow):
         actions["cursor_readout"] = menu.addAction("游标读数")
         actions["cursor_readout"].setCheckable(True)
         actions["cursor_readout"].setChecked(self._cursor_enabled)
+        actions["cursor_readout"].setEnabled(not self._data_tip_enabled)
         return menu, actions
 
     def _toggle_markers(self, enabled: bool) -> None:
@@ -2833,6 +2844,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _toggle_data_tips(self, enabled: bool) -> None:
         self._data_tip_enabled = enabled
+        self._toggle_cursor_readout(not enabled)
         for button_name in ("top_data_tip_button", "bottom_data_tip_button", "toolbar_data_tip_button"):
             button = getattr(self, button_name, None)
             if button is not None:
@@ -2843,8 +2855,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.data_tip_action.blockSignals(True)
             self.data_tip_action.setChecked(enabled)
             self.data_tip_action.blockSignals(False)
-        state = "on" if enabled else "off"
-        self.statusBar().showMessage(f"Data Tip mode {state}")
+        state = "开启" if enabled else "关闭"
+        self.statusBar().showMessage(f"数据标注模式：{state}")
 
     def _create_marker_lines(self, plot, key: str) -> None:
         theme = self._theme()

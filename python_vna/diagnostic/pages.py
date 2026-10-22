@@ -29,6 +29,7 @@ from python_vna.ui.plot_interactions import (
     DataTipPoint,
     DataTipText,
     EditableLegendItem,
+    PlotTextEditor,
     TRACE_ACTIVE_WIDTH,
     TRACE_CURVE_WIDTH,
     VnaAxisItem,
@@ -37,6 +38,7 @@ from python_vna.ui.plot_interactions import (
     _cursor_palette_for_background,
     _data_tip_anchor_for_label_drag,
     copy_widget_image_to_clipboard,
+    edit_legend_size,
     trace_pen,
 )
 from python_vna.ui.legend_placement import place_legend_away_from_curves
@@ -505,6 +507,7 @@ class DiagnosticPage(QtWidgets.QWidget):
         )
         legend.setParentItem(plot_item.vb)
         plot_item.legend = legend
+        plot._text_editor = PlotTextEditor(plot)
         plot.showGrid(x=True, y=True, alpha=float(self._theme.get("grid_alpha", 0.14)))
         plot.scene().sigMouseClicked.connect(
             lambda event, plot_widget=plot: self._handle_plot_click(plot_widget, event)
@@ -546,6 +549,8 @@ class DiagnosticPage(QtWidgets.QWidget):
         elif plot.plotItem.legend is not None:
             plot.plotItem.legend.clear()
         self._readd_cursor_items(plot)
+        for item in self._cursor_items.get(plot, {}).values():
+            item.setVisible(False)
 
     def _plot_curves_on_widget(
         self,
@@ -761,10 +766,12 @@ class DiagnosticPage(QtWidgets.QWidget):
 
     def _toggle_data_tip_mode(self, enabled: bool) -> None:
         self._data_tip_enabled = bool(enabled)
-        self._show_status(f"数据提示模式：{'开启' if enabled else '关闭'}")
+        self._toggle_cursor_readout(not enabled)
+        self._show_status(f"数据标注模式：{'开启' if enabled else '关闭'}")
 
     def _toggle_cursor_readout(self, enabled: bool) -> None:
-        self._cursor_enabled = bool(enabled)
+        enabled = bool(enabled) and not self._data_tip_enabled
+        self._cursor_enabled = enabled
         for items in self._cursor_items.values():
             for item in items.values():
                 item.setVisible(False)
@@ -812,6 +819,8 @@ class DiagnosticPage(QtWidgets.QWidget):
     def _set_cursor_position(
         self, plot: pg.PlotWidget, cursor_x: float, cursor_y: float, trace: str | None = None
     ) -> bool:
+        if self._data_tip_enabled:
+            return False
         if trace:
             self._active_trace[plot] = trace
             self._refresh_active_curve_style(plot)
@@ -900,6 +909,8 @@ class DiagnosticPage(QtWidgets.QWidget):
             trace = self._active_trace.get(plot)
             if trace:
                 self._prompt_rename_plot_curve(plot, trace)
+        elif action is actions["legend_size"]:
+            edit_legend_size(plot)
         elif action is actions["copy_image"]:
             if copy_widget_image_to_clipboard(plot):
                 self._show_status("已复制图像到剪贴板")
@@ -1021,7 +1032,7 @@ class DiagnosticPage(QtWidgets.QWidget):
 
     def _prompt_rename_plot_curve(self, plot: pg.PlotWidget, label: str) -> bool:
         new_label, accepted = QtWidgets.QInputDialog.getText(
-            self,
+            plot.window(),
             "重命名图例",
             "图例名称：",
             QtWidgets.QLineEdit.Normal,
@@ -1031,7 +1042,7 @@ class DiagnosticPage(QtWidgets.QWidget):
             return False
         if self._rename_plot_curve(plot, label, new_label):
             return True
-        QtWidgets.QMessageBox.warning(self, "重命名图例", "请输入非空且不重复的图例名称。")
+        QtWidgets.QMessageBox.warning(plot.window(), "重命名图例", "请输入非空且不重复的图例名称。")
         return False
 
     def _build_plot_context_menu(self, plot: pg.PlotWidget) -> tuple[QtWidgets.QMenu, dict[str, object]]:
@@ -1040,15 +1051,17 @@ class DiagnosticPage(QtWidgets.QWidget):
         actions["back"] = menu.addAction("返回上一缩放")
         actions["auto"] = menu.addAction("自动缩放")
         menu.addSeparator()
-        actions["data_tip"] = menu.addAction("数据提示")
+        actions["data_tip"] = menu.addAction("数据标注")
         actions["data_tip"].setCheckable(True)
         actions["data_tip"].setChecked(self._data_tip_enabled)
         actions["cursor"] = menu.addAction("读数游标")
         actions["cursor"].setCheckable(True)
         actions["cursor"].setChecked(self._cursor_enabled)
-        actions["clear_tips"] = menu.addAction("清除数据提示")
+        actions["cursor"].setEnabled(not self._data_tip_enabled)
+        actions["clear_tips"] = menu.addAction("清除数据标注")
         menu.addSeparator()
         actions["rename_curve"] = menu.addAction("重命名图例")
+        actions["legend_size"] = menu.addAction("图例大小…")
         trace = self._active_trace.get(plot)
         actions["rename_curve"].setEnabled(trace in self._plot_curves.get(plot, {}))
         menu.addSeparator()
@@ -1240,7 +1253,7 @@ class DiagnosticPage(QtWidgets.QWidget):
         data_tip["point"] = point
         data_tip["text"] = text
         self._data_tip_items.setdefault(plot, []).append(data_tip)
-        self._show_status(f"数据提示：x={tip_x:.4g}, y={tip_y:.4g}")
+        self._show_status(f"数据标注：x={tip_x:.4g}, y={tip_y:.4g}")
         return True
 
     def _drag_data_tip_to_scene_pos(
@@ -1268,7 +1281,7 @@ class DiagnosticPage(QtWidgets.QWidget):
                 else self._data_tip_anchor_for_plot_point(plot, tip_x, tip_y)
             )
         text.setPos(self._to_plot_x(plot, tip_x), self._to_plot_y(plot, tip_y))
-        self._show_status(f"数据提示已移动：x={tip_x:.4g}, y={tip_y:.4g}")
+        self._show_status(f"数据标注已移动：x={tip_x:.4g}, y={tip_y:.4g}")
         return True
 
     def _drag_data_tip_label_to_scene_pos(
@@ -1288,15 +1301,15 @@ class DiagnosticPage(QtWidgets.QWidget):
         text = data_tip["text"]
         if hasattr(text, "setAnchor"):
             text.setAnchor(anchor)
-        self._show_status("数据提示标签已移动")
+        self._show_status("数据标注标签已移动")
         return True
 
     def _show_data_tip_menu(self, plot: pg.PlotWidget, data_tip: dict[str, object], screen_pos) -> None:
         self._active_plot = plot
         self._suppress_plot_context_menu_once()
         menu = QtWidgets.QMenu(self)
-        delete_this = menu.addAction("删除此数据提示")
-        delete_all = menu.addAction("删除全部数据提示")
+        delete_this = menu.addAction("删除此数据标注")
+        delete_all = menu.addAction("删除全部数据标注")
         action = menu.exec(QtCore.QPoint(int(screen_pos.x()), int(screen_pos.y())))
         if action is delete_this:
             self._delete_data_tip(plot, data_tip)
@@ -1320,7 +1333,7 @@ class DiagnosticPage(QtWidgets.QWidget):
     def _clear_data_tips(self, plot: pg.PlotWidget) -> None:
         for data_tip in list(self._data_tip_items.get(plot, [])):
             self._delete_data_tip(plot, data_tip)
-        self._show_status("已清除数据提示")
+        self._show_status("已清除数据标注")
 
     def _data_tip_anchor_for_plot_point(
         self, plot: pg.PlotWidget, value_x: float, value_y: float
@@ -1462,7 +1475,8 @@ class VibrationAnalysisPage(DiagnosticPage):
         button_row = QtWidgets.QHBoxLayout()
         self.load_button = QtWidgets.QPushButton("加载文件")
         self.delete_button = QtWidgets.QPushButton("删除")
-        self.clear_button = QtWidgets.QPushButton("清空")
+        self.clear_button = QtWidgets.QPushButton("清空全部")
+        self.clear_all_button = self.clear_button
         set_button_role(self.load_button, "primary")
         set_button_role(self.delete_button, "danger")
         set_button_role(self.clear_button, "secondary")
@@ -1619,9 +1633,13 @@ class VibrationAnalysisPage(DiagnosticPage):
         self.log_channel_list.clear()
         self._log_ranges.clear()
         self._configure_log_range_controls(None)
-        self.frequency_plot.clear()
-        self.log_plot.clear()
-        self._plot_curves.clear()
+        for plot in (self.frequency_plot, self.log_plot):
+            self._clear_plot_widget(plot)
+            plot.setTitle("")
+        self._vibration_colors.clear()
+        self._preferred_frequency_labels.clear()
+        self._preferred_log_labels.clear()
+        self._preferred_log_group = ""
         self._show_status("上位机数据分析已清空")
 
     def current_file(self) -> VibrationAnalysisFile | None:
@@ -2073,10 +2091,12 @@ class TraceAnalysisPage(DiagnosticPage):
         self.controls_layout = controls_layout
 
         data_group, data_layout = create_group_box("1. 数据", layout_type=QtWidgets.QVBoxLayout)
+        data_layout.setContentsMargins(8, 14, 8, 8)
         button_row = QtWidgets.QHBoxLayout()
         self.load_button = QtWidgets.QPushButton("加载文件")
         self.delete_button = QtWidgets.QPushButton("删除")
-        self.clear_button = QtWidgets.QPushButton("清空图像")
+        self.clear_button = QtWidgets.QPushButton("清空全部")
+        self.clear_all_button = self.clear_button
         set_button_role(self.load_button, "primary")
         set_button_role(self.delete_button, "danger")
         set_button_role(self.clear_button, "secondary")
@@ -2238,8 +2258,8 @@ class TraceAnalysisPage(DiagnosticPage):
 
         self.ide_trans_time_plot = self._create_plot_widget("IDE Trans 时域")
         self.ide_trans_power_plot = self._create_plot_widget("IDE Trans 功率谱")
-        self.ide_trans_magnitude_plot = self._create_plot_widget("IDE Trans 传递函数幅值")
-        self.ide_trans_phase_plot = self._create_plot_widget("IDE Trans 相位")
+        self.ide_trans_magnitude_plot = self._create_plot_widget("IDE Trans 幅频响应")
+        self.ide_trans_phase_plot = self._create_plot_widget("IDE Trans 相频响应")
         self.ide_trans_coherence_plot = self._create_plot_widget("IDE Trans 相干性")
 
         self.ide_trans_view_tabs = QtWidgets.QTabWidget()
@@ -2310,8 +2330,8 @@ class TraceAnalysisPage(DiagnosticPage):
         hac_trans_layout.addWidget(self.hac_trans_context_label)
 
         self.hac_trans_time_plot = self._create_plot_widget("HAC Trans 时域")
-        self.hac_trans_magnitude_plot = self._create_plot_widget("HAC Trans 传递函数幅值")
-        self.hac_trans_phase_plot = self._create_plot_widget("HAC Trans 相位")
+        self.hac_trans_magnitude_plot = self._create_plot_widget("HAC Trans 幅频响应")
+        self.hac_trans_phase_plot = self._create_plot_widget("HAC Trans 相频响应")
         self.hac_trans_coherence_plot = self._create_plot_widget("HAC Trans 相干性")
         self.hac_trans_view_tabs = QtWidgets.QTabWidget()
 
@@ -2391,7 +2411,7 @@ class TraceAnalysisPage(DiagnosticPage):
 
         self.load_button.clicked.connect(self._choose_files)
         self.delete_button.clicked.connect(self._delete_selected)
-        self.clear_button.clicked.connect(self.clear_plots)
+        self.clear_button.clicked.connect(self.clear)
         self.file_list.currentRowChanged.connect(lambda _row: self._on_file_selection_changed())
         self.file_list.itemSelectionChanged.connect(self._on_file_list_selection_changed)
         self.rename_edit.editingFinished.connect(self._rename_current_file_from_editor)
@@ -2646,8 +2666,8 @@ class TraceAnalysisPage(DiagnosticPage):
         self.ide_trans_info_label.setFixedHeight(self.ide_trans_info_label.fontMetrics().lineSpacing() + 2)
         self.ide_trans_time_window_button = QtWidgets.QPushButton("时域图")
         self.ide_trans_power_window_button = QtWidgets.QPushButton("功率谱")
-        self.ide_trans_magnitude_window_button = QtWidgets.QPushButton("传函幅值")
-        self.ide_trans_phase_window_button = QtWidgets.QPushButton("相位")
+        self.ide_trans_magnitude_window_button = QtWidgets.QPushButton("幅频图")
+        self.ide_trans_phase_window_button = QtWidgets.QPushButton("相频图")
         self.ide_trans_coherence_window_button = QtWidgets.QPushButton("相干性")
         for button in (
             self.ide_trans_time_window_button,
@@ -2690,8 +2710,8 @@ class TraceAnalysisPage(DiagnosticPage):
         self.hac_trans_info_label = QtWidgets.QLabel("请选择 HAC 传函 CSV 文件")
         self._configure_trans_info_label(self.hac_trans_info_label)
         self.hac_trans_time_window_button = QtWidgets.QPushButton("激励/响应")
-        self.hac_trans_magnitude_window_button = QtWidgets.QPushButton("传函幅值")
-        self.hac_trans_phase_window_button = QtWidgets.QPushButton("相位")
+        self.hac_trans_magnitude_window_button = QtWidgets.QPushButton("幅频图")
+        self.hac_trans_phase_window_button = QtWidgets.QPushButton("相频图")
         self.hac_trans_coherence_window_button = QtWidgets.QPushButton("相干性")
         for button in (
             self.hac_trans_time_window_button,
@@ -2867,6 +2887,8 @@ class TraceAnalysisPage(DiagnosticPage):
         self._last_trace_file_index = None
         self._close_plot_windows()
         self.clear_plots(show_status=False)
+        for plot in self._plot_curves:
+            plot.setTitle("")
         self._refresh_controls()
         self._show_status("减振器软件测试数据分析已清空")
 
@@ -3620,7 +3642,7 @@ class TraceAnalysisPage(DiagnosticPage):
         magnitude_plotted = self._plot_trace_curves_on_widget(
             self.ide_trans_magnitude_plot,
             magnitude_curves,
-            title=f"传递函数（输出 / 输入）- {current.table.name}",
+            title=f"IDE Trans 幅频响应（输出 / 输入）- {current.table.name}",
             x_label="频率 (Hz)",
             y_label="幅值 (dB)",
             log_x=True,
@@ -3638,7 +3660,7 @@ class TraceAnalysisPage(DiagnosticPage):
         phase_plotted = self._plot_trace_curves_on_widget(
             self.ide_trans_phase_plot,
             phase_curves,
-            title=f"IDE Trans 相位 - {current.table.name}",
+            title=f"IDE Trans 相频响应 - {current.table.name}",
             x_label="频率 (Hz)",
             y_label="相位 (deg)",
             log_x=True,
@@ -3749,7 +3771,7 @@ class TraceAnalysisPage(DiagnosticPage):
         magnitude_count = self._plot_trace_curves_on_widget(
             self.hac_trans_magnitude_plot,
             magnitude_curves,
-            title=f"HAC Trans 传递函数（输出 / 输入）- {current.table.name}",
+            title=f"HAC Trans 幅频响应（输出 / 输入）- {current.table.name}",
             x_label="频率 (Hz)",
             y_label="幅值 (dB)",
             log_x=True,
@@ -3767,7 +3789,7 @@ class TraceAnalysisPage(DiagnosticPage):
         phase_count = self._plot_trace_curves_on_widget(
             self.hac_trans_phase_plot,
             phase_curves,
-            title=f"HAC Trans 相位 - {current.table.name}",
+            title=f"HAC Trans 相频响应 - {current.table.name}",
             x_label="频率 (Hz)",
             y_label="相位 (deg)",
             log_x=True,
@@ -3933,6 +3955,9 @@ class TraceAnalysisPage(DiagnosticPage):
         self.cangfu_channel_list.clear()
         self.cangfu_settings_group.setEnabled(current is not None)
         self.cangfu_x_axis_combo.setEnabled(True)
+        transfer_mode = current is not None and bool(self._cangfu_transfer_pairs(current))
+        self.cangfu_time_window_button.setText("传函图" if transfer_mode else "时域图")
+        self.cangfu_psd_window_button.setEnabled(not transfer_mode)
         if current is None:
             self._configure_range_controls(self.cangfu_range_start, self.cangfu_range_end, 1, (1, 1))
             self.cangfu_selected_label.setText("当前 Cangfu 文件：未选择")
@@ -4278,11 +4303,13 @@ class TraceAnalysisPage(DiagnosticPage):
         if not curves:
             self._show_status("当前图像没有可打开的曲线")
             return
+        title = str(source_plot.plotItem.titleLabel.text or title)
         dialog = QtWidgets.QDialog(self)
         dialog.setWindowTitle(title)
         dialog.resize(920, 620)
         layout = QtWidgets.QVBoxLayout(dialog)
         plot = self._create_plot_widget(title)
+        plot.plotItem.legend.set_font_point_size(source_plot.plotItem.legend.font_point_size())
         plot.setLabel("bottom", source_plot.getAxis("bottom").labelText)
         plot.setLabel("left", source_plot.getAxis("left").labelText)
         log_x, log_y = self._log_modes.get(source_plot, (False, False))
@@ -4448,6 +4475,7 @@ class TraceAnalysisPage(DiagnosticPage):
             return
         if not force and name == self._rename_edit_autofill_text:
             return
+        scroll_position = (self.file_list.horizontalScrollBar().value(), self.file_list.verticalScrollBar().value())
         current.table.name = name
         current.table.metadata["trace_custom_display_name"] = True
         row = self.file_list.currentRow()
@@ -4456,6 +4484,9 @@ class TraceAnalysisPage(DiagnosticPage):
             item.setText(self._file_list_text(current))
         self._update_current_file_label(current)
         self.plot_current()
+        self.file_list.doItemsLayout()
+        self.file_list.horizontalScrollBar().setValue(scroll_position[0])
+        self.file_list.verticalScrollBar().setValue(scroll_position[1])
         self._show_status(f"当前数据已重命名为：{name}")
 
     def _file_list_text(self, current: TraceAnalysisFile) -> str:
