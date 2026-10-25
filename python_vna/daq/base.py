@@ -69,6 +69,9 @@ class BaseDaqBackend(ABC):
     def request_stop(self) -> None:
         """Ask an in-flight read to return soon without touching driver state."""
 
+    def update_trigger_level(self, level_v: float) -> float:
+        raise DaqBackendError("This backend does not support updating a running measurement's trigger.")
+
     def set_stop_event(self, stop_event: threading.Event | None) -> None:
         """Share a worker-owned stop event with backends that poll during reads."""
 

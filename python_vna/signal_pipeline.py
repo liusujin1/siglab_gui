@@ -7,7 +7,7 @@ from dataclasses import dataclass, field, replace
 import numpy as np
 
 from python_vna.daq.base import BackendFrame
-from python_vna.impact_selection import ImpactCandidate, ImpactSelector, smart_hit_active
+from python_vna.impact_selection import ImpactCandidate, ImpactSelector, first_hit_range, smart_hit_active
 from python_vna.models import (
     AcquisitionConfig,
     AveragingConfig,
@@ -330,14 +330,29 @@ def detect_overload(
     metadata: dict,
     threshold: float = 0.999,
 ) -> bool:
-    """Return True when DAQ metadata or full-scale clipping indicates overload."""
+    """Reject hardware overloads and samples outside the configured full scale."""
     overload_channels = metadata.get("overload_channels")
     if isinstance(overload_channels, (list, tuple, set)):
-        return bool(overload_channels)
+        if overload_channels:
+            return True
     if isinstance(overload_channels, np.ndarray):
-        return bool(overload_channels.size and np.any(overload_channels))
+        if overload_channels.size and np.any(overload_channels):
+            return True
     if bool(metadata.get("overload", False)):
         return True
+
+    if "channel_hardware_ranges" in metadata:
+        ranges = metadata["channel_hardware_ranges"]
+        for index, name in enumerate(channel_names):
+            try:
+                lower, upper = map(float, ranges[name])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not np.isfinite(lower + upper) or upper <= lower or index >= data.shape[0]:
+                continue
+            margin = (upper - lower) * (1.0 - threshold) / 2
+            if np.any(data[index] <= lower + margin) or np.any(data[index] >= upper - margin):
+                return True
 
     full_scales = metadata.get("channel_full_scales", {})
     if not full_scales:
@@ -489,6 +504,7 @@ class FrameProcessor:
     channel_configs: list[ChannelConfig] = field(default_factory=list)
     _impact_selector: ImpactSelector | None = field(default=None, init=False)
     _smart_last_valid: MeasurementSet | None = field(default=None, init=False)
+    _first_hit_settings: dict | None = field(default=None, init=False)
     _processed_frames: int = field(default=0, init=False)
     _accepted_frames: int = field(default=0, init=False)
     _fft_averager: RunningAverager = field(init=False)
@@ -544,12 +560,40 @@ class FrameProcessor:
             report = selector.reject("无效数据或参考通道")
         else:
             modal = replace(self.acquisition.modal, reject_double_hit=True, reject_overload=True)
-            prepared, flags = apply_modal_processing(frame, indices, reference, modal)
+            checked_frame = frame
+            if modal.smart_hit_auto_range_enabled:
+                scales = frame.metadata.get("channel_full_scales", {})
+                if not isinstance(scales, dict):
+                    scales = dict(zip(frame.channel_names, scales))
+                else:
+                    scales = dict(scales)
+                if self._first_hit_settings is None:
+                    scales.pop(reference, None)
+                elif self._first_hit_settings.get("state") == "requested":
+                    scales[reference] = self._first_hit_settings["full_scale_v"]
+                else:
+                    scales.setdefault(reference, self._first_hit_settings["full_scale_v"])
+                checked_frame = replace(frame, metadata={**frame.metadata, "channel_full_scales": scales})
+            prepared, flags = apply_modal_processing(checked_frame, indices, reference, modal)
             if flags["rejected"]:
                 report = selector.reject("过载" if flags["overload_rejected"] else "双击")
             elif modal.smart_hit_force_limits and not (modal.smart_hit_force_min <= peak <= modal.smart_hit_force_max):
                 report = selector.reject("力峰值超限")
             else:
+                if modal.smart_hit_auto_range_enabled and self._first_hit_settings is None:
+                    try:
+                        self._first_hit_settings = first_hit_range(force, reference)
+                    except ValueError as exc:
+                        report = selector.reject(str(exc))
+                        preview = self._rejected_measurement(frame, reference, responses, flags)
+                        base = self._smart_last_valid or preview
+                        return replace(base, time_data=preview.time_data, metadata={
+                            **base.metadata, **flags, **report,
+                            "average_count": self._accepted_frames,
+                            "legacy_measured_average_count": self._accepted_frames,
+                            "smart_hit_force_unit": unit,
+                            "smart_hit_incomplete": True,
+                        })
                 prepared.metadata["processing_window"] = self.acquisition.processing_window
                 frequencies, spectrum = compute_fft(prepared)
                 warnings = []
@@ -572,7 +616,7 @@ class FrameProcessor:
                 accepted, report = selector.offer(candidate, frequencies, frame.channel_names,
                                                   reference, responses)
         for candidate in accepted:
-            self._smart_last_valid = self._process_accepted(candidate.frame)
+            self._smart_last_valid = self._process_accepted(candidate.frame, modal_prechecked=True)
             candidate.frame = None
         preview_frame = frame if valid else replace(
             frame, data=np.empty((len(frame.channel_names), 0)), timestamps=np.array([], dtype=float)
@@ -586,10 +630,11 @@ class FrameProcessor:
             "legacy_measured_average_count": self._accepted_frames,
             "smart_hit_force_unit": unit,
             "smart_hit_incomplete": self._accepted_frames < self.acquisition.averaging.count,
+            **({"smart_hit_auto_range": dict(self._first_hit_settings)} if self._first_hit_settings else {}),
         })
         return result
 
-    def _process_accepted(self, frame: BackendFrame) -> MeasurementSet:
+    def _process_accepted(self, frame: BackendFrame, *, modal_prechecked: bool = False) -> MeasurementSet:
         self._processed_frames += 1
         channel_index = {
             name: idx for idx, name in enumerate(frame.channel_names)
@@ -608,11 +653,14 @@ class FrameProcessor:
                 name for name in frame.channel_names if name != reference_name
             ]
 
+        modal = self.acquisition.modal
+        if modal_prechecked:
+            modal = replace(modal, reject_double_hit=False, reject_overload=False)
         frame, modal_flags = apply_modal_processing(
             frame,
             channel_index,
             reference_name,
-            self.acquisition.modal,
+            modal,
             reject_enabled=self.averaging_enabled,
         )
         frame.metadata["processing_window"] = self.acquisition.processing_window

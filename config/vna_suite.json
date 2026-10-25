@@ -76,6 +76,7 @@
         "tests/test_main_window.py",
         "tests/test_signal_pipeline.py",
         "tests/test_impact_selection.py",
+        "tests/test_first_hit_ranging.py",
         "tests/test_simulated_backend.py"
       ],
       "tests": [
@@ -85,6 +86,7 @@
         "tests/test_main_window.py",
         "tests/test_signal_pipeline.py",
         "tests/test_impact_selection.py",
+        "tests/test_first_hit_ranging.py",
         "tests/test_simulated_backend.py"
       ]
     },

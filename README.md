@@ -57,6 +57,17 @@ double-hit and optional force-limit failures do not advance the average count.
 The status bar shows acceptance progress and rejection reasons, and highlights
 ten consecutive rejections. Acquisition waits until the target is met or Stop is
 pressed. An early stop preserves the actual count and an incomplete marker.
+First-hit ranging is enabled by default with smart selection. The first valid
+hammer hit sets only the reference channel's full scale to the next available
+step at or above 1.2 times its raw voltage peak (up to 10 V), and the trigger voltage
+to 35% of that peak. Those automatic settings remain locked for that run.
+For example, a 1 V peak selects a 1.25 V full scale and a 0.35 V trigger; the trigger
+percentage selector then shows 28% because its denominator is full scale.
+The old reference full scale is bypassed only while finding that first valid hit.
+Subsequent hits exceeding the locked range are rejected. Other channels retain
+their configured range checks, and actual hardware overloads are always checked.
+USB-4431 acquisition uses its 10 V hardware range independently of these software
+limits. Trigger changes occur between frames on the acquisition thread.
 VNA/JSON saves retain the settings and up to 200 hit summaries; VNA stores the
 extension as ASCII JSON in `SLm.modal.py_hit_selection_json` alongside the existing
 MATLAB fields. The latest hit remains available as the time-domain preview.

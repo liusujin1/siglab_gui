@@ -41,6 +41,7 @@ from python_vna.condition_notes import (
 )
 from python_vna.diagnostics import append_log
 from python_vna.measurement_filter import filter_measurement_to_enabled_channels
+from python_vna.impact_selection import HAMMER_FULL_SCALE_STEPS, smart_hit_active, validate_first_hit_source
 from python_vna.models import ChannelConfig, MeasurementSet, SavedSession, SessionConfig
 from python_vna.optional import require
 from python_vna import __version__ as PYTHON_VNA_VERSION
@@ -987,6 +988,7 @@ class MCSetupDialog(QtWidgets.QDialog):
 class AcquisitionWorker(QtCore.QObject):
     started = QtCore.Signal(object)
     measurement_ready = QtCore.Signal(object)
+    settings_applied = QtCore.Signal(int, object)
     status_changed = QtCore.Signal(str)
     error = QtCore.Signal(str)
     finished = QtCore.Signal()
@@ -998,6 +1000,7 @@ class AcquisitionWorker(QtCore.QObject):
         display_interval_seconds: float = 0.25,
         average_run: bool = False,
         target_average_count: int | None = None,
+        run_id: int = 0,
     ) -> None:
         super().__init__()
         self._controller = controller
@@ -1005,6 +1008,8 @@ class AcquisitionWorker(QtCore.QObject):
         self._display_interval_seconds = display_interval_seconds
         self._average_run = average_run
         self._target_average_count = target_average_count
+        self._run_id = run_id
+        self._settings_sent = False
         self._stop_requested = threading.Event()
         self._backend_started = threading.Event()
 
@@ -1029,8 +1034,15 @@ class AcquisitionWorker(QtCore.QObject):
                 return
             self.started.emit(self._device_name)
             self.status_changed.emit("State: running")
+            session = getattr(getattr(self._controller, "state", None), "session", None)
+            if session is not None and smart_hit_active(session.acquisition, self._average_run) and session.acquisition.modal.smart_hit_auto_range_enabled:
+                self.status_changed.emit("等待首锤自动量程；若一直无触发，请降低初始 Abs Level")
             while not self._stop_requested.is_set():
                 measurement = self._controller.read_and_process()
+                settings = measurement.metadata.get("smart_hit_auto_range", {})
+                if settings.get("state") == "applied" and not self._settings_sent:
+                    self.settings_applied.emit(self._run_id, dict(settings))
+                    self._settings_sent = True
                 latest_measurement = measurement
                 now = time.monotonic()
                 if now - last_emit >= self._display_interval_seconds:
@@ -1400,18 +1412,7 @@ class MainWindow(QtWidgets.QMainWindow):
     LIGHT_TRACE_COLORS = list(SHARED_LIGHT_TRACE_COLORS)
     UI_THEMES = {name: dict(tokens) for name, tokens in SHARED_UI_THEMES.items()}
 
-    CHANNEL_FULL_SCALE_OPTIONS = [
-        10.0,
-        5.0,
-        2.5,
-        1.25,
-        0.625,
-        0.3125,
-        0.15625,
-        0.078125,
-        0.0390625,
-        0.01953125,
-    ]
+    CHANNEL_FULL_SCALE_OPTIONS = list(HAMMER_FULL_SCALE_STEPS)
     DISPLAY_MODE_ITEMS = [
         ("y(t)", "time"),
         ("aspec", "autospectrum"),
@@ -2469,6 +2470,11 @@ class MainWindow(QtWidgets.QMainWindow):
         explanation = QtWidgets.QLabel("每帧触发＋线性平均≥3次时生效；自动检查过载和双击。")
         explanation.setWordWrap(True)
         smart_form.addRow(explanation)
+        auto_range = QtWidgets.QCheckBox("首锤自动量程/触发（仅参考通道，本次锁定）")
+        auto_range.setObjectName("smartHitAutoRange")
+        auto_range.setChecked(modal.smart_hit_auto_range_enabled)
+        auto_range.setToolTip("首锤电压峰值预留20%余量后向上选量程，Abs Level设为峰值的35%；后续超过锁定量程或硬件范围仍剔除。")
+        smart_form.addRow(auto_range)
         smart_edits = {}
         reference = next((channel for channel in self.session.ai_channels
                           if channel.name == self.session.acquisition.reference_channel), None)
@@ -2491,7 +2497,7 @@ class MainWindow(QtWidgets.QMainWindow):
             smart_form.addRow(text, edit)
         force_limits = QtWidgets.QCheckBox("限制敲击力范围（使用参考通道工程单位）")
         force_limits.setChecked(modal.smart_hit_force_limits)
-        smart_form.insertRow(5, force_limits)
+        smart_form.insertRow(6, force_limits)
         for key in ("smart_hit_force_min", "smart_hit_force_max"):
             smart_edits[key].setEnabled(force_limits.isChecked())
             force_limits.toggled.connect(smart_edits[key].setEnabled)
@@ -2541,6 +2547,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._read_session_from_widgets()
             settings = self.session.acquisition.modal
             settings.smart_hit_enabled = smart_enable.isChecked()
+            settings.smart_hit_auto_range_enabled = auto_range.isChecked()
             settings.smart_hit_response_channels = None if len(selected) == response_list.count() else selected
             settings.smart_hit_force_limits = force_limits.isChecked()
             for key, edit in smart_edits.items():
@@ -2556,7 +2563,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         layout.addWidget(buttons)
         dialog.setMinimumSize(380, 170)
-        dialog.resize(490, 570)
+        dialog.resize(490, 600)
         dialog.exec()
         dialog.deleteLater()
 
@@ -4839,6 +4846,9 @@ class MainWindow(QtWidgets.QMainWindow):
         stripped = str(text).strip().lower()
         if stripped == "auto":
             return -1.0
+        for value in MainWindow.CHANNEL_FULL_SCALE_OPTIONS:
+            if stripped == MainWindow._format_full_scale_option(value).lower():
+                return value
         multiplier = 1.0
         if stripped.endswith("mv"):
             multiplier = 1e-3
@@ -5304,7 +5314,7 @@ class MainWindow(QtWidgets.QMainWindow):
         except ValueError:
             return 0.0
 
-    def _set_trigger_percent_from_level(self, level: float) -> None:
+    def _set_trigger_percent_from_level(self, level: float, *, exact: bool = False) -> None:
         full_scale = self._channel_full_scale_for_trigger(self._trigger_channel_index())
         percent = 0.0 if full_scale == 0.0 else abs(level) * 100.0 / full_scale
         index = min(
@@ -5312,7 +5322,15 @@ class MainWindow(QtWidgets.QMainWindow):
             key=lambda i: abs(self.TRIGGER_LEVEL_PERCENT_VALUES[i] - percent),
         )
         self.trigger_level_percent_combo.blockSignals(True)
-        self.trigger_level_percent_combo.setCurrentIndex(index)
+        if exact and not np.isclose(self.TRIGGER_LEVEL_PERCENT_VALUES[index], percent, atol=1e-10, rtol=0.0):
+            label = f"{percent:.12g}%"
+            exact_index = self.trigger_level_percent_combo.findText(label)
+            if exact_index < 0:
+                self.trigger_level_percent_combo.addItem(label)
+                exact_index = self.trigger_level_percent_combo.count() - 1
+            self.trigger_level_percent_combo.setCurrentIndex(exact_index)
+        else:
+            self.trigger_level_percent_combo.setCurrentIndex(index)
         self.trigger_level_percent_combo.blockSignals(False)
 
     def _frame_size_slider_changed(self, value: int) -> None:
@@ -5418,9 +5436,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.trigger_source_combo.addItems(["Ch1", "Ch2", "Ch3", "Ch4"])
         self._make_compact_combo(self.trigger_source_combo, 4)
         self.trigger_source_combo.currentTextChanged.connect(self._trigger_source_combo_changed)
-        self.trigger_level_edit = QtWidgets.QDoubleSpinBox()
+        self.trigger_level_edit = CompactDoubleSpinBox()
         self.trigger_level_edit.setRange(0.0, 10.0)
-        self.trigger_level_edit.setDecimals(3)
+        self.trigger_level_edit.setDecimals(9)
         self.trigger_level_edit.setSingleStep(0.01)
         self.trigger_level_edit.setSuffix(" V")
         self.trigger_level_edit.setMinimumWidth(78)
@@ -5430,6 +5448,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.trigger_level_edit.valueChanged.connect(self._trigger_level_abs_changed)
         self.trigger_level_percent_combo = QtWidgets.QComboBox()
         self.trigger_level_percent_combo.addItems(self.TRIGGER_LEVEL_PERCENT_OPTIONS)
+        self.trigger_level_percent_combo.setToolTip(
+            "此百分比以通道量程为基准；首锤自动触发使用峰值的35%，换算后此栏可能不是35%。"
+        )
         self.trigger_level_percent_combo.setCurrentText("0%")
         self._make_compact_combo(self.trigger_level_percent_combo, 4)
         self.trigger_level_percent_combo.currentTextChanged.connect(
@@ -5695,14 +5716,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if stored_trigger_percent is None:
             self._set_trigger_percent_from_level(self.session.acquisition.trigger.level)
         else:
-            percent_index = min(
-                range(len(self.TRIGGER_LEVEL_PERCENT_VALUES)),
-                key=lambda index: abs(self.TRIGGER_LEVEL_PERCENT_VALUES[index] - stored_trigger_percent),
-            )
-            self.trigger_level_percent_combo.blockSignals(True)
-            self.trigger_level_percent_combo.setCurrentIndex(percent_index)
-            self.trigger_level_percent_combo.blockSignals(False)
-            self._trigger_level_percent_changed(self.trigger_level_percent_combo.currentText())
+            self._set_trigger_percent_from_level(self.session.acquisition.trigger.level, exact=True)
         self.trigger_slope_combo.setCurrentIndex(0)
         self.pretrigger_samples_edit.setValue(self.session.acquisition.trigger.pretrigger_samples)
         self.trigger_timeout_edit.setValue(self.session.acquisition.trigger.timeout_seconds)
@@ -6209,6 +6223,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._pending_measurement = None
         self._plot_update_scheduled = False
         self._stop_requested_for_current_run = False
+        self._first_hit_locked_channel = None
+        self._first_hit_axis_overrides = set()
         device_name = self.device_combo.currentData()
         worker = ContinuousRecordingWorker(
             self.controller,
@@ -6271,6 +6287,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if not average_run:
             session.acquisition.trigger.enabled = False
             session.acquisition.trigger.source = "immediate"
+        try:
+            validate_first_hit_source(session.acquisition, average_run)
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
+            return
         if "manual" in session.acquisition.trigger.mode.strip().lower() and not session.acquisition.trigger.enabled:
             self.run_info_label.setText("State: waiting for arm")
             self.statusBar().showMessage("Manual trigger mode requires Arm before acquisition")
@@ -6285,13 +6306,17 @@ class MainWindow(QtWidgets.QMainWindow):
             if average_run and session.acquisition.averaging.mode in {"linear", "peak"}
             else None
         )
+        self._first_hit_locked_channel = None
+        self._first_hit_axis_overrides = set()
         display_interval = self._acquisition_display_interval_seconds(session)
+        self._acquisition_run_id = getattr(self, "_acquisition_run_id", 0) + 1
         worker = AcquisitionWorker(
             self.controller,
             device_name,
             average_run=average_run,
             target_average_count=target_average_count,
             display_interval_seconds=display_interval,
+            run_id=self._acquisition_run_id,
         )
         stop_event = self._worker_stop_event(worker)
         thread = QtCore.QThread(self)
@@ -6299,7 +6324,9 @@ class MainWindow(QtWidgets.QMainWindow):
         thread.started.connect(worker.run)
         worker.started.connect(self._acquisition_started)
         worker.measurement_ready.connect(self._handle_worker_measurement)
-        worker.status_changed.connect(self.run_info_label.setText)
+        if hasattr(worker, "settings_applied"):
+            worker.settings_applied.connect(self._handle_first_hit_settings)
+        worker.status_changed.connect(self._handle_acquisition_status)
         worker.error.connect(self._handle_worker_error)
         worker.finished.connect(self._acquisition_worker_finished)
         worker.finished.connect(thread.quit, QtCore.Qt.DirectConnection)
@@ -6320,6 +6347,48 @@ class MainWindow(QtWidgets.QMainWindow):
         self.device_info_label.setText(f"Device: {device_name}")
         self.statusBar().showMessage("Starting averaged acquisition" if average_run else "Starting acquisition")
         thread.start()
+
+    @QtCore.Slot(int, object)
+    def _handle_first_hit_settings(self, run_id: int, settings: dict) -> None:
+        if run_id != getattr(self, "_acquisition_run_id", None) or settings.get("state") != "applied":
+            return
+        if getattr(self, "_first_hit_settings_run_id", None) == run_id:
+            return
+        self._first_hit_settings_run_id = run_id
+        channel_name = settings["channel"]
+        self._first_hit_locked_channel = channel_name
+        self._first_hit_axis_overrides = set()
+        session = self.controller.state.session
+        for channel in session.ai_channels:
+            if channel.name == channel_name:
+                channel.full_scale = settings["full_scale_v"]
+                channel.min_value = -channel.full_scale
+                channel.max_value = channel.full_scale
+        session.acquisition.trigger.level = settings["trigger_level_v"]
+        session.acquisition.trigger.level_percent = settings["trigger_level_v"] / settings["full_scale_v"] * 100
+        for row in range(self.channel_table.rowCount()):
+            if self.channel_table.item(row, 1).text() == channel_name:
+                with QtCore.QSignalBlocker(self.channel_table):
+                    self.channel_table.item(row, 9).setText(f"{settings['full_scale_v']:.12g}")
+                self._sync_channel_grid()
+                if self.channel_list.currentRow() == row:
+                    self._load_channel_editor_from_row(row)
+                break
+        with QtCore.QSignalBlocker(self.trigger_level_edit):
+            self.trigger_level_edit.setValue(settings["trigger_level_v"])
+        self._set_trigger_percent_from_level(settings["trigger_level_v"], exact=True)
+        self._refresh_full_scale_axis_ranges_for_channels([channel_name], force_auto_y=True, automatic=True)
+        self.statusBar().showMessage(
+            f"首锤已锁定：{channel_name} ±{settings['full_scale_v']:.6g} V，Abs Level {settings['trigger_level_v']:.6g} V"
+        )
+
+    @QtCore.Slot(str)
+    def _handle_acquisition_status(self, message: str) -> None:
+        if self._stop_requested_for_current_run:
+            return
+        self.run_info_label.setText(message)
+        if message.startswith("等待首锤"):
+            self.statusBar().showMessage(message)
 
     @staticmethod
     def _acquisition_display_interval_seconds(session: SessionConfig) -> float:
@@ -6603,6 +6672,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_marker_readout("bottom")
 
     def _axis_y_scope_for_plot(self, key: str) -> str:
+        reference = getattr(self, "_first_hit_locked_channel", None)
+        if (reference is not None and self._effective_display_mode_for_key(key) == "time"
+                and key not in getattr(self, "_first_hit_axis_overrides", set())
+                and self._manual_y_ranges.get(key) is None
+                and any(reference in self._trace_aliases(name) for name in self._last_plot_cache.get(key, {}))):
+            self._channel_full_scale_focus[key] = reference
+            self._auto_y_follow_visible_x[key] = False
+            return "channel_full_scale"
         if self._channel_full_scale_focus.get(key) is not None:
             return "channel_full_scale"
         if self._auto_y_follow_visible_x.get(key, False):
@@ -6776,6 +6853,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return "linear"
 
     def _reset_plot_display_state(self) -> None:
+        self._first_hit_locked_channel = None
+        self._first_hit_axis_overrides = set()
         for key in ("top", "bottom"):
             self._manual_x_ranges[key] = None
             self._manual_y_ranges[key] = None
@@ -8287,7 +8366,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return None
 
     def _refresh_full_scale_axis_ranges_for_channels(
-        self, channel_names: list[str], force_auto_y: bool = False
+        self, channel_names: list[str], force_auto_y: bool = False, *, automatic: bool = False
     ) -> None:
         changed: set[str] = set()
         for name in channel_names:
@@ -8313,6 +8392,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 continue
             if force_auto_y:
                 self._manual_y_ranges[key] = None
+            if not automatic and getattr(self, "_first_hit_locked_channel", None) is not None:
+                self._first_hit_axis_overrides.add(key)
             self._channel_full_scale_focus[key] = focus_trace_name or self._active_trace_names.get(key)
             self._auto_y_follow_visible_x[key] = False
             self._apply_axis_scale(key, preserve_x=True, y_scope="channel_full_scale")
@@ -8498,6 +8579,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"Auto-scaled {key} X axis")
 
     def _auto_scale_plot_xy(self, key: str) -> None:
+        if getattr(self, "_first_hit_locked_channel", None) is not None:
+            self._first_hit_axis_overrides.add(key)
         self._manual_x_ranges[key] = None
         self._manual_y_ranges[key] = None
         self._channel_full_scale_focus[key] = None
@@ -8506,6 +8589,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"Auto-scaled {key} X/Y axes")
 
     def _auto_fit_y_to_visible_x(self, key: str) -> None:
+        if getattr(self, "_first_hit_locked_channel", None) is not None:
+            self._first_hit_axis_overrides.add(key)
         self._manual_y_ranges[key] = None
         self._channel_full_scale_focus[key] = None
         self._apply_axis_scale(key, preserve_x=True, y_scope="visible")

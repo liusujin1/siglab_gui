@@ -10,6 +10,22 @@ from python_vna.daq.base import BackendFrame
 from python_vna.models import AcquisitionConfig
 
 
+HAMMER_FULL_SCALE_STEPS = tuple(10.0 / 2 ** index for index in range(10))
+
+
+def first_hit_range(voltage: np.ndarray, reference: str) -> dict:
+    peak = float(np.max(np.abs(voltage), initial=0.0))
+    baseline = float(np.median(voltage))
+    noise = float(1.4826 * np.median(np.abs(voltage - baseline)))
+    level = peak * 0.35
+    if not np.isfinite(peak) or level <= 0 or abs(baseline) + 6 * noise >= level:
+        raise ValueError("首锤基线或背景噪声过大，请调整耦合或重新敲击")
+    requested = min(10.0, peak * 1.2)
+    full_scale = min(value for value in HAMMER_FULL_SCALE_STEPS if value >= requested)
+    return {"state": "requested", "channel": reference, "peak_v": peak,
+            "full_scale_v": full_scale, "trigger_level_v": level}
+
+
 def smart_hit_active(acquisition: AcquisitionConfig, averaging: bool) -> bool:
     return bool(
         averaging and acquisition.modal.smart_hit_enabled
@@ -17,6 +33,14 @@ def smart_hit_active(acquisition: AcquisitionConfig, averaging: bool) -> bool:
         and acquisition.trigger.enabled
         and acquisition.trigger.mode.strip().lower() == "every frame"
     )
+
+
+def validate_first_hit_source(acquisition: AcquisitionConfig, averaging: bool) -> None:
+    if smart_hit_active(acquisition, averaging) and acquisition.modal.smart_hit_auto_range_enabled:
+        source = acquisition.trigger.source.strip().split("/")[-1]
+        reference = acquisition.reference_channel.strip().split("/")[-1]
+        if source != reference:
+            raise ValueError("首锤自动量程需要以力锤参考通道触发，请调整触发通道或关闭首锤自动量程")
 
 
 @dataclass

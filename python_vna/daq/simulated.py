@@ -113,6 +113,7 @@ class SimulatedDaqBackend(BaseDaqBackend):
             frame_index=self._state.frame_index,
             metadata={
                 "backend": "simulated",
+                "channel_hardware_ranges": {channel.name: (-10.0, 10.0) for channel in enabled},
                 "frame_start_unix_ns": time.time_ns(),
                 "channel_full_scales": {
                     channel.name: abs(float(channel.full_scale or channel.max_value or 0.0))
@@ -126,6 +127,12 @@ class SimulatedDaqBackend(BaseDaqBackend):
 
     def stop(self) -> None:
         self._running = False
+
+    def update_trigger_level(self, level_v: float) -> float:
+        if self._state is None or not np.isfinite(level_v) or level_v <= 0:
+            raise DaqBackendError("模拟设备触发电压无效或设备尚未配置")
+        self._state.session.acquisition.trigger.level = float(level_v)
+        return float(level_v)
 
     def abort(self) -> None:
         self._running = False

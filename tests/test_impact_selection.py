@@ -16,6 +16,8 @@ def impact_config() -> AcquisitionConfig:
                                response_channels=["ai1", "ai2"])
     config.trigger.enabled = True
     config.trigger.mode = "Every Frame"
+    config.trigger.source = "ai0"
+    config.modal.smart_hit_auto_range_enabled = False
     config.averaging.count = 3
     return config
 

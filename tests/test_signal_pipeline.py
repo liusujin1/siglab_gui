@@ -874,8 +874,10 @@ class SignalPipelineTests(unittest.TestCase):
         self.assertEqual(len(ai_channels.voltage_calls), 1)
         self.assertEqual(ai_channels.accel_calls, [])
         _args, kwargs = ai_channels.voltage_calls[0]
-        self.assertEqual(kwargs["min_val"], -5.0)
-        self.assertEqual(kwargs["max_val"], 5.0)
+        self.assertEqual(kwargs["min_val"], -10.0)
+        self.assertEqual(kwargs["max_val"], 10.0)
+        self.assertEqual(backend._hardware_input_ranges, {"ai0": (-10.0, 10.0)})
+        self.assertEqual(session.ai_channels[0].full_scale, 5.0)
         assigned = ai_channels.created[0].assignments
         self.assertEqual(assigned["ai_coupling"], "ac")
         self.assertEqual(assigned["ai_excit_src"], "internal")

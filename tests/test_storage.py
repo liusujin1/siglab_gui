@@ -23,6 +23,30 @@ from python_vna.storage import (
 
 
 class StorageTests(unittest.TestCase):
+    def test_first_hit_exact_trigger_and_software_range_roundtrip(self):
+        from python_vna.storage import load_saved_session_json
+        session = self._sample_session()
+        session.config.ai_channels[0].full_scale = 0.3125
+        session.config.acquisition.trigger.level = 0.0455
+        session.config.acquisition.trigger.level_percent = 14.56
+        session.config.acquisition.modal.smart_hit_auto_range_enabled = True
+        session.measurement.metadata["smart_hit_auto_range"] = {
+            "state": "applied", "channel": "ai0", "peak_v": 0.13,
+            "full_scale_v": 0.3125, "trigger_level_v": 0.0455,
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            vna = Path(folder) / "ranging.vna"
+            data = Path(folder) / "ranging.json"
+            save_legacy_vna(session, vna)
+            save_session_json(session, data)
+            loaded = load_legacy_vna(vna)
+            json_loaded = load_saved_session_json(data)
+        for item in (loaded, json_loaded):
+            self.assertEqual(item.config.ai_channels[0].full_scale, 0.3125)
+            self.assertAlmostEqual(item.config.acquisition.trigger.level, 0.0455)
+            self.assertAlmostEqual(item.config.acquisition.trigger.level_percent, 14.56)
+            self.assertEqual(item.measurement.metadata["smart_hit_auto_range"]["state"], "applied")
+
     def test_smart_hit_settings_and_audit_roundtrip_in_legacy_vna(self):
         session = self._sample_session()
         modal = session.config.acquisition.modal

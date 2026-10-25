@@ -57,6 +57,7 @@ class ModalProcessingConfig:
     double_hit_delay_fraction: float = 0.2
     reject_overload: bool = False
     smart_hit_enabled: bool = True
+    smart_hit_auto_range_enabled: bool = True
     smart_hit_tolerance: float = 0.25
     smart_hit_min_hz: float = 0.0
     smart_hit_max_hz: float = 0.0

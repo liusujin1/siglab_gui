@@ -1918,11 +1918,136 @@ class MainWindowTests(unittest.TestCase):
                 self.window._device_refresh_thread.quit()
                 self.window._device_refresh_thread.wait(2000)
 
+    def test_first_hit_settings_update_only_reference_and_exact_trigger_percent(self):
+        self.window._acquisition_run_id = 7
+        settings = {"state": "applied", "channel": "ai0", "peak_v": 1.0,
+                    "full_scale_v": 1.25, "trigger_level_v": 0.35}
+        other_ranges = [self.window.channel_table.item(row, 9).text() for row in range(1, 4)]
+        self.window._handle_first_hit_settings(7, settings)
+        self.assertEqual(float(self.window.channel_table.item(0, 9).text()), 1.25)
+        self.assertEqual([self.window.channel_table.item(row, 9).text() for row in range(1, 4)], other_ranges)
+        self.assertAlmostEqual(self.window.trigger_level_edit.value(), 0.35)
+        self.assertEqual(self.window.trigger_level_percent_combo.currentText(), "28%")
+        self.assertFalse(self.window.trigger_level_percent_combo.isEditable())
+        self.window._read_session_from_widgets()
+        self.assertAlmostEqual(self.controller.state.session.acquisition.trigger.level, 0.35)
+        self.assertAlmostEqual(self.controller.state.session.acquisition.trigger.level_percent, 28)
+
+    def test_old_or_duplicate_auto_settings_do_not_overwrite_new_manual_values(self):
+        self.window._acquisition_run_id = 8
+        settings = {"state": "applied", "channel": "ai0", "peak_v": 1.0,
+                    "full_scale_v": 2.5, "trigger_level_v": 0.35}
+        self.window._handle_first_hit_settings(7, settings)
+        self.assertEqual(float(self.window.channel_table.item(0, 9).text()), 10)
+        self.window._handle_first_hit_settings(8, settings)
+        self.window.channel_table.item(0, 9).setText("1.25")
+        self.window.trigger_level_edit.setValue(0.5)
+        self.window._handle_first_hit_settings(8, settings)
+        self.assertEqual(float(self.window.channel_table.item(0, 9).text()), 1.25)
+        self.assertEqual(self.window.trigger_level_edit.value(), 0.5)
+
+    def test_first_hit_time_axis_range_survives_redraw_and_display_switch(self):
+        self.window._acquisition_run_id = 1
+        self.window._handle_first_hit_settings(1, {"state": "applied", "channel": "ai0",
+                                                  "full_scale_v": 2.5, "trigger_level_v": 0.35})
+        measurement = self._measurement()
+        self.controller.state.measurement = measurement
+        self.window.top_display_combo.setCurrentText("y(t)")
+        self.window._plot_measurement(measurement)
+        first = tuple(self.window.top_plot.viewRange()[1])
+        self.window._plot_measurement(measurement)
+        np.testing.assert_allclose(self.window.top_plot.viewRange()[1], first)
+        self.window.top_display_combo.setCurrentText("aspec")
+        self.window.top_display_combo.setCurrentText("y(t)")
+        np.testing.assert_allclose(self.window.top_plot.viewRange()[1], first)
+        self.assertEqual(self.window._channel_full_scale_focus["top"], "ai0")
+        self.window._auto_scale_plot_xy("top")
+        self.window._plot_measurement(measurement)
+        self.assertIn("top", self.window._first_hit_axis_overrides)
+        self.assertIsNone(self.window._channel_full_scale_focus["top"])
+
+    def test_loading_exact_trigger_value_does_not_snap_to_legacy_percent_step(self):
+        self.controller.state.session.ai_channels[0].full_scale = 0.3125
+        self.controller.state.session.acquisition.trigger.level = 0.0455
+        self.controller.state.session.acquisition.trigger.level_percent = 14.56
+        self.window._load_session_to_widgets()
+        self.assertAlmostEqual(self.window.trigger_level_edit.value(), 0.0455)
+        self.assertEqual(self.window.trigger_level_percent_combo.currentText(), "14.56%")
+
+    def test_every_average_click_recalibrates_first_hit_on_worker_thread(self):
+        from test_first_hit_ranging import RangeBackend, ranging_session
+
+        backend = RangeBackend()
+        self.controller.backend = backend
+        self.controller.set_session(ranging_session())
+        self.window.session = self.controller.state.session
+        self.window._load_session_to_widgets()
+        self.window._device_poll_timer.stop()
+        for amplitude, expected_range in ((1.0, 1.25), (0.4, 0.625), (2.0, 2.5)):
+            with self.subTest(amplitude=amplitude):
+                backend.amplitudes = iter([amplitude] * 3)
+                self.window._start_average_acquisition()
+                thread = self.window._acquisition_thread
+                self.assertIsNotNone(thread)
+                try:
+                    self.assertTrue(thread.wait(10000))
+                finally:
+                    self.app.processEvents()
+                    self.app.processEvents()
+                self.assertIsNone(self.window._acquisition_thread)
+                self.assertEqual(float(self.window.channel_table.item(0, 9).text()), expected_range)
+                self.assertAlmostEqual(self.window.trigger_level_edit.value(), amplitude * 0.35)
+                self.assertEqual(self.controller.state.measurement.metadata["smart_hit_attempted"], 3)
+                self.assertEqual(self.controller.state.measurement.metadata["average_count"], 3)
+                self.assertNotEqual(backend.calls[-1][0], threading.get_ident())
+        self.assertEqual(len(backend.calls), 3)
+
+    def test_auto_range_signal_arrives_before_final_plot_and_only_once(self):
+        from test_first_hit_ranging import RangeBackend, ranging_session
+
+        session = ranging_session()
+        backend = RangeBackend()
+        controller = VnaController(backend, session)
+        worker = AcquisitionWorker(controller, "Dev1", average_run=True, target_average_count=3,
+                                   display_interval_seconds=1e9, run_id=42)
+        settings_events, plot_events, errors = [], [], []
+        worker.settings_applied.connect(lambda run_id, event: settings_events.append((run_id, event, backend.index)))
+        worker.measurement_ready.connect(plot_events.append)
+        worker.error.connect(errors.append)
+        worker.run()
+        self.assertEqual(errors, [])
+        self.assertEqual(len(settings_events), 1)
+        self.assertEqual(settings_events[0][0], 42)
+        self.assertEqual(settings_events[0][2], 1)
+        self.assertEqual(settings_events[0][1]["state"], "applied")
+        self.assertAlmostEqual(settings_events[0][1]["trigger_level_v"], 0.35)
+        self.assertEqual(len(plot_events), 1)
+        self.assertEqual(plot_events[0].metadata["average_count"], 3)
+
+    def test_trigger_update_failure_stops_worker_without_success_signal(self):
+        from test_first_hit_ranging import RangeBackend, ranging_session
+
+        backend = RangeBackend()
+        def failed_update(_level):
+            raise RuntimeError("test driver failure")
+        backend.update_trigger_level = failed_update
+        controller = VnaController(backend, ranging_session())
+        worker = AcquisitionWorker(controller, "Dev1", average_run=True, target_average_count=3)
+        applied, errors = [], []
+        worker.settings_applied.connect(lambda *_args: applied.append(True))
+        worker.error.connect(errors.append)
+        worker.run()
+        self.assertEqual(applied, [])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("触发更新失败", errors[0])
+        self.assertEqual(controller.state.measurement.metadata["smart_hit_auto_range"]["state"], "failed")
+
     def test_modal_smart_settings_apply_and_reopen(self):
         def fake_exec(dialog):
             enabled = dialog.findChild(QtWidgets.QCheckBox, "smartHitEnabled")
             self.assertTrue(enabled.isChecked())
             enabled.setChecked(False)
+            dialog.findChild(QtWidgets.QCheckBox, "smartHitAutoRange").setChecked(False)
             dialog.findChild(QtWidgets.QDoubleSpinBox, "smart_hit_tolerance").setValue(15)
             responses = dialog.findChild(QtWidgets.QListWidget, "smartHitResponses")
             self.assertGreaterEqual(responses.count(), 2)
@@ -1936,6 +2061,7 @@ class MainWindowTests(unittest.TestCase):
             self.window._open_modal_parameters_dialog()
         modal = self.window.session.acquisition.modal
         self.assertFalse(modal.smart_hit_enabled)
+        self.assertFalse(modal.smart_hit_auto_range_enabled)
         self.assertEqual(modal.smart_hit_tolerance, 0.15)
         self.assertEqual(len(modal.smart_hit_response_channels), 1)
         self.window._read_session_from_widgets()

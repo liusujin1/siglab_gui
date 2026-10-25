@@ -9,6 +9,7 @@ from python_vna.daq import BaseDaqBackend, BackendDevice, preferred_usb4431_devi
 from python_vna.daq.base import BackendFrame
 from python_vna.models import MeasurementSet, SavedSession, SessionConfig
 from python_vna.signal_pipeline import FrameProcessor
+from python_vna.impact_selection import validate_first_hit_source
 
 
 @dataclass(slots=True)
@@ -43,6 +44,7 @@ class VnaController:
         self._set_backend_stop_event(self._stop_requested)
 
     def set_averaging_enabled(self, enabled: bool) -> None:
+        validate_first_hit_source(self.state.session.acquisition, enabled)
         self.processor = FrameProcessor(self.state.session.acquisition, averaging_enabled=enabled,
                                         channel_configs=self.state.session.ai_channels)
         if self.processor._impact_selector is not None:
@@ -76,6 +78,33 @@ class VnaController:
             }
             return retained
         self.state.measurement = measurement
+        settings = measurement.metadata.get("smart_hit_auto_range")
+        if settings and settings.get("state") == "requested":
+            if self._stop_requested.is_set():
+                settings["state"] = "cancelled"
+            else:
+                try:
+                    updater = getattr(self.backend, "update_trigger_level", None)
+                    if updater is None:
+                        raise RuntimeError("当前后端不支持首锤触发更新")
+                    actual_level = float(updater(settings["trigger_level_v"]))
+                    if not np.isfinite(actual_level) or actual_level <= 0:
+                        raise ValueError("后端返回了无效触发电压")
+                except Exception as exc:
+                    settings.update(state="failed", error=str(exc))
+                    if self.processor._first_hit_settings is not None:
+                        self.processor._first_hit_settings.update(settings)
+                    raise RuntimeError(f"首锤触发更新失败，采集已停止：{exc}") from exc
+                settings.update(state="applied", trigger_level_v=actual_level)
+                self.processor._first_hit_settings.update(settings)
+                session = self.state.session
+                for channel in session.ai_channels:
+                    if channel.name == settings["channel"]:
+                        channel.full_scale = settings["full_scale_v"]
+                        channel.min_value = -channel.full_scale
+                        channel.max_value = channel.full_scale
+                session.acquisition.trigger.level = actual_level
+                session.acquisition.trigger.level_percent = actual_level / settings["full_scale_v"] * 100
         return measurement
 
     def stop(self) -> None:

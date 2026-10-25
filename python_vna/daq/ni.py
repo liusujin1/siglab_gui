@@ -36,6 +36,7 @@ class NIDaqBackend(BaseDaqBackend):
         self._finite_ai_sampling = False
         self._stop_requested = False
         self._external_stop_event: threading.Event | None = None
+        self._hardware_input_ranges: dict[str, tuple[float, float]] = {}
 
     IEPE_BIAS_CURRENT_MA = 2.1
 
@@ -360,11 +361,15 @@ class NIDaqBackend(BaseDaqBackend):
 
         constants = self._constants
         self._ai_task = self._nidaqmx.Task(new_task_name=f"{selected}_ai")
+        usb4431 = "4431" in selected_device.product_type
+        self._hardware_input_ranges = {}
         for channel in enabled:
             physical_name = self._normalize_physical_name(
                 selected, channel.physical_name or channel.name
             )
             min_val, max_val = self._channel_voltage_limits(channel)
+            if usb4431:
+                min_val, max_val = -10.0, 10.0
             ai_channel = self._add_ai_voltage_channel(
                 physical_name,
                 min_val=min_val,
@@ -372,6 +377,12 @@ class NIDaqBackend(BaseDaqBackend):
                 channel=channel,
             )
             self._apply_voltage_channel_properties(ai_channel, channel)
+            lower = self._safe_getattr(ai_channel, "ai_rng_low", None)
+            upper = self._safe_getattr(ai_channel, "ai_rng_high", None)
+            if isinstance(lower, (int, float)) and isinstance(upper, (int, float)) and upper > lower:
+                self._hardware_input_ranges[channel.name] = (float(lower), float(upper))
+            elif usb4431:
+                self._hardware_input_ranges[channel.name] = (-10.0, 10.0)
 
         sample_rate = session.acquisition.sample_rate
         frame_size = session.acquisition.frame_size
@@ -401,29 +412,7 @@ class NIDaqBackend(BaseDaqBackend):
                 pass
 
         if trigger.enabled and trigger.source != "immediate":
-            source = self._normalize_trigger_source(trigger.source, selected)
-            trigger_level = abs(float(trigger.level))
-            delay_setting = int(trigger.pretrigger_samples)
-            pretrigger_samples = (
-                int(round(abs(delay_setting) * frame_size / 100.0))
-                if delay_setting < 0
-                else 0
-            )
-            if pretrigger_samples > 0 and finite_ai_sampling:
-                self._ai_task.triggers.reference_trigger.cfg_anlg_window_ref_trig(
-                    trigger_source=source,
-                    pretrigger_samples=pretrigger_samples,
-                    window_top=trigger_level,
-                    window_bottom=-trigger_level,
-                    trigger_when=constants.WindowTriggerCondition1.LEAVING_WINDOW,
-                )
-            else:
-                self._ai_task.triggers.start_trigger.cfg_anlg_window_start_trig(
-                    trigger_source=source,
-                    window_top=trigger_level,
-                    window_bottom=-trigger_level,
-                    trigger_when=constants.WindowTriggerCondition1.LEAVING_WINDOW,
-                )
+            self._configure_analog_trigger(abs(float(trigger.level)))
 
         if session.acquisition.excitation.enabled and session.ao_channel:
             if not selected_device.capability.supports_output:
@@ -447,6 +436,47 @@ class NIDaqBackend(BaseDaqBackend):
         self._reader = self._stream_readers.AnalogMultiChannelReader(
             self._ai_task.in_stream
         )
+
+    def _configure_analog_trigger(self, level_v: float):
+        trigger = self._session.acquisition.trigger
+        source = self._normalize_trigger_source(trigger.source, self._device_name)
+        pretrigger = int(round(abs(trigger.pretrigger_samples) * self._session.acquisition.frame_size / 100)) if trigger.pretrigger_samples < 0 else 0
+        parameters = dict(trigger_source=source, window_top=level_v, window_bottom=-level_v,
+                          trigger_when=self._constants.WindowTriggerCondition1.LEAVING_WINDOW)
+        if pretrigger > 0 and self._finite_ai_sampling:
+            target = self._ai_task.triggers.reference_trigger
+            target.cfg_anlg_window_ref_trig(pretrigger_samples=pretrigger, **parameters)
+        else:
+            target = self._ai_task.triggers.start_trigger
+            target.cfg_anlg_window_start_trig(**parameters)
+        return target
+
+    def update_trigger_level(self, level_v: float) -> float:
+        if self._ai_task is None or self._session is None or not self._finite_ai_sampling:
+            raise DaqBackendError("首锤触发更新需要已配置的有限采集任务")
+        if not np.isfinite(level_v) or level_v <= 0:
+            raise DaqBackendError("触发电压必须为有限正数")
+        if self._should_stop_read():
+            raise DaqBackendError("Acquisition stopped by user.")
+        mode = self._safe_getattr(self._safe_getattr(self._constants, "TaskMode", None), "TASK_UNRESERVE", None)
+        if mode is not None:
+            self._ai_task.control(mode)
+        target = self._configure_analog_trigger(float(level_v))
+        actual = self._safe_getattr(target, "anlg_win_top", level_v)
+        actual = float(actual) if isinstance(actual, (int, float)) else float(level_v)
+        if not np.isfinite(actual) or actual <= 0:
+            raise DaqBackendError("DAQmx 返回了无效的实际触发电压")
+        return actual
+
+    def _read_overload_status(self) -> dict:
+        stream = self._safe_getattr(self._ai_task, "in_stream", None)
+        exists = self._safe_getattr(stream, "overloaded_input_chans_exist", None)
+        if exists is None:
+            return {}
+        result = {"overload": bool(exists)}
+        if exists:
+            result["overload_channels"] = list(self._safe_getattr(stream, "overloaded_input_chans", []) or [])
+        return result
 
     @staticmethod
     def _normalize_trigger_source(source: str, _device_name: str) -> str:
@@ -538,6 +568,7 @@ class NIDaqBackend(BaseDaqBackend):
                     data[:, samples_read : samples_read + requested] = chunk
                     samples_read += requested
             read_end_unix_ns = time.time_ns()
+            overload_status = self._read_overload_status()
         except Exception as exc:  # pragma: no cover - requires NI runtime/hardware
             raise DaqBackendError(f"NI-DAQmx read failed: {exc}") from exc
         finally:
@@ -562,6 +593,8 @@ class NIDaqBackend(BaseDaqBackend):
             metadata={
                 "backend": "ni",
                 "device": self._device_name,
+                "channel_hardware_ranges": dict(self._hardware_input_ranges),
+                **overload_status,
                 "trigger_delay_percent": int(self._session.acquisition.trigger.pretrigger_samples)
                 if self._session.acquisition.trigger.enabled
                 else 0,
@@ -620,6 +653,7 @@ class NIDaqBackend(BaseDaqBackend):
                     pass
             setattr(self, task_name, None)
         self._reader = None
+        self._hardware_input_ranges = {}
         self._session = None
         self._finite_ai_sampling = False
         self._stop_requested = False

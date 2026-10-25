@@ -1237,6 +1237,8 @@ def save_legacy_vna(session: SavedSession, path: str | Path) -> Path:
     }
     impact_extension = {
         "version": 1,
+        "trigger": {"level_v": float(config.acquisition.trigger.level),
+                    "level_percent": config.acquisition.trigger.level_percent},
         "settings": {key: value for key, value in asdict(config.acquisition.modal).items()
                      if key.startswith("smart_hit_")},
         "summary": {key: value for key, value in metadata.items()
@@ -1815,6 +1817,7 @@ def load_legacy_vna(path: str | Path) -> SavedSession:
     modal_raw = getattr(slm, "modal", None)
     modal = ModalProcessingConfig()
     impact_summary = {}
+    exact_trigger = None
     modal.force_window_enabled = window_index in {17, 18, 19}
     modal.exponential_window_enabled = window_index in {15, 16, 17, 18, 19}
     if reject_index in {3, 4}:
@@ -1838,6 +1841,11 @@ def load_legacy_vna(path: str | Path) -> SavedSession:
         try:
             extension = json.loads(_legacy_string(getattr(modal_entry, "py_hit_selection_json", "{}")))
             if isinstance(extension, dict) and extension.get("version") == 1:
+                saved_trigger = extension.get("trigger")
+                if isinstance(saved_trigger, dict):
+                    level = saved_trigger.get("level_v")
+                    if isinstance(level, (int, float)) and np.isfinite(level) and 0 <= level <= 10:
+                        exact_trigger = float(level)
                 for key, value in extension.get("settings", {}).items():
                     if key.startswith("smart_hit_") and hasattr(modal, key):
                         setattr(modal, key, value)
@@ -1887,6 +1895,9 @@ def load_legacy_vna(path: str | Path) -> SavedSession:
         excitation=excitation,
         modal=modal,
     )
+    if exact_trigger is not None:
+        acquisition.trigger.level = exact_trigger
+        acquisition.trigger.level_percent = exact_trigger / max(trigger_full_scale, 1e-20) * 100
     if xcstate is not None and xcmeas is not None:
         xs = _legacy_unwrap_cell(xcstate[0, 0])
         refc = _as_int_list(getattr(xs, "refc", np.array([])))
