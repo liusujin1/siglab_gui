@@ -1022,6 +1022,8 @@ class AcquisitionWorker(QtCore.QObject):
         try:
             self.status_changed.emit("State: starting")
             self._controller.set_averaging_enabled(self._average_run)
+            if getattr(self._controller, "backend", None).__class__.__name__ == "NetDaqBackend":
+                self._controller.backend.set_stop_event(self._stop_requested)
             self._controller.configure(device_name=self._device_name)
             self._set_controller_stop_event(self._stop_requested)
             if self._stop_requested.is_set():
@@ -1069,6 +1071,8 @@ class AcquisitionWorker(QtCore.QObject):
                 self._controller.stop()
             except Exception as exc:
                 append_log(f"acquisition stop failed: {exc!r}")
+                if getattr(self._controller, "backend", None).__class__.__name__ == "NetDaqBackend":
+                    self.error.emit(str(exc))
             try:
                 self._controller.close()
             except Exception as exc:
@@ -1140,6 +1144,8 @@ class ContinuousRecordingWorker(QtCore.QObject):
         try:
             self.status_changed.emit("State: preparing record")
             self._controller.set_averaging_enabled(False)
+            if getattr(self._controller, "backend", None).__class__.__name__ == "NetDaqBackend":
+                self._controller.backend.set_stop_event(self._stop_requested)
             self._controller.configure(device_name=self._device_name)
             self._set_controller_stop_event(self._stop_requested)
             if self._stop_requested.is_set():
@@ -1193,6 +1199,10 @@ class ContinuousRecordingWorker(QtCore.QObject):
                 self._controller.stop()
             except Exception as exc:
                 append_log(f"recording stop failed: {exc!r}")
+                if getattr(self._controller, "backend", None).__class__.__name__ == "NetDaqBackend":
+                    error_message = str(exc)
+                    completed = False
+                    self.error.emit(error_message)
             try:
                 self._controller.close()
             except Exception as exc:
@@ -1591,6 +1601,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._load_session_to_widgets()
         self._refresh_condition_panel()
         self._update_window_title()
+        self._apply_netdaq_limits()
 
         self.device_status_light = QtWidgets.QLabel()
         self.device_status_light.setFixedSize(12, 12)
@@ -1606,7 +1617,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _set_device_connected(self, connected: bool) -> None:
         if not hasattr(self, "device_status_light"):
             return
-        hardware = self.controller.backend.__class__.__name__ == "NIDaqBackend"
+        hardware = self.controller.backend.__class__.__name__ in {"NIDaqBackend", "NetDaqBackend"}
         connected = bool(connected and hardware)
         self.device_status_light.setProperty("connected", connected)
         color = "#16803c" if connected else "#d32f2f"
@@ -1617,14 +1628,14 @@ class MainWindow(QtWidgets.QMainWindow):
             "设备已连接" if connected else ("设备未连接" if hardware else "模拟模式")
         )
         self.device_status_label.setToolTip(
-            "空闲时每 5 秒检查所选 NI 设备；采集时根据数据和错误更新状态。"
+            "空闲时每 5 秒只读检查所选设备；采集时根据数据和错误更新状态。绿色不代表已完成标定。"
         )
 
     def _poll_device_connection(self) -> None:
         if (self._acquisition_thread is not None or self._recording_thread is not None
                 or self._close_confirmed):
             return
-        if self.controller.backend.__class__.__name__ != "NIDaqBackend":
+        if self.controller.backend.__class__.__name__ not in {"NIDaqBackend", "NetDaqBackend"}:
             self._set_device_connected(False)
             return
         self.refresh_devices_async(connection_only=True)
@@ -1663,9 +1674,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _save_theme_preference(self) -> None:
         try:
+            try:
+                payload = json.loads(self._ui_settings_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            payload["theme"] = self._theme_name
             self._ui_settings_path.parent.mkdir(parents=True, exist_ok=True)
             self._ui_settings_path.write_text(
-                json.dumps({"theme": self._theme_name}, indent=2),
+                json.dumps(payload, indent=2),
                 encoding="utf-8",
             )
         except OSError:
@@ -2084,6 +2102,7 @@ class MainWindow(QtWidgets.QMainWindow):
         file_menu.addAction("打开 VNA", self._import_legacy_vna)
         file_menu.addAction("保存 VNA", self._save_session)
         file_menu.addAction("保存为默认", self._save_to_default_vna)
+        self.device_connection_action = file_menu.addAction("设备连接...", self._open_device_connection)
         file_menu.addSeparator()
         file_menu.addAction("检查更新", self._check_for_updates)
         file_menu.addSeparator()
@@ -3518,7 +3537,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return line
 
         self.backend_combo = QtWidgets.QComboBox()
-        self.backend_combo.addItems(["simulated", "ni"])
+        self.backend_combo.addItems(["simulated", "ni", "netdaq"])
         self.backend_combo.currentTextChanged.connect(self._backend_changed)
         self.device_combo = QtWidgets.QComboBox()
         self.refresh_devices_button = QtWidgets.QPushButton("刷新")
@@ -5025,6 +5044,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
 
     def _apply_bias_defaults_to_table_row(self, row: int) -> None:
+        if self.controller.backend.__class__.__name__ == "NetDaqBackend":
+            self._sync_netdaq_channel_mode(row)
+            return
         coupling = self.channel_table.item(row, 6).text().strip().lower()
         if coupling != "bias":
             self.channel_table.item(row, 4).setCheckState(QtCore.Qt.Unchecked)
@@ -5118,6 +5140,57 @@ class MainWindow(QtWidgets.QMainWindow):
             option_text = self._format_full_scale_option(full_scale_value)
             self.channel_full_scale_combo.setCurrentText(option_text)
         self._channel_editor_loading = False
+        self._sync_netdaq_channel_mode(row)
+
+    def _sync_netdaq_channel_mode(self, row: int) -> None:
+        backend = self.controller.backend
+        if backend.__class__.__name__ != "NetDaqBackend":
+            return
+        self.channel_iepe_checkbox.setEnabled(False)
+        self.channel_iepe_current_edit.setEnabled(False)
+        if backend.profile is None or not 0 <= row < len(backend.profile.channels):
+            if row == self.channel_list.currentRow():
+                self.channel_iepe_checkbox.setToolTip("NetDAQ IEPE 属于设备上报的通道模式，不能通过耦合索引设置")
+                self.channel_iepe_checkbox.setText("IEPE（未确认）")
+                previous = self._channel_editor_loading
+                self._channel_editor_loading = True
+                try:
+                    self.channel_iepe_current_edit.setSpecialValueText("未确认")
+                    self.channel_iepe_current_edit.setValue(0)
+                finally:
+                    self._channel_editor_loading = previous
+            return
+        entry = backend.profile.channels[row]
+        enabled = entry["input_mode"] == "iepe"
+        current = float(entry.get("iepe_current_ma", 0)) if enabled else 0.0
+        previous = self._channel_editor_loading
+        self._channel_editor_loading = True
+        try:
+            self.channel_table.item(row, 4).setCheckState(QtCore.Qt.Checked if enabled else QtCore.Qt.Unchecked)
+            self.channel_table.item(row, 5).setText(f"{current:g}")
+            if row == self.channel_list.currentRow():
+                self.channel_iepe_checkbox.setText("IEPE")
+                self.channel_iepe_checkbox.setChecked(enabled)
+                self.channel_iepe_current_edit.setSpecialValueText("")
+                self.channel_iepe_current_edit.setValue(current)
+                self.channel_iepe_current_edit.setToolTip("电流来自已核实的设备配置，仅显示；不通过耦合或 !C 设置")
+                self.channel_iepe_checkbox.setToolTip(
+                    f"设备上报类型 {entry['channel_type']} / {entry['input_mode']}；模式及电流只读，不通过 !C 切换")
+                writable = entry["channel_type"] in {0, 6, 8}
+                self.channel_coupling_combo.setEnabled(writable)
+                self.channel_full_scale_combo.setEnabled(writable)
+            if entry["channel_type"] not in {0, 6, 8}:
+                option = entry["options"][0]
+                self.channel_table.item(row, 6).setText(option["coupling"])
+                self.channel_table.item(row, 9).setText(f"{float(option['full_scale_v']):g}")
+                if row == self.channel_list.currentRow():
+                    self.channel_coupling_combo.setCurrentText(option["coupling"])
+                    text = self._format_full_scale_option(float(option["full_scale_v"]))
+                    if self.channel_full_scale_combo.findText(text) < 0:
+                        self.channel_full_scale_combo.addItem(text, float(option["full_scale_v"]))
+                    self.channel_full_scale_combo.setCurrentText(text)
+        finally:
+            self._channel_editor_loading = previous
 
     def _apply_channel_editor_to_row(self, *_args) -> None:
         if self._channel_editor_loading or not hasattr(self, "channel_list"):
@@ -5789,6 +5862,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._reload_channel_selectors()
         self._update_axis_labels()
         self._refresh_trace_lists_from_available_sources()
+        self._apply_netdaq_limits()
 
     def _set_channel_row(self, row: int, channel: ChannelConfig) -> None:
         enabled_item = QtWidgets.QTableWidgetItem()
@@ -5841,6 +5915,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.channel_table.setItem(row, 14, QtWidgets.QTableWidgetItem(""))
 
     def _read_session_from_widgets(self) -> SessionConfig:
+        if self.controller.backend.__class__.__name__ == "NetDaqBackend":
+            for row in range(self.channel_table.rowCount()):
+                self._sync_netdaq_channel_mode(row)
         channels: list[ChannelConfig] = []
         for row in range(self.channel_table.rowCount()):
             channels.append(
@@ -5993,7 +6070,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.device_combo.clear()
             self.device_combo.addItem("正在加载设备...", None)
             self.refresh_devices_button.setEnabled(False)
-            self.statusBar().showMessage("正在刷新 NI 设备...")
+            self.statusBar().showMessage("正在只读刷新设备...")
         thread = QtCore.QThread(self)
         worker = DeviceRefreshWorker(self.controller)
         worker.moveToThread(thread)
@@ -6028,21 +6105,102 @@ class MainWindow(QtWidgets.QMainWindow):
         self._device_refresh_thread = None
         self._device_refresh_worker = None
         self.refresh_devices_button.setEnabled(True)
+        self._apply_netdaq_limits()
 
-    def _backend_changed(self, backend_name: str) -> None:
+    def _netdaq_preferences(self):
+        from python_vna.daq.netdaq import NetDaqSettings
+
+        if self.controller.backend.__class__.__name__ == "NetDaqBackend":
+            return self.controller.backend.settings
+        try:
+            payload = json.loads(self._ui_settings_path.read_text(encoding="utf-8"))
+            return NetDaqSettings(**payload.get("netdaq", {}))
+        except (OSError, ValueError, TypeError, AttributeError, RuntimeError):
+            return NetDaqSettings()
+
+    def _open_device_connection(self) -> None:
+        if (self._acquisition_thread is not None or self._recording_thread is not None
+                or self._device_refresh_thread is not None):
+            self.statusBar().showMessage("请等待采集或设备查询结束后再修改连接")
+            return
+        from dataclasses import asdict
+        from python_vna.ui.netdaq_settings import DeviceConnectionDialog
+
+        names = {"NIDaqBackend": "ni", "NetDaqBackend": "netdaq"}
+        current = names.get(self.controller.backend.__class__.__name__, "simulated")
+        dialog = DeviceConnectionDialog(current, self._netdaq_preferences(), self)
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+        settings = dialog.settings()
+        try:
+            try:
+                payload = json.loads(self._ui_settings_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            payload["netdaq"] = asdict(settings)
+            self._ui_settings_path.parent.mkdir(parents=True, exist_ok=True)
+            self._ui_settings_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except OSError as exc:
+            self.statusBar().showMessage(f"连接设置无法保存：{exc}")
+            return
+        self.backend_combo.blockSignals(True)
+        self.backend_combo.setCurrentText(dialog.backend_combo.currentText())
+        self.backend_combo.blockSignals(False)
+        self._backend_changed(dialog.backend_combo.currentText(), settings)
+
+    def _apply_netdaq_limits(self) -> None:
+        backend = self.controller.backend
+        netdaq = backend.__class__.__name__ == "NetDaqBackend"
+        if netdaq:
+            self.trigger_mode_combo.setCurrentIndex(self.trigger_mode_combo.findData("Off (Free Run)"))
+            self.trigger_enable.setChecked(False)
+            self.exc_enable.setChecked(False)
+            self.trigger_enable.setEnabled(False)
+        self.trigger_mode_combo.setEnabled(not netdaq)
+        self.exc_enable.setEnabled(not netdaq)
+        if netdaq:
+            for row in range(self.channel_table.rowCount()):
+                self._sync_netdaq_channel_mode(row)
+        elif hasattr(self, "channel_list"):
+            valid = 0 <= self.channel_list.currentRow() < self.channel_table.rowCount()
+            for widget in (self.channel_iepe_checkbox, self.channel_iepe_current_edit,
+                           self.channel_coupling_combo, self.channel_full_scale_combo):
+                widget.setEnabled(valid)
+            self.channel_iepe_checkbox.setText("IEPE")
+            self.channel_iepe_current_edit.setSpecialValueText("")
+        if hasattr(self, "excitation_enabled_action"):
+            self.excitation_enabled_action.setEnabled(not netdaq)
+        self.trigger_mode_combo.setToolTip("NetDAQ 触发尚未实机验证，仅支持自由运行" if netdaq else "")
+        idle = self._acquisition_thread is None and self._recording_thread is None
+        if idle:
+            ready = not netdaq or backend.ready
+            for button in (self.start_button, self.avg_button, self.record_button):
+                button.setEnabled(ready)
+                if netdaq and backend.stop_uncertain:
+                    button.setToolTip("设备停止未确认；请检查设备状态后重新应用连接设置")
+                elif netdaq:
+                    button.setToolTip("NetDAQ 缺少已验证设备配置，只能只读探测" if not ready else button.text())
+        self.backend_combo.setToolTip("NetDAQ 为实验性后端，需在文件 / 设备连接中配置")
+
+    def _backend_changed(self, backend_name: str, netdaq_settings=None) -> None:
         append_log(f"backend changed: begin {backend_name}")
-        if self._acquisition_thread is not None or self._recording_thread is not None:
+        if (self._acquisition_thread is not None or self._recording_thread is not None
+                or self._device_refresh_thread is not None):
             self._stop_acquisition()
             return
+        from python_vna.app import build_backend
+
+        try:
+            backend = (build_backend("netdaq", netdaq_settings=netdaq_settings or self._netdaq_preferences())
+                       if backend_name == "netdaq" else build_backend(backend_name))
+        except Exception as exc:
+            self.statusBar().showMessage(str(exc))
+            return
         self.controller.close()
-        if backend_name == "ni":
-            from python_vna.app import build_backend
-
-            self.controller.backend = build_backend("ni")
-        else:
-            from python_vna.app import build_backend
-
-            self.controller.backend = build_backend("simulated")
+        self.controller.backend = backend
+        self._apply_netdaq_limits()
         append_log(f"backend changed: end {backend_name}")
         self.refresh_devices_async()
 
@@ -6055,6 +6213,10 @@ class MainWindow(QtWidgets.QMainWindow):
         for row in range(self.channel_table.rowCount()):
             channel_name = self.channel_table.item(row, 1).text()
             self.channel_table.item(row, 2).setText(f"{device_name}/{channel_name}")
+            backend = self.controller.backend
+            if backend.__class__.__name__ == "NetDaqBackend" and backend.profile is not None:
+                if row >= len(backend.profile.channels):
+                    self.channel_table.item(row, 0).setCheckState(QtCore.Qt.Unchecked)
         current_row = self.channel_list.currentRow() if hasattr(self, "channel_list") else -1
         self._load_channel_editor_from_row(current_row)
         self._reload_channel_selectors()
@@ -6436,12 +6598,16 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.Slot(object)
     def _acquisition_started(self, device_name: str | None) -> None:
         self.device_info_label.setText(f"Device: {device_name}")
+        if self.controller.backend.__class__.__name__ == "NetDaqBackend":
+            self.device_info_label.setText(f"NetDAQ (experimental) | Fs={self.session.acquisition.sample_rate:.9g} Hz")
         self.run_info_label.setText("State: running")
         self.statusBar().showMessage("Acquisition running")
 
     @QtCore.Slot(object)
     def _recording_started(self, device_name: str | None) -> None:
         self.device_info_label.setText(f"Device: {device_name}")
+        if self.controller.backend.__class__.__name__ == "NetDaqBackend":
+            self.device_info_label.setText(f"NetDAQ (experimental) | Fs={self.session.acquisition.sample_rate:.9g} Hz")
         self.run_info_label.setText("State: recording")
         if self._recording_output_dir is not None:
             self.statusBar().showMessage(f"Recording to {self._recording_output_dir}")
@@ -6585,6 +6751,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.device_combo.setEnabled(idle)
         self.refresh_devices_button.setEnabled(idle)
         self.run_info_label.setText("State: error")
+        self._apply_netdaq_limits()
         self.statusBar().showMessage(f"Acquisition error: {message}")
         QtWidgets.QMessageBox.critical(self, "Acquisition Failed", message)
 
@@ -6606,6 +6773,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.backend_combo.setEnabled(True)
         self.device_combo.setEnabled(True)
         self.refresh_devices_button.setEnabled(True)
+        self._apply_netdaq_limits()
         if self.run_info_label.text() not in {"State: error"}:
             self.run_info_label.setText("State: stopped")
             self.statusBar().showMessage("Acquisition stopped")
@@ -6634,6 +6802,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.backend_combo.setEnabled(True)
         self.device_combo.setEnabled(True)
         self.refresh_devices_button.setEnabled(True)
+        self._apply_netdaq_limits()
         if self.run_info_label.text() not in {"State: error"}:
             self.run_info_label.setText("State: stopped")
             if output_dir is not None:

@@ -16,10 +16,15 @@ __all__ = [
     "preferred_usb4431_device",
     "NIDaqBackend",
     "SimulatedDaqBackend",
+    "NetDaqBackend",
 ]
 
 
 def __getattr__(name):
+    if name == "NetDaqBackend":
+        from .netdaq import NetDaqBackend
+
+        return NetDaqBackend
     if name == "NIDaqBackend":
         from .ni import NIDaqBackend
 

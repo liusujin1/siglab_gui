@@ -59,7 +59,7 @@
     },
     {
       "id": "python_vna_test",
-      "description": "Acquisition, NI-DAQ, signal processing, and the PythonVNATest desktop UI.",
+      "description": "Acquisition, NI-DAQ, experimental NetDAQ, signal processing, and the PythonVNATest desktop UI.",
       "entrypoint": "scripts/entry_python_vna_test.py",
       "executable": "PythonVNATest.exe",
       "patterns": [
@@ -70,6 +70,9 @@
         "python_vna/signal_pipeline.py",
         "python_vna/impact_selection.py",
         "python_vna/ui/main_window.py",
+        "python_vna/ui/netdaq_settings.py",
+        "tests/test_netdaq.py",
+        "tests/test_netdaq_ui.py",
         "tests/test_app.py",
         "tests/test_continuous_recording.py",
         "tests/test_controller.py",
@@ -87,7 +90,9 @@
         "tests/test_signal_pipeline.py",
         "tests/test_impact_selection.py",
         "tests/test_first_hit_ranging.py",
-        "tests/test_simulated_backend.py"
+        "tests/test_simulated_backend.py",
+        "tests/test_netdaq.py",
+        "tests/test_netdaq_ui.py"
       ]
     },
     {

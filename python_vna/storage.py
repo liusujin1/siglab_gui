@@ -1436,6 +1436,14 @@ def save_legacy_vna(session: SavedSession, path: str | Path) -> Path:
         "EULabel": eu_label,
         "SLm": slm,
     }
+    if metadata.get("daq_backend") == "netdaq":
+        # Keep MATLAB-era configuration fields unchanged. Python readers restore
+        # the non-SigLab hardware clock from this optional, ASCII-only extension.
+        mat_variables["PythonVNAAcquisition_json"] = json.dumps({
+            "version": 1, "backend": "netdaq", "sample_rate": sample_rate,
+            "bandwidth_hz": float(config.acquisition.bandwidth_hz),
+            "provenance": metadata.get("daq_provenance", {}),
+        }, ensure_ascii=True, default=_json_default)
     stream = BytesIO()
     savemat(
         stream,
@@ -1629,6 +1637,18 @@ def load_legacy_vna(path: str | Path) -> SavedSession:
 
     mat = loadmat(path, squeeze_me=False, struct_as_record=False)
     sample_rate = float(np.squeeze(mat.get("SampleRate", [[10240.0]])).item())
+    native_acquisition = {}
+    try:
+        extension_text = "".join(str(value) for value in np.ravel(mat.get("PythonVNAAcquisition_json", "{}")))
+        candidate = json.loads(extension_text)
+        if (isinstance(candidate, dict) and candidate.get("version") == 1
+                and candidate.get("backend") == "netdaq"):
+            actual_rate = float(candidate["sample_rate"])
+            if np.isfinite(actual_rate) and actual_rate > 0:
+                native_acquisition = candidate
+                sample_rate = actual_rate
+    except (ValueError, TypeError, KeyError):
+        pass
     center_freq = float(np.squeeze(mat.get("CenterFreq", [[0.0]])).item())
     slm = mat.get("SLm")
     if slm is None:
@@ -1771,6 +1791,10 @@ def load_legacy_vna(path: str | Path) -> SavedSession:
         system_clock,
         sample_rate,
     )
+    if native_acquisition:
+        bandwidth = _legacy_scalar(native_acquisition.get("bandwidth_hz"), hdlg_bandwidth)
+        if np.isfinite(bandwidth) and 0 < bandwidth <= sample_rate / 2:
+            hdlg_bandwidth = bandwidth
     if sample_rate <= 0.0:
         sample_rate = hdlg_sample_rate
     if frame_size <= 0:
@@ -1955,6 +1979,8 @@ def load_legacy_vna(path: str | Path) -> SavedSession:
         impulse_responses=impulse_responses,
         metadata={
             "source": "legacy_vna",
+            **({"daq_backend": "netdaq", "daq_provenance": native_acquisition.get("provenance", {})}
+               if native_acquisition else {}),
             "center_freq": center_freq,
             "rbw_hz": float(fdxvec[1] - fdxvec[0]) if fdxvec.size > 1 else 0.0,
             "legacy_channels": legacy_channels,

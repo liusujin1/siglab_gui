@@ -69,6 +69,9 @@ class VnaController:
     def read_and_process(self) -> MeasurementSet:
         frame = self._read_processing_frame()
         measurement = self.processor.process(frame)
+        if frame.metadata.get("backend") == "netdaq":
+            measurement.metadata["daq_backend"] = "netdaq"
+            measurement.metadata["daq_provenance"] = dict(frame.metadata)
         if (measurement.metadata.get("rejected", False) and self.state.measurement is not None
                 and not measurement.metadata.get("smart_hit_active", False)):
             retained = self.state.measurement
