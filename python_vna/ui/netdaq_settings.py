@@ -29,7 +29,7 @@ class DeviceConnectionDialog(QtWidgets.QDialog):
     def __init__(self, backend: str, settings: NetDaqSettings, parent=None):
         super().__init__(parent)
         self.setWindowTitle("设备连接")
-        self.resize(550, 470)
+        self.resize(550, 530)
         self._thread = None
         self._worker = None
         self._pending_close = False
@@ -39,6 +39,13 @@ class DeviceConnectionDialog(QtWidgets.QDialog):
         self.backend_combo = QtWidgets.QComboBox()
         self.backend_combo.addItems(["ni", "netdaq", "simulated"])
         self.backend_combo.setCurrentText(backend)
+        self.transport_combo = QtWidgets.QComboBox()
+        self.transport_combo.addItem("TCP 网络采集仪", "tcp")
+        self.transport_combo.addItem("USB2404V10（0547:1003）", "usb")
+        self.transport_combo.setCurrentIndex(self.transport_combo.findData(settings.transport))
+        self.usb_index_edit = QtWidgets.QSpinBox()
+        self.usb_index_edit.setRange(0, 15)
+        self.usb_index_edit.setValue(settings.usb_index)
         self.host_edit = QtWidgets.QLineEdit(settings.host)
         self.host_edit.setPlaceholderText("设备 IP 或主机名（不会自动使用默认地址）")
         self.legacy_port_edit = QtWidgets.QSpinBox()
@@ -60,6 +67,8 @@ class DeviceConnectionDialog(QtWidgets.QDialog):
         self.probe_channels_edit.setPlaceholderText("可选：厂商物理通道号，如 1,2,3,4；未知时留空")
         form = QtWidgets.QFormLayout()
         form.addRow("设备类型", self.backend_combo)
+        form.addRow("NetDAQ / USBDAQ 接口", self.transport_combo)
+        form.addRow("USB 设备序号（从 0 开始）", self.usb_index_edit)
         form.addRow("NetDAQ 地址", self.host_edit)
         form.addRow("控制端口", self.legacy_port_edit)
         form.addRow("数据端口", self.stream_port_edit)
@@ -92,11 +101,20 @@ class DeviceConnectionDialog(QtWidgets.QDialog):
         layout.addLayout(row)
         layout.addWidget(self.report, 1)
         layout.addWidget(self.buttons)
+        self.transport_combo.currentIndexChanged.connect(self._transport_changed)
+        self._transport_changed()
+
+    def _transport_changed(self):
+        usb = self.transport_combo.currentData() == "usb"
+        for widget in (self.host_edit, self.legacy_port_edit, self.stream_port_edit):
+            widget.setEnabled(not usb)
+        self.usb_index_edit.setEnabled(usb)
 
     def settings(self):
         return NetDaqSettings(self.host_edit.text().strip(), self.legacy_port_edit.value(),
                              self.stream_port_edit.value(), self.timeout_edit.value(),
-                             self.profile_edit.text().strip())
+                             self.profile_edit.text().strip(), self.transport_combo.currentData(),
+                             self.usb_index_edit.value())
 
     def _browse(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -110,10 +128,12 @@ class DeviceConnectionDialog(QtWidgets.QDialog):
         try:
             settings = self.settings()
             if self.backend_combo.currentText() == "netdaq":
-                if not settings.host:
+                if settings.transport == "tcp" and not settings.host:
                     raise ValueError("请填写设备 IP 或主机名")
                 if settings.profile_path:
-                    NetDaqProfile.load(settings.profile_path)
+                    profile = NetDaqProfile.load(settings.profile_path)
+                    if profile.transport != settings.transport:
+                        raise ValueError("设备配置与所选 TCP / USB 接口不匹配")
         except Exception as exc:
             self.report.setPlainText(str(exc))
             return
@@ -124,7 +144,7 @@ class DeviceConnectionDialog(QtWidgets.QDialog):
             return
         try:
             settings = self.settings()
-            if not settings.host:
+            if settings.transport == "tcp" and not settings.host:
                 raise ValueError("请先填写设备地址")
             text = self.probe_channels_edit.text().strip()
             channels = tuple(int(n.strip()) for n in text.split(",")) if text else ()

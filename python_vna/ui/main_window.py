@@ -5176,10 +5176,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.channel_iepe_current_edit.setToolTip("电流来自已核实的设备配置，仅显示；不通过耦合或 !C 设置")
                 self.channel_iepe_checkbox.setToolTip(
                     f"设备上报类型 {entry['channel_type']} / {entry['input_mode']}；模式及电流只读，不通过 !C 切换")
-                writable = entry["channel_type"] in {0, 6, 8}
+                writable = entry["channel_type"] in {0, 6, 8} and backend.settings.transport != "usb"
                 self.channel_coupling_combo.setEnabled(writable)
                 self.channel_full_scale_combo.setEnabled(writable)
-            if entry["channel_type"] not in {0, 6, 8}:
+            if entry["channel_type"] not in {0, 6, 8} or backend.settings.transport == "usb":
                 option = entry["options"][0]
                 self.channel_table.item(row, 6).setText(option["coupling"])
                 self.channel_table.item(row, 9).setText(f"{float(option['full_scale_v']):g}")

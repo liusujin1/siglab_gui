@@ -19,6 +19,9 @@ workaround is included.
 
 ## First connection (read-only)
 
+For USB2404V10 connected by USB, use the separate [USB transport contract](USBDAQ.md).
+The network IP/port instructions below do not apply to that transport.
+
 Open `File / Device connection` (Chinese UI: `文件 / 设备连接...`). Select
 `netdaq`, enter the explicit device IP and use `只读探测`. Leave the profile
 empty. Optional channel numbers must be the manufacturer's physical numbers;

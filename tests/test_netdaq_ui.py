@@ -158,3 +158,50 @@ def test_probe_runs_off_ui_thread_and_cancels_without_destroying_thread(app):
         assert dialog._thread is None
         assert dialog.result() == QtWidgets.QDialog.Rejected
     dialog.deleteLater()
+
+
+def test_usb_dialog_needs_no_ip_and_remembers_explicit_transport(app):
+    dialog = DeviceConnectionDialog("netdaq", NetDaqSettings(transport="usb", usb_index=1))
+    assert not dialog.host_edit.isEnabled()
+    assert not dialog.legacy_port_edit.isEnabled()
+    assert dialog.usb_index_edit.isEnabled()
+    assert dialog.settings().transport == "usb"
+    assert dialog.settings().usb_index == 1
+    dialog.accept()
+    assert dialog.result() == QtWidgets.QDialog.Accepted
+    assert not NetDaqBackend(dialog.settings()).ready
+    dialog.deleteLater()
+
+
+def test_usb_probe_uses_same_cancellable_worker_without_an_ip(app):
+    dialog = DeviceConnectionDialog("netdaq", NetDaqSettings(transport="usb"))
+    observed = []
+    def probe(self, channels=(), *, stop_event=None):
+        observed.append((self.settings.transport, tuple(channels)))
+        return {"transport": "usb", "acquisition_started": False}
+    dialog.probe_channels_edit.setText("0,1,2,3")
+    with mock.patch.object(NetDaqBackend, "probe", probe):
+        dialog._probe()
+        deadline = time.monotonic() + 3
+        while dialog._thread is not None and time.monotonic() < deadline:
+            QTest.qWait(5)
+    assert observed == [("usb", (0, 1, 2, 3))]
+    assert '"transport": "usb"' in dialog.report.toPlainText()
+    dialog.reject()
+    dialog.deleteLater()
+
+
+def test_usb_fixed_ranges_and_iepe_are_not_editable(window):
+    backend = NetDaqBackend(NetDaqSettings(transport="usb"))
+    entry = {"wire_number": 0, "channel_type": 0, "input_mode": "voltage_single_ended_dc",
+             "options": [{"coupling": "dc", "full_scale_v": 10, "configuration_hex": "06"}]}
+    backend.profile = NetDaqProfile("synthetic", b"!D!" + bytes(30), "raw32", bytes(13),
+                                   0, 1000, (entry,), "test", "test-only", "usb")
+    window.controller.backend = backend
+    window._apply_netdaq_limits()
+    window.channel_list.setCurrentRow(0)
+    window._load_channel_editor_from_row(0)
+    assert not window.channel_coupling_combo.isEnabled()
+    assert not window.channel_full_scale_combo.isEnabled()
+    assert not window.channel_iepe_checkbox.isEnabled()
+    assert not window.channel_iepe_checkbox.isChecked()

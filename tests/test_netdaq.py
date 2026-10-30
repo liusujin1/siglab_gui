@@ -63,7 +63,7 @@ class Emulator:
 
         class Control(socketserver.BaseRequestHandler):
             def handle(self):
-                self.request.settimeout(10)
+                self.request.settimeout(30)
                 self.request.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 try:
                     while not emulator.closing.is_set():

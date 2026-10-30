@@ -44,6 +44,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--device", default=None, help="Preferred device name.")
     parser.add_argument("--netdaq-host", default="", help="Explicit NetDAQ IP/hostname; no automatic default.")
     parser.add_argument("--netdaq-profile", default="", help="Verified NetDAQ device profile JSON.")
+    parser.add_argument("--netdaq-transport", choices=["tcp", "usb"], default="tcp")
+    parser.add_argument("--netdaq-usb-index", type=int, default=0)
+    parser.add_argument("--netdaq-probe-channels", default="", help="Explicit physical channel numbers, comma-separated.")
     parser.add_argument("--netdaq-legacy-port", type=int, default=60000)
     parser.add_argument("--netdaq-stream-port", type=int, default=60003)
     parser.add_argument("--probe-netdaq-json", action="store_true", help="Read-only NetDAQ probe, without GUI.")
@@ -91,12 +94,14 @@ def main(argv: list[str] | None = None) -> int:
 
         netdaq_settings = NetDaqSettings(
             host=args.netdaq_host, legacy_port=args.netdaq_legacy_port,
-            stream_port=args.netdaq_stream_port, profile_path=args.netdaq_profile)
+            stream_port=args.netdaq_stream_port, profile_path=args.netdaq_profile,
+            transport=args.netdaq_transport, usb_index=args.netdaq_usb_index)
         if args.probe_netdaq_json:
             import json
 
             try:
-                print(json.dumps(NetDaqBackend(netdaq_settings).probe(), ensure_ascii=False))
+                channels = tuple(int(n.strip()) for n in args.netdaq_probe_channels.split(",")) if args.netdaq_probe_channels else ()
+                print(json.dumps(NetDaqBackend(netdaq_settings).probe(channels), ensure_ascii=False))
             except Exception as exc:
                 print(json.dumps({"error": str(exc)}, ensure_ascii=False))
                 return 1

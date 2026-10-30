@@ -26,8 +26,14 @@ class NetDaqSettings:
     stream_port: int = 60003
     timeout: float = 2.0
     profile_path: str = ""
+    transport: str = "tcp"
+    usb_index: int = 0
 
     def __post_init__(self):
+        if self.transport not in {"tcp", "usb"}:
+            raise DaqBackendError("NetDAQ transport must be tcp or usb")
+        if isinstance(self.usb_index, bool) or not isinstance(self.usb_index, int) or not 0 <= self.usb_index < 16:
+            raise DaqBackendError("USBDAQ device index must be between 0 and 15")
         if (not isinstance(self.host, str) or len(self.host) > 253
                 or any(c in self.host for c in "/\\\0 \r\n")):
             raise DaqBackendError("NetDAQ address must be an IP address or hostname, without a port")
@@ -50,6 +56,8 @@ class NetDaqProfile:
     channels: tuple[dict, ...]
     digest: str
     evidence: str
+    transport: str = "tcp"
+    firmware_hex: str = ""
 
     @classmethod
     def load(cls, path: str | Path):
@@ -61,6 +69,9 @@ class NetDaqProfile:
             model, evidence = str(data["model"]).strip(), str(data["evidence"]).strip()
             desc = bytes.fromhex(data["descriptor_hex"])
             descriptor_data(desc)
+            transport = data.get("transport", "tcp")
+            if transport not in {"tcp", "usb"}:
+                raise ValueError("unsupported transport")
             fmt = data["stream_format"]
             if fmt not in {"packed24", "raw16", "raw24", "raw32"}:
                 raise ValueError("unsupported stream format")
@@ -70,6 +81,14 @@ class NetDaqProfile:
             offset = data["divisor_offset"]
             maximum = float(data["max_sample_rate"])
             channels = data["channels"]
+            if transport == "usb":
+                from .usbdaq import checked_reply
+
+                checked_reply(desc, 0x44, 33)
+                checked_reply(bytes.fromhex(data["firmware_hex"]), 0x56, 7)
+                if (fmt != "raw32" or desc[5:8] != bytes((24, 4, 4))
+                        or offset != 0 or not isinstance(channels, list) or not 1 <= len(channels) <= 4):
+                    raise ValueError("USB2404 supports only qualified raw32/24-bit profiles with 1..4 channels")
             if (not model or not evidence or len(init) != 13 or isinstance(offset, bool)
                     or not isinstance(offset, int) or not 0 <= offset <= 9
                     or not math.isfinite(maximum) or maximum <= 0
@@ -105,15 +124,22 @@ class NetDaqProfile:
                         raise ValueError("range and calibration must be positive")
                     if option["coupling"] not in {"ac", "dc", "bias"}:
                         raise ValueError("invalid coupling")
-                    if kind in {0, 6, 8}:
+                    if kind in {0, 6, 8} and transport != "usb":
                         for key in ("coupling_index", "gain_index"):
                             value = option[key]
                             if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 255:
                                 raise ValueError(f"invalid {key}")
                     elif len(options) != 1 or not bytes.fromhex(option["configuration_hex"]):
                         raise ValueError("non-writable types need one captured, fixed configuration")
+            if transport == "usb":
+                wires = [c["wire_number"] for c in channels]
+                if wires != sorted(wires) or any(n > 3 for n in wires):
+                    raise ValueError("USB2404 requires ascending, independently verified physical channels 0..3")
+                mask = sum(1 << n for n in wires)
+                if init[4:] != bytes((1,)) + struct.pack("<I", mask) + bytes(4):
+                    raise ValueError("USB2404 captured channel mask disagrees with stream channel order")
             return cls(model, desc, fmt, init, offset, maximum, tuple(channels),
-                       hashlib.sha256(raw).hexdigest(), evidence)
+                       hashlib.sha256(raw).hexdigest(), evidence, transport, data.get("firmware_hex", ""))
         except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
             raise DaqBackendError(f"NetDAQ device profile is invalid: {exc}") from exc
 
@@ -140,6 +166,8 @@ class NetDaqBackend(BaseDaqBackend):
     def __init__(self, settings: NetDaqSettings | None = None):
         self.settings = settings or NetDaqSettings()
         self.profile = NetDaqProfile.load(self.settings.profile_path) if self.settings.profile_path else None
+        if self.profile and self.profile.transport != self.settings.transport:
+            raise DaqBackendError("Device profile transport does not match connection settings")
         self._cancel = threading.Event()
         self._external_stop: threading.Event | None = None
         self._control: LegacyConnection | None = None
@@ -155,11 +183,14 @@ class NetDaqBackend(BaseDaqBackend):
 
     @property
     def device_name(self) -> str:
+        if self.settings.transport == "usb":
+            return f"USBDAQ@0547:1003:{self.settings.usb_index}"
         return f"NetDAQ@{self.settings.host}:{self.settings.legacy_port}"
 
     @property
     def ready(self) -> bool:
-        return bool(self.settings.host and self.profile and not self.stop_uncertain)
+        return bool((self.settings.transport == "usb" or self.settings.host)
+                    and self.profile and not self.stop_uncertain)
 
     def is_set(self):
         return self._cancel.is_set() or bool(self._external_stop and self._external_stop.is_set())
@@ -173,19 +204,24 @@ class NetDaqBackend(BaseDaqBackend):
             raise DaqBackendError("NetDAQ resources must be accessed by their owning worker thread")
 
     def _connection(self, *, cancellable=True):
+        if self.settings.transport == "usb":
+            from .usbdaq import UsbConnection
+
+            return UsbConnection(self.settings.usb_index, self.settings.timeout, self if cancellable else None)
         return LegacyConnection(self.settings.host, self.settings.legacy_port,
                                 self.settings.timeout, self if cancellable else None)
 
     def probe(self, channel_numbers=(), *, stop_event=None) -> dict:
-        if not self.settings.host:
+        if self.settings.transport != "usb" and not self.settings.host:
             raise DaqBackendError("请先设置 NetDAQ 设备 IP；未自动连接任何默认地址")
         channel_numbers = tuple(channel_numbers)
         if (len(channel_numbers) > 64 or len(set(channel_numbers)) != len(channel_numbers)
                 or any(isinstance(n, bool) or not isinstance(n, int) or not 0 <= n <= 255
                        for n in channel_numbers)):
             raise DaqBackendError("NetDAQ probe requires unique physical channel numbers in 0..255")
-        with LegacyConnection(self.settings.host, self.settings.legacy_port,
-                              self.settings.timeout, stop_event) as control:
+        control = self._connection(cancellable=False)
+        control.stop_event = stop_event
+        with control:
             raw = control.descriptor()
             # Firmware is retained as raw bytes until its version encoding is verified.
             firmware = control.command(0x56, size=7)
@@ -196,13 +232,14 @@ class NetDaqBackend(BaseDaqBackend):
                     "type": kind, "config_bytes": count,
                     "current_configuration_hex": control.channel_configuration(number).hex(),
                 }
-        return {"host": self.settings.host, "descriptor_hex": raw.hex(),
+        return {"host": self.settings.host, "transport": self.settings.transport,
+                "usb": getattr(control, "info", None), "descriptor_hex": raw.hex(),
                 "firmware_hex": firmware.hex(), "channels": channels,
                 "profile_matches": bool(self.profile and raw == self.profile.descriptor),
                 "experimental": True}
 
     def list_devices(self):
-        if not self.settings.host:
+        if self.settings.transport != "usb" and not self.settings.host:
             return []
         result = self.probe()
         profile = self.profile if result["profile_matches"] else None
@@ -257,6 +294,10 @@ class NetDaqBackend(BaseDaqBackend):
             raw = self._control.descriptor()
             if raw != profile.descriptor:
                 raise DaqBackendError("NetDAQ descriptor differs from verified profile; no settings were written")
+            if self.settings.transport == "usb":
+                firmware = self._control.command(0x56, size=7)
+                if firmware.hex() != profile.firmware_hex:
+                    raise DaqBackendError("USBDAQ firmware differs from verified profile; no settings were written")
         except Exception:
             self.close()
             raise
@@ -286,22 +327,29 @@ class NetDaqBackend(BaseDaqBackend):
                 kind, _count = self._control.channel_descriptor(entry["wire_number"])
                 if kind != entry["channel_type"]:
                     raise DaqBackendError(f"NetDAQ {name}: reported channel type changed; no settings were written")
-                if kind not in {0, 6, 8}:
+                if kind not in {0, 6, 8} or self.settings.transport == "usb":
                     current = self._control.channel_configuration(entry["wire_number"])
                     if current != bytes.fromhex(option["configuration_hex"]):
                         raise DaqBackendError(f"NetDAQ {name}: read-only channel configuration changed")
             for index, name, option in self._selected:
                 self._check_stop()
                 entry = profile.channels[index]
-                if entry["channel_type"] in {0, 6, 8}:
+                if entry["channel_type"] in {0, 6, 8} and self.settings.transport != "usb":
                     self._control.set_channel(entry["wire_number"],
                                               option["coupling_index"], option["gain_index"],
                                               expected_type=entry["channel_type"])
             template = bytearray(profile.init_ad_payload)
-            struct.pack_into("<I", template, profile.divisor_offset, self._divisor)
+            struct.pack_into(">I" if self.settings.transport == "usb" else "<I",
+                             template, profile.divisor_offset, self._divisor)
             self._control.initialize_ad(bytes(template))
-            self._stream = WireConnection(self.settings.host, self.settings.stream_port,
-                                          self.settings.timeout, self).connect()
+            if self.settings.transport == "usb":
+                from .usbdaq import UsbStream
+
+                self._control.prepare_stream(self._rate, len(profile.channels))
+                self._stream = UsbStream(self._control)
+            else:
+                self._stream = WireConnection(self.settings.host, self.settings.stream_port,
+                                              self.settings.timeout, self).connect()
             self._check_stop()
             # A start request may take effect even if its acknowledgement is lost.
             self._may_be_running = True
@@ -321,7 +369,8 @@ class NetDaqBackend(BaseDaqBackend):
         count = len(profile.channels)
         frame_size = self._session.acquisition.frame_size
         needed = frame_size * count * (bits // 8)
-        deadline = time.monotonic() + max(self.settings.timeout, frame_size / self._rate + self.settings.timeout)
+        startup = 5.0 if self.settings.transport == "usb" and self._frame_index == 0 else 0.0
+        deadline = time.monotonic() + startup + frame_size / self._rate + self.settings.timeout
         while len(self._pending) < needed:
             self._check_stop()
             if profile.stream_format == "packed24":
@@ -339,9 +388,11 @@ class NetDaqBackend(BaseDaqBackend):
             self._rate, [name for index, name, option in self._selected], data,
             np.arange(frame_size, dtype=float) / self._rate, self._frame_index,
             {"backend": "netdaq", "experimental": True, "device_model": profile.model,
+             "transport": self.settings.transport,
              "profile_sha256": profile.digest, "requested_sample_rate": self._requested_rate,
              "actual_sample_rate": self._rate, "sample_start_index": self._sample_index,
              "channel_modes": {name: {"channel_type": profile.channels[index]["channel_type"],
+                                       "wire_number": profile.channels[index]["wire_number"],
                                        "input_mode": profile.channels[index]["input_mode"]}
                                for index, name, option in self._selected},
              "units": "V", "stream_continuity_verified": False},
@@ -364,9 +415,10 @@ class NetDaqBackend(BaseDaqBackend):
             if self._may_be_running:
                 # A fresh legacy connection avoids reusing a partial/cancelled reply.
                 control = self._control
-                if control is None or control.sock is None:
-                    control = LegacyConnection(self.settings.host, self.settings.legacy_port,
-                                               min(self.settings.timeout, 0.5)).connect()
+                connected = (getattr(control, "connected", False) if self.settings.transport == "usb"
+                             else control is not None and control.sock is not None)
+                if not connected:
+                    control = self._connection(cancellable=False).connect()
                     self._control = control
                 control.stop_event = None
                 control.timeout = min(self.settings.timeout, 0.5)
@@ -376,10 +428,16 @@ class NetDaqBackend(BaseDaqBackend):
         finally:
             self._active = self._may_be_running = False
             if self._stream is not None:
-                self._stream.close()
+                try:
+                    self._stream.close()
+                except Exception as exc:
+                    error = error or exc
                 self._stream = None
             if self._control is not None:
-                self._control.close()
+                try:
+                    self._control.close()
+                except Exception as exc:
+                    error = error or exc
                 self._control = None
             self._pending.clear()
         if error:
