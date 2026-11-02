@@ -7,6 +7,7 @@ Only the acquisition/probe owner calls native code; Stop only sets an event.
 from __future__ import annotations
 
 import ctypes as ct
+import math
 import os
 from pathlib import Path
 import struct
@@ -101,6 +102,54 @@ def checked_reply(raw, command, size=0):
     return raw
 
 
+def descriptor_info(raw):
+    """Decode reported limits; these are not independent electrical calibration."""
+    checked_reply(raw, 0x44, 33)
+    desc = descriptor_data(raw)
+    family, bits, count, path = desc[0], desc[2], desc[3], desc[4]
+    maximum, low, high, adc_low, adc_high = struct.unpack(">5i", desc[5:25])
+    if (family != 0 or bits != 24 or path != 4 or not 1 <= count <= 4
+            or maximum <= 0 or low >= high
+            or (adc_low, adc_high) != (-8388608, 8388607)):
+        raise NetDaqProtocolError("USBDAQ descriptor differs from supported USB2404 limits")
+    return {
+        "family": family, "adc_bits": bits, "channel_count": count,
+        "stream_path": path, "clock_selector": desc[27],
+        "nominal_max_sample_rate": maximum,
+        "nominal_voltage_min_mv": low, "nominal_voltage_max_mv": high,
+        "adc_min": adc_low, "adc_max": adc_high,
+        "nominal_volts_per_count": (high - low) * .001 / (adc_high - adc_low + 1),
+        "calibration_verified": False,
+    }
+
+
+def sample_clock(raw):
+    """USB plugin timing; do not reuse the network DLL's selector table."""
+    info = descriptor_info(raw)
+    selector = info["clock_selector"]
+    if selector == 0x83:
+        raise NetDaqProtocolError("USBDAQ clock selector 0x83 has no verified InitAD sequence")
+    clocks = {
+        0: (64000.0, 1), 0x81: (64000.0, 1), 0x82: (1000000.0, 2),
+        0x84: (128000.0, 1), 0x86: (64000.0, 1), 0x87: (100000.0, 1),
+        0x88: (48000.0, 1), 0x89: (1000000.0, 1), 0x8A: (96000.0, 1),
+    }
+    # The USB plugin's default branch uses half the descriptor's maximum rate.
+    return clocks.get(selector, (info["nominal_max_sample_rate"] / 2.0, 1))
+
+
+def sampling_divisor(raw, rate):
+    if (isinstance(rate, bool) or not isinstance(rate, (int, float))
+            or not math.isfinite(rate) or rate <= 0):
+        raise NetDaqProtocolError("USBDAQ sample rate must be finite and positive")
+    clock, factor = sample_clock(raw)
+    value = clock / (factor * rate) + .4
+    if not math.isfinite(value) or not 1 <= value < 0x100000000:
+        raise NetDaqProtocolError("USBDAQ sample rate is outside the divisor field range")
+    divisor = int(value)
+    return divisor, clock / (factor * divisor)
+
+
 def check_endpoints(raw):
     """Validate the one supported interface from standard USB descriptors."""
     if len(raw) < 9 or raw[1] != 2 or int.from_bytes(raw[2:4], "little") != len(raw):
@@ -134,6 +183,8 @@ class UsbConnection:
         self.handle = None
         self.owner = None
         self.info = {}
+        self.device_info = None
+        self._channel_lengths = {}
         self.may_be_running = False
         self.stop_uncertain = False
         self._leased = False
@@ -163,6 +214,8 @@ class UsbConnection:
         if self.handle or self.stop_uncertain:
             raise NetDaqProtocolError("USBDAQ already open or previous device state unconfirmed")
         self._check_stop()
+        self.device_info = None
+        self._channel_lengths.clear()
         if not _lease.acquire(blocking=False):
             raise NetDaqProtocolError("USBDAQ is busy with another acquisition/probe")
         self._leased, self.owner = True, threading.get_ident()
@@ -253,19 +306,40 @@ class UsbConnection:
 
     def descriptor(self):
         raw = self.command(0x44, size=33)
-        descriptor_data(raw)
+        self.device_info = descriptor_info(raw)
         return raw
 
+    def _check_channel(self, number):
+        count = self.device_info["channel_count"] if self.device_info else 4
+        if (isinstance(number, bool) or not isinstance(number, int)
+                or not 0 <= number < count):
+            raise NetDaqProtocolError(f"USBDAQ physical channel must be within 0..{count - 1}")
+
     def channel_descriptor(self, number):
+        self._check_channel(number)
         raw = self.command(0x41, bytes((number,)), 8)
+        if not 1 <= raw[5] <= 122:
+            raise NetDaqProtocolError("USBDAQ invalid declared channel configuration length")
+        self._channel_lengths[number] = raw[5]
         return raw[4], raw[5]
 
     def channel_configuration(self, number):
-        return self.command(0x42, bytes((number,)), 0)[4:-2]
+        self._check_channel(number)
+        if number not in self._channel_lengths:
+            self.channel_descriptor(number)
+        count = self._channel_lengths[number]
+        return self.command(0x42, bytes((number,)), count + 6)[4:-2]
 
     def initialize_ad(self, payload):
         if len(payload) != 13:
             raise NetDaqProtocolError("USBDAQ InitAD requires 13 captured bytes")
+        if self.device_info is None:
+            self.descriptor()
+        mask = int.from_bytes(payload[5:9], "little")
+        if (int.from_bytes(payload[:4], "big") == 0 or payload[4] != 1
+                or payload[9:] != bytes(4) or not mask
+                or mask >> self.device_info["channel_count"]):
+            raise NetDaqProtocolError("USBDAQ invalid InitAD divisor, flags or physical channel mask")
         self.command(0x49, payload)
 
     def start(self):

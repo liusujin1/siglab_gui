@@ -49,6 +49,8 @@ class FakeUsb:
         self.drop_start, self.reject_stop = False, False
         self.pause = self.disconnect = self.corrupt_reply = False
         self.claim_error = 0
+        self.descriptor = REAL_DESCRIPTOR
+        self.config_lengths = {n: 1 for n in range(4)}
         self.firmware = reply(0x56, bytes((2, 0)))
         self.data = np.arange(16000, dtype="<i4").tobytes()
         self.position = 0
@@ -107,11 +109,11 @@ class FakeUsb:
         self.commands.append((cmd, raw[3:length - 2]))
         body = raw[3:length - 2]
         if cmd == 0x44:
-            self.response = REAL_DESCRIPTOR
+            self.response = self.descriptor
         elif cmd == 0x56:
             self.response = self.firmware
         elif cmd == 0x41:
-            self.response = reply(cmd, body + bytes((0, 1)))
+            self.response = reply(cmd, body + bytes((0, self.config_lengths[body[0]])))
         elif cmd == 0x42:
             self.response = reply(cmd, body + self.configurations[body[0]])
         elif cmd in (0x49, 0x53, 0x50):
@@ -249,11 +251,163 @@ def test_read_only_probe_no_ip_or_profile_required(usb):
     assert report["usb"]["product"] == "USB2404V10"
     assert report["transport"] == "usb"
     assert report["channels"]["0"]["current_configuration_hex"] == "01"
+    info = report["usb_descriptor"]
+    assert info["channel_count"] == 4 and info["adc_bits"] == 24
+    assert (info["nominal_voltage_min_mv"], info["nominal_voltage_max_mv"]) == (-10000, 10000)
+    assert info["nominal_volts_per_count"] == 10 / 8388608
+    assert info["calibration_verified"] is False
     assert {cmd for cmd, _ in usb.commands} == {0x44, 0x56, 0x41, 0x42}
     assert usb.close_count == 1
     with pytest.raises(DaqBackendError):
         b.configure(config())
     assert len(usb.commands) == 6
+
+
+def changed_descriptor(offset, value):
+    raw = bytearray(REAL_DESCRIPTOR)
+    raw[3 + offset] = value
+    raw[-2] = sum(raw[:-2]) & 255
+    return bytes(raw)
+
+
+@pytest.mark.parametrize("offset,value", [(0, 1), (2, 32), (3, 0), (3, 5), (4, 3)])
+def test_usb_descriptor_rejects_unsupported_or_impossible_limits(offset, value):
+    with pytest.raises(DaqBackendError):
+        u.descriptor_info(changed_descriptor(offset, value))
+
+
+def test_probe_checks_physical_count_before_querying_echo_only_channels(usb):
+    with pytest.raises(DaqBackendError, match="physical channel count"):
+        NetDaqBackend(NetDaqSettings(transport="usb")).probe((0, 4))
+    assert [cmd for cmd, _ in usb.commands] == [0x44]
+    assert usb.close_count == 1
+
+
+def test_probe_profile_match_includes_firmware(usb, tmp_path):
+    b = backend(tmp_path)
+    assert b.probe()["profile_matches"] is True
+    usb.firmware = reply(0x56, bytes((3, 0)))
+    assert b.probe()["profile_matches"] is False
+    assert not any(cmd in {0x49, 0x53, 0x43} for cmd, _ in usb.commands)
+
+
+def test_missing_device_releases_lease_without_open_or_commands(usb):
+    usb.bus.devices = ct.POINTER(u.UsbDevice)()
+    with pytest.raises(DaqBackendError, match="target not found"):
+        u.UsbConnection().connect()
+    assert not usb.commands and usb.close_count == 0
+    usb.bus.devices = ct.pointer(usb.dev)
+    with u.UsbConnection():
+        pass
+    assert usb.close_count == 1
+
+
+@pytest.mark.parametrize("number", [-1, 4, 255, True])
+def test_channel_queries_reject_invalid_physical_indices(usb, number):
+    with u.UsbConnection() as control:
+        for operation in (control.channel_descriptor, control.channel_configuration):
+            with pytest.raises(DaqBackendError, match="physical channel"):
+                operation(number)
+    assert not usb.commands
+
+
+@pytest.mark.parametrize("actual", [b"", b"\x06\x01"])
+def test_channel_configuration_must_match_declared_length(usb, actual):
+    usb.configurations[0] = actual
+    with u.UsbConnection() as control:
+        with pytest.raises(DaqBackendError, match="reply"):
+            control.channel_configuration(0)
+    assert [cmd for cmd, _ in usb.commands] == [0x41, 0x42]
+
+
+@pytest.mark.parametrize("declared", [0, 123, 255])
+def test_invalid_declared_configuration_length_never_queries_config(usb, declared):
+    usb.config_lengths[0] = declared
+    with u.UsbConnection() as control:
+        with pytest.raises(DaqBackendError, match="configuration length"):
+            control.channel_configuration(0)
+    assert [cmd for cmd, _ in usb.commands] == [0x41]
+
+
+def test_channel_configuration_keeps_opaque_bytes_separate_from_echo(usb):
+    usb.configurations[0], usb.configurations[1] = b"\x06", b"\x01"
+    with u.UsbConnection() as control:
+        assert control.channel_configuration(0) == b"\x06"
+        assert control.channel_configuration(1) == b"\x01"
+        assert control.channel_descriptor(0) == (0, 1)
+    assert not any(cmd == 0x43 for cmd, _ in usb.commands)
+
+
+@pytest.mark.parametrize("selector,divisor", [
+    (0, 64), (0x81, 64), (0x82, 500), (0x84, 128), (0x85, 64),
+    (0x86, 64), (0x87, 100), (0x88, 48), (0x89, 1000), (0x8A, 96), (0x90, 64),
+])
+def test_usb_clock_selectors_follow_usb_plugin_rules(selector, divisor):
+    raw = changed_descriptor(27, selector)
+    assert u.sampling_divisor(raw, 1000) == (divisor, 1000)
+
+
+def test_usb_default_clock_uses_reported_maximum_not_network_table():
+    raw = bytearray(changed_descriptor(27, 0x85))
+    raw[8:12] = struct.pack(">i", 10000)
+    raw[-2] = sum(raw[:-2]) & 255
+    assert u.sampling_divisor(bytes(raw), 1000) == (5, 1000)
+    assert u.sampling_divisor(REAL_DESCRIPTOR, 3000) == (21, 64000 / 21)
+    assert u.sampling_divisor(REAL_DESCRIPTOR, 128000 / 43) == (21, 64000 / 21)
+
+
+@pytest.mark.parametrize("rate", [0, -1, True, "1000", float("nan"), float("inf"), 128000, 1e-10])
+def test_usb_invalid_divisors_are_rejected(rate):
+    with pytest.raises(DaqBackendError):
+        u.sampling_divisor(REAL_DESCRIPTOR, rate)
+
+
+def test_usb_clock_without_init_ad_sequence_is_rejected():
+    with pytest.raises(DaqBackendError, match="0x83"):
+        u.sampling_divisor(changed_descriptor(27, 0x83), 1000)
+
+
+@pytest.mark.parametrize("mask,divisor", [(0, 64), (16, 64), (31, 64), (1, 0)])
+def test_init_ad_rejects_nonphysical_mask_or_zero_divisor_before_write(usb, mask, divisor):
+    payload = struct.pack(">I", divisor) + b"\x01" + struct.pack("<I", mask) + bytes(4)
+    with u.UsbConnection() as control:
+        with pytest.raises(DaqBackendError, match="InitAD"):
+            control.initialize_ad(payload)
+    assert [cmd for cmd, _ in usb.commands] == [0x44]
+
+
+def test_usb_profile_respects_declared_channel_count_and_rate(tmp_path):
+    path = profile(tmp_path)
+    data = json.loads(path.read_text())
+    data["max_sample_rate"] = 128001
+    path.write_text(json.dumps(data))
+    with pytest.raises(DaqBackendError, match="reported device limit"):
+        NetDaqProfile.load(path)
+    data["max_sample_rate"] = 2000
+    data["descriptor_hex"] = changed_descriptor(3, 2).hex()
+    path.write_text(json.dumps(data))
+    with pytest.raises(DaqBackendError, match="physical count"):
+        NetDaqProfile.load(path)
+
+
+@pytest.mark.parametrize("selector,divisor", [(0x87, 100), (0x89, 1000)])
+def test_backend_uses_usb_clock_rules_for_init_ad_and_actual_rate(usb, tmp_path, selector, divisor):
+    path = profile(tmp_path)
+    data = json.loads(path.read_text())
+    usb.descriptor = changed_descriptor(27, selector)
+    data["descriptor_hex"] = usb.descriptor.hex()
+    path.write_text(json.dumps(data))
+    b = NetDaqBackend(NetDaqSettings(transport="usb", profile_path=str(path)))
+    b.configure(config())
+    try:
+        b.start()
+        frame = b.read_frame()
+        assert frame.sample_rate == 1000
+        assert frame.metadata["actual_sample_rate"] == 1000
+        payload = next(body for cmd, body in usb.commands if cmd == 0x49)
+        assert int.from_bytes(payload[:4], "big") == divisor
+    finally:
+        b.close()
 
 
 @pytest.mark.parametrize("corrupt", [False, True])

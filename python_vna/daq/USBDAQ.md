@@ -36,7 +36,9 @@ Use the [NetDAQ profile contract](NETDAQ.md), with these USB-specific constraint
   with the ascending, independently verified physical stream order (0..3 only).
 - Each channel has exactly ONE fixed range/coupling option with captured
   `configuration_hex`. USB does not write `!C`, even for type 0/6/8. Current
-  reported type/configuration must match. Range/coupling and IEPE are read-only.
+  reported type/configuration must match. The configuration length comes from
+  `!A`; `!B` must return exactly that many bytes after the channel echo.
+  Range/coupling and IEPE are read-only.
 - `volts_per_count`, `zero_count`, physical mode/current, maximum sample rate and
   channel order MUST come from independent calibration/qualification, not from
   a convenient descriptor ratio or a successful protocol acknowledgement.
@@ -119,3 +121,45 @@ There is no known hardware sequence counter: provenance explicitly records
 `stream_continuity_verified=false`. At least 13 hours of sustained Record and
 known-source comparison remain pending. Do not deploy for engineering amplitude
 measurements until the real profile has been independently qualified.
+
+## Offline protocol alignment, 2026-11-02
+
+Reviewed external references (not imported or executed by the product):
+
+```text
+PROTOCOL_USB.md SHA-256:
+e0652c70ca47cfaa16cd32e02b956352720c4b492b7d70aaf556187df61ec2dd
+netdaq_usb.py SHA-256:
+0dba48e0e6c73767788a803c2dca54f617d2d2a64bca11b5e48c964966359d85
+```
+
+The hardware is unavailable for this revision. New coverage uses injected USB
+test doubles only; it does not constitute additional hardware acceptance.
+
+- `desc[3]` is the reported channel count, not the stream container width.
+  Samples remain signed little-endian int32 with a 24-bit ADC range. Queries,
+  profiles and InitAD masks must stay within the reported physical count
+  (at most four for this product).
+- Probe JSON includes `usb_descriptor` with nominal voltage/ADC ranges and the
+  derived nominal V/count. Its `calibration_verified=false` is deliberate:
+  matching DASP's software conversion is not independent electrical calibration.
+  The earlier NI/DASP voltage discrepancy remains unresolved. Acquisition still
+  requires a verified profile; descriptor ratios never become a default profile.
+- USB timing is separate from TCP timing. Selectors `0x86/87/88/89/8A` use
+  64000/100000/48000/1000000/96000 Hz. Only `0x82` has the additional divisor
+  factor of two. Zero selectors are normalized to `0x81`, as in device
+  enumeration; other default branches use half the descriptor's maximum rate.
+  `0x83` has no verified InitAD sequence and is rejected.
+- Divisor calculation truncates after adding 0.4. Zero/overflow divisors are
+  rejected before opening the device, and actual rates feed frames and storage.
+- USB profile matching checks firmware as well as the descriptor.
+
+The reference's unconditional `SET_CONFIGURATION` on open is not adopted:
+read-only probing must not reset a device. The existing checked interface claim,
+descriptor validation, Stop ownership and native-buffer quarantine remain.
+Digital I/O and channel writes are not enabled by this revision.
+
+Validation: 111 USB/TCP/settings tests passed. The required
+`powershell -NoProfile -File scripts\test_vna_product.ps1 -Product python_vna_test`
+completed with 530 tests passed, including the shared format and acquisition UI
+regressions. No device was accessed during these tests.

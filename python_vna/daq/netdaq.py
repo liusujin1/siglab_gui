@@ -82,13 +82,15 @@ class NetDaqProfile:
             maximum = float(data["max_sample_rate"])
             channels = data["channels"]
             if transport == "usb":
-                from .usbdaq import checked_reply
+                from .usbdaq import checked_reply, descriptor_info
 
-                checked_reply(desc, 0x44, 33)
+                usb_info = descriptor_info(desc)
                 checked_reply(bytes.fromhex(data["firmware_hex"]), 0x56, 7)
-                if (fmt != "raw32" or desc[5:8] != bytes((24, 4, 4))
+                if (fmt != "raw32"
                         or offset != 0 or not isinstance(channels, list) or not 1 <= len(channels) <= 4):
                     raise ValueError("USB2404 supports only qualified raw32/24-bit profiles with 1..4 channels")
+                if maximum > usb_info["nominal_max_sample_rate"]:
+                    raise ValueError("USBDAQ verified rate cannot exceed the reported device limit")
             if (not model or not evidence or len(init) != 13 or isinstance(offset, bool)
                     or not isinstance(offset, int) or not 0 <= offset <= 9
                     or not math.isfinite(maximum) or maximum <= 0
@@ -133,8 +135,8 @@ class NetDaqProfile:
                         raise ValueError("non-writable types need one captured, fixed configuration")
             if transport == "usb":
                 wires = [c["wire_number"] for c in channels]
-                if wires != sorted(wires) or any(n > 3 for n in wires):
-                    raise ValueError("USB2404 requires ascending, independently verified physical channels 0..3")
+                if wires != sorted(wires) or any(n >= usb_info["channel_count"] for n in wires):
+                    raise ValueError("USB2404 requires ascending channels within the reported physical count")
                 mask = sum(1 << n for n in wires)
                 if init[4:] != bytes((1,)) + struct.pack("<I", mask) + bytes(4):
                     raise ValueError("USB2404 captured channel mask disagrees with stream channel order")
@@ -223,6 +225,9 @@ class NetDaqBackend(BaseDaqBackend):
         control.stop_event = stop_event
         with control:
             raw = control.descriptor()
+            usb_info = getattr(control, "device_info", None)
+            if usb_info and any(n >= usb_info["channel_count"] for n in channel_numbers):
+                raise DaqBackendError("USBDAQ probe channel exceeds the reported physical channel count")
             # Firmware is retained as raw bytes until its version encoding is verified.
             firmware = control.command(0x56, size=7)
             channels = {}
@@ -232,10 +237,14 @@ class NetDaqBackend(BaseDaqBackend):
                     "type": kind, "config_bytes": count,
                     "current_configuration_hex": control.channel_configuration(number).hex(),
                 }
+        matches = bool(self.profile and raw == self.profile.descriptor)
+        if self.settings.transport == "usb":
+            matches = matches and firmware.hex() == self.profile.firmware_hex
         return {"host": self.settings.host, "transport": self.settings.transport,
                 "usb": getattr(control, "info", None), "descriptor_hex": raw.hex(),
+                "usb_descriptor": usb_info,
                 "firmware_hex": firmware.hex(), "channels": channels,
-                "profile_matches": bool(self.profile and raw == self.profile.descriptor),
+                "profile_matches": matches,
                 "experimental": True}
 
     def list_devices(self):
@@ -273,7 +282,11 @@ class NetDaqBackend(BaseDaqBackend):
             raise DaqBackendError("NetDAQ frame allocation exceeds the 64 MiB safety limit")
         if not math.isfinite(acq.sample_rate) or acq.sample_rate > profile.max_sample_rate:
             raise DaqBackendError("NetDAQ requested sample rate exceeds the verified device limit")
-        divisor, actual = sampling_divisor(profile.descriptor, acq.sample_rate)
+        rate_encoder = sampling_divisor
+        if self.settings.transport == "usb":
+            from .usbdaq import sampling_divisor as rate_encoder
+
+        divisor, actual = rate_encoder(profile.descriptor, acq.sample_rate)
         if actual > profile.max_sample_rate:
             raise DaqBackendError("NetDAQ coerced sample rate exceeds the verified device limit")
         selected = []
