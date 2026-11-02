@@ -74,6 +74,9 @@ list. Input mode is one of `iepe`, `voltage_single_ended_dc`,
 `iepe_current_ma` field, NOT to a coupling option; a verified IEPE profile
 requires a known positive current. No command to switch channel type or current
 is guessed. The UI shows IEPE and current as read-only for NetDAQ.
+The USB fixed-supply exception is documented in `USBDAQ.md`: a qualified
+`device_fixed` or `external` supply may have an unknown current, represented by
+JSON null. TCP retains the positive-current requirement.
 
 Each option requires `full_scale_v`, `coupling` (`ac`, `dc`, or `bias`),
 `volts_per_count`, and `zero_count`. Only types **0, 6, 8** additionally use

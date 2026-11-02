@@ -9,6 +9,7 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+import numpy as np
 from PySide6 import QtCore, QtWidgets
 from PySide6.QtTest import QTest
 
@@ -205,3 +206,66 @@ def test_usb_fixed_ranges_and_iepe_are_not_editable(window):
     assert not window.channel_full_scale_combo.isEnabled()
     assert not window.channel_iepe_checkbox.isEnabled()
     assert not window.channel_iepe_checkbox.isChecked()
+
+
+@pytest.mark.parametrize("supply", ["device_fixed", "external"])
+@pytest.mark.parametrize("current", [None, 2.0])
+def test_usb_iepe_unknown_current_and_supply_survive_editor_changes(window, supply, current):
+    backend = NetDaqBackend(NetDaqSettings(transport="usb"))
+    # Synthetic profile facts; vendor type 0 alone does not establish IEPE.
+    entries = tuple({
+        "wire_number": i, "channel_type": 0,
+        "input_mode": "iepe" if i else "voltage_single_ended_dc",
+        "iepe_supply": supply, "iepe_current_ma": current,
+        "options": [{"coupling": "ac" if i else "dc", "full_scale_v": 10,
+                     "configuration_hex": "01"}],
+    } for i in range(4))
+    backend.profile = NetDaqProfile("synthetic", b"!D!" + bytes(30), "raw32", bytes(13),
+                                   0, 1000, entries, "test", "test-only", "usb")
+    window.controller.backend = backend
+    window.channel_list.setCurrentRow(1)
+    window._load_channel_editor_from_row(1)
+    window._apply_netdaq_limits()
+    assert window.channel_iepe_checkbox.isChecked()
+    assert not window.channel_iepe_checkbox.isEnabled()
+    assert not window.channel_iepe_current_edit.isEnabled()
+    assert window.channel_iepe_current_edit.value() == (current or 0)
+    if current is None:
+        assert window.channel_iepe_current_edit.text() == "未确认"
+    expected = "外部适调器供电" if supply == "external" else "设备固定供电"
+    assert expected in window.channel_iepe_checkbox.toolTip()
+    window.channel_sensitivity_edit.setValue(20)
+    config = window._read_session_from_widgets()
+    assert config.ai_channels[1].iepe_current_ma == (current or 0)
+    assert config.ai_channels[1].iepe_enabled
+    assert config.ai_channels[1].sensitivity == 20
+    assert config.ai_channels[1].coupling == "ac"
+    window.controller.backend = build_backend("simulated")
+    window._apply_netdaq_limits()
+    assert window.channel_iepe_current_edit.isEnabled()
+    assert window.channel_iepe_current_edit.specialValueText() == ""
+    assert not window.channel_iepe_checkbox.toolTip()
+
+
+def test_iepe_sensitivity_display_uses_reciprocal_mv_per_unit_once(window):
+    from python_vna.daq.base import BackendFrame
+    from python_vna.signal_pipeline import FrameProcessor
+
+    session = window.session
+    channel = session.ai_channels[0]
+    channel.iepe_enabled = True
+    channel.iepe_current_ma = 0
+    channel.sensitivity = 1000 / 51.567
+    channel.engineering_unit = "m/s^2"
+    channel.per_eu_mode = "/Volt"
+    session.acquisition.frame_size = 64
+    waveform = np.sin(2 * np.pi * np.arange(64) / 8)
+    frame = BackendFrame(1000, ["ai0"], (waveform * .051567)[None, :],
+                         np.arange(64) / 1000, 0, {})
+    measurement = FrameProcessor(session.acquisition).process(frame)
+    window.controller.state.measurement = measurement
+    window.top_display_combo.setCurrentText("y(t)")
+    window.top_value_mode_combo.setCurrentText("real")
+    window._plot_measurement(measurement)
+    _, y = window._last_plot_cache["top"]["ai0"]
+    np.testing.assert_allclose(y, waveform, atol=1e-12)

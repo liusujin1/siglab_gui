@@ -23,6 +23,57 @@ from python_vna.storage import (
 
 
 class StorageTests(unittest.TestCase):
+    def test_netdaq_iepe_state_and_precise_sensitivity_are_independent_of_coupling(self):
+        session = self._sample_session()
+        channel = session.config.ai_channels[0]
+        channel.coupling = "ac"
+        channel.iepe_enabled = True
+        channel.iepe_current_ma = 0
+        channel.sensitivity = 1000 / 51.567
+        session.measurement.metadata["daq_backend"] = "netdaq"
+        session.measurement.metadata["daq_provenance"] = {
+            "transport": "usb", "channel_modes": {"ai0": {
+                "iepe": {"enabled": True, "supply": "external", "current_ma": None}}},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "iepe.vna"
+            save_legacy_vna(session, path)
+            loaded = load_legacy_vna(path)
+        restored = loaded.config.ai_channels[0]
+        self.assertEqual(restored.coupling, "ac")
+        self.assertTrue(restored.iepe_enabled)
+        self.assertEqual(restored.iepe_current_ma, 0)
+        self.assertAlmostEqual(restored.sensitivity, 1000 / 51.567)
+        self.assertAlmostEqual(
+            loaded.measurement.metadata["legacy_channels"]["ai0"]["euscale_fac"],
+            1000 / 51.567,
+        )
+
+    def test_invalid_optional_netdaq_channel_settings_keep_legacy_fallback(self):
+        import json
+        from scipy.io import savemat
+
+        session = self._sample_session()
+        session.config.ai_channels[0].coupling = "ac"
+        session.config.ai_channels[0].sensitivity = 20
+        session.measurement.metadata["daq_backend"] = "netdaq"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "fallback.vna"
+            save_legacy_vna(session, path)
+            mat = loadmat(path)
+            for bad_current in (-1, None, "invalid", float("nan")):
+                with self.subTest(current=bad_current):
+                    mat["PythonVNAAcquisition_json"] = json.dumps({
+                        "version": 1, "backend": "netdaq", "sample_rate": session.measurement.sample_rate,
+                        "channel_settings": {"ai0": {
+                            "iepe_enabled": True, "iepe_current_ma": bad_current, "sensitivity": 123.456}},
+                    })
+                    savemat(path, {key: value for key, value in mat.items() if not key.startswith("__")})
+                    loaded = load_legacy_vna(path)
+                    self.assertFalse(loaded.config.ai_channels[0].iepe_enabled)
+                    self.assertEqual(loaded.config.ai_channels[0].iepe_current_ma, 2.1)
+                    self.assertEqual(loaded.config.ai_channels[0].sensitivity, 20)
+
     def test_first_hit_exact_trigger_and_software_range_roundtrip(self):
         from python_vna.storage import load_saved_session_json
         session = self._sample_session()

@@ -1438,11 +1438,16 @@ def save_legacy_vna(session: SavedSession, path: str | Path) -> Path:
     }
     if metadata.get("daq_backend") == "netdaq":
         # Keep MATLAB-era configuration fields unchanged. Python readers restore
-        # the non-SigLab hardware clock from this optional, ASCII-only extension.
+        # the native clock and independent IEPE settings from this ASCII-only extension.
         mat_variables["PythonVNAAcquisition_json"] = json.dumps({
             "version": 1, "backend": "netdaq", "sample_rate": sample_rate,
             "bandwidth_hz": float(config.acquisition.bandwidth_hz),
             "provenance": metadata.get("daq_provenance", {}),
+            "channel_settings": {channel.name: {
+                "iepe_enabled": bool(channel.iepe_enabled),
+                "iepe_current_ma": float(channel.iepe_current_ma),
+                "sensitivity": float(channel.sensitivity),
+            } for channel in channels},
         }, ensure_ascii=True, default=_json_default)
     stream = BytesIO()
     savemat(
@@ -1730,6 +1735,20 @@ def load_legacy_vna(path: str | Path) -> SavedSession:
                 sensitivity = float(chan_stat[idx, 2])
                 full_scale = float(chan_stat[idx, 4])
                 per_eu_mode = "/Volt" if enabled else "Off"
+            iepe_enabled = coupling == "bias"
+            iepe_current_ma = 2.1
+            native_channels = native_acquisition.get("channel_settings", {})
+            native_channel = native_channels.get(channel_name, {}) if isinstance(native_channels, dict) else {}
+            try:
+                native_iepe = native_channel["iepe_enabled"]
+                native_current = float(native_channel["iepe_current_ma"])
+                native_sensitivity = float(native_channel["sensitivity"])
+                if (isinstance(native_iepe, bool) and np.isfinite(native_current) and native_current >= 0
+                        and np.isfinite(native_sensitivity)):
+                    iepe_enabled, iepe_current_ma = native_iepe, native_current
+                    sensitivity = native_sensitivity
+            except (KeyError, TypeError, ValueError, OverflowError):
+                pass
             channels.append(
                 ChannelConfig(
                     name=channel_name,
@@ -1739,7 +1758,8 @@ def load_legacy_vna(path: str | Path) -> SavedSession:
                     coupling=coupling,
                     is_reference=(idx == 0),
                     offset=offset,
-                    iepe_enabled=(coupling == "bias"),
+                    iepe_enabled=iepe_enabled,
+                    iepe_current_ma=iepe_current_ma,
                     engineering_unit=eu_text,
                     sensitivity=sensitivity,
                     per_eu_mode=per_eu_mode,

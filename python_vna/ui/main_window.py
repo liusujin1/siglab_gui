@@ -1156,6 +1156,7 @@ class ContinuousRecordingWorker(QtCore.QObject):
                 for channel in self._controller.state.session.ai_channels
                 if channel.enabled
             ]
+            provenance = getattr(self._controller.backend, "acquisition_provenance", None)
             self._writer = ContinuousDatWriter(
                 self._output_dir,
                 self._controller.state.session,
@@ -1165,6 +1166,7 @@ class ContinuousRecordingWorker(QtCore.QObject):
                 segment_seconds=self._segment_seconds,
                 storage_format="binary",
                 compress_closed_segments=False,
+                daq_provenance=provenance() if callable(provenance) else None,
             )
             self._writer.start()
             self._controller.start()
@@ -5161,8 +5163,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._channel_editor_loading = previous
             return
         entry = backend.profile.channels[row]
-        enabled = entry["input_mode"] == "iepe"
-        current = float(entry.get("iepe_current_ma", 0)) if enabled else 0.0
+        iepe = backend.profile.iepe_settings(row)
+        enabled = iepe["enabled"]
+        current = iepe["current_ma"] or 0.0
         previous = self._channel_editor_loading
         self._channel_editor_loading = True
         try:
@@ -5171,11 +5174,16 @@ class MainWindow(QtWidgets.QMainWindow):
             if row == self.channel_list.currentRow():
                 self.channel_iepe_checkbox.setText("IEPE")
                 self.channel_iepe_checkbox.setChecked(enabled)
-                self.channel_iepe_current_edit.setSpecialValueText("")
+                self.channel_iepe_current_edit.setSpecialValueText("未确认" if enabled and not iepe["current_known"] else "")
                 self.channel_iepe_current_edit.setValue(current)
-                self.channel_iepe_current_edit.setToolTip("电流来自已核实的设备配置，仅显示；不通过耦合或 !C 设置")
+                supply_text = {"device_fixed": "设备固定供电", "external": "外部适调器供电",
+                               "unspecified": "供电来源未记录", "none": "未启用"}[iepe["supply"]]
+                self.channel_iepe_current_edit.setToolTip(
+                    f"{supply_text}；" + ("电流来自已核实配置" if iepe["current_known"] else "电流数值未确认")
+                    + "；仅显示，不下发电流设置")
                 self.channel_iepe_checkbox.setToolTip(
-                    f"设备上报类型 {entry['channel_type']} / {entry['input_mode']}；模式及电流只读，不通过 !C 切换")
+                    f"已核实配置：{entry['input_mode']} / {supply_text}；硬件类型码 {entry['channel_type']}；"
+                    "模式及电流只读，勾选状态不会开启恒流源")
                 writable = entry["channel_type"] in {0, 6, 8} and backend.settings.transport != "usb"
                 self.channel_coupling_combo.setEnabled(writable)
                 self.channel_full_scale_combo.setEnabled(writable)
@@ -6169,7 +6177,9 @@ class MainWindow(QtWidgets.QMainWindow):
                            self.channel_coupling_combo, self.channel_full_scale_combo):
                 widget.setEnabled(valid)
             self.channel_iepe_checkbox.setText("IEPE")
+            self.channel_iepe_checkbox.setToolTip("")
             self.channel_iepe_current_edit.setSpecialValueText("")
+            self.channel_iepe_current_edit.setToolTip("")
         if hasattr(self, "excitation_enabled_action"):
             self.excitation_enabled_action.setEnabled(not netdaq)
         self.trigger_mode_combo.setToolTip("NetDAQ 触发尚未实机验证，仅支持自由运行" if netdaq else "")

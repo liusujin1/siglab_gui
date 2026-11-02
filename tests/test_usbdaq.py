@@ -232,6 +232,176 @@ def backend(tmp_path):
     return NetDaqBackend(NetDaqSettings(transport="usb", profile_path=str(profile(tmp_path)), timeout=.2))
 
 
+def iepe_backend(tmp_path, *, supply="device_fixed", current=None):
+    path = profile(tmp_path)
+    data = json.loads(path.read_text())
+    for entry in data["channels"][1:]:
+        entry.update(input_mode="iepe", iepe_supply=supply, iepe_current_ma=current)
+        entry["options"][0]["coupling"] = "ac"
+    path.write_text(json.dumps(data))
+    b = NetDaqBackend(NetDaqSettings(transport="usb", profile_path=str(path), timeout=.2))
+    session = config()
+    session.acquisition.modal.enabled = False
+    for channel in session.ai_channels[1:]:
+        channel.iepe_enabled = True
+        channel.iepe_current_ma = current or 0.0
+        channel.coupling = "ac"
+        channel.sensitivity = 1000 / 51.567
+        channel.per_eu_mode = "/Volt"
+        channel.engineering_unit = "m/s^2"
+    return b, session
+
+
+@pytest.mark.parametrize("supply", ["device_fixed", "external"])
+@pytest.mark.parametrize("current", [None, 0, 2.0])
+def test_iepe_supply_and_current_are_profile_facts_not_usb_writes(usb, tmp_path, supply, current):
+    b, session = iepe_backend(tmp_path, supply=supply, current=current)
+    assert b.list_devices()[0].capability.supports_iepe
+    b.configure(session)
+    try:
+        b.start()
+        frame = b.read_frame()
+        info = frame.metadata["channel_modes"]["ai1"]["iepe"]
+        assert info == {
+            "enabled": True, "supply": supply, "current_ma": current or None,
+            "current_known": bool(current), "control": "read_only",
+        }
+        assert frame.metadata["channel_modes"]["ai1"]["channel_type"] == 0
+        np.testing.assert_allclose(frame.data[1], np.arange(1, 32, 4) * .001)
+        assert frame.metadata["units"] == "V"
+    finally:
+        b.close()
+    assert not any(cmd in {0x43, 0x4F} for cmd, _ in usb.commands)
+
+
+@pytest.mark.parametrize("change", [
+    {"iepe_current_ma": None, "iepe_supply": "unspecified"},
+    {"iepe_current_ma": -1}, {"iepe_current_ma": float("nan")},
+    {"iepe_current_ma": True}, {"iepe_supply": "switch_on_by_usb"},
+])
+def test_iepe_unknown_supply_or_invalid_current_never_becomes_a_profile(tmp_path, change):
+    path = profile(tmp_path)
+    data = json.loads(path.read_text())
+    entry = data["channels"][1]
+    entry.update(input_mode="iepe", iepe_supply="device_fixed", iepe_current_ma=2.0)
+    entry.update(change)
+    path.write_text(json.dumps(data))
+    with pytest.raises(DaqBackendError, match="IEPE"):
+        NetDaqProfile.load(path)
+
+
+def test_unknown_current_does_not_inherit_ni_default(usb, tmp_path):
+    b, session = iepe_backend(tmp_path)
+    session.ai_channels[1].iepe_current_ma = 2.1
+    with pytest.raises(DaqBackendError, match="read-only channel mode"):
+        b.configure(session)
+    assert not usb.commands
+
+
+def test_unknown_current_usb_exception_does_not_change_tcp_profile_rules(tmp_path):
+    iepe_backend(tmp_path)
+    path = tmp_path / "synthetic-profile.json"
+    data = json.loads(path.read_text())
+    data["transport"] = "tcp"
+    for entry in data["channels"]:
+        entry["channel_type"] = 3
+    path.write_text(json.dumps(data))
+    with pytest.raises(DaqBackendError, match="IEPE"):
+        NetDaqProfile.load(path)
+
+
+def test_usb_iepe_voltage_sensitivity_and_vna_roundtrip(usb, tmp_path):
+    from python_vna.controller import VnaController
+    from python_vna.ui.main_window import MainWindow
+
+    b, session = iepe_backend(tmp_path)
+    counts = np.zeros((64, 4), dtype="<i4")
+    counts[:, 1] = np.round(51567 * np.sin(2 * np.pi * np.arange(64) / 8)).astype(np.int32)
+    usb.data = counts.tobytes()
+    session.acquisition.frame_size = 64
+    path = tmp_path / "synthetic-profile.json"
+    data = json.loads(path.read_text())
+    for entry in data["channels"][1:]:
+        entry["options"][0]["volts_per_count"] = 1e-6
+    path.write_text(json.dumps(data))
+    b = NetDaqBackend(NetDaqSettings(transport="usb", profile_path=str(path)))
+    ctl = VnaController(b, session)
+    ctl.configure()
+    try:
+        ctl.start()
+        measurement = ctl.read_and_process()
+    finally:
+        ctl.close()
+    volts = measurement.time_data["channels"]["ai1"]
+    np.testing.assert_allclose(volts, counts[:, 1] * 1e-6)
+    channel = session.ai_channels[1]
+    eu = volts * MainWindow._effective_euscale_fac(channel.sensitivity, channel.per_eu_mode)
+    np.testing.assert_allclose(eu, np.sin(2 * np.pi * np.arange(64) / 8), atol=1e-5)
+    target = tmp_path / "iepe.vna"
+    save_legacy_vna(ctl.snapshot(), target)
+    loaded = load_legacy_vna(target)
+    assert loaded.config.ai_channels[1].iepe_enabled
+    assert loaded.config.ai_channels[1].iepe_current_ma == 0
+    assert loaded.config.ai_channels[1].engineering_unit == "m/s^2"
+    assert loaded.config.ai_channels[1].sensitivity == pytest.approx(1000 / 51.567)
+    saved_iepe = loaded.measurement.metadata["daq_provenance"]["channel_modes"]["ai1"]["iepe"]
+    assert saved_iepe["supply"] == "device_fixed" and saved_iepe["current_ma"] is None
+    np.testing.assert_allclose(
+        loaded.measurement.time_data["channels"][loaded.config.ai_channels[1].label], volts)
+
+
+@pytest.mark.parametrize("storage_format", ["text", "binary"])
+def test_iepe_record_retains_supply_without_scaling_voltage(usb, tmp_path, storage_format):
+    from python_vna.continuous_recording import ContinuousDatWriter, read_dat_header
+    from python_vna.analysis_data import load_analysis_path, load_continuous_channels
+
+    b, session = iepe_backend(tmp_path, supply="external")
+    b.configure(session)
+    output = tmp_path / "record"
+    writer = ContinuousDatWriter(
+        output, session, device_name=b.device_name, channel_names=["ai0", "ai1", "ai2", "ai3"],
+        software_version="synthetic test", storage_format=storage_format,
+        compress_closed_segments=False, daq_provenance=b.acquisition_provenance())
+    writer.start()
+    try:
+        b.start()
+        frame = b.read_frame()
+        writer.write_frame(frame)
+    finally:
+        b.close()
+        writer.close(completed=True)
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    info = manifest["daq_provenance"]["channel_modes"]["ai1"]["iepe"]
+    assert info["supply"] == "external" and info["current_ma"] is None
+    assert manifest["session"]["ai_channels"][1]["iepe_current_ma"] == 0
+    if storage_format == "text":
+        header = read_dat_header(output / manifest["segments"][0]["path"])
+        assert header["daq_provenance"]["channel_modes"]["ai1"]["iepe"] == info
+    dataset = load_analysis_path(output / "manifest.json")
+    _, channels = load_continuous_channels(dataset, ["ai1"])
+    np.testing.assert_allclose(channels["ai1"], frame.data[1])
+
+
+def test_iepe_record_worker_supplies_provenance_without_spectrum_processing(usb, tmp_path):
+    from python_vna.controller import VnaController
+    from python_vna.signal_pipeline import FrameProcessor
+    from python_vna.ui.main_window import ContinuousRecordingWorker
+    from unittest.mock import patch
+
+    b, session = iepe_backend(tmp_path)
+    ctl = VnaController(b, session)
+    worker = ContinuousRecordingWorker(ctl, b.device_name, tmp_path / "worker-record")
+    errors = []
+    worker.error.connect(errors.append)
+    worker.recording_status.connect(lambda status: worker.request_stop() if status.total_frames == 3 else None)
+    with patch.object(FrameProcessor, "process", side_effect=AssertionError("Record must not compute spectra")):
+        worker.run()
+    assert not errors and ctl.state.measurement is None
+    manifest = json.loads((tmp_path / "worker-record" / "manifest.json").read_text())
+    assert manifest["completed"] and manifest["total_frames"] == 3
+    assert manifest["daq_provenance"]["channel_modes"]["ai1"]["iepe"]["current_ma"] is None
+
+
 def test_ctypes_byte_packed_abi_and_endpoint_validation():
     p = ct.sizeof(ct.c_void_p)
     assert ct.sizeof(u.DeviceDescriptor) == 18

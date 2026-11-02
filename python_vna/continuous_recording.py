@@ -107,8 +107,9 @@ def session_recording_header(
     channel_names: list[str],
     start_unix_ns: int,
     software_version: str,
+    daq_provenance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    header = {
         "format": TEXT_DAT_FORMAT,
         "format_version": TEXT_DAT_VERSION,
         "software_version": software_version,
@@ -132,6 +133,9 @@ def session_recording_header(
             *channel_names,
         ],
     }
+    if daq_provenance is not None:
+        header["daq_provenance"] = daq_provenance
+    return header
 
 
 class ContinuousDatWriter:
@@ -148,6 +152,7 @@ class ContinuousDatWriter:
         manifest_interval_seconds: float = 5.0,
         compress_closed_segments: bool = True,
         storage_format: str = "text",
+        daq_provenance: dict[str, Any] | None = None,
         time_fn=time.time_ns,
         monotonic_fn=time.monotonic,
     ) -> None:
@@ -156,6 +161,9 @@ class ContinuousDatWriter:
         self.device_name = device_name
         self.channel_names = list(channel_names)
         self.software_version = software_version
+        self.daq_provenance = (
+            json.loads(json.dumps(daq_provenance)) if daq_provenance is not None else None
+        )
         self.segment_seconds = float(segment_seconds)
         self.max_segment_bytes = None if max_segment_bytes is None else int(max_segment_bytes)
         self.manifest_interval_seconds = float(manifest_interval_seconds)
@@ -337,6 +345,7 @@ class ContinuousDatWriter:
                 channel_names=self.channel_names,
                 start_unix_ns=start_unix_ns,
                 software_version=self.software_version,
+                daq_provenance=self.daq_provenance,
             )
             header["segment_index"] = index
             handle = path.open("w", encoding="utf-8", newline="\n")
@@ -540,7 +549,7 @@ class ContinuousDatWriter:
                 "dtype": "float64" if self.storage_format == "binary" else "float64_text",
                 "layout": "sample_major" if self.storage_format == "binary" else "text_table",
             }
-        return {
+        payload = {
             "format": "python_vna_continuous_manifest",
             "format_version": 1,
             "software_version": self.software_version,
@@ -574,6 +583,9 @@ class ContinuousDatWriter:
             "segments": self._segments,
             "active_segment": active_segment,
         }
+        if self.daq_provenance is not None:
+            payload["daq_provenance"] = self.daq_provenance
+        return payload
 
     def _write_manifest(
         self,

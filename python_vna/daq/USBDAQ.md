@@ -39,7 +39,7 @@ Use the [NetDAQ profile contract](NETDAQ.md), with these USB-specific constraint
   reported type/configuration must match. The configuration length comes from
   `!A`; `!B` must return exactly that many bytes after the channel echo.
   Range/coupling and IEPE are read-only.
-- `volts_per_count`, `zero_count`, physical mode/current, maximum sample rate and
+- `volts_per_count`, `zero_count`, physical mode/supply, maximum sample rate and
   channel order MUST come from independent calibration/qualification, not from
   a convenient descriptor ratio or a successful protocol acknowledgement.
 
@@ -163,3 +163,51 @@ Validation: 111 USB/TCP/settings tests passed. The required
 `powershell -NoProfile -File scripts\test_vna_product.ps1 -Product python_vna_test`
 completed with 530 tests passed, including the shared format and acquisition UI
 regressions. No device was accessed during these tests.
+
+## IEPE software path, offline
+
+USB IEPE is a qualified channel interpretation, not a writable coupling index.
+A profile can use `input_mode="iepe"` with the actual observed vendor type
+(including type 0 if independently established). Type 0 by itself proves
+nothing about IEPE support.
+
+Optional channel fields:
+
+- `iepe_supply`: `device_fixed`, `external`, or `unspecified`. Fixed means
+  independently confirmed device excitation; external means an independently
+  confirmed external conditioner. Neither value causes an excitation command.
+- `iepe_current_ma`: known positive current, or null/zero for unknown current.
+  Unknown current is accepted for USB only when the supply is explicitly fixed
+  or external. It never falls back to NI's 2.1 mA default.
+- Existing profiles with a known positive current remain compatible; omitted
+  supply is recorded as unspecified, rather than inferred from the vendor type.
+
+The channel editor shows enabled IEPE and current as read-only. Unknown current
+is displayed as unconfirmed; `ChannelConfig.iepe_current_ma=0` is its storage
+sentinel, not a claim of zero excitation. Provenance retains JSON null and the
+supply source. Changing labels, units or sensitivity does not turn excitation on.
+Coupling and voltage range still use the single qualified, captured option.
+IEPE does not add per-frame mean subtraction or discard startup frames.
+
+The backend returns volts, and the existing display/analysis chain applies
+sensor sensitivity once. DASP's mV/EU sensitivity is reciprocal to EU/Volt:
+for 51.567 mV/(m/s^2), enter `1000 / 51.567` EU/Volt, not 51.567.
+No sensor coefficient is applied in the wire decoder.
+
+Frame/VNA provenance records supply source, known/unknown current and units.
+The optional NetDAQ JSON extension also preserves IEPE independently of AC
+coupling, plus exact sensitivity, without changing MATLAB-era fields. Older
+files without the extension retain their original fallback behavior.
+Record obtains provenance before its first sample; binary manifests and text
+headers retain it without changing sample columns or binary layout.
+
+No real IEPE hardware profile, current switch, excitation command or sensor-fault
+detection is shipped. Fixed excitation, external supply, current magnitude,
+coupling and actual electrical response still need hardware qualification.
+
+Validation on 2026-11-02: the PythonVNATest product command completed with
+554 passed; VIanalysis completed with 455 passed and one skipped. Coverage
+includes mixed voltage/IEPE channels, unknown current, unchanged TCP current
+requirements, sensitivity applied once, VNA state/precision round-trip, and
+Record manifest/text-header provenance with voltage-only sample storage.
+All USB operations used injected test doubles; no hardware was accessed.

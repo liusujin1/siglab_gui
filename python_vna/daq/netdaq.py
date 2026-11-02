@@ -109,9 +109,17 @@ class NetDaqProfile:
                         or mode not in {"iepe", "voltage_single_ended_dc", "voltage_single_ended_ac",
                                         "voltage_differential_dc", "quarter_bridge", "half_bridge", "full_bridge"}):
                     raise ValueError("channel_type and independently verified input_mode are required")
-                current = float(channel.get("iepe_current_ma", 0))
-                if not math.isfinite(current) or current < 0 or (mode == "iepe" and current <= 0):
-                    raise ValueError("IEPE current must be established independently, not encoded as coupling")
+                current_value = channel.get("iepe_current_ma")
+                current = float(current_value) if current_value is not None else 0.0
+                supply = channel.get("iepe_supply", "unspecified")
+                if supply not in {"device_fixed", "external", "unspecified"}:
+                    raise ValueError("IEPE supply must be device_fixed, external or unspecified")
+                if (isinstance(current_value, bool) or not math.isfinite(current) or current < 0
+                        or (mode == "iepe" and current == 0
+                            and (transport != "usb" or supply == "unspecified"))):
+                    raise ValueError(
+                        "IEPE requires an independently established current or, for USB only, "
+                        "an explicit fixed/external supply; unknown current is not a command setting")
                 options = channel["options"]
                 if not isinstance(options, list) or not options:
                     raise ValueError(f"channel ai{index} has no verified range/coupling options")
@@ -147,9 +155,11 @@ class NetDaqProfile:
 
     def option(self, index: int, channel) -> dict:
         reported = self.channels[index]
-        iepe = reported["input_mode"] == "iepe"
+        settings = self.iepe_settings(index)
+        iepe = settings["enabled"]
+        expected_current = settings["current_ma"] or 0.0
         if channel.iepe_enabled != iepe or (iepe and not math.isclose(
-                float(reported["iepe_current_ma"]), channel.iepe_current_ma, abs_tol=1e-6)):
+                expected_current, channel.iepe_current_ma, abs_tol=1e-6)):
             raise DaqBackendError(f"NetDAQ {channel.name}: IEPE is a read-only channel mode, not a coupling switch")
         for option in reported["options"]:
             if (math.isclose(float(option["full_scale_v"]), channel.full_scale, rel_tol=1e-8)
@@ -157,6 +167,17 @@ class NetDaqProfile:
                 return option
         raise DaqBackendError(
             f"NetDAQ {channel.name}: no verified option for range/coupling/IEPE; no settings were written")
+
+    def iepe_settings(self, index: int) -> dict:
+        """Supply facts from the qualified profile, never inferred from !A/!B."""
+        entry = self.channels[index]
+        enabled = entry["input_mode"] == "iepe"
+        value = entry.get("iepe_current_ma")
+        current = float(value) if enabled and value is not None and float(value) > 0 else None
+        return {
+            "enabled": enabled, "supply": entry.get("iepe_supply", "unspecified") if enabled else "none",
+            "current_ma": current, "current_known": current is not None, "control": "read_only",
+        }
 
 
 class NetDaqBackend(BaseDaqBackend):
@@ -400,19 +421,29 @@ class NetDaqBackend(BaseDaqBackend):
         frame = BackendFrame(
             self._rate, [name for index, name, option in self._selected], data,
             np.arange(frame_size, dtype=float) / self._rate, self._frame_index,
-            {"backend": "netdaq", "experimental": True, "device_model": profile.model,
-             "transport": self.settings.transport,
-             "profile_sha256": profile.digest, "requested_sample_rate": self._requested_rate,
-             "actual_sample_rate": self._rate, "sample_start_index": self._sample_index,
-             "channel_modes": {name: {"channel_type": profile.channels[index]["channel_type"],
-                                       "wire_number": profile.channels[index]["wire_number"],
-                                       "input_mode": profile.channels[index]["input_mode"]}
-                               for index, name, option in self._selected},
-             "units": "V", "stream_continuity_verified": False},
+            {**self.acquisition_provenance(), "sample_start_index": self._sample_index},
         )
         self._sample_index += frame_size
         self._frame_index += 1
         return frame
+
+    def acquisition_provenance(self) -> dict:
+        """JSON-safe acquisition facts, also available before Record's first frame."""
+        if self._session is None:
+            raise DaqBackendError("NetDAQ must be configured before reading acquisition provenance")
+        profile = self.profile
+        return {
+            "backend": "netdaq", "experimental": True, "device_model": profile.model,
+            "transport": self.settings.transport, "profile_sha256": profile.digest,
+            "requested_sample_rate": self._requested_rate, "actual_sample_rate": self._rate,
+            "channel_modes": {name: {
+                "channel_type": profile.channels[index]["channel_type"],
+                "wire_number": profile.channels[index]["wire_number"],
+                "input_mode": profile.channels[index]["input_mode"],
+                "iepe": profile.iepe_settings(index),
+            } for index, name, option in self._selected},
+            "units": "V", "stream_continuity_verified": False,
+        }
 
     def request_stop(self):
         self._cancel.set()
