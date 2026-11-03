@@ -267,7 +267,10 @@ def test_range_trigger_ao_and_descriptor_gates_before_writes(tmp_path):
         for key in ("range", "trigger", "ao"):
             cfg = session()
             if key == "range": cfg.ai_channels[0].full_scale = 1
-            if key == "trigger": cfg.acquisition.trigger.enabled = True
+            if key == "trigger":
+                cfg.acquisition.trigger.enabled = True
+                cfg.acquisition.trigger.mode = "Every Frame"
+                cfg.acquisition.trigger.source = "ai63"
             if key == "ao": cfg.acquisition.excitation.enabled = True
             with pytest.raises(DaqBackendError): backend.configure(cfg)
         assert emulator.commands == []

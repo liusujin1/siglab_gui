@@ -71,6 +71,8 @@
         "python_vna/impact_selection.py",
         "python_vna/ui/main_window.py",
         "python_vna/ui/netdaq_settings.py",
+        "python_vna/ui/offline_daq_tools.py",
+        "tests/test_offline_daq.py",
         "tests/test_netdaq.py",
         "tests/test_netdaq_ui.py",
         "tests/test_usbdaq.py",
@@ -94,7 +96,8 @@
         "tests/test_simulated_backend.py",
         "tests/test_netdaq.py",
         "tests/test_netdaq_ui.py",
-        "tests/test_usbdaq.py"
+        "tests/test_usbdaq.py",
+        "tests/test_offline_daq.py"
       ]
     },
     {

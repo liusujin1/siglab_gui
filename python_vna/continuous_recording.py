@@ -180,6 +180,7 @@ class ContinuousDatWriter:
         self._start_monotonic: float | None = None
         self._last_manifest_monotonic = 0.0
         self._closed = False
+        self._write_error: str | None = None
         self._compression_queue: queue.Queue[Path | None] | None = None
         self._compression_results: queue.Queue[_CompressionResult] | None = None
         self._compression_thread: threading.Thread | None = None
@@ -224,7 +225,8 @@ class ContinuousDatWriter:
         if data.ndim != 2:
             raise ValueError("Continuous recording frames must be 2D channel x sample arrays.")
         channel_count, sample_count = data.shape
-        if self.channel_names and len(self.channel_names) != channel_count:
+        if (sample_count == 0 or list(frame.channel_names) != self.channel_names
+                or channel_count != len(self.channel_names)):
             raise ValueError(
                 "Continuous recording channel count does not match the configured channels."
             )
@@ -233,6 +235,8 @@ class ContinuousDatWriter:
         else:
             fallback_end_unix_ns = int(self._time_fn())
         sample_rate = float(frame.sample_rate or self.session.acquisition.sample_rate)
+        if sample_rate != float(self.session.acquisition.sample_rate):
+            raise ValueError("Continuous recording sample rate changed during acquisition.")
         frame_unix_ns = int(
             frame.metadata.get(
                 "frame_start_unix_ns",
@@ -244,16 +248,27 @@ class ContinuousDatWriter:
             )
         )
         frame_start_sample = self._total_samples
-        if self.storage_format == "binary":
-            self._write_binary_frame(data)
-        else:
-            self._write_text_frame(
-                data,
-                frame_index=int(frame.frame_index),
-                frame_start_unix_ns=frame_unix_ns,
-                frame_start_sample=frame_start_sample,
-                sample_rate=sample_rate,
-            )
+        frame_offset = segment.file.tell()
+        try:
+            if self.storage_format == "binary":
+                self._write_binary_frame(data)
+            else:
+                self._write_text_frame(
+                    data,
+                    frame_index=int(frame.frame_index),
+                    frame_start_unix_ns=frame_unix_ns,
+                    frame_start_sample=frame_start_sample,
+                    sample_rate=sample_rate,
+                )
+        except Exception as exc:
+            self._write_error = f"Frame write failed: {exc}"
+            # Keep only committed complete frames when a write stops part-way.
+            try:
+                segment.file.seek(frame_offset)
+                segment.file.truncate()
+            except OSError:
+                pass
+            raise
         segment.frames += 1
         segment.samples += int(sample_count)
         self._total_frames += 1
@@ -323,12 +338,20 @@ class ContinuousDatWriter:
     def close(self, *, completed: bool = True, error: str | None = None) -> None:
         if self._closed:
             return
-        if self._segment is not None:
-            self._close_segment()
-        self._finish_compression_worker()
-        self._drain_compression_results()
+        close_error = None
+        try:
+            if self._segment is not None:
+                self._close_segment()
+        except Exception as exc:
+            close_error = exc
+        finally:
+            self._finish_compression_worker()
+            self._drain_compression_results()
         self._closed = True
-        self._write_manifest(completed=completed, error=error, force=True)
+        error = error or self._write_error or (str(close_error) if close_error else None)
+        self._write_manifest(completed=completed and error is None, error=error, force=True)
+        if close_error is not None:
+            raise close_error
 
     def _open_segment(self, index: int) -> None:
         if self._start_unix_ns is None:
@@ -360,8 +383,18 @@ class ContinuousDatWriter:
 
     def _close_segment(self) -> None:
         segment = self._require_open_segment()
-        segment.file.flush()
-        segment.file.close()
+        close_error = None
+        try:
+            segment.file.flush()
+        except OSError as exc:
+            close_error = exc
+            self._write_error = f"Segment flush failed: {exc}"
+        finally:
+            try:
+                segment.file.close()
+            except OSError as exc:
+                close_error = close_error or exc
+                self._write_error = f"Segment close failed: {exc}"
         segment_path = segment.path
         raw_bytes = segment_path.stat().st_size
         manifest_path = segment_path.name
@@ -391,6 +424,8 @@ class ContinuousDatWriter:
         )
         self._segment = None
         self._drain_compression_results()
+        if close_error is not None:
+            raise close_error
 
     def _start_compression_worker(self) -> None:
         if self._compression_thread is not None:

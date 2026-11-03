@@ -232,6 +232,47 @@ def backend(tmp_path):
     return NetDaqBackend(NetDaqSettings(transport="usb", profile_path=str(profile(tmp_path)), timeout=.2))
 
 
+@pytest.mark.parametrize("mode", ["Every Frame", "Manual Arm", "1st Frame", "1st-Manual Arm"])
+def test_usb_host_trigger_uses_raw_stream_without_hardware_trigger_commands(usb, tmp_path, mode):
+    samples = np.zeros((4096, 4), dtype="<i4")
+    samples[:, 1] = np.arange(4096)
+    samples[20:22, 0] = -2000
+    usb.data = samples.tobytes()
+    session = config()
+    session.acquisition.frame_size = 16
+    session.acquisition.trigger.enabled = True
+    session.acquisition.trigger.mode = mode
+    session.acquisition.trigger.source = "ai0"
+    session.acquisition.trigger.level = 1
+    session.acquisition.trigger.pretrigger_samples = -25
+    b = backend(tmp_path)
+    try:
+        b.configure(session)
+        b.start()
+        result = b.read_frame()
+        assert result.metadata["software_trigger"]
+        assert result.metadata["trigger_sample_index"] == 20
+        assert result.metadata["sample_start_index"] == 16
+        np.testing.assert_allclose(result.data, samples[16:32].T * .001)
+        assert result.timestamps[0] == 0
+        assert result.metadata["channel_full_scales"]["ai0"] == 10
+        b.stop()
+    finally:
+        b.close()
+    assert all(command not in {0x43} for command, _ in usb.commands)
+
+
+def test_offline_profile_preview_preserves_unconfirmed_current(usb, tmp_path):
+    from python_vna.daq.netdaq import profile_preview
+    b, _ = iepe_backend(tmp_path, supply="external", current=None)
+    usb.commands.clear()
+    report = profile_preview(b.settings.profile_path)
+    assert report["valid"] and not report["hardware_accessed"]
+    assert report["channels"][1]["iepe"]["current_ma"] is None
+    assert report["channels"][1]["input_mode"] == "iepe"
+    assert not usb.commands
+
+
 def iepe_backend(tmp_path, *, supply="device_fixed", current=None):
     path = profile(tmp_path)
     data = json.loads(path.read_text())

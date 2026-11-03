@@ -7,7 +7,7 @@ import threading
 
 from PySide6 import QtCore, QtWidgets
 
-from python_vna.daq.netdaq import NetDaqBackend, NetDaqProfile, NetDaqSettings
+from python_vna.daq.netdaq import NetDaqBackend, NetDaqProfile, NetDaqSettings, profile_preview
 
 
 class NetDaqProbeWorker:
@@ -77,7 +77,7 @@ class DeviceConnectionDialog(QtWidgets.QDialog):
         form.addRow("只读查询通道", self.probe_channels_edit)
         note = QtWidgets.QLabel(
             "NetDAQ 为实验性后端。没有已验证的量程、IEPE、通道顺序及电压标定配置时，"
-            "只能只读探测，不能开始采集。触发和 AO 暂不支持。")
+            "只能只读探测，不能开始采集。Avg 支持主机软件触发（非硬件触发），AO 暂不支持。")
         note.setWordWrap(True)
         self.probe_button = QtWidgets.QPushButton("只读探测")
         self.probe_button.clicked.connect(self._probe)
@@ -88,6 +88,9 @@ class DeviceConnectionDialog(QtWidgets.QDialog):
         row = QtWidgets.QHBoxLayout()
         row.addWidget(self.probe_button)
         row.addWidget(copy)
+        preview = QtWidgets.QPushButton("配置预览 / 校验")
+        preview.clicked.connect(self._preview_profile)
+        row.addWidget(preview)
         row.addStretch()
         self.buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
@@ -103,6 +106,10 @@ class DeviceConnectionDialog(QtWidgets.QDialog):
         layout.addWidget(self.buttons)
         self.transport_combo.currentIndexChanged.connect(self._transport_changed)
         self._transport_changed()
+
+    def _preview_profile(self):
+        self.report.setPlainText(json.dumps(profile_preview(self.profile_edit.text().strip()),
+                                            ensure_ascii=False, indent=2))
 
     def _transport_changed(self):
         usb = self.transport_combo.currentData() == "usb"

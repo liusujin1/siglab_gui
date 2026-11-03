@@ -180,8 +180,30 @@ class NetDaqProfile:
         }
 
 
+def profile_preview(path):
+    """Offline validation is not physical calibration or permission to invent mappings."""
+    try:
+        profile = NetDaqProfile.load(path)
+    except DaqBackendError as exc:
+        return {"valid": False, "reason": str(exc), "hardware_accessed": False}
+    return {
+        "valid": True, "hardware_accessed": False, "model": profile.model,
+        "transport": profile.transport, "sha256": profile.digest, "evidence": profile.evidence,
+        "max_sample_rate": profile.max_sample_rate, "stream_format": profile.stream_format,
+        "channels": [{
+            "application_channel": f"ai{index}", "wire_number": entry["wire_number"],
+            "reported_type": entry["channel_type"], "input_mode": entry["input_mode"],
+            "iepe": profile.iepe_settings(index),
+            "options": [{key: option[key] for key in
+                         ("coupling", "full_scale_v", "volts_per_count", "zero_count")}
+                        for option in entry["options"]],
+        } for index, entry in enumerate(profile.channels)],
+        "note": "仅验证文件结构和声明的一致性；不代表已完成实机电压、量程或 IEPE 验收。",
+    }
+
+
 class NetDaqBackend(BaseDaqBackend):
-    """Free-run AI only until device-specific trigger/AO behavior is verified.
+    """AI with optional host trigger; hardware trigger/AO remain unqualified.
 
     The captured InitAD payload fixes the hardware stream channel mask/order.
     Disabled application channels are filtered on the host, not guessed mask bits.
@@ -203,6 +225,7 @@ class NetDaqBackend(BaseDaqBackend):
         self._pending = bytearray()
         self._sample_index = 0
         self._frame_index = 0
+        self._trigger = None
 
     @property
     def device_name(self) -> str:
@@ -277,7 +300,9 @@ class NetDaqBackend(BaseDaqBackend):
         return [BackendDevice(
             self.device_name, f"NetDAQ {profile.model if profile else '未标定 / 仅只读探测'} (experimental)",
             [f"{self.device_name}/ai{i}" for i in range(len(profile.channels))] if profile else [], [],
-            BackendCapability(supports_iepe=iepe, max_ai_sample_rate=profile.max_sample_rate if profile else None),
+            BackendCapability(supports_iepe=iepe, supports_analog_trigger=bool(profile),
+                              supports_pretrigger=bool(profile),
+                              max_ai_sample_rate=profile.max_sample_rate if profile else None),
         )]
 
     def configure(self, session, device_name=None):
@@ -294,8 +319,6 @@ class NetDaqBackend(BaseDaqBackend):
         acq = session.acquisition
         if acq.excitation.enabled:
             raise DaqBackendError("NetDAQ AO is not verified and is disabled")
-        if acq.trigger.enabled or acq.trigger.pretrigger_samples:
-            raise DaqBackendError("NetDAQ trigger/pretrigger is not verified; use free-run only")
         if not 1 <= acq.frame_size <= 1048576:
             raise DaqBackendError("NetDAQ frame size is outside 1..1048576")
         profile = self.profile
@@ -322,6 +345,16 @@ class NetDaqBackend(BaseDaqBackend):
             selected.append((index, channel.name, profile.option(index, channel)))
         if not selected:
             raise DaqBackendError("NetDAQ requires at least one enabled channel")
+        # Validate the host trigger before acquiring a handle or writing configuration.
+        self._trigger = None
+        if acq.trigger.enabled and acq.trigger.source != "immediate":
+            from copy import deepcopy
+            from .software_trigger import SoftwareTrigger
+
+            trigger_acq = deepcopy(acq)
+            trigger_acq.sample_rate = actual
+            self._trigger = SoftwareTrigger(trigger_acq, [name for _, name, _ in selected],
+                                            self._read_free_frame, self._check_stop)
         self._owner = threading.get_ident()
         self._control = self._connection().connect()
         try:
@@ -394,6 +427,15 @@ class NetDaqBackend(BaseDaqBackend):
             raise
 
     def read_frame(self):
+        return self._trigger.read_frame() if self._trigger is not None else self._read_free_frame()
+
+    def update_trigger_level(self, level_v):
+        self._check_owner()
+        if self._trigger is None:
+            raise DaqBackendError("NetDAQ 未启用主机端软件触发")
+        return self._trigger.update_level(level_v)
+
+    def _read_free_frame(self):
         self._check_owner()
         self._check_stop()
         if not self._active:
@@ -402,9 +444,13 @@ class NetDaqBackend(BaseDaqBackend):
         bits = int(profile.stream_format[-2:])
         count = len(profile.channels)
         frame_size = self._session.acquisition.frame_size
+        if self._trigger is not None:
+            frame_size = min(frame_size, max(1, int(self._rate * .05)))
         needed = frame_size * count * (bits // 8)
         startup = 5.0 if self.settings.transport == "usb" and self._frame_index == 0 else 0.0
         deadline = time.monotonic() + startup + frame_size / self._rate + self.settings.timeout
+        if self._trigger is not None and self._trigger.wait_deadline is not None:
+            deadline = min(deadline, self._trigger.wait_deadline)
         while len(self._pending) < needed:
             self._check_stop()
             if profile.stream_format == "packed24":
@@ -443,6 +489,11 @@ class NetDaqBackend(BaseDaqBackend):
                 "iepe": profile.iepe_settings(index),
             } for index, name, option in self._selected},
             "units": "V", "stream_continuity_verified": False,
+            "channel_full_scales": {name: float(option["full_scale_v"])
+                                    for index, name, option in self._selected},
+            "channel_hardware_ranges": {name: [-float(option["full_scale_v"]), float(option["full_scale_v"])]
+                                        for index, name, option in self._selected},
+            "trigger_implementation": "host_absolute_window" if self._trigger is not None else "free_run",
         }
 
     def request_stop(self):

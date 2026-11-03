@@ -10,6 +10,7 @@ from python_vna.daq.base import BackendFrame
 from python_vna.models import MeasurementSet, SavedSession, SessionConfig
 from python_vna.signal_pipeline import FrameProcessor
 from python_vna.impact_selection import validate_first_hit_source
+from python_vna.daq.quality import AcquisitionQuality
 
 
 @dataclass(slots=True)
@@ -32,6 +33,7 @@ class VnaController:
         self._overlap_latest_metadata: dict | None = None
         self._overlap_latest_raw_frame_index: int | None = None
         self._stop_requested = threading.Event()
+        self.quality = AcquisitionQuality(session.ai_channels, backend_name=type(backend).__name__)
 
     def list_devices(self) -> list[BackendDevice]:
         return self.backend.list_devices()
@@ -39,6 +41,7 @@ class VnaController:
     def configure(self, device_name: str | None = None) -> None:
         self.device_name = device_name
         self.backend.configure(self.state.session, device_name=device_name)
+        self.quality = AcquisitionQuality(self.state.session.ai_channels, backend_name=type(self.backend).__name__)
         self._reset_overlap_processing()
         self._stop_requested.clear()
         self._set_backend_stop_event(self._stop_requested)
@@ -69,8 +72,8 @@ class VnaController:
     def read_and_process(self) -> MeasurementSet:
         frame = self._read_processing_frame()
         measurement = self.processor.process(frame)
-        if frame.metadata.get("backend") == "netdaq":
-            measurement.metadata["daq_backend"] = "netdaq"
+        if frame.metadata.get("backend") in {"netdaq", "replay"}:
+            measurement.metadata["daq_backend"] = frame.metadata["backend"]
             measurement.metadata["daq_provenance"] = dict(frame.metadata)
         if (measurement.metadata.get("rejected", False) and self.state.measurement is not None
                 and not measurement.metadata.get("smart_hit_active", False)):
@@ -150,16 +153,24 @@ class VnaController:
 
     def _read_processing_frame(self) -> BackendFrame:
         overlap_percent = int(self.state.session.acquisition.overlap_percent)
-        if overlap_percent <= 0:
+        software_triggered = (self.backend.__class__.__name__ in {"NetDaqBackend", "ReplayBackend"}
+                              and self.state.session.acquisition.trigger.enabled)
+        if overlap_percent <= 0 or software_triggered:
             self._reset_overlap_processing()
-            return self.backend.read_frame()
+            frame = self.read_acquisition_frame()
+            if (self.backend.__class__.__name__ == "ReplayBackend" and self.processor.averaging_enabled
+                    and frame.data.shape[1] != self.state.session.acquisition.frame_size):
+                from python_vna.daq.replay import ReplayComplete
+
+                raise ReplayComplete("回放结束：尾部不足一帧，未参与平均；原始数据保持完整")
+            return frame
 
         frame_size = int(self.state.session.acquisition.frame_size)
         hop_size = self._overlap_hop_size(frame_size, overlap_percent)
         while self._overlap_data is None or self._overlap_data.shape[1] < frame_size:
             if self._stop_requested.is_set():
                 raise RuntimeError("Acquisition stopped by user.")
-            self._append_overlap_raw_frame(self.backend.read_frame())
+            self._append_overlap_raw_frame(self.read_acquisition_frame())
 
         data = self._overlap_data[:, :frame_size].copy()
         channel_names = list(self._overlap_channel_names or [])
@@ -190,6 +201,11 @@ class VnaController:
         )
         self._overlap_frame_index += 1
         return output_frame
+
+    def read_acquisition_frame(self) -> BackendFrame:
+        frame = self.backend.read_frame()
+        self.quality.add(frame)
+        return frame
 
     @staticmethod
     def _overlap_hop_size(frame_size: int, overlap_percent: int) -> int:

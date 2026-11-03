@@ -18,6 +18,7 @@ from python_vna.continuous_recording import (
     available_recording_directory,
 )
 from python_vna.daq.base import BackendDevice
+from python_vna.daq.replay import ReplayComplete
 from python_vna.display_transforms import (
     align_vector_to_values,
     legacy_frequency_int_vector,
@@ -1062,6 +1063,10 @@ class AcquisitionWorker(QtCore.QObject):
                     break
             if latest_measurement is not None and not emitted_latest and not self._stop_requested.is_set():
                 self.measurement_ready.emit(latest_measurement)
+        except ReplayComplete as exc:
+            if latest_measurement is not None and not emitted_latest and not self._stop_requested.is_set():
+                self.measurement_ready.emit(latest_measurement)
+            self.status_changed.emit(str(exc))
         except Exception as exc:
             if not self._stop_requested.is_set():
                 self.error.emit(str(exc))
@@ -1144,6 +1149,9 @@ class ContinuousRecordingWorker(QtCore.QObject):
         try:
             self.status_changed.emit("State: preparing record")
             self._controller.set_averaging_enabled(False)
+            trigger = self._controller.state.session.acquisition.trigger
+            trigger.enabled = False
+            trigger.source = "immediate"
             if getattr(self._controller, "backend", None).__class__.__name__ == "NetDaqBackend":
                 self._controller.backend.set_stop_event(self._stop_requested)
             self._controller.configure(device_name=self._device_name)
@@ -1178,7 +1186,8 @@ class ContinuousRecordingWorker(QtCore.QObject):
             self.started.emit(self._device_name)
             self.status_changed.emit("State: recording")
             while not self._stop_requested.is_set():
-                frame = self._controller.backend.read_frame()
+                read = getattr(self._controller, "read_acquisition_frame", self._controller.backend.read_frame)
+                frame = read()
                 if not self._writer.channel_names and frame.channel_names:
                     self._writer.channel_names = list(frame.channel_names)
                 status = self._writer.write_frame(frame)
@@ -1188,8 +1197,11 @@ class ContinuousRecordingWorker(QtCore.QObject):
                     self.preview_ready.emit(self._preview_measurement(frame, status))
                     last_preview = now
             completed = True
+        except ReplayComplete:
+            completed = True
+            self.status_changed.emit("离线回放结束，记录已保存")
         except Exception as exc:
-            if self._stop_requested.is_set():
+            if self._stop_requested.is_set() and not isinstance(exc, OSError):
                 completed = True
                 error_message = None
             else:
@@ -1213,8 +1225,7 @@ class ContinuousRecordingWorker(QtCore.QObject):
                 if self._writer is not None:
                     self._writer.close(completed=completed, error=error_message)
             except Exception as exc:
-                if not self._stop_requested.is_set():
-                    self.error.emit(f"Recording close failed: {exc}")
+                self.error.emit(f"Recording close failed: {exc}")
             try:
                 self._set_controller_stop_event(None)
             except Exception:
@@ -2105,6 +2116,10 @@ class MainWindow(QtWidgets.QMainWindow):
         file_menu.addAction("保存 VNA", self._save_session)
         file_menu.addAction("保存为默认", self._save_to_default_vna)
         self.device_connection_action = file_menu.addAction("设备连接...", self._open_device_connection)
+        file_menu.addAction("导入 DASP 通道参数...", self._import_dasp_parameters)
+        file_menu.addAction("离线回放数据文件...", self._open_replay_file)
+        file_menu.addAction("离线回放记录目录...", self._open_replay_folder)
+        file_menu.addAction("采集质量报告...", self._show_acquisition_quality)
         file_menu.addSeparator()
         file_menu.addAction("检查更新", self._check_for_updates)
         file_menu.addSeparator()
@@ -3539,7 +3554,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return line
 
         self.backend_combo = QtWidgets.QComboBox()
-        self.backend_combo.addItems(["simulated", "ni", "netdaq"])
+        self.backend_combo.addItems(["simulated", "ni", "netdaq", "replay"])
         self.backend_combo.currentTextChanged.connect(self._backend_changed)
         self.device_combo = QtWidgets.QComboBox()
         self.refresh_devices_button = QtWidgets.QPushButton("刷新")
@@ -6043,6 +6058,16 @@ class MainWindow(QtWidgets.QMainWindow):
         return session
 
     def _apply_device_list(self, devices: list[BackendDevice]) -> None:
+        backend = self.controller.backend
+        if backend.__class__.__name__ == "ReplayBackend" and backend.source is not None:
+            from copy import deepcopy
+
+            self.session.ai_channels = deepcopy(backend.source.channels)
+            self.session.acquisition.sample_rate = backend.source.rate
+            self.session.acquisition.bandwidth_hz = backend.source.rate / 2.56
+            self.session.acquisition.reference_channel = backend.source.names[0]
+            self.session.acquisition.response_channels = backend.source.names[1:]
+            self._load_session_to_widgets()
         self.device_combo.clear()
         for device in devices:
             self.device_combo.addItem(f"{device.name} ({device.product_type})", device.name)
@@ -6158,16 +6183,88 @@ class MainWindow(QtWidgets.QMainWindow):
         self.backend_combo.blockSignals(False)
         self._backend_changed(dialog.backend_combo.currentText(), settings)
 
+    def _offline_tools_idle(self):
+        if (self._acquisition_thread is not None or self._recording_thread is not None
+                or self._device_refresh_thread is not None):
+            self.statusBar().showMessage("请先停止采集并等待设备查询结束")
+            return False
+        return True
+
+    def _import_dasp_parameters(self):
+        if not self._offline_tools_idle():
+            return
+        from python_vna.daq.dasp_import import apply_dasp_channels
+        from python_vna.ui.offline_daq_tools import DaspImportDialog
+
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "导入 DASP 参数", str(self._last_vna_directory), "DASP 参数 (*.ini *.par)")
+        if not path:
+            return
+        try:
+            dialog = DaspImportDialog(path, self)
+            if dialog.exec() == QtWidgets.QDialog.Accepted:
+                session = self._read_session_from_widgets()
+                selected = dialog.selected_channels()
+                apply_dasp_channels(session.ai_channels, selected)
+                self._load_session_to_widgets()
+                self._reload_channel_selectors(include_new_responses=True)
+                self.statusBar().showMessage(f"已导入 {len(selected)} 个通道的传感器参数，硬件配置保持原值")
+                self._last_vna_directory = Path(path).parent
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "DASP 参数未导入", str(exc))
+
+    def _open_replay_file(self):
+        if not self._offline_tools_idle():
+            return
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "离线回放", str(self._last_vna_directory),
+            "采集数据 (*.vna *.mat *.par *.sts *.json *.bin *.dat *.zip)")
+        if path:
+            self._activate_replay(path)
+
+    def _open_replay_folder(self):
+        if not self._offline_tools_idle():
+            return
+        path = QtWidgets.QFileDialog.getExistingDirectory(self, "离线回放记录目录", str(self._last_vna_directory))
+        if path:
+            self._activate_replay(path)
+
+    def _activate_replay(self, path):
+        self._replay_path = str(path)
+        self._backend_changed("replay")
+        self.backend_combo.blockSignals(True)
+        self.backend_combo.setCurrentText("replay")
+        self.backend_combo.blockSignals(False)
+
+    def _show_acquisition_quality(self):
+        if not self._offline_tools_idle():
+            return
+        from python_vna.ui.offline_daq_tools import QualityReportDialog
+
+        quality = self.controller.quality
+        if not quality.frames:
+            self.statusBar().showMessage("尚无采集统计，请先完成一次采集或离线回放")
+            return
+        report = quality.report()
+        dialog = QualityReportDialog(report, self._last_export_directory, self)
+        dialog.exec()
+        self._last_export_directory = dialog._directory
+
     def _apply_netdaq_limits(self) -> None:
         backend = self.controller.backend
         netdaq = backend.__class__.__name__ == "NetDaqBackend"
-        if netdaq:
+        replay = backend.__class__.__name__ == "ReplayBackend"
+        host_trigger_ready = replay or (netdaq and backend.ready)
+        if netdaq and not host_trigger_ready:
             self.trigger_mode_combo.setCurrentIndex(self.trigger_mode_combo.findData("Off (Free Run)"))
             self.trigger_enable.setChecked(False)
+        if netdaq or replay:
             self.exc_enable.setChecked(False)
+        self._sync_trigger_arm_button()
+        if netdaq and not host_trigger_ready:
             self.trigger_enable.setEnabled(False)
-        self.trigger_mode_combo.setEnabled(not netdaq)
-        self.exc_enable.setEnabled(not netdaq)
+        self.trigger_mode_combo.setEnabled(not netdaq or host_trigger_ready)
+        self.exc_enable.setEnabled(not (netdaq or replay))
         if netdaq:
             for row in range(self.channel_table.rowCount()):
                 self._sync_netdaq_channel_mode(row)
@@ -6181,8 +6278,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.channel_iepe_current_edit.setSpecialValueText("")
             self.channel_iepe_current_edit.setToolTip("")
         if hasattr(self, "excitation_enabled_action"):
-            self.excitation_enabled_action.setEnabled(not netdaq)
-        self.trigger_mode_combo.setToolTip("NetDAQ 触发尚未实机验证，仅支持自由运行" if netdaq else "")
+            self.excitation_enabled_action.setEnabled(not (netdaq or replay))
+        self.trigger_mode_combo.setToolTip(
+            "Avg 使用主机软件绝对阈值触发，支持 Delay；非设备硬件触发，Inst/Record 自由运行"
+            if host_trigger_ready else ("缺少已验证配置，只能只读探测" if netdaq else ""))
         idle = self._acquisition_thread is None and self._recording_thread is None
         if idle:
             ready = not netdaq or backend.ready
@@ -6203,8 +6302,12 @@ class MainWindow(QtWidgets.QMainWindow):
         from python_vna.app import build_backend
 
         try:
-            backend = (build_backend("netdaq", netdaq_settings=netdaq_settings or self._netdaq_preferences())
-                       if backend_name == "netdaq" else build_backend(backend_name))
+            if backend_name == "netdaq":
+                backend = build_backend("netdaq", netdaq_settings=netdaq_settings or self._netdaq_preferences())
+            elif backend_name == "replay":
+                backend = build_backend("replay", replay_path=getattr(self, "_replay_path", None))
+            else:
+                backend = build_backend(backend_name)
         except Exception as exc:
             self.statusBar().showMessage(str(exc))
             return

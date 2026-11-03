@@ -12,7 +12,7 @@ from python_vna.resources import resource_path
 from python_vna.storage import default_session_config, load_legacy_vna
 from python_vna.update_client import cleanup_stale_updater_runner
 
-def build_backend(name: str, *, netdaq_settings=None):
+def build_backend(name: str, *, netdaq_settings=None, replay_path=None):
     if name == "ni":
         from python_vna.daq.ni import NIDaqBackend
 
@@ -25,6 +25,12 @@ def build_backend(name: str, *, netdaq_settings=None):
         from python_vna.daq.netdaq import NetDaqBackend
 
         return NetDaqBackend(netdaq_settings)
+    if name == "replay":
+        from python_vna.daq.replay import ReplayBackend
+
+        if not replay_path:
+            raise ValueError("离线回放需要选择数据文件或目录")
+        return ReplayBackend(replay_path)
     raise ValueError(f"Unsupported backend '{name}'.")
 
 
@@ -37,11 +43,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--backend",
-        choices=["simulated", "ni", "netdaq"],
+        choices=["simulated", "ni", "netdaq", "replay"],
         default="ni",
         help="DAQ backend to use.",
     )
     parser.add_argument("--device", default=None, help="Preferred device name.")
+    parser.add_argument("--replay-path", default="", help="Offline VNA/DASP/continuous recording source.")
     parser.add_argument("--netdaq-host", default="", help="Explicit NetDAQ IP/hostname; no automatic default.")
     parser.add_argument("--netdaq-profile", default="", help="Verified NetDAQ device profile JSON.")
     parser.add_argument("--netdaq-transport", choices=["tcp", "usb"], default="tcp")
@@ -124,7 +131,7 @@ def main(argv: list[str] | None = None) -> int:
     if icon_path.exists():
         app.setWindowIcon(QtGui.QIcon(str(icon_path)))
     append_log(f"backend build: begin {args.backend}")
-    backend = build_backend(args.backend, netdaq_settings=netdaq_settings)
+    backend = build_backend(args.backend, netdaq_settings=netdaq_settings, replay_path=args.replay_path)
     append_log(f"backend build: end {args.backend}")
     session_config = default_session_config()
     controller = VnaController(backend, session_config)

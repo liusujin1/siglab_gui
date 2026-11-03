@@ -211,3 +211,93 @@ includes mixed voltage/IEPE channels, unknown current, unchanged TCP current
 requirements, sensitivity applied once, VNA state/precision round-trip, and
 Record manifest/text-header provenance with voltage-only sample storage.
 All USB operations used injected test doubles; no hardware was accessed.
+
+## Offline tools (2026-11-03)
+
+The acquisition window's File menu now includes:
+
+- **Import DASP channel parameters**: preview `Channel.ini` or `CH n.par`,
+  then apply checked channels' labels, enabled flags, units and EU/Volt.
+  Sensitivity in mV/EU becomes `1000 / (sensitivity * external_gain)` EU/Volt.
+  Unmatched sensitivity/measurement units, virtual channels, negative polarity,
+  and extra calibration curves are reported and skipped. Valid channels in the
+  same file remain available. Offset compensation, hardware gain, coupling,
+  auto-range and IEPE are not imported or inferred.
+- **Offline replay data file / recording folder**: select VNA/MAT time data,
+  a DASP `CH n.par`/`.sts` pair or measurement folder, or a continuous recording
+  folder, `manifest.json`, closed `.bin`, `.dat` or `.zip` segment.
+  Press Inst/Avg/Stop as for acquisition. Replay is explicitly non-hardware,
+  never turns the connection lamp green, and does not enable AO.
+- **Acquisition quality report**: after stopping, inspect/export a UTF-8-BOM
+  JSON report with per-channel DC, RMS, AC RMS, min/max, peak-to-peak,
+  invalid-sample count, near-range fraction and delivered-frame throughput.
+  Statistics do not modify signal data or diagnose an IEPE sensor as disconnected.
+
+The device connection dialog's **Profile preview / validation** works without
+an address or hardware. It shows model, transport, stream format, sampling limit,
+channel mapping, voltage conversion and known/unknown IEPE supply/current. Passing
+this file check does not establish physical calibration or qualify a new device.
+
+### Replay boundaries
+
+Binary continuous data is read in bounded, read-only memory-mapped blocks.
+Text/ZIP records are streamed using the existing DAT reader. VNA replay reuses
+the legacy loader and has a 256 MiB input-file limit. A replay never rewrites its
+source. Channel order and declared sample rate are retained; no resampling,
+automatic baseline subtraction, zero filling or startup-frame rejection is used.
+End of a finite replay is reported as completion; malformed or truncated data
+is an error. Playback pacing is cancellable rather than an uninterruptible sleep.
+
+The final short block is preserved for Inst/Record. Avg reports that a short
+tail cannot participate in a fixed-length spectral average; it does not pad
+samples or alter the source. Replay blocks are limited to 64 MiB.
+
+DASP replay supports signed little-endian int32 containers of 24-bit ADC counts.
+Its `.par` range endpoints are converted from the declared voltage units to
+volts. Old zero compensation and sensor calibration are not applied to this
+raw-voltage replay. The channel importer can separately apply validated sensor
+units. The declared DASP sample rate is not independent evidence of its physical
+output clock, and replay is not a solution to the deferred 1 V saturation issue.
+
+Command-line entry:
+
+```powershell
+.\.venv\Scripts\python.exe -m python_vna.app --backend replay --replay-path "D:\record\manifest.json"
+```
+
+### Host trigger
+
+A qualified NetDAQ profile permits **host software triggering**, not vendor
+hardware-trigger commands. The source must be enabled and Abs Level must be
+positive. A trigger occurs when a finite voltage leaves the `(-level, +level)`
+window, including negative excursions. A sustained out-of-window level does not
+produce repeated triggers until the input re-enters the window.
+
+Every Frame/Manual Arm rearm per record; 1st Frame/1st-Manual Arm wait only for
+the first event. Existing Manual Arm UI state still controls arming. Signed
+Delay remains a percentage of frame length: negative values retain pretrigger
+history, zero starts at the crossing, positive values start after it. The
+display's time starts at zero. Trigger wait has a deadline and Stop polling;
+history is bounded and channels remain synchronized. Too-early crossings without
+enough prehistory cannot form a complete record. No valid startup frames are
+unconditionally discarded.
+
+Inst and Record use free-run; Avg uses the existing host averaging, overload
+and double-hit pipeline. Separate triggered records are not combined by the
+continuous-stream overlap buffer. NI's hardware trigger and overlap path are
+unchanged. No additional `!C`, trigger command, gain or IEPE command is sent.
+
+### Recording failures
+
+Record rejects changed channel order or sample rate rather than silently
+mislabeling data. A failed frame write attempts to truncate the partial frame
+back to the last committed boundary. Flush/close failures still release the
+file and attempt to mark the manifest incomplete. If the filesystem cannot even
+write a manifest, the close error is surfaced; the previous manifest remains
+the recovery point.
+
+Offline stress coverage includes a virtual 13-hour/78-segment clock, bounded
+memory, injected slow/full-disk writes, flush failure, stream interruption,
+100 replay restarts, cross-block triggers and cancelled reads. Virtual time and
+test doubles do not establish 13-hour physical USB stability, calibrated
+amplitude, hardware gain ranges or actual IEPE electrical behavior.

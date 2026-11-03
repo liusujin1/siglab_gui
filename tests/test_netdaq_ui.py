@@ -19,6 +19,7 @@ from python_vna.daq.netdaq import NetDaqBackend, NetDaqProfile, NetDaqSettings
 from python_vna.storage import default_session_config
 from python_vna.ui.main_window import MainWindow
 from python_vna.ui.netdaq_settings import DeviceConnectionDialog
+from python_vna.ui.offline_daq_tools import DaspImportDialog, QualityReportDialog
 
 
 @pytest.fixture
@@ -63,6 +64,69 @@ def test_connection_entry_unknown_profile_gates_controls_and_indicator(window):
     assert window.exc_enable.isEnabled()
     window._set_device_connected(True)
     assert not window.device_status_light.property("connected")
+
+
+def test_dasp_preview_import_selection_and_units(app, tmp_path):
+    path = tmp_path / "Channel.ini"
+    path.write_text("[Channel 0]\nUnit=V\nSensitivity Physical Unit=V\nVoltage Unit=V\nSensitivity=2\n"
+                    "[Channel 1]\nUnit=m/s^2\nSensitivity Physical Unit=m/s^2\nSensitivity=50\n",
+                    encoding="utf-8")
+    dialog = DaspImportDialog(path)
+    assert dialog.table.rowCount() == 2
+    assert dialog.channels[1].eu_per_volt == 20
+    dialog.table.item(0, 0).setCheckState(QtCore.Qt.Unchecked)
+    assert [c.index for c in dialog.selected_channels()] == [1]
+    dialog.reject()
+    dialog.deleteLater()
+
+
+def test_profile_preview_is_offline_even_without_device_address(app, tmp_path):
+    path = tmp_path / "bad.json"
+    path.write_text("{}")
+    dialog = DeviceConnectionDialog("netdaq", NetDaqSettings())
+    dialog.profile_edit.setText(str(path))
+    with mock.patch.object(NetDaqBackend, "probe", side_effect=AssertionError("hardware access")):
+        dialog._preview_profile()
+    report = json.loads(dialog.report.toPlainText())
+    assert not report["valid"] and not report["hardware_accessed"]
+    dialog.reject()
+    dialog.deleteLater()
+
+
+def test_replay_ui_loads_channel_metadata_and_cannot_turn_indicator_green(window, tmp_path):
+    from python_vna.daq.replay import ReplayBackend
+    from python_vna.continuous_recording import ContinuousDatWriter
+    from python_vna.daq.base import BackendFrame
+    session = default_session_config()
+    for c in session.ai_channels:
+        c.enabled = c.name in {"ai0", "ai2"}
+    session.ai_channels[2].label = "顶部Z"
+    folder = tmp_path / "record"
+    writer = ContinuousDatWriter(folder, session, device_name=None, channel_names=["ai0", "ai2"],
+                                 software_version="test", storage_format="binary")
+    writer.write_frame(BackendFrame(2560, ["ai0", "ai2"], np.ones((2, 8)), np.arange(8) / 2560, 0))
+    writer.close()
+    backend = ReplayBackend(folder, realtime=False)
+    window.controller.backend = backend
+    window._apply_device_list(backend.list_devices())
+    window._apply_netdaq_limits()
+    assert window.channel_table.rowCount() == 2
+    assert window.session.ai_channels[1].label == "顶部Z"
+    assert window.trigger_mode_combo.isEnabled()
+    assert not window.exc_enable.isEnabled()
+    assert not window.device_status_light.property("connected")
+
+
+def test_quality_dialog_exports_utf8_bom_json_without_extension(app, tmp_path):
+    report = {"note": "采集报告", "channels": {}}
+    dialog = QualityReportDialog(report, tmp_path)
+    with mock.patch.object(QtWidgets.QFileDialog, "getSaveFileName", return_value=(str(tmp_path / "报告"), "JSON")):
+        dialog._export()
+    path = tmp_path / "报告.json"
+    assert path.read_bytes().startswith(b"\xef\xbb\xbf")
+    assert json.loads(path.read_text(encoding="utf-8-sig")) == report
+    dialog.close()
+    dialog.deleteLater()
 
 
 def test_theme_save_preserves_connection_preferences(window):
