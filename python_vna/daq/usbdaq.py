@@ -118,6 +118,8 @@ def descriptor_info(raw):
         "nominal_max_sample_rate": maximum,
         "nominal_voltage_min_mv": low, "nominal_voltage_max_mv": high,
         "adc_min": adc_low, "adc_max": adc_high,
+        "voltage_unit": "mV", "count_encoding": "signed_twos_complement",
+        "adc_code_count": adc_high - adc_low + 1,
         "nominal_volts_per_count": (high - low) * .001 / (adc_high - adc_low + 1),
         "calibration_verified": False,
     }

@@ -69,11 +69,13 @@ def test_connection_entry_unknown_profile_gates_controls_and_indicator(window):
 def test_dasp_preview_import_selection_and_units(app, tmp_path):
     path = tmp_path / "Channel.ini"
     path.write_text("[Channel 0]\nUnit=V\nSensitivity Physical Unit=V\nVoltage Unit=V\nSensitivity=2\n"
-                    "[Channel 1]\nUnit=m/s^2\nSensitivity Physical Unit=m/s^2\nSensitivity=50\n",
+                    "[Channel 1]\nUnit=m/s^2\nSensitivity Physical Unit=m/s^2\nSensitivity=50\nGain=2\nExternal gain=10\n",
                     encoding="utf-8")
     dialog = DaspImportDialog(path)
     assert dialog.table.rowCount() == 2
-    assert dialog.channels[1].eu_per_volt == 20
+    assert dialog.channels[1].eu_per_volt == 1
+    assert "Gain=2" in dialog.table.item(1, 4).toolTip()
+    assert "External gain=10" in dialog.table.item(1, 4).toolTip()
     dialog.table.item(0, 0).setCheckState(QtCore.Qt.Unchecked)
     assert [c.index for c in dialog.selected_channels()] == [1]
     dialog.reject()

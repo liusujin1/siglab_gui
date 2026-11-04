@@ -466,6 +466,9 @@ def test_read_only_probe_no_ip_or_profile_required(usb):
     assert info["channel_count"] == 4 and info["adc_bits"] == 24
     assert (info["nominal_voltage_min_mv"], info["nominal_voltage_max_mv"]) == (-10000, 10000)
     assert info["nominal_volts_per_count"] == 10 / 8388608
+    assert info["voltage_unit"] == "mV"
+    assert info["count_encoding"] == "signed_twos_complement"
+    assert info["adc_code_count"] == 2**24
     assert info["calibration_verified"] is False
     assert {cmd for cmd, _ in usb.commands} == {0x44, 0x56, 0x41, 0x42}
     assert usb.close_count == 1

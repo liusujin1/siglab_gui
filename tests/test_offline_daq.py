@@ -14,7 +14,7 @@ from python_vna.app import build_backend, parse_args
 from python_vna.continuous_recording import ContinuousDatWriter
 from python_vna.controller import VnaController
 from python_vna.daq.base import BackendFrame, DaqBackendError
-from python_vna.daq.dasp_import import apply_dasp_channels, load_dasp_channels
+from python_vna.daq.dasp_import import apply_dasp_channels, dasp_voltage_scale, load_dasp_channels
 from python_vna.daq.netdaq import profile_preview
 from python_vna.daq.quality import AcquisitionQuality
 from python_vna.daq.replay import ReplayBackend, ReplayComplete, ReplaySource
@@ -72,7 +72,8 @@ def test_dasp_sensor_import_reciprocal_units_and_no_zero_or_iepe_change(tmp_path
     assert channels[1].coupling == old.coupling
 
 
-@pytest.mark.parametrize("setting", ["Sensitivity=0", "External gain=nan", "Calibration enable=1",
+@pytest.mark.parametrize("setting", ["Sensitivity=0", "External gain=nan", "Gain=0", "Gain=nan",
+                                   "Inner gain=2", "Gain=1e308\nExternal gain=1e308", "Calibration enable=1",
                                    "Polarity=1", "bVirtualChannel=1",
                                    "Sensitivity Physical Unit=N"])
 def test_dasp_unknown_or_invalid_scaling_fails_closed(tmp_path, setting):
@@ -287,9 +288,63 @@ def test_replay_dasp_counts_map_to_volts_without_zero_drift(tmp_path):
     source = ReplaySource(tmp_path)
     data = next(source.blocks(8))
     assert data[0, 0] == -10
-    assert data[0, -1] == 10
-    assert data[0, 1] == pytest.approx(0, abs=2e-6)
+    assert data[0, -1] == 10 - 10 / 8388608
+    assert data[0, 1] == 0
+    assert source.header["dasp_conversion"]["ai0"]["volts_per_count"] == 10 / 8388608
+    assert source.header["sample_rate_basis"] == "file_declared_unverified"
     assert "未减零漂" in source.header["replay_warning"]
+
+
+def test_dasp_scale_counts_quantization_steps_not_inclusive_voltage_endpoints():
+    scale = dasp_voltage_scale({
+        "AD Bit": "24", "Range from": "-8388608", "Range to": "8388607",
+        "Voltage from": "-10000", "Voltage to": "10000", "Voltage Unit": "mV",
+    })
+    assert scale["adc_code_count"] == 16777216
+    assert scale["zero_count"] == 0
+    assert scale["volts_per_count"] == 10 / 8388608
+    assert not scale["electrical_calibration_verified"]
+    counts = np.array([-8388608, -4194304, -838861, 0, 838861, 4194304, 8388607])
+    values = (counts - scale["zero_count"]) * scale["volts_per_count"]
+    np.testing.assert_allclose(values, [-10, -5, -1, 0, 1, 5, 10], rtol=0, atol=10 / 8388608)
+    assert values[3] == 0
+
+
+@pytest.mark.parametrize("gain, external", [(1, 1), (2, 1), (1, 10), (2, 10)])
+def test_dasp_gain_and_external_gain_apply_once_in_eu_conversion(tmp_path, gain, external):
+    path = tmp_path / "CH 2.par"
+    path.write_text(
+        f"[Setup]\nChannel no=2\nSensitivity=50\nVoltage Unit=mV\nUnit=m/s^2\n"
+        f"Sensitivity Physical Unit=m/s^2\nGain={gain}\nExternal gain={external}\n",
+        encoding="utf-8")
+    imported = load_dasp_channels(path)
+    assert imported[0].gain == gain
+    assert imported[0].external_gain == external
+    channels = session_for().ai_channels
+    apply_dasp_channels(channels, imported)
+    assert channels[1].sensitivity == pytest.approx(1000 / (50 * gain * external))
+    assert .5 * channels[1].sensitivity == pytest.approx(10 / (gain * external))
+
+
+def test_dasp_replay_does_not_apply_gain_sensitivity_or_offset_to_raw_volts(tmp_path):
+    path = tmp_path / "CH 1.par"
+    path.write_text(
+        "[Setup]\nChannel no=1\nAD Bit=24\nRange from=-8388608\nRange to=8388607\n"
+        "Voltage from=-10000\nVoltage to=10000\nVoltage Unit=mV\nSample rate=128000\n"
+        "Gain=10\nExternal gain=20\nSensitivity=50\nOffset comp=4000\n", encoding="utf-8")
+    np.array([0, 4194304, -4194304], dtype="<i4").tofile(path.with_suffix(".sts"))
+    source = ReplaySource(path)
+    np.testing.assert_array_equal(next(source.blocks(8)), [[0, 5, -5]])
+    session = session_for(("ai0",), size=8)
+    backend = ReplayBackend(path, realtime=False)
+    backend.configure(session)
+    report = backend.acquisition_provenance()
+    assert report["sample_rate_basis"] == "file_declared_unverified"
+    assert report["actual_sample_rate"] is None
+    assert report["playback_sample_rate"] == 128000
+    assert report["voltage_conversion"]["ai0"]["volts_per_count"] == 10 / 8388608
+    assert not report["voltage_conversion"]["ai0"]["electrical_calibration_verified"]
+    backend.close()
 
 
 def test_replay_vna_preserves_voltage_not_eu_scaling(tmp_path):

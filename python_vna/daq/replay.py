@@ -11,7 +11,7 @@ import time
 import numpy as np
 
 from .base import BaseDaqBackend, BackendCapability, BackendDevice, BackendFrame, DaqBackendError
-from .dasp_import import read_parameters, _number
+from .dasp_import import dasp_voltage_scale, read_parameters, _number
 from .software_trigger import SoftwareTrigger
 from python_vna.models import ChannelConfig
 
@@ -93,6 +93,7 @@ class ReplaySource:
         if not paths:
             raise DaqBackendError("目录内没有 CH n.par")
         self.names, self._dasp_settings = [], []
+        self.header["dasp_conversion"] = {}
         for path in paths:
             section = read_parameters(path)["Setup"]
             number = int(section.get("Channel no", "1"))
@@ -100,24 +101,23 @@ class ReplaySource:
             if self.names and rate != self.rate:
                 raise DaqBackendError("DASP 多通道声明的采样率不一致")
             self.rate = rate
-            low, high = _number(section, "Range from"), _number(section, "Range to")
-            vl, vh = _number(section, "Voltage from"), _number(section, "Voltage to")
-            factor = {"mv": .001, "v": 1.0}.get(section.get("Voltage Unit", "mV").lower())
-            if (factor is None or high <= low or vh <= vl or int(section["AD Bit"]) != 24
-                    or int(section.get("Buffer data type", "2")) != 2):
-                raise DaqBackendError("DASP 回放仅支持参数完整的 24 位 int32 原始电压记录")
+            scale = dasp_voltage_scale(section)
             sts = path.with_suffix(".sts")
             if not sts.is_file() or not sts.stat().st_size or sts.stat().st_size % 4:
                 raise DaqBackendError(f"DASP 原始文件缺失或截断：{sts.name}")
             name = f"ai{number - 1}"
             self.names.append(name)
             self.parts.append(sts)
-            self._dasp_settings.append((low, high, vl * factor, vh * factor))
+            self._dasp_settings.append(scale)
+            self.header["dasp_conversion"][name] = scale
             self.channels.append(ChannelConfig(name, f"Replay/{name}", label=section.get("Name", f"CH {number}")))
         sizes = [p.stat().st_size for p in self.parts]
         if len(set(sizes)) != 1:
             raise DaqBackendError("DASP 原始多通道样本数不同，不截短或补齐数据")
-        self.header["replay_warning"] = "DASP 回放使用文件声明采样率，未验证物理时钟；未减零漂或应用传感器标定"
+        self.header["sample_rate_basis"] = "file_declared_unverified"
+        self.header["replay_warning"] = (
+            "DASP 回放使用文件声明采样率（可能是标称/ADC速率），未验证实际输出时钟；"
+            "未减零漂或应用传感器标定")
 
     def _vna(self):
         from python_vna.storage import load_legacy_vna
@@ -147,11 +147,11 @@ class ReplaySource:
             try:
                 for begin in range(0, len(arrays[0]), size):
                     rows = []
-                    for array, (lo, hi, vl, vh) in zip(arrays, self._dasp_settings):
+                    for array, scale in zip(arrays, self._dasp_settings):
                         counts = np.asarray(array[begin:begin + size], dtype=float)
-                        if np.any((counts < lo) | (counts > hi)):
+                        if np.any((counts < scale["adc_min"]) | (counts > scale["adc_max"])):
                             raise DaqBackendError("DASP 样本超过声明 ADC 码范围")
-                        rows.append((counts - lo) * ((vh - vl) / (hi - lo)) + vl)
+                        rows.append((counts - scale["zero_count"]) * scale["volts_per_count"])
                     yield np.vstack(rows)
             finally:
                 for array in arrays:
@@ -278,8 +278,11 @@ class ReplayBackend(BaseDaqBackend):
         return result
 
     def acquisition_provenance(self):
+        rate_basis = self.source.header.get("sample_rate_basis", "recorded")
         return dict(backend="replay", source_path=self.path, source_kind=self.source.kind, units="V",
-                    actual_sample_rate=self._rate, physical_device=False,
+                    actual_sample_rate=None if rate_basis == "file_declared_unverified" else self._rate,
+                    playback_sample_rate=self._rate, physical_device=False, sample_rate_basis=rate_basis,
+                    voltage_conversion=deepcopy(self.source.header.get("dasp_conversion")),
                     channel_full_scales={c.name: abs(float(c.full_scale))
                                          for c in self._session.ai_channels if c.enabled},
                     warning=self.source.header.get("replay_warning"))

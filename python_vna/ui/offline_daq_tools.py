@@ -28,10 +28,15 @@ class DaspImportDialog(QtWidgets.QDialog):
                                            f"{channel.source_sensitivity:g}", f"{channel.eu_per_volt:.10g}",
                                            channel.unit), 1):
                 self.table.setItem(row, column, QtWidgets.QTableWidgetItem(value))
+            self.table.item(row, 4).setToolTip(
+                f"灵敏度：{channel.source_sensitivity:g} {channel.voltage_unit}/({channel.unit})\n"
+                f"Gain={channel.gain:g}；External gain={channel.external_gain:g}\n"
+                "EU/Volt = 1 / (灵敏度 × 电压单位换算 × Gain × External gain)\n"
+                "仅用于工程量折算，不写入硬件增益。")
         self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setStretchLastSection(True)
         note = QtWidgets.QLabel(
-            "按原电压/工程量灵敏度取倒数，并换算为 EU/Volt；外部增益只计算一次。\n"
+            "按原灵敏度换算为 EU/Volt，Gain 和 External gain 在工程量换算中各除一次。\n"
             "仅导入勾选通道的标签、启用状态、单位与灵敏度；保留当前零漂、量程、耦合和 IEPE。")
         note.setWordWrap(True)
         self.buttons = QtWidgets.QDialogButtonBox(

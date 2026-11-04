@@ -44,8 +44,8 @@ Use the [NetDAQ profile contract](NETDAQ.md), with these USB-specific constraint
   a convenient descriptor ratio or a successful protocol acknowledgement.
 
 No real verified profile is shipped. Test fixtures clearly identify themselves
-as synthetic and are never used for hardware tests. Trigger/pretrigger and AO
-remain disabled. Once a real profile is qualified, the same Inst/Avg/overlap,
+as synthetic and are never used for hardware tests. Hardware trigger and AO
+remain disabled; host triggering is described below. Once a real profile is qualified, the same Inst/Avg/overlap,
 Record, engineering-unit processing and VNA provenance paths are used.
 
 ## State, buffers and ownership
@@ -218,10 +218,10 @@ The acquisition window's File menu now includes:
 
 - **Import DASP channel parameters**: preview `Channel.ini` or `CH n.par`,
   then apply checked channels' labels, enabled flags, units and EU/Volt.
-  Sensitivity in mV/EU becomes `1000 / (sensitivity * external_gain)` EU/Volt.
+  Sensitivity in mV/EU becomes `1000 / (sensitivity * Gain * External_gain)` EU/Volt.
   Unmatched sensitivity/measurement units, virtual channels, negative polarity,
   and extra calibration curves are reported and skipped. Valid channels in the
-  same file remain available. Offset compensation, hardware gain, coupling,
+  same file remain available. Offset compensation, hardware gain commands, coupling,
   auto-range and IEPE are not imported or inferred.
 - **Offline replay data file / recording folder**: select VNA/MAT time data,
   a DASP `CH n.par`/`.sts` pair or measurement folder, or a continuous recording
@@ -301,3 +301,72 @@ memory, injected slow/full-disk writes, flush failure, stream interruption,
 100 replay restarts, cross-block triggers and cancelled reads. Virtual time and
 test doubles do not establish 13-hour physical USB stability, calibrated
 amplitude, hardware gain ranges or actual IEPE electrical behavior.
+
+## Revised DASP conversion evidence (2026-11-03)
+
+Reviewed `D:\AI_test\claude\DASP\_ana\PROTOCOL_USB.md`, SHA-256:
+
+```text
+a3c68eb71d0f6f75089eb7dd7b130ba3523cedfa6c6f068d4ea897bfa00cde3a
+```
+
+The revised sections 3.1/3.2/3.4 provide consistent software-conversion evidence:
+declared mV units in `.par` and the DASP language resource, plus signed ADC
+samples in saved recordings. They establish the nominal conversion used by
+DASP for the observed configuration, not an independent electrical calibration:
+
+```text
+volts = counts * 10 / 8388608
+EU/Volt = 1000 / (Sensitivity_mV_per_EU * Gain * External_gain)
+```
+
+DASP raw replay now uses the number of ADC codes (`high - low + 1`), rather
+than an inclusive-endpoint interpolation. Zero code is exactly 0 V, negative
+full code is -10 V, and positive full code is `10 - 10/8388608` V. The earlier
+endpoint interpolation added approximately half an LSB near zero; it could
+not account for the reported order-of-magnitude discrepancy.
+
+Gain and External gain are applied once in imported EU/Volt, with their
+declared values visible in its tooltip. They are not applied in raw-voltage
+replay or sent as hardware settings. The gain-divisor convention is based on
+the documented DASP convention; non-unity physical gain still needs comparison.
+`Inner gain` is not silently interpreted as `Gain` when non-unity.
+
+Read-only verification against the installed DASP data found 42 `.par` files,
+all with the same ADC interval and +/-10000 mV declaration. All declared Gain=1;
+External gain was 1 or 10. Five CH1 recordings were also streamed:
+
+| Measurement on 2026-10-30 | Mean reconstructed V | Positive full-code fraction |
+| --- | ---: | ---: |
+| 15-41-12 | 4.1717230919 | 0 |
+| 15-47-25 | 4.1742877877 | 0 |
+| 15-47-56 | 9.9999879088 | 0.9999989101 |
+| 15-55-03 | 9.9999988079 | 1 |
+| 16-07-04 | 9.9999988079 | 1 |
+
+The later files already contain full positive ADC code; changing display
+scaling cannot recover their signal. Saved parameters alone cannot distinguish
+an actual overrange input, an open biased input, an undocumented hardware mode,
+or another acquisition fault. Do not infer a specific electrical cause.
+
+The DASP rate declaration remains unqualified: its saved 128000 Hz is not
+automatically treated as a verified output clock. Replay provenance now
+distinguishes `playback_sample_rate` from `actual_sample_rate` (null for this
+unverified DASP path), retaining the explicit rate warning and conversion basis.
+No timestamps are silently reinterpreted as 64000 Hz.
+
+Two reference-document statements are not adopted as hardware conclusions:
+
+- Section 9.3's generic claim that auto-range changes Voltage from/to is not
+  evidence of such a change on this card; the inspected records show none.
+  Conversely, unchanged `.par` declarations do not prove every opaque `!C`
+  value has no effect on hardware gain.
+- Section 7.2's claim that Stop replies mix with samples on the same IN
+  endpoint conflicts with the separately observed 0x86 reply / 0x82 sample
+  endpoints. The previously validated single-owner Stop/drain sequence remains.
+
+IEPE switching/current, opaque channel bytes, physical channel mapping,
+non-unity hardware gains, high-rate throughput and long-run continuity remain
+hardware acceptance items. This update does not manufacture a verified device
+profile, remove profile matching, issue `!C`, reset the USB configuration, or
+subtract stored zero drift. It changes no shared analysis/storage modules.
