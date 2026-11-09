@@ -6046,7 +6046,7 @@ class MainWindow(QtWidgets.QMainWindow):
         worker.error.connect(self._handle_device_refresh_error)
         worker.finished.connect(thread.quit, QtCore.Qt.DirectConnection)
         worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(self._device_refresh_finished)
+        thread.finished.connect(self._device_refresh_finished, QtCore.Qt.QueuedConnection)
         thread.finished.connect(thread.deleteLater)
         self._device_refresh_thread = thread
         self._device_refresh_worker = worker
@@ -6068,7 +6068,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.device_combo.clear()
         self.statusBar().showMessage(f"Device refresh failed: {message}")
 
+    @QtCore.Slot()
     def _device_refresh_finished(self) -> None:
+        if self._device_refresh_thread is not None:
+            self._device_refresh_thread.wait()
         self._device_refresh_thread = None
         self._device_refresh_worker = None
         self.refresh_devices_button.setEnabled(True)
@@ -9418,6 +9421,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._plot_measurement(loaded.measurement)
         self.statusBar().showMessage(f"已从 {path} 加载会话")
 
+    @QtCore.Slot(object)
     def _apply_loaded_startup_session(self, imported: SavedSession) -> None:
         append_log("startup session apply: begin")
         self.statusBar().showMessage("正在加载默认设置...")
@@ -9458,18 +9462,25 @@ class MainWindow(QtWidgets.QMainWindow):
         worker = StartupSessionWorker(selected_path)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.session_ready.connect(self._apply_loaded_startup_session)
+        worker.session_ready.connect(self._apply_loaded_startup_session, QtCore.Qt.QueuedConnection)
         worker.skipped.connect(self.statusBar().showMessage)
-        worker.error.connect(lambda message: self.statusBar().showMessage(f"默认设置未加载：{message}"))
+        worker.error.connect(self._handle_startup_session_error)
         worker.finished.connect(thread.quit, QtCore.Qt.DirectConnection)
         worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(self._startup_session_finished)
+        thread.finished.connect(self._startup_session_finished, QtCore.Qt.QueuedConnection)
         thread.finished.connect(thread.deleteLater)
         self._startup_session_thread = thread
         self._startup_session_worker = worker
         thread.start()
 
+    @QtCore.Slot(str)
+    def _handle_startup_session_error(self, message: str) -> None:
+        self.statusBar().showMessage(f"默认设置未加载：{message}")
+
+    @QtCore.Slot()
     def _startup_session_finished(self) -> None:
+        if self._startup_session_thread is not None:
+            self._startup_session_thread.wait()
         self._startup_session_thread = None
         self._startup_session_worker = None
 

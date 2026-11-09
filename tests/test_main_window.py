@@ -286,6 +286,52 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(self.window.device_combo.itemData(0), "Dev1")
         self.assertIn("找到 1 个设备", self.window.statusBar().currentMessage())
 
+    def test_device_refresh_finishes_and_updates_controls_on_gui_thread(self):
+        deadline = time.monotonic() + 2
+        while self.window._device_refresh_thread is not None and time.monotonic() < deadline:
+            self.app.processEvents()
+            time.sleep(.001)
+        self.assertIsNone(self.window._device_refresh_thread)
+        worker_threads, control_threads = [], []
+        self.backend.list_devices = lambda: worker_threads.append(QtCore.QThread.currentThread()) or []
+        with mock.patch.object(self.window.refresh_devices_button, "setEnabled",
+                               side_effect=lambda enabled: control_threads.append(
+                                   (enabled, QtCore.QThread.currentThread()))):
+            self.window.refresh_devices_async()
+            deadline = time.monotonic() + 2
+            while self.window._device_refresh_thread is not None and time.monotonic() < deadline:
+                self.app.processEvents()
+                time.sleep(.001)
+        self.assertIsNone(self.window._device_refresh_thread)
+        self.assertIsNone(self.window._device_refresh_worker)
+        self.assertEqual(len(worker_threads), 1)
+        self.assertNotEqual(worker_threads[0], self.app.thread())
+        self.assertEqual(control_threads, [(False, self.app.thread()), (True, self.app.thread())])
+
+    def test_startup_session_worker_applies_config_and_finishes_on_gui_thread(self):
+        imported = SavedSession(config=default_session_config(), measurement=None)
+        worker_threads, applied_threads = [], []
+        original_set_session = self.controller.set_session
+        def load_session(_path):
+            worker_threads.append(QtCore.QThread.currentThread())
+            return imported
+        def set_session(config):
+            applied_threads.append(QtCore.QThread.currentThread())
+            return original_set_session(config)
+        with tempfile.NamedTemporaryFile(suffix=".vna") as file, \
+                mock.patch.object(main_window_module, "load_legacy_vna", side_effect=load_session), \
+                mock.patch.object(self.controller, "set_session", side_effect=set_session):
+            self.window.load_startup_session_async(file.name)
+            deadline = time.monotonic() + 2
+            while self.window._startup_session_thread is not None and time.monotonic() < deadline:
+                self.app.processEvents()
+                time.sleep(.001)
+        self.assertIsNone(self.window._startup_session_thread)
+        self.assertIsNone(self.window._startup_session_worker)
+        self.assertEqual(len(worker_threads), 1)
+        self.assertNotEqual(worker_threads[0], self.app.thread())
+        self.assertEqual(applied_threads, [self.app.thread()])
+
     def test_device_refresh_worker_uses_subprocess_probe_for_ni_backend(self):
         class NIDaqBackend:
             def list_devices(self):
