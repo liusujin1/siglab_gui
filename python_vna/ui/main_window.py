@@ -1015,6 +1015,7 @@ class AcquisitionWorker(QtCore.QObject):
     started = QtCore.Signal(object)
     measurement_ready = QtCore.Signal(object)
     settings_applied = QtCore.Signal(int, object)
+    capture_level_applied = QtCore.Signal(int, float)
     status_changed = QtCore.Signal(str)
     error = QtCore.Signal(str)
     finished = QtCore.Signal()
@@ -1063,7 +1064,10 @@ class AcquisitionWorker(QtCore.QObject):
             session = getattr(getattr(self._controller, "state", None), "session", None)
             if session is not None and smart_hit_active(session.acquisition, self._average_run) and session.acquisition.modal.smart_hit_auto_range_enabled:
                 level = abs(session.acquisition.trigger.level)
-                self.status_changed.emit(f"等待首锤：已就绪，初始 Abs Level {level:.6g} V；若无触发请降低该值")
+                self.capture_level_applied.emit(self._run_id, level)
+                self.status_changed.emit(
+                    f"等待首锤：已就绪，独立捕获阈值 {level:.6g} V；模态设置中可调整，首锤后切换为峰值的35%"
+                )
             while not self._stop_requested.is_set():
                 measurement = self._controller.read_and_process()
                 settings = measurement.metadata.get("smart_hit_auto_range", {})
@@ -2507,6 +2511,7 @@ class MainWindow(QtWidgets.QMainWindow):
                           if channel.name == self.session.acquisition.reference_channel), None)
         unit = reference.engineering_unit if reference is not None else "V"
         smart_specs = [
+            ("smart_hit_initial_trigger_v", "首锤捕获阈值 V", modal.smart_hit_initial_trigger_v, 0.000001, 9.999999),
             ("smart_hit_tolerance", "FRF 一致性容差 %", modal.smart_hit_tolerance * 100, 0.1, 200.0),
             ("smart_hit_min_hz", "判定频率下限 Hz", modal.smart_hit_min_hz, 0.0, 1e6),
             ("smart_hit_max_hz", "判定频率上限 Hz（0=跟随带宽）", modal.smart_hit_max_hz, 0.0, 1e6),
@@ -2516,15 +2521,27 @@ class MainWindow(QtWidgets.QMainWindow):
         for key, text, value, minimum, maximum in smart_specs:
             edit = CompactDoubleSpinBox()
             edit.setObjectName(key)
+            edit.setDecimals(6 if key == "smart_hit_initial_trigger_v" else 2)
             edit.setRange(minimum, maximum)
-            edit.setDecimals(2)
             edit.setValue(value)
             edit.setMinimumWidth(100)
             smart_edits[key] = edit
             smart_form.addRow(text, edit)
+        capture_edit = smart_edits["smart_hit_initial_trigger_v"]
+        capture_edit.setSingleStep(0.001)
+        capture_edit.setToolTip(
+            "仅智能选锤＋首锤自动量程生效时使用。每轮平均独立使用此电压，不乘通道量程，"
+            "也不继承上一轮阈值；首锤后切换为峰值的35%。默认10 mV，噪声误触发时可上调，"
+            "弱敲击不触发时可下调。不增加等待或预采帧。"
+        )
+        def sync_capture_enabled() -> None:
+            capture_edit.setEnabled(smart_enable.isChecked() and auto_range.isChecked())
+        smart_enable.toggled.connect(sync_capture_enabled)
+        auto_range.toggled.connect(sync_capture_enabled)
+        sync_capture_enabled()
         force_limits = QtWidgets.QCheckBox("限制敲击力范围（使用参考通道工程单位）")
         force_limits.setChecked(modal.smart_hit_force_limits)
-        smart_form.insertRow(6, force_limits)
+        smart_form.insertRow(7, force_limits)
         for key in ("smart_hit_force_min", "smart_hit_force_max"):
             smart_edits[key].setEnabled(force_limits.isChecked())
             force_limits.toggled.connect(smart_edits[key].setEnabled)
@@ -2590,7 +2607,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         layout.addWidget(buttons)
         dialog.setMinimumSize(380, 170)
-        dialog.resize(490, 600)
+        dialog.resize(490, 630)
         dialog.exec()
         dialog.deleteLater()
 
@@ -6353,6 +6370,8 @@ class MainWindow(QtWidgets.QMainWindow):
         worker.measurement_ready.connect(self._handle_worker_measurement)
         if hasattr(worker, "settings_applied"):
             worker.settings_applied.connect(self._handle_first_hit_settings)
+        if hasattr(worker, "capture_level_applied"):
+            worker.capture_level_applied.connect(self._handle_first_hit_capture_level)
         worker.status_changed.connect(self._handle_acquisition_status)
         worker.error.connect(self._handle_worker_error)
         worker.finished.connect(self._acquisition_worker_finished)
@@ -6374,6 +6393,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.device_info_label.setText(f"Device: {device_name}")
         self.statusBar().showMessage("Starting averaged acquisition" if average_run else "Starting acquisition")
         thread.start()
+
+    @QtCore.Slot(int, float)
+    def _handle_first_hit_capture_level(self, run_id: int, level: float) -> None:
+        if (run_id != getattr(self, "_acquisition_run_id", None)
+                or getattr(self, "_first_hit_settings_run_id", None) == run_id
+                or getattr(self, "_first_hit_capture_run_id", None) == run_id
+                or self._stop_requested_for_current_run):
+            return
+        self._first_hit_capture_run_id = run_id
+        with QtCore.QSignalBlocker(self.trigger_level_edit):
+            self.trigger_level_edit.setValue(level)
+        self._set_trigger_percent_from_level(level, exact=True)
+        self.trigger_level_edit.setToolTip(
+            "首锤捕获使用模态设置中的独立电压；首锤后自动切换为峰值的35%。"
+        )
 
     @QtCore.Slot(int, object)
     def _handle_first_hit_settings(self, run_id: int, settings: dict) -> None:

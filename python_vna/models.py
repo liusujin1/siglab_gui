@@ -58,6 +58,7 @@ class ModalProcessingConfig:
     reject_overload: bool = False
     smart_hit_enabled: bool = True
     smart_hit_auto_range_enabled: bool = True
+    smart_hit_initial_trigger_v: float = 0.01
     smart_hit_tolerance: float = 0.25
     smart_hit_min_hz: float = 0.0
     smart_hit_max_hz: float = 0.0

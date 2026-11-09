@@ -37,6 +37,9 @@ def smart_hit_active(acquisition: AcquisitionConfig, averaging: bool) -> bool:
 
 def validate_first_hit_source(acquisition: AcquisitionConfig, averaging: bool) -> None:
     if smart_hit_active(acquisition, averaging) and acquisition.modal.smart_hit_auto_range_enabled:
+        level = acquisition.modal.smart_hit_initial_trigger_v
+        if not np.isfinite(level) or not 0 < level < 10:
+            raise ValueError("首锤捕获阈值必须大于 0 V 且小于 10 V")
         source = acquisition.trigger.source.strip().split("/")[-1]
         reference = acquisition.reference_channel.strip().split("/")[-1]
         if source != reference:

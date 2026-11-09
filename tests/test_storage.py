@@ -30,6 +30,7 @@ class StorageTests(unittest.TestCase):
         session.config.acquisition.trigger.level = 0.0455
         session.config.acquisition.trigger.level_percent = 14.56
         session.config.acquisition.modal.smart_hit_auto_range_enabled = True
+        session.config.acquisition.modal.smart_hit_initial_trigger_v = .002345
         session.measurement.metadata["smart_hit_auto_range"] = {
             "state": "applied", "channel": "ai0", "peak_v": 0.13,
             "full_scale_v": 0.3125, "trigger_level_v": 0.0455,
@@ -46,6 +47,7 @@ class StorageTests(unittest.TestCase):
             self.assertAlmostEqual(item.config.acquisition.trigger.level, 0.0455)
             self.assertAlmostEqual(item.config.acquisition.trigger.level_percent, 14.56)
             self.assertEqual(item.measurement.metadata["smart_hit_auto_range"]["state"], "applied")
+            self.assertEqual(item.config.acquisition.modal.smart_hit_initial_trigger_v, .002345)
 
     def test_smart_hit_settings_and_audit_roundtrip_in_legacy_vna(self):
         session = self._sample_session()
@@ -96,6 +98,7 @@ class StorageTests(unittest.TestCase):
             savemat(path, {key: value for key, value in data.items() if not key.startswith("__")})
             loaded = load_legacy_vna(path)
         self.assertTrue(loaded.config.acquisition.modal.smart_hit_enabled)
+        self.assertEqual(loaded.config.acquisition.modal.smart_hit_initial_trigger_v, .01)
 
     def test_json_replace_failure_preserves_existing_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
