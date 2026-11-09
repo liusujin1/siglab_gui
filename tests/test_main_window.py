@@ -2271,14 +2271,85 @@ class MainWindowTests(unittest.TestCase):
                     pen = item.opts["pen"]
                     self.assertEqual(pen.color().alpha(), 255)
                     self.assertEqual(pen.style(), QtCore.Qt.CustomDashLine)
-                    self.assertEqual(pen.dashPattern(), [8.0, 4.0])
+                    self.assertEqual(pen.dashPattern(), [12.0, 8.0])
                     self.assertEqual(pen.widthF(), 1.0)
-                    self.assertEqual(pen.color().name(), self.window._color_for_trace(
+                    self.assertNotEqual(pen.color().name(), self.window._color_for_trace(
                         item.property("overlayTrace")).lower())
                     self.assertNotEqual(pen.color().name(), self.window._theme()["plot_bg"])
+                    self.assertEqual(pen.color(), self.window._overlay_pen(item.property("overlayTrace")).color())
+                    self.assertEqual(item.curve.opts["segmentedLineMode"], "off")
+                    self.assertGreater(item.zValue(), main_window_module.CURVE_Z)
+                    self.assertLess(item.zValue(), main_window_module.CURSOR_Z)
                 for curve in self.window._plot_curve_items[key].values():
                     self.assertEqual(curve.opts["pen"].style(), QtCore.Qt.SolidLine)
                     self.assertGreater(curve.opts["pen"].widthF(), items[0].opts["pen"].widthF())
+
+    def test_overlay_dashes_are_painted_even_with_an_opengl_viewport(self):
+        import importlib
+        curve_module = importlib.import_module("pyqtgraph.graphicsItems.PlotCurveItem")
+        class GLViewport:
+            pass
+        curve = main_window_module._OverlayCurve(
+            x=np.array([0., 200.]), y=np.array([10., 10.]),
+            pen=self.window._overlay_pen("ai0"),
+        )
+        canvas = QtGui.QImage(201, 21, QtGui.QImage.Format_ARGB32)
+        canvas.fill(QtCore.Qt.transparent)
+        painter = QtGui.QPainter(canvas)
+        try:
+            with mock.patch.object(curve_module.OpenGLHelpers, "GraphicsViewGLWidget", GLViewport), \
+                 mock.patch.object(curve, "paintGL") as paint_gl:
+                curve.paint(painter, None, GLViewport())
+                paint_gl.assert_not_called()
+        finally:
+            painter.end()
+        painted = np.array([canvas.pixelColor(x, 10).alpha() > 0 for x in range(200)])
+        self.assertGreater(np.count_nonzero(painted), 60)
+        self.assertGreater(np.count_nonzero(~painted), 50)
+        self.assertGreater(np.count_nonzero(painted[1:] != painted[:-1]), 10)
+
+    def test_psd_overlay_is_hidden_in_time_and_restored_only_for_its_value_mode(self):
+        measurement = self._measurement()
+        measurement.spectra["f"] = np.array([0., 1000., 2000., 5000.])
+        self.controller.state.measurement = measurement
+        for key in ("top", "bottom"):
+            display = self.window._display_combo_for_key(key)
+            values = self.window._value_combo_for_key(key)
+            display.setCurrentText("aspec")
+            self.window._plot_measurement(measurement)
+            original_value = values.currentText()
+            self.window._capture_overlay(key)
+            self.assertEqual(len(self.window._plot_overlay_items[key]), 1)
+            display.setCurrentText("y(t)")
+            self.assertEqual(len(self.window._plot_overlay_items[key]), 0)
+            self.assertLess(self.window._plot_widget_for_key(key).viewRange()[0][1], 1.)
+            display.setCurrentText("aspec")
+            values.setCurrentText(original_value)
+            self.assertEqual(len(self.window._plot_overlay_items[key]), 1)
+            values.setCurrentIndex((values.currentIndex() + 1) % values.count())
+            self.assertEqual(len(self.window._plot_overlay_items[key]), 0)
+            values.setCurrentText(original_value)
+            self.assertEqual(len(self.window._plot_overlay_items[key]), 1)
+            self.assertEqual(len(self.window._stored_overlays[key]), 1)
+
+    def test_smart_hit_overload_feedback_identifies_response_and_hardware_limits(self):
+        measurement = self._measurement()
+        measurement.metadata.update(
+            smart_hit_active=True, smart_hit_reason="过载", smart_hit_state="rejected",
+            smart_hit_channel="ai1", average_count=0, average_target=3,
+            overload_details=[
+                {"kind": "software", "channel": "ai1", "peak_v": .2, "limit_v": .1},
+                {"kind": "hardware", "channel": "ai2"},
+            ],
+        )
+        self.window._pending_measurement = measurement
+        self.window._flush_pending_measurement()
+        self.assertIn("ai1", self.window.run_info_label.text())
+        status = self.window.statusBar().currentMessage()
+        self.assertIn("ai1 峰值 0.2 V", status)
+        self.assertIn("±0.1 V", status)
+        self.assertIn("响应通道需单独调大量程", status)
+        self.assertIn("ai2 硬件过载", status)
 
     def test_device_indicator_tracks_selected_hardware_and_simulation(self):
         self.window._set_device_connected(True)
@@ -2318,7 +2389,7 @@ class MainWindowTests(unittest.TestCase):
         self.window._set_active_trace("top", "ai1")
         self.window._capture_top_overlay()
         self.assertEqual(len(self.window._stored_overlays["top"]), 1)
-        self.assertEqual(list(self.window._stored_overlays["top"][0].keys()), ["ai1"])
+        self.assertEqual(list(self.window._stored_overlays["top"][0].curves.keys()), ["ai1"])
         self.assertTrue(self.window.overlay_checkbox.isChecked())
         self.assertTrue(self.window.overlay_action.isChecked())
         self.window._clear_overlays()

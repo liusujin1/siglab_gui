@@ -66,6 +66,13 @@ percentage selector then shows 28% because its denominator is full scale.
 The old reference full scale is bypassed only while finding that first valid hit.
 Subsequent hits exceeding the locked range are rejected. Other channels retain
 their configured range checks, and actual hardware overloads are always checked.
+A response's software-range overload does not prevent a valid hammer reference
+from calibrating its own range, but that hit is still rejected from averaging.
+The status reports the specific overloaded channel, voltage peak and limit.
+Hardware overloads, double hits and force-limit failures prevent calibration.
+There is no added startup delay or discarded calibration frame. The ready
+message shows the initial trigger voltage; if no hit triggers, lower Abs Level
+before starting again. After calibration the trigger remains 35% of the peak.
 USB-4431 acquisition uses its 10 V hardware range independently of these software
 limits. Trigger changes occur between frames on the acquisition thread.
 VNA/JSON saves retain the settings and up to 200 hit summaries; VNA stores the
