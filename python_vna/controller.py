@@ -38,7 +38,31 @@ class VnaController:
 
     def configure(self, device_name: str | None = None) -> None:
         self.device_name = device_name
-        self.backend.configure(self.state.session, device_name=device_name)
+        session = self.state.session
+        trigger = session.acquisition.trigger
+        previous_trigger = (trigger.level, trigger.level_percent)
+        capture = (self.processor._impact_selector is not None
+                   and session.acquisition.modal.smart_hit_auto_range_enabled)
+        if capture:
+            validate_first_hit_source(session.acquisition, True)
+            # Configure the first hardware trigger directly; no probe frame or
+            # inherited display-range percentage is needed to catch the first hit.
+            trigger.level = float(session.acquisition.modal.smart_hit_initial_trigger_v)
+            reference = next((channel for channel in session.ai_channels
+                              if channel.name == session.acquisition.reference_channel), None)
+            full_scale = abs(float(reference.full_scale)) if reference is not None else 10.0
+            trigger.level_percent = trigger.level / (full_scale or 10.0) * 100.0
+        try:
+            self.backend.configure(session, device_name=device_name)
+        except Exception:
+            if capture:
+                trigger.level, trigger.level_percent = previous_trigger
+            raise
+        if capture:
+            self.processor.acquisition.trigger.level = trigger.level
+            self.processor.acquisition.trigger.level_percent = trigger.level_percent
+            if self.state.measurement is not None:
+                self.state.measurement.metadata["smart_hit_capture_level_v"] = trigger.level
         self._reset_overlap_processing()
         self._stop_requested.clear()
         self._set_backend_stop_event(self._stop_requested)
@@ -69,6 +93,11 @@ class VnaController:
     def read_and_process(self) -> MeasurementSet:
         frame = self._read_processing_frame()
         measurement = self.processor.process(frame)
+        if (self.processor._impact_selector is not None
+                and self.processor.acquisition.modal.smart_hit_auto_range_enabled):
+            measurement.metadata["smart_hit_capture_level_v"] = (
+                self.processor.acquisition.modal.smart_hit_initial_trigger_v
+            )
         if (measurement.metadata.get("rejected", False) and self.state.measurement is not None
                 and not measurement.metadata.get("smart_hit_active", False)):
             retained = self.state.measurement

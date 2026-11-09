@@ -70,9 +70,15 @@ A response's software-range overload does not prevent a valid hammer reference
 from calibrating its own range, but that hit is still rejected from averaging.
 The status reports the specific overloaded channel, voltage peak and limit.
 Hardware overloads, double hits and force-limit failures prevent calibration.
-There is no added startup delay or discarded calibration frame. The ready
-message shows the initial trigger voltage; if no hit triggers, lower Abs Level
-before starting again. After calibration the trigger remains 35% of the peak.
+There is no added startup delay or discarded calibration frame. Each new smart
+auto-ranging average run configures an independent first-hit capture voltage,
+defaulting to 0.01 V (10 mV), adjustable in the Modal dialog. It does not multiply
+the display full scale or inherit the previous run's trigger. This is a
+configurable starting threshold, not an automatic noise-floor estimate: raise it
+if noise triggers frames, or lower it for weak hits. The ready message and Abs
+Level show the capture voltage. After calibration the trigger becomes 35% of the
+peak, with the displayed percentage computed relative to the selected full scale.
+Other acquisition modes continue to use the manually configured trigger voltage.
 USB-4431 acquisition uses its 10 V hardware range independently of these software
 limits. Trigger changes occur between frames on the acquisition thread.
 VNA/JSON saves retain the settings and up to 200 hit summaries; VNA stores the

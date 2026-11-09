@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 import numpy as np
 
@@ -28,10 +29,12 @@ class RangeBackend:
     def __init__(self, amplitudes=(1, 1, 1)):
         self.amplitudes = iter(amplitudes)
         self.calls = []
+        self.configured_levels = []
         self.index = 0
 
     def configure(self, session, device_name=None):
         self.session = session
+        self.configured_levels.append(session.acquisition.trigger.level)
 
     def start(self):
         pass
@@ -55,6 +58,107 @@ class RangeBackend:
 
 
 class FirstHitRangeTests(unittest.TestCase):
+    def test_each_run_captures_with_independent_voltage_before_switching_to_35_percent(self):
+        session = ranging_session()
+        session.ai_channels[0].full_scale = 10
+        session.acquisition.trigger.level = 3.5
+        session.acquisition.trigger.level_percent = 35
+        backend = RangeBackend()
+        controller = VnaController(backend, session)
+        for amplitude in (1., .1):
+            backend.amplitudes = iter([amplitude] * 3)
+            controller.set_averaging_enabled(True)
+            controller.configure()
+            self.assertEqual(backend.configured_levels[-1], .01)
+            self.assertEqual(session.acquisition.trigger.level, .01)
+            self.assertEqual(backend.index, len(backend.calls) * 3)
+            # A trigger-aware source would never deliver these hits at the old 3.5 V level.
+            self.assertLess(backend.configured_levels[-1], amplitude)
+            for _ in range(3):
+                result = controller.read_and_process()
+            self.assertEqual(result.metadata["average_count"], 3)
+            self.assertAlmostEqual(session.acquisition.trigger.level, amplitude * .35)
+            self.assertEqual(result.metadata["smart_hit_capture_level_v"], .01)
+        self.assertEqual(backend.configured_levels, [.01, .01])
+        self.assertEqual(backend.index, 6)
+        self.assertEqual(len(backend.calls), 2)
+
+    def test_custom_capture_voltage_is_independent_of_all_display_ranges(self):
+        for full_scale in (.01953125, 1.25, 10):
+            with self.subTest(full_scale=full_scale):
+                session = ranging_session()
+                session.ai_channels[0].full_scale = full_scale
+                session.acquisition.modal.smart_hit_initial_trigger_v = .002345
+                backend = RangeBackend()
+                controller = VnaController(backend, session)
+                controller.set_averaging_enabled(True)
+                controller.configure()
+                self.assertEqual(backend.configured_levels, [.002345])
+                self.assertEqual(session.ai_channels[0].full_scale, full_scale)
+                self.assertAlmostEqual(session.acquisition.trigger.level_percent, .002345 / full_scale * 100)
+
+    def test_noise_trigger_does_not_lock_a_range_or_change_capture_voltage(self):
+        session = ranging_session()
+        backend = RangeBackend((1, 1, 1))
+        controller = VnaController(backend, session)
+        controller.set_averaging_enabled(True)
+        controller.configure()
+        noise = impact_frame()
+        noise.data[0] = np.random.default_rng(7).normal(0, .02, 512)
+        with mock.patch.object(backend, "read_frame", return_value=noise):
+            result = controller.read_and_process()
+        self.assertTrue(result.metadata["rejected"])
+        self.assertNotIn("smart_hit_auto_range", result.metadata)
+        self.assertEqual(session.acquisition.trigger.level, .01)
+        self.assertEqual(backend.calls, [])
+        for _ in range(3):
+            result = controller.read_and_process()
+        self.assertEqual(result.metadata["average_count"], 3)
+        self.assertEqual(result.metadata["smart_hit_attempted"], 4)
+        self.assertEqual(len(backend.calls), 1)
+
+    def test_other_acquisition_modes_keep_the_manual_trigger_voltage(self):
+        for mode in ("inst", "auto_off", "smart_off", "count_two", "other_trigger"):
+            with self.subTest(mode=mode):
+                session = ranging_session()
+                session.acquisition.trigger.level = 1.75
+                session.acquisition.trigger.level_percent = 17.5
+                if mode == "auto_off":
+                    session.acquisition.modal.smart_hit_auto_range_enabled = False
+                elif mode == "smart_off":
+                    session.acquisition.modal.smart_hit_enabled = False
+                elif mode == "count_two":
+                    session.acquisition.averaging.count = 2
+                elif mode == "other_trigger":
+                    session.acquisition.trigger.mode = "Manual Arm"
+                backend = RangeBackend()
+                controller = VnaController(backend, session)
+                controller.set_averaging_enabled(mode != "inst")
+                controller.configure()
+                self.assertEqual(backend.configured_levels, [1.75])
+                self.assertEqual(session.acquisition.trigger.level_percent, 17.5)
+
+    def test_capture_validation_and_failed_configuration_leave_original_trigger_unchanged(self):
+        for level in (0, -1, 10, float("nan"), float("inf")):
+            with self.subTest(level=level):
+                session = ranging_session()
+                session.acquisition.modal.smart_hit_initial_trigger_v = level
+                controller = VnaController(RangeBackend(), session)
+                with self.assertRaisesRegex(ValueError, "首锤捕获阈值"):
+                    controller.set_averaging_enabled(True)
+        session = ranging_session()
+        session.acquisition.trigger.level = 3.5
+        session.acquisition.trigger.level_percent = 35
+        backend = RangeBackend()
+        controller = VnaController(backend, session)
+        controller.set_averaging_enabled(True)
+        with mock.patch.object(backend, "configure", side_effect=RuntimeError("configure failed")):
+            with self.assertRaisesRegex(RuntimeError, "configure failed"):
+                controller.configure()
+        self.assertEqual(session.acquisition.trigger.level, 3.5)
+        self.assertEqual(session.acquisition.trigger.level_percent, 35)
+        self.assertEqual(backend.index, 0)
+
     def test_positive_and_negative_peak_select_same_gear_and_voltage(self):
         for sign in (-1, 1):
             settings = first_hit_range(impact_frame(amplitude=sign * 0.13).data[0], "ai0")

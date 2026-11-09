@@ -2010,12 +2010,16 @@ class MainWindowTests(unittest.TestCase):
         controller = VnaController(backend, session)
         worker = AcquisitionWorker(controller, "Dev1", average_run=True, target_average_count=3,
                                    display_interval_seconds=1e9, run_id=42)
-        settings_events, plot_events, errors = [], [], []
+        settings_events, capture_events, plot_events, errors = [], [], [], []
+        worker.capture_level_applied.connect(
+            lambda run_id, level: capture_events.append((run_id, level, backend.index))
+        )
         worker.settings_applied.connect(lambda run_id, event: settings_events.append((run_id, event, backend.index)))
         worker.measurement_ready.connect(plot_events.append)
         worker.error.connect(errors.append)
         worker.run()
         self.assertEqual(errors, [])
+        self.assertEqual(capture_events, [(42, .01, 0)])
         self.assertEqual(len(settings_events), 1)
         self.assertEqual(settings_events[0][0], 42)
         self.assertEqual(settings_events[0][2], 1)
@@ -2023,6 +2027,22 @@ class MainWindowTests(unittest.TestCase):
         self.assertAlmostEqual(settings_events[0][1]["trigger_level_v"], 0.35)
         self.assertEqual(len(plot_events), 1)
         self.assertEqual(plot_events[0].metadata["average_count"], 3)
+        self.assertEqual(backend.index, 3)
+
+    def test_capture_voltage_updates_readout_and_cannot_overwrite_newer_auto_settings(self):
+        self.window._acquisition_run_id = 12
+        self.window._handle_first_hit_capture_level(11, .002345)
+        self.assertNotAlmostEqual(self.window.trigger_level_edit.value(), .002345)
+        self.window._handle_first_hit_capture_level(12, .002345)
+        self.assertAlmostEqual(self.window.trigger_level_edit.value(), .002345)
+        self.assertEqual(float(self.window.channel_table.item(0, 9).text()), 10.)
+        self.assertEqual(self.window.trigger_level_percent_combo.currentText(), "0.02345%")
+        self.window._handle_first_hit_settings(
+            12, {"state": "applied", "channel": "ai0", "full_scale_v": 1.25, "trigger_level_v": .35}
+        )
+        self.window._handle_first_hit_capture_level(12, .002345)
+        self.assertAlmostEqual(self.window.trigger_level_edit.value(), .35)
+        self.assertEqual(self.window.trigger_level_percent_combo.currentText(), "28%")
 
     def test_trigger_update_failure_stops_worker_without_success_signal(self):
         from test_first_hit_ranging import RangeBackend, ranging_session
@@ -2046,7 +2066,15 @@ class MainWindowTests(unittest.TestCase):
         def fake_exec(dialog):
             enabled = dialog.findChild(QtWidgets.QCheckBox, "smartHitEnabled")
             self.assertTrue(enabled.isChecked())
+            capture = dialog.findChild(QtWidgets.QDoubleSpinBox, "smart_hit_initial_trigger_v")
+            self.assertEqual(capture.value(), .01)
+            self.assertEqual(capture.minimum(), .000001)
+            self.assertEqual(capture.maximum(), 9.999999)
+            self.assertEqual(capture.singleStep(), .001)
+            self.assertTrue(capture.isEnabled())
+            capture.setValue(.002345)
             enabled.setChecked(False)
+            self.assertFalse(capture.isEnabled())
             dialog.findChild(QtWidgets.QCheckBox, "smartHitAutoRange").setChecked(False)
             dialog.findChild(QtWidgets.QDoubleSpinBox, "smart_hit_tolerance").setValue(15)
             responses = dialog.findChild(QtWidgets.QListWidget, "smartHitResponses")
@@ -2062,6 +2090,7 @@ class MainWindowTests(unittest.TestCase):
         modal = self.window.session.acquisition.modal
         self.assertFalse(modal.smart_hit_enabled)
         self.assertFalse(modal.smart_hit_auto_range_enabled)
+        self.assertEqual(modal.smart_hit_initial_trigger_v, .002345)
         self.assertEqual(modal.smart_hit_tolerance, 0.15)
         self.assertEqual(len(modal.smart_hit_response_channels), 1)
         self.window._read_session_from_widgets()
