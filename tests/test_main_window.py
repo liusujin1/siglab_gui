@@ -2270,10 +2270,15 @@ class MainWindowTests(unittest.TestCase):
                 for item in items:
                     pen = item.opts["pen"]
                     self.assertEqual(pen.color().alpha(), 255)
-                    self.assertEqual(pen.style(), QtCore.Qt.DashLine)
+                    self.assertEqual(pen.style(), QtCore.Qt.CustomDashLine)
+                    self.assertEqual(pen.dashPattern(), [8.0, 4.0])
+                    self.assertEqual(pen.widthF(), 1.0)
                     self.assertEqual(pen.color().name(), self.window._color_for_trace(
                         item.property("overlayTrace")).lower())
                     self.assertNotEqual(pen.color().name(), self.window._theme()["plot_bg"])
+                for curve in self.window._plot_curve_items[key].values():
+                    self.assertEqual(curve.opts["pen"].style(), QtCore.Qt.SolidLine)
+                    self.assertGreater(curve.opts["pen"].widthF(), items[0].opts["pen"].widthF())
 
     def test_device_indicator_tracks_selected_hardware_and_simulation(self):
         self.window._set_device_connected(True)

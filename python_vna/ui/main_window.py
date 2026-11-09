@@ -9122,7 +9122,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _overlay_pen(self, name: str):
-        return pg.mkPen(self._color_for_trace(name), width=1.6, style=QtCore.Qt.DashLine)
+        pen = pg.mkPen(self._color_for_trace(name), width=1.0)
+        pen.setDashPattern([8.0, 4.0])
+        return pen
 
     def _capture_overlay(self, key: str) -> None:
         trace_name, curve = self._selected_curve(key)
