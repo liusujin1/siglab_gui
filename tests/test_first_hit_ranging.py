@@ -110,17 +110,59 @@ class FirstHitRangeTests(unittest.TestCase):
         self.assertEqual(len(backend.calls), 2)
         self.assertEqual(result.metadata["smart_hit_auto_range"]["full_scale_v"], 0.3125)
 
-    def test_only_reference_software_range_is_bypassed_for_calibration(self):
+    def test_response_software_overload_does_not_block_reference_calibration_or_enter_average(self):
         session = ranging_session()
         session.ai_channels[1].full_scale = 0.1
-        backend = RangeBackend()
+        backend = RangeBackend((1, 1, 1, 1))
         controller = VnaController(backend, session)
         controller.set_averaging_enabled(True)
         controller.configure()
         result = controller.read_and_process()
         self.assertTrue(result.metadata["overload_rejected"])
+        self.assertEqual(result.metadata["average_count"], 0)
+        self.assertEqual(controller.processor._impact_selector.pending, [])
+        self.assertEqual(result.metadata["smart_hit_auto_range"]["state"], "applied")
+        self.assertEqual(session.ai_channels[0].full_scale, 1.25)
+        self.assertEqual(session.ai_channels[1].full_scale, 0.1)
+        self.assertEqual(len(backend.calls), 1)
+        self.assertEqual(result.metadata["smart_hit_channel"], "ai1")
+        self.assertEqual(result.metadata["overload_details"], [
+            {"kind": "software", "channel": "ai1", "peak_v": 2., "limit_v": .1}
+        ])
+        session.ai_channels[1].full_scale = 10.
+        for _ in range(3):
+            result = controller.read_and_process()
+        self.assertEqual(result.metadata["average_count"], 3)
+        self.assertEqual(len(backend.calls), 1)
+
+    def test_response_hardware_overload_still_blocks_reference_calibration(self):
+        session = ranging_session()
+        processor = FrameProcessor(session.acquisition, channel_configs=session.ai_channels)
+        frame = impact_frame()
+        frame.metadata["overload_channels"] = ["Dev1/ai1"]
+        result = processor.process(frame)
+        self.assertTrue(result.metadata["overload_rejected"])
         self.assertNotIn("smart_hit_auto_range", result.metadata)
-        self.assertEqual(backend.calls, [])
+        self.assertEqual(result.metadata["average_count"], 0)
+        self.assertEqual(result.metadata["smart_hit_channel"], "Dev1/ai1")
+
+    def test_double_hit_and_force_limit_do_not_calibrate_even_when_response_is_over_range(self):
+        for problem in ("double", "force"):
+            with self.subTest(problem=problem):
+                session = ranging_session()
+                session.ai_channels[1].full_scale = .1
+                frame = impact_frame()
+                if problem == "double":
+                    frame.data[0, 128] = .8
+                else:
+                    session.acquisition.modal.smart_hit_force_limits = True
+                    session.acquisition.modal.smart_hit_force_max = 100.
+                processor = FrameProcessor(session.acquisition, channel_configs=session.ai_channels)
+                frame.metadata["channel_full_scales"]["ai1"] = .1
+                result = processor.process(frame)
+                self.assertTrue(result.metadata["rejected"])
+                self.assertNotIn("smart_hit_auto_range", result.metadata)
+                self.assertEqual(result.metadata["average_count"], 0)
 
     def test_explicit_manual_range_after_calibration_remains_the_reject_limit(self):
         session = ranging_session()

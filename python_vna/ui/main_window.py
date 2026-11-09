@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
@@ -111,6 +112,31 @@ ARCHIVE_CONTAINER_SUFFIXES = {
     ".bz2",
     ".xz",
 }
+
+
+class _OverlayCurve(pg.PlotCurveItem):
+    def paint(self, painter, option, widget=None):
+        # The OpenGL curve renderer ignores QPen dash patterns.
+        super().paint(painter, option, None)
+
+
+class _OverlayPlotDataItem(pg.PlotDataItem):
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        old_curve = self.curve
+        old_curve.setParentItem(None)
+        old_curve.deleteLater()
+        self.curve = _OverlayCurve(parent=self)
+        self.curve.setSegmentedLineMode("off")
+        self.curve.sigClicked.connect(self.sigClicked)
+        self.setData(*args, **kwargs)
+
+
+@dataclass
+class _OverlaySnapshot:
+    context: tuple[str, str]
+    curves: dict[str, tuple[np.ndarray, np.ndarray]]
+
 
 def archive_member_container(path: str | Path | None) -> Path | None:
     """Return the archive path when a selected path points inside an archive."""
@@ -1036,7 +1062,8 @@ class AcquisitionWorker(QtCore.QObject):
             self.status_changed.emit("State: running")
             session = getattr(getattr(self._controller, "state", None), "session", None)
             if session is not None and smart_hit_active(session.acquisition, self._average_run) and session.acquisition.modal.smart_hit_auto_range_enabled:
-                self.status_changed.emit("等待首锤自动量程；若一直无触发，请降低初始 Abs Level")
+                level = abs(session.acquisition.trigger.level)
+                self.status_changed.emit(f"等待首锤：已就绪，初始 Abs Level {level:.6g} V；若无触发请降低该值")
             while not self._stop_requested.is_set():
                 measurement = self._controller.read_and_process()
                 settings = measurement.metadata.get("smart_hit_auto_range", {})
@@ -1489,7 +1516,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_exit_requested = False
         self._tray_icon: QtWidgets.QSystemTrayIcon | None = None
         self._last_plot_cache: dict[str, dict[str, tuple[np.ndarray, np.ndarray]]] = {}
-        self._stored_overlays: dict[str, deque[dict[str, tuple[np.ndarray, np.ndarray]]]] = {
+        self._stored_overlays: dict[str, deque[_OverlaySnapshot]] = {
             "top": deque(maxlen=6),
             "bottom": deque(maxlen=6),
         }
@@ -6503,6 +6530,7 @@ class MainWindow(QtWidgets.QMainWindow):
             status = self._smart_hit_status(measurement)
             self.run_info_label.setText(
                 f"智能选锤 {average_count}/{average_target} | {measurement.metadata.get('smart_hit_reason', '')}"
+                f" {measurement.metadata.get('smart_hit_channel', '')}"
             )
             self.run_info_label.setToolTip(status)
         elif measurement.metadata.get("rejected", False):
@@ -6540,6 +6568,14 @@ class MainWindow(QtWidgets.QMainWindow):
             text += f"，{info.get('smart_hit_channel', '')} 偏差 {info['smart_hit_deviation']:.1%}"
         if info.get("smart_hit_warnings"):
             text += "；" + "；".join(info["smart_hit_warnings"])
+        for overload in info.get("overload_details", []):
+            if overload["kind"] == "software":
+                text += (f"；{overload['channel']} 峰值 {overload['peak_v']:.6g} V"
+                         f" 达到设置量程限制 ±{overload['limit_v']:.6g} V")
+                if overload["channel"] != info.get("double_hit_reference_channel"):
+                    text += "（响应通道需单独调大量程）"
+            else:
+                text += f"；{overload['channel']} 硬件过载，请减小敲击力度或检查传感器"
         if info.get("smart_hit_consecutive_rejections", 0) >= 10:
             text = "【连续10锤以上未合格，请检查敲击及参数】" + text
         return text
@@ -7526,19 +7562,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._configure_plot_xscale(plot, cache_key)
         if self.overlay_checkbox.isChecked():
-            for overlay_curves in self._stored_overlays[cache_key]:
+            for overlay_curves in self._visible_overlay_curves(cache_key):
                 for name, (x_data, y_data) in overlay_curves.items():
                     x_plot, y_plot = self._prepare_curve_xy(cache_key, x_data, y_data)
                     if x_plot.size == 0:
                         continue
-                    curve_item = pg.PlotDataItem(
+                    curve_item = _OverlayPlotDataItem(
                         x_plot,
                         y_plot,
                         pen=self._overlay_pen(name),
                     )
                     curve_item.setProperty("overlayTrace", name)
                     plot.addItem(curve_item)
-                    curve_item.setZValue(CURVE_Z - 1)
+                    curve_item.setDownsampling(auto=True, method="peak")
+                    curve_item.setClipToView(True)
+                    curve_item.setZValue(CURVE_Z + 1)
                     curve_item.setCurveClickable(False)
                     self._plot_overlay_items[cache_key].append(curve_item)
 
@@ -8500,7 +8538,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         if current_extent is not None:
                             extents.append(current_extent)
                         if self.overlay_checkbox.isChecked():
-                            for overlay_curves in self._stored_overlays[key]:
+                            for overlay_curves in self._visible_overlay_curves(key):
                                 overlay_extent = self._curve_x_extent(overlay_curves)
                                 if overlay_extent is not None:
                                     extents.append(overlay_extent)
@@ -9122,9 +9160,21 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _overlay_pen(self, name: str):
-        pen = pg.mkPen(self._color_for_trace(name), width=1.0)
-        pen.setDashPattern([8.0, 4.0])
+        color = QtGui.QColor(self._color_for_trace(name))
+        hue = (max(0.0, color.hslHueF()) + 0.45) % 1.0
+        lightness = 0.75 if self._theme()["plot_bg"] == self.UI_THEMES["dark"]["plot_bg"] else 0.34
+        color.setHslF(hue, 0.65, lightness)
+        pen = pg.mkPen(color, width=1.0)
+        pen.setCapStyle(QtCore.Qt.FlatCap)
+        pen.setDashPattern([12.0, 8.0])
         return pen
+
+    def _overlay_context(self, key: str) -> tuple[str, str]:
+        return self._effective_display_mode_for_key(key), self._analysis_value_mode_for_key(key)
+
+    def _visible_overlay_curves(self, key: str):
+        context = self._overlay_context(key)
+        return (snapshot.curves for snapshot in self._stored_overlays[key] if snapshot.context == context)
 
     def _capture_overlay(self, key: str) -> None:
         trace_name, curve = self._selected_curve(key)
@@ -9132,7 +9182,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage(f"No active {key} plot curve available to capture")
             return
         x_data, y_data = curve
-        snapshot = {trace_name: (x_data.copy(), y_data.copy())}
+        snapshot = _OverlaySnapshot(
+            self._overlay_context(key), {trace_name: (x_data.copy(), y_data.copy())}
+        )
         self._stored_overlays[key].appendleft(snapshot)
         if not self.overlay_checkbox.isChecked():
             self.overlay_checkbox.setChecked(True)

@@ -324,22 +324,21 @@ def detect_double_hit(
     ).rejected
 
 
-def detect_overload(
+def overload_details(
     data: np.ndarray,
     channel_names: list[str],
     metadata: dict,
     threshold: float = 0.999,
-) -> bool:
-    """Reject hardware overloads and samples outside the configured full scale."""
+) -> list[dict]:
+    """Report hardware and configured-range overloads separately."""
+    details = []
     overload_channels = metadata.get("overload_channels")
-    if isinstance(overload_channels, (list, tuple, set)):
-        if overload_channels:
-            return True
-    if isinstance(overload_channels, np.ndarray):
-        if overload_channels.size and np.any(overload_channels):
-            return True
-    if bool(metadata.get("overload", False)):
-        return True
+    if isinstance(overload_channels, (list, tuple, set, np.ndarray)):
+        for name in overload_channels:
+            if name:
+                details.append({"kind": "hardware", "channel": str(name)})
+    if bool(metadata.get("overload", False)) and not details:
+        details.append({"kind": "hardware", "channel": "设备"})
 
     if "channel_hardware_ranges" in metadata:
         ranges = metadata["channel_hardware_ranges"]
@@ -352,11 +351,11 @@ def detect_overload(
                 continue
             margin = (upper - lower) * (1.0 - threshold) / 2
             if np.any(data[index] <= lower + margin) or np.any(data[index] >= upper - margin):
-                return True
+                details.append({"kind": "hardware", "channel": name})
 
     full_scales = metadata.get("channel_full_scales", {})
     if not full_scales:
-        return False
+        return details
     if isinstance(full_scales, dict):
         scale_by_name = full_scales
     else:
@@ -375,8 +374,18 @@ def detect_overload(
             continue
         channel_peak = float(np.max(np.abs(data[index]), initial=0.0))
         if channel_peak >= threshold * full_scale:
-            return True
-    return False
+            details.append({"kind": "software", "channel": name,
+                            "peak_v": channel_peak, "limit_v": full_scale})
+    return details
+
+
+def detect_overload(
+    data: np.ndarray,
+    channel_names: list[str],
+    metadata: dict,
+    threshold: float = 0.999,
+) -> bool:
+    return bool(overload_details(data, channel_names, metadata, threshold))
 
 
 def apply_modal_processing(
@@ -390,6 +399,7 @@ def apply_modal_processing(
     flags = {
         "double_hit_rejected": False,
         "overload_rejected": False,
+        "overload_details": [],
         "rejected": False,
     }
     data = frame.data.copy()
@@ -420,7 +430,8 @@ def apply_modal_processing(
             flags["rejected"] = True
 
     if reject_enabled and modal.reject_overload:
-        if detect_overload(data, list(frame.channel_names), frame.metadata):
+        flags["overload_details"] = overload_details(data, list(frame.channel_names), frame.metadata)
+        if flags["overload_details"]:
             flags["overload_rejected"] = True
             flags["rejected"] = True
 
@@ -575,25 +586,35 @@ class FrameProcessor:
                     scales.setdefault(reference, self._first_hit_settings["full_scale_v"])
                 checked_frame = replace(frame, metadata={**frame.metadata, "channel_full_scales": scales})
             prepared, flags = apply_modal_processing(checked_frame, indices, reference, modal)
+            force_in_range = not modal.smart_hit_force_limits or (
+                modal.smart_hit_force_min <= peak <= modal.smart_hit_force_max
+            )
+            hardware_overload = any(item["kind"] == "hardware" for item in flags["overload_details"])
+            if (modal.smart_hit_auto_range_enabled and self._first_hit_settings is None
+                    and not hardware_overload and not flags["double_hit_rejected"] and force_in_range):
+                try:
+                    # Response software limits still reject averaging, but must not
+                    # prevent a valid reference pulse from calibrating its own range.
+                    self._first_hit_settings = first_hit_range(force, reference)
+                except ValueError as exc:
+                    report = selector.reject(str(exc))
+                    preview = self._rejected_measurement(frame, reference, responses, flags)
+                    base = self._smart_last_valid or preview
+                    return replace(base, time_data=preview.time_data, metadata={
+                        **base.metadata, **flags, **report,
+                        "average_count": self._accepted_frames,
+                        "legacy_measured_average_count": self._accepted_frames,
+                        "smart_hit_force_unit": unit,
+                        "smart_hit_incomplete": True,
+                    })
             if flags["rejected"]:
+                selector.last["channel"] = ", ".join(
+                    dict.fromkeys(item["channel"] for item in flags["overload_details"])
+                )
                 report = selector.reject("过载" if flags["overload_rejected"] else "双击")
-            elif modal.smart_hit_force_limits and not (modal.smart_hit_force_min <= peak <= modal.smart_hit_force_max):
+            elif not force_in_range:
                 report = selector.reject("力峰值超限")
             else:
-                if modal.smart_hit_auto_range_enabled and self._first_hit_settings is None:
-                    try:
-                        self._first_hit_settings = first_hit_range(force, reference)
-                    except ValueError as exc:
-                        report = selector.reject(str(exc))
-                        preview = self._rejected_measurement(frame, reference, responses, flags)
-                        base = self._smart_last_valid or preview
-                        return replace(base, time_data=preview.time_data, metadata={
-                            **base.metadata, **flags, **report,
-                            "average_count": self._accepted_frames,
-                            "legacy_measured_average_count": self._accepted_frames,
-                            "smart_hit_force_unit": unit,
-                            "smart_hit_incomplete": True,
-                        })
                 prepared.metadata["processing_window"] = self.acquisition.processing_window
                 frequencies, spectrum = compute_fft(prepared)
                 warnings = []
