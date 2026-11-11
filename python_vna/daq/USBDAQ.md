@@ -2,8 +2,8 @@
 
 This feature belongs to PythonVNATest. NI remains the startup default. USB uses
 the existing NetDAQ backend with `transport="usb"`; it does not use TCP ports.
-No third-party Python package, vendor 32-bit DAQ DLL, firmware loader, driver
-installer, or new shared analysis/storage change is included in this extension.
+No third-party Python package, vendor 32-bit DAQ DLL, firmware loader or driver
+installer is introduced. Optional file metadata extensions are described below.
 
 ## Access
 
@@ -523,3 +523,72 @@ Final product validation:
 `powershell -NoProfile -File scripts\test_vna_product.ps1 -Product python_vna_test`
 passed all 650 tests. This change adds no shared analysis/storage module change,
 new dependency, version bump or packaged release.
+
+## Optional streaming software DC removal (2026-11-11)
+
+**File / Automatic DC removal** opens a per-channel enable/cutoff dialog for
+NetDAQ USB/TCP and offline replay. It is disabled for NI, which retains its
+existing hardware coupling path. Settings default to disabled and 0.1 Hz.
+The acquisition layout and MATLAB-style channel matrix are unchanged.
+
+Enabled channels use a first-order Butterworth high-pass in voltage units,
+before software triggering, overlap, modal rejection, FFT and engineering
+scaling. The two-value SOS state persists across all stream blocks in one run.
+Configuration starts a fresh state, initialized from the first input sample
+with `sosfilt_zi`; no startup frame is discarded, no calibration capture is
+inserted and no per-frame mean is subtracted. There can still be an initial
+transient, and the cutoff affects low-frequency magnitude and phase. Choose a
+cutoff below the frequency band of interest, particularly for foundation data.
+
+The original software-input voltage accompanies corrected frames internally.
+Trigger windows and overlapping windows retain matching raw samples. Overload
+rejection and acquisition-quality rail/DC statistics use this raw voltage,
+so subtracting DC cannot conceal an ADC overload. Double-hit and spectral
+processing use the corrected signal.
+
+Persistence:
+
+- Channel configuration adds `dc_removal_enabled` and `dc_removal_cutoff_hz`,
+  with backward-compatible defaults for old files.
+- VNA stores the current processed data and optional ASCII provenance/config
+  fields. Legacy MATLAB variable structure and existing scaling stay intact.
+- Record previews use corrected voltage; live Record files keep original
+  software-input voltage, with filter parameters and explicit raw-data flags.
+  The file does not grow an additional full recording copy.
+- Acquisition replay of that raw Record applies the saved settings when
+  imported into the replay session. Replay of already corrected VNA/Record
+  does not filter again and does not pretend that raw DC can be recovered.
+- Analysis Viewer opening a raw Record directly still shows raw data. This
+  acquisition-only change does not alter the other product's analysis loader.
+  For processed VNA, Analysis sees the stored corrected result.
+
+Validation compares arbitrary block partitions with a single uninterrupted
+SOS evaluation, constant DC, disabled channels, invalid cutoffs, replay reset,
+trigger offsets, raw overload detection, overlap, raw Record bytes and VNA
+round-trip. The Record worker is checked for corrected previews and raw storage,
+including recording an already processed replay without double filtering.
+
+A real CH1 IEPE run used the operator's 5 V/g sensor factor, 2560 samples/s,
+512-sample frames and a 0.1 Hz cutoff for 20 seconds (51200 samples).
+Concurrent raw/corrected voltage means were -0.02154301 / -0.00162503 V;
+AC RMS values were 0.49556425 / 0.49557034 V for this input period.
+Sixteen raw samples reached the positive ADC full code; these remain in the
+raw record and are not described as repaired by high-pass filtering.
+Raw Record replay reproduced all corrected samples within 1e-13 V. A saved
+VNA retained both its correction settings and corrected time samples.
+Local evidence is `tmp_dasp_live_20261111/dc_removal/acceptance.json`.
+
+VIanalysis regression: 455 passed, one skipped, and one pre-existing failure
+in `test_load_continuous_multiple_segments_keeps_manifest_order`. That fixture
+uses a 100 Hz frame with a default 2560 Hz session, violating Record's existing
+sample-rate check. The same failure was reproduced with all modified runtime
+modules loaded read-only from committed HEAD `c5ccb6e`. Its test and recording
+implementation were not modified by this feature.
+
+Final PythonVNATest product validation passed 669 tests and 56 subtests.
+VIanalysis rerun with only that independently reproduced baseline failure
+deselected passed 455 tests and 26 subtests, with one skipped test.
+Additional malformed optional-setting checks fall back to disabled defaults.
+The enabled-filter USB Stop cases at 0, 20 and 200 ms after Start all released
+normally; the largest measured request-to-release interval was 90.26 ms.
+Settings also round-trip in a default VNA saved before the first acquisition.

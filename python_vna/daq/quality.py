@@ -18,7 +18,8 @@ class AcquisitionQuality:
     def add(self, frame):
         self.frames += 1
         self.bytes += int(frame.data.nbytes)
-        for name, values in zip(frame.channel_names, frame.data):
+        raw = frame.raw_data if frame.raw_data is not None else frame.data
+        for name, values in zip(frame.channel_names, raw):
             reported = frame.metadata.get("channel_hardware_ranges", {}).get(name)
             if reported is not None and len(reported) == 2:
                 self.ranges[name] = tuple(float(v) for v in reported)
@@ -61,4 +62,4 @@ class AcquisitionQuality:
             )
         return dict(format="python_vna_acquisition_quality", backend=self.backend_name, frames=self.frames,
                     elapsed_seconds=elapsed, bytes_read=self.bytes, bytes_per_second=self.bytes / elapsed,
-                    channels=channels, note="返回帧的电压统计，吞吐率按交付帧计算；接近量程并不等于传感器断线。未移除 DC，未自动标定。")
+                    channels=channels, note="软件去直流前的电压统计，吞吐率按交付帧计算；接近量程并不等于传感器断线。未自动标定。")

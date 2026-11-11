@@ -27,6 +27,7 @@ class VnaController:
         self.processor = FrameProcessor(session.acquisition, averaging_enabled=False, channel_configs=session.ai_channels)
         self.device_name: str | None = None
         self._overlap_data: np.ndarray | None = None
+        self._overlap_raw_data: np.ndarray | None = None
         self._overlap_channel_names: list[str] | None = None
         self._overlap_sample_start_index = 0
         self._overlap_frame_index = 0
@@ -173,9 +174,12 @@ class VnaController:
             self._append_overlap_raw_frame(self.read_acquisition_frame())
 
         data = self._overlap_data[:, :frame_size].copy()
+        raw = self._overlap_raw_data[:, :frame_size].copy() if self._overlap_raw_data is not None else None
         channel_names = list(self._overlap_channel_names or [])
         output_start_index = self._overlap_sample_start_index
         self._overlap_data = self._overlap_data[:, hop_size:]
+        if self._overlap_raw_data is not None:
+            self._overlap_raw_data = self._overlap_raw_data[:, hop_size:]
         self._overlap_sample_start_index += hop_size
         if self._overlap_data.size == 0:
             self._overlap_data = None
@@ -198,6 +202,7 @@ class VnaController:
             timestamps=timestamps,
             frame_index=self._overlap_frame_index,
             metadata=metadata,
+            raw_data=raw,
         )
         self._overlap_frame_index += 1
         return output_frame
@@ -223,16 +228,20 @@ class VnaController:
             or self._overlap_data.shape[0] != data.shape[0]
         ):
             self._overlap_data = data.copy()
+            self._overlap_raw_data = frame.raw_data.copy() if frame.raw_data is not None else None
             self._overlap_channel_names = list(frame.channel_names)
             self._overlap_sample_start_index = 0
             self._overlap_frame_index = 0
         else:
             self._overlap_data = np.concatenate([self._overlap_data, data], axis=1)
+            if self._overlap_raw_data is not None and frame.raw_data is not None:
+                self._overlap_raw_data = np.concatenate([self._overlap_raw_data, frame.raw_data], axis=1)
         self._overlap_latest_metadata = dict(frame.metadata)
         self._overlap_latest_raw_frame_index = int(frame.frame_index)
 
     def _reset_overlap_processing(self) -> None:
         self._overlap_data = None
+        self._overlap_raw_data = None
         self._overlap_channel_names = None
         self._overlap_sample_start_index = 0
         self._overlap_frame_index = 0

@@ -23,6 +23,8 @@ class ChannelConfig:
     min_value: float = -10.0
     max_value: float = 10.0
     is_reference: bool = False
+    dc_removal_enabled: bool = False
+    dc_removal_cutoff_hz: float = 0.1
 
 
 @dataclass(slots=True)

@@ -129,3 +129,70 @@ class QualityReportDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(self, "导出失败", str(exc))
             return
         self._directory = target.parent
+
+
+class DcRemovalDialog(QtWidgets.QDialog):
+    def __init__(self, session, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("自动去直流（软件 AC 耦合）")
+        self.resize(590, 330)
+        self.channels = [replace(channel) for channel in session.ai_channels]
+        self.rate = session.acquisition.sample_rate
+        self.table = QtWidgets.QTableWidget(len(self.channels), 4)
+        self.table.setHorizontalHeaderLabels(["通道", "标签", "启用", "截止频率 (Hz)"])
+        self.table.setStyleSheet(
+            "QTableWidget::indicator { width: 16px; height: 16px; }"
+            "QTableWidget::indicator:unchecked { border: 1px solid #7d98a6;"
+            " border-radius: 3px; background: transparent; }")
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        for row, channel in enumerate(self.channels):
+            self.table.setItem(row, 0, QtWidgets.QTableWidgetItem(channel.name))
+            self.table.setItem(row, 1, QtWidgets.QTableWidgetItem(channel.label))
+            check = QtWidgets.QTableWidgetItem()
+            check.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsUserCheckable)
+            check.setCheckState(QtCore.Qt.Checked if channel.dc_removal_enabled else QtCore.Qt.Unchecked)
+            self.table.setItem(row, 2, check)
+            cutoff = QtWidgets.QDoubleSpinBox()
+            cutoff.setRange(.001, max(.001, self.rate * .49))
+            cutoff.setDecimals(3)
+            cutoff.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+            cutoff.setValue(channel.dc_removal_cutoff_hz)
+            cutoff.setEnabled(channel.dc_removal_enabled)
+            self.table.setCellWidget(row, 3, cutoff)
+        self.table.itemChanged.connect(self._toggle_cutoff)
+        self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        note = QtWidgets.QLabel(
+            "一阶高通，状态跨帧保留；首次用首个采样值初始化，不丢帧、不逐帧减均值。\n"
+            "默认 0.1 Hz；截止频率附近会衰减和移相，低频振动请按关注频段选择。\n"
+            "触发、显示、分析用校正信号；连续记录保存原始电压，回放按保存参数处理。\n"
+            "VNA 保存当前处理后的时域；普通 Analysis 直接打开连续记录仍显示原始数据。")
+        note.setWordWrap(True)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons.button(QtWidgets.QDialogButtonBox.Ok).setText("应用")
+        buttons.button(QtWidgets.QDialogButtonBox.Cancel).setText("取消")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(self.table, 1)
+        layout.addWidget(note)
+        layout.addWidget(buttons)
+
+    def _toggle_cutoff(self, item):
+        if item.column() == 2:
+            self.table.cellWidget(item.row(), 3).setEnabled(item.checkState() == QtCore.Qt.Checked)
+
+    def accept(self):
+        from python_vna.daq.dc_removal import DcRemoval
+        from python_vna.daq.base import DaqBackendError
+
+        for row, channel in enumerate(self.channels):
+            channel.dc_removal_enabled = self.table.item(row, 2).checkState() == QtCore.Qt.Checked
+            channel.dc_removal_cutoff_hz = self.table.cellWidget(row, 3).value()
+        try:
+            DcRemoval(self.channels, self.rate)
+        except (DaqBackendError, ValueError) as exc:
+            QtWidgets.QMessageBox.warning(self, "配置无效", str(exc))
+            return
+        super().accept()

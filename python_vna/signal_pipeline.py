@@ -420,7 +420,8 @@ def apply_modal_processing(
             flags["rejected"] = True
 
     if reject_enabled and modal.reject_overload:
-        if detect_overload(data, list(frame.channel_names), frame.metadata):
+        if detect_overload(frame.raw_data if frame.raw_data is not None else data,
+                           list(frame.channel_names), frame.metadata):
             flags["overload_rejected"] = True
             flags["rejected"] = True
 

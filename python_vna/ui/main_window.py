@@ -1165,6 +1165,13 @@ class ContinuousRecordingWorker(QtCore.QObject):
                 if channel.enabled
             ]
             provenance = getattr(self._controller.backend, "acquisition_provenance", None)
+            recording_provenance = provenance() if callable(provenance) else None
+            if recording_provenance and recording_provenance.get("dc_removed"):
+                if recording_provenance.get("raw_voltage_available"):
+                    recording_provenance.update(
+                        dc_removed=False, preview_dc_removed=True, stored_data="raw_voltage")
+                else:
+                    recording_provenance["stored_data"] = "dc_removed_voltage"
             self._writer = ContinuousDatWriter(
                 self._output_dir,
                 self._controller.state.session,
@@ -1174,7 +1181,7 @@ class ContinuousRecordingWorker(QtCore.QObject):
                 segment_seconds=self._segment_seconds,
                 storage_format="binary",
                 compress_closed_segments=False,
-                daq_provenance=provenance() if callable(provenance) else None,
+                daq_provenance=recording_provenance,
             )
             self._writer.start()
             self._controller.start()
@@ -1190,7 +1197,14 @@ class ContinuousRecordingWorker(QtCore.QObject):
                 frame = read()
                 if not self._writer.channel_names and frame.channel_names:
                     self._writer.channel_names = list(frame.channel_names)
-                status = self._writer.write_frame(frame)
+                recorded_frame = frame
+                if frame.raw_data is not None:
+                    from dataclasses import replace
+
+                    recorded_frame = replace(
+                        frame, data=frame.raw_data, raw_data=None,
+                        metadata={**frame.metadata, "dc_removed": False})
+                status = self._writer.write_frame(recorded_frame)
                 self.recording_status.emit(status)
                 now = time.monotonic()
                 if now - last_preview >= self._preview_interval_seconds:
@@ -1282,6 +1296,8 @@ class ContinuousRecordingWorker(QtCore.QObject):
                 "recording_total_samples": status.total_samples,
                 "recording_segment_index": status.segment_index,
                 "recording_output_dir": str(status.output_dir),
+                **({"daq_backend": frame.metadata["backend"], "daq_provenance": dict(frame.metadata)}
+                   if frame.metadata.get("backend") in {"netdaq", "replay"} else {}),
             },
         )
 
@@ -2118,6 +2134,7 @@ class MainWindow(QtWidgets.QMainWindow):
         file_menu.addAction("保存为默认", self._save_to_default_vna)
         self.device_connection_action = file_menu.addAction("设备连接...", self._open_device_connection)
         file_menu.addAction("导入 DASP 通道参数...", self._import_dasp_parameters)
+        self.dc_removal_action = file_menu.addAction("自动去直流...", self._configure_dc_removal)
         file_menu.addAction("离线回放数据文件...", self._open_replay_file)
         file_menu.addAction("离线回放记录目录...", self._open_replay_folder)
         file_menu.addAction("采集质量报告...", self._show_acquisition_quality)
@@ -5958,8 +5975,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.controller.backend.__class__.__name__ == "NetDaqBackend":
             for row in range(self.channel_table.rowCount()):
                 self._sync_netdaq_channel_mode(row)
+        previous_channels = {channel.name: channel for channel in self.session.ai_channels}
         channels: list[ChannelConfig] = []
         for row in range(self.channel_table.rowCount()):
+            previous = previous_channels.get(self.channel_table.item(row, 1).text())
             channels.append(
                 ChannelConfig(
                     enabled=self.channel_table.item(row, 0).checkState() == QtCore.Qt.Checked,
@@ -5978,6 +5997,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     full_scale=float(self.channel_table.item(row, 9).text()),
                     min_value=-float(self.channel_table.item(row, 9).text()),
                     max_value=float(self.channel_table.item(row, 9).text()),
+                    dc_removal_enabled=previous.dc_removal_enabled if previous else False,
+                    dc_removal_cutoff_hz=previous.dc_removal_cutoff_hz if previous else 0.1,
                 )
             )
 
@@ -6207,6 +6228,24 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         return True
 
+    def _configure_dc_removal(self):
+        if not self._offline_tools_idle():
+            return
+        if self.controller.backend.__class__.__name__ not in {"NetDaqBackend", "ReplayBackend"}:
+            self.statusBar().showMessage("软件自动去直流用于 NetDAQ / USB 和离线回放；NI 使用设备耦合配置")
+            return
+        from python_vna.ui.offline_daq_tools import DcRemovalDialog
+
+        session = self._read_session_from_widgets()
+        dialog = DcRemovalDialog(session, self)
+        if dialog.exec() == QtWidgets.QDialog.Accepted:
+            session.ai_channels = dialog.channels
+            self._load_session_to_widgets()
+            enabled = [f"{c.name} ({c.dc_removal_cutoff_hz:g} Hz)"
+                       for c in session.ai_channels if c.enabled and c.dc_removal_enabled]
+            self.statusBar().showMessage(
+                "下次采集自动去直流：" + ("、".join(enabled) if enabled else "关闭"))
+
     def _import_dasp_parameters(self):
         if not self._offline_tools_idle():
             return
@@ -6272,6 +6311,7 @@ class MainWindow(QtWidgets.QMainWindow):
         backend = self.controller.backend
         netdaq = backend.__class__.__name__ == "NetDaqBackend"
         replay = backend.__class__.__name__ == "ReplayBackend"
+        self.dc_removal_action.setEnabled(netdaq or replay)
         host_trigger_ready = replay or (netdaq and backend.ready)
         if netdaq and not host_trigger_ready:
             self.trigger_mode_combo.setCurrentIndex(self.trigger_mode_combo.findData("Off (Free Run)"))

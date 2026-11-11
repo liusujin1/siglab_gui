@@ -373,6 +373,9 @@ class NetDaqBackend(BaseDaqBackend):
             selected.append((index, channel.name, profile.option(index, channel)))
         if not selected:
             raise DaqBackendError("NetDAQ requires at least one enabled channel")
+        from .dc_removal import DcRemoval
+
+        self._dc_removal = DcRemoval(session.ai_channels, actual)
         # Validate the host trigger before acquiring a handle or writing configuration.
         self._trigger = None
         if acq.trigger.enabled and acq.trigger.source != "immediate":
@@ -507,7 +510,7 @@ class NetDaqBackend(BaseDaqBackend):
         )
         self._sample_index += frame_size
         self._frame_index += 1
-        return frame
+        return self._dc_removal.apply_frame(frame)
 
     def acquisition_provenance(self) -> dict:
         """JSON-safe acquisition facts, also available before Record's first frame."""
@@ -532,6 +535,10 @@ class NetDaqBackend(BaseDaqBackend):
             "trigger_implementation": "host_absolute_window" if self._trigger is not None else "free_run",
         }
         result["qualification"] = profile.qualification
+        if self._dc_removal.enabled:
+            result["dc_removal"] = self._dc_removal.description()
+            result["dc_removed"] = True
+            result["raw_voltage_available"] = True
         result["electrical_calibration_verified"] = profile.qualification == "physical_verified"
         if profile.qualification == "dasp_parameters":
             result["channel_nominal_ranges"] = result.pop("channel_hardware_ranges")

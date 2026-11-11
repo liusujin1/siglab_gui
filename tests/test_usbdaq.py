@@ -233,6 +233,64 @@ def backend(tmp_path):
     return NetDaqBackend(NetDaqSettings(transport="usb", profile_path=str(profile(tmp_path)), timeout=.2))
 
 
+def test_usb_dc_filter_precedes_trigger_and_retains_original_voltage(usb, tmp_path):
+    samples = np.zeros((4096, 4), dtype="<i4")
+    samples[:, 0] = 3000
+    samples[20:22, 0] = 5000
+    usb.data = samples.tobytes()
+    session = config()
+    session.acquisition.frame_size = 16
+    session.ai_channels[0].dc_removal_enabled = True
+    trigger = session.acquisition.trigger
+    trigger.enabled, trigger.source, trigger.mode, trigger.level = True, "ai0", "Every Frame", .5
+    trigger.pretrigger_samples = -25
+    b = backend(tmp_path)
+    b.configure(session)
+    b.start()
+    try:
+        frame = b.read_frame()
+        assert frame.metadata["trigger_sample_index"] == 20
+        assert frame.raw_data[0, 4] == 5
+        assert frame.data[0, 4] == pytest.approx(2, abs=.01)
+        assert frame.metadata["dc_removed"]
+    finally:
+        b.close()
+    assert all(cmd in (0x44, 0x56, 0x41, 0x42, 0x49, 0x53, 0x50) for cmd, _ in usb.commands)
+
+
+def test_usb_dc_filter_does_not_hide_adc_overload(usb, tmp_path):
+    from python_vna.signal_pipeline import FrameProcessor
+
+    samples = np.zeros((4096, 4), dtype="<i4")
+    samples[:, 0] = 9999
+    usb.data = samples.tobytes()
+    session = config()
+    session.ai_channels[0].dc_removal_enabled = True
+    session.acquisition.modal.reject_overload = True
+    session.acquisition.modal.smart_hit_enabled = False
+    b = backend(tmp_path)
+    b.configure(session)
+    b.start()
+    try:
+        frame = b.read_frame()
+        np.testing.assert_allclose(frame.data[0], 0, atol=1e-9)
+        measurement = FrameProcessor(session.acquisition).process(frame)
+        assert measurement.metadata["overload_rejected"]
+        assert measurement.metadata["average_count"] == 0
+    finally:
+        b.close()
+
+
+def test_usb_invalid_dc_filter_fails_before_any_hardware_access(usb, tmp_path):
+    session = config()
+    session.ai_channels[0].dc_removal_enabled = True
+    session.ai_channels[0].dc_removal_cutoff_hz = 500
+    b = backend(tmp_path)
+    with pytest.raises(DaqBackendError, match="截止频率"):
+        b.configure(session)
+    assert usb.commands == []
+
+
 @pytest.mark.parametrize("mode", ["Every Frame", "Manual Arm", "1st Frame", "1st-Manual Arm"])
 def test_usb_host_trigger_uses_raw_stream_without_hardware_trigger_commands(usb, tmp_path, mode):
     samples = np.zeros((4096, 4), dtype="<i4")

@@ -19,7 +19,7 @@ from python_vna.daq.netdaq import NetDaqBackend, NetDaqProfile, NetDaqSettings
 from python_vna.storage import default_session_config
 from python_vna.ui.main_window import MainWindow
 from python_vna.ui.netdaq_settings import DeviceConnectionDialog
-from python_vna.ui.offline_daq_tools import DaspImportDialog, QualityReportDialog
+from python_vna.ui.offline_daq_tools import DaspImportDialog, QualityReportDialog, DcRemovalDialog
 
 
 @pytest.fixture
@@ -80,6 +80,44 @@ def test_dasp_preview_import_selection_and_units(app, tmp_path):
     assert [c.index for c in dialog.selected_channels()] == [1]
     dialog.reject()
     dialog.deleteLater()
+
+
+def test_dc_removal_dialog_keeps_channel_settings_independent_and_cancel_is_safe(app):
+    s = default_session_config()
+    dialog = DcRemovalDialog(s)
+    assert not dialog.table.cellWidget(0, 3).isEnabled()
+    dialog.table.item(0, 2).setCheckState(QtCore.Qt.Checked)
+    assert dialog.table.cellWidget(0, 3).isEnabled()
+    dialog.table.cellWidget(0, 3).setValue(.2)
+    assert not s.ai_channels[0].dc_removal_enabled
+    dialog.accept()
+    assert dialog.channels[0].dc_removal_enabled
+    assert dialog.channels[0].dc_removal_cutoff_hz == .2
+    assert not dialog.channels[1].dc_removal_enabled
+    dialog.deleteLater()
+
+
+def test_dc_removal_ui_apply_and_sensor_edits_keep_configuration(window):
+    window._device_refresh_thread = None
+    window.controller.backend = NetDaqBackend(NetDaqSettings(transport="usb"))
+    window._apply_netdaq_limits()
+    assert window.dc_removal_action.isEnabled()
+
+    def accept(dialog):
+        dialog.table.item(0, 2).setCheckState(QtCore.Qt.Checked)
+        dialog.table.cellWidget(0, 3).setValue(.3)
+        dialog.accept()
+        return QtWidgets.QDialog.Accepted
+
+    with mock.patch.object(DcRemovalDialog, "exec", accept):
+        window._configure_dc_removal()
+    channel = window._read_session_from_widgets().ai_channels[0]
+    assert channel.dc_removal_enabled and channel.dc_removal_cutoff_hz == .3
+    window.channel_sensitivity_edit.setValue(1.96133)
+    assert window._read_session_from_widgets().ai_channels[0].dc_removal_enabled
+    window.controller.backend = build_backend("simulated")
+    window._apply_netdaq_limits()
+    assert not window.dc_removal_action.isEnabled()
 
 
 def test_dasp_sensor_can_move_to_ch1_without_hardware_or_second_scaling(app, tmp_path):

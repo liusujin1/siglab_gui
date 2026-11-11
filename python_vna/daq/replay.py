@@ -54,6 +54,10 @@ class ReplaySource:
                 self.kind = "text_record"
         else:
             raise DaqBackendError("回放支持 VNA/MAT、DASP CH n.par/sts、连续记录目录或 manifest/DAT/BIN")
+        provenance = self.header.get("daq_provenance", {})
+        if isinstance(provenance, dict) and provenance.get("dc_removed"):
+            self.header["dc_removed"] = True
+            self.header["dc_removal"] = deepcopy(provenance.get("dc_removal"))
         if (not math.isfinite(self.rate) or self.rate <= 0 or not self.names
                 or len(self.names) != len(set(self.names)) or len(self.names) > 64):
             raise DaqBackendError("回放文件采样率或通道信息无效")
@@ -128,10 +132,16 @@ class ReplaySource:
         if saved.measurement is None:
             raise DaqBackendError("VNA 中没有时域数据")
         measurement = saved.measurement
-        self._vna_data = measurement.time_data.get("channels", {})
+        raw = measurement.time_data.get("channels", {})
+        self.channels = [deepcopy(c) for c in saved.config.ai_channels
+                         if c.enabled and (c.name in raw or c.label in raw)]
+        self._vna_data = {c.name: raw[c.name if c.name in raw else c.label]
+                          for c in self.channels} if self.channels else raw
         self.names = list(self._vna_data)
         self.rate = float(measurement.sample_rate)
-        self.channels = [deepcopy(c) for c in saved.config.ai_channels if c.name in self.names]
+        provenance = measurement.metadata.get("daq_provenance", {})
+        self.header["dc_removed"] = provenance.get("dc_removed", False)
+        self.header["dc_removal"] = deepcopy(provenance.get("dc_removal"))
         lengths = {np.asarray(v).size for v in self._vna_data.values()}
         if len(lengths) != 1 or not next(iter(lengths), 0):
             raise DaqBackendError("VNA 时域数据为空或通道长度不一致")
@@ -220,6 +230,10 @@ class ReplayBackend(BaseDaqBackend):
         if self._size * len(source.names) * 8 > 64 * 1024 * 1024:
             raise DaqBackendError("回放单块超过 64 MiB，请缩短帧长")
         self._rate = session.acquisition.sample_rate = source.rate
+        from .dc_removal import DcRemoval
+
+        self._dc_removal = DcRemoval(
+            [] if source.header.get("dc_removed") else session.ai_channels, self._rate)
         session.acquisition.bandwidth_hz = source.rate / 2.56
         self._session = session
         self._cancel.clear()
@@ -275,17 +289,24 @@ class ReplayBackend(BaseDaqBackend):
                               {**self.acquisition_provenance(), "sample_start_index": self._position})
         self._position += count
         self._frame_index += 1
-        return result
+        return self._dc_removal.apply_frame(result)
 
     def acquisition_provenance(self):
         rate_basis = self.source.header.get("sample_rate_basis", "recorded")
-        return dict(backend="replay", source_path=self.path, source_kind=self.source.kind, units="V",
+        result = dict(backend="replay", source_path=self.path, source_kind=self.source.kind, units="V",
                     actual_sample_rate=None if rate_basis == "file_declared_unverified" else self._rate,
                     playback_sample_rate=self._rate, physical_device=False, sample_rate_basis=rate_basis,
                     voltage_conversion=deepcopy(self.source.header.get("dasp_conversion")),
                     channel_full_scales={c.name: abs(float(c.full_scale))
                                          for c in self._session.ai_channels if c.enabled},
                     warning=self.source.header.get("replay_warning"))
+        if self._dc_removal.enabled:
+            result.update(dc_removal=self._dc_removal.description(), dc_removed=True,
+                          raw_voltage_available=True)
+        elif self.source.header.get("dc_removed"):
+            result.update(dc_removal=deepcopy(self.source.header.get("dc_removal")), dc_removed=True,
+                          raw_voltage_available=False)
+        return result
 
     def update_trigger_level(self, level_v):
         if self._trigger is None:

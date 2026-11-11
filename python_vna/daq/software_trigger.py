@@ -32,6 +32,7 @@ class SoftwareTrigger:
         self.read_block = read_block
         self.check_stop = check_stop
         self.data = np.empty((len(self.names), 0))
+        self.raw_data = None
         self.start = self.scan = self.index = 0
         self.previous_inside = False
         self.last_metadata = {}
@@ -55,12 +56,19 @@ class SoftwareTrigger:
                 or frame.data.ndim != 2 or frame.data.shape[0] != len(self.names)
                 or not 0 < frame.data.shape[1] <= self.size):
             raise DaqBackendError("软件触发流的通道、采样率或块长度发生改变")
+        if frame.raw_data is not None:
+            if self.raw_data is None:
+                self.raw_data = frame.raw_data.copy()
+            else:
+                self.raw_data = np.concatenate((self.raw_data, frame.raw_data), axis=1)
         self.data = np.concatenate((self.data, frame.data), axis=1)
         self.last_metadata = dict(frame.metadata)
 
     def _discard_before(self, absolute):
         count = min(self.data.shape[1], max(0, absolute - self.start))
         self.data = self.data[:, count:].copy()
+        if self.raw_data is not None:
+            self.raw_data = self.raw_data[:, count:].copy()
         self.start += count
 
     def read_frame(self):
@@ -96,6 +104,7 @@ class SoftwareTrigger:
         self.check_stop()
         offset = begin - self.start
         data = self.data[:, offset:offset + self.size].copy()
+        raw = self.raw_data[:, offset:offset + self.size].copy() if self.raw_data is not None else None
         self.previous_inside = bool(np.isfinite(data[self.source, -1])
                                     and abs(data[self.source, -1]) < self.level)
         # Retain prehistory for an event immediately after this record. It may
@@ -115,6 +124,6 @@ class SoftwareTrigger:
         else:
             metadata.pop("frame_start_unix_ns", None)
         result = BackendFrame(self.rate, self.names, data, np.arange(self.size) / self.rate,
-                              self.index, metadata)
+                              self.index, metadata, raw_data=raw)
         self.index += 1
         return result

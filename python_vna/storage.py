@@ -1436,17 +1436,29 @@ def save_legacy_vna(session: SavedSession, path: str | Path) -> Path:
         "EULabel": eu_label,
         "SLm": slm,
     }
-    if metadata.get("daq_backend") == "netdaq":
+    if any(channel.dc_removal_enabled or channel.dc_removal_cutoff_hz != 0.1 for channel in channels):
+        mat_variables["PythonVNADcRemoval_json"] = json.dumps({
+            "version": 1,
+            "channels": {channel.name: {
+                "enabled": bool(channel.dc_removal_enabled),
+                "cutoff_hz": float(channel.dc_removal_cutoff_hz),
+            } for channel in channels},
+        }, ensure_ascii=True)
+    if metadata.get("daq_backend") == "netdaq" or (
+            metadata.get("daq_backend") == "replay"
+            and metadata.get("daq_provenance", {}).get("dc_removed")):
         # Keep MATLAB-era configuration fields unchanged. Python readers restore
         # the native clock and independent IEPE settings from this ASCII-only extension.
         mat_variables["PythonVNAAcquisition_json"] = json.dumps({
-            "version": 1, "backend": "netdaq", "sample_rate": sample_rate,
+            "version": 1, "backend": metadata["daq_backend"], "sample_rate": sample_rate,
             "bandwidth_hz": float(config.acquisition.bandwidth_hz),
             "provenance": metadata.get("daq_provenance", {}),
             "channel_settings": {channel.name: {
                 "iepe_enabled": bool(channel.iepe_enabled),
                 "iepe_current_ma": float(channel.iepe_current_ma),
                 "sensitivity": float(channel.sensitivity),
+                "dc_removal_enabled": bool(channel.dc_removal_enabled),
+                "dc_removal_cutoff_hz": float(channel.dc_removal_cutoff_hz),
             } for channel in channels},
         }, ensure_ascii=True, default=_json_default)
     stream = BytesIO()
@@ -1647,12 +1659,21 @@ def load_legacy_vna(path: str | Path) -> SavedSession:
         extension_text = "".join(str(value) for value in np.ravel(mat.get("PythonVNAAcquisition_json", "{}")))
         candidate = json.loads(extension_text)
         if (isinstance(candidate, dict) and candidate.get("version") == 1
-                and candidate.get("backend") == "netdaq"):
+                and candidate.get("backend") in {"netdaq", "replay"}):
             actual_rate = float(candidate["sample_rate"])
             if np.isfinite(actual_rate) and actual_rate > 0:
                 native_acquisition = candidate
                 sample_rate = actual_rate
     except (ValueError, TypeError, KeyError):
+        pass
+    dc_channels = {}
+    try:
+        dc_text = "".join(str(value) for value in np.ravel(mat.get("PythonVNADcRemoval_json", "{}")))
+        dc_candidate = json.loads(dc_text)
+        if (isinstance(dc_candidate, dict) and dc_candidate.get("version") == 1
+                and isinstance(dc_candidate.get("channels"), dict)):
+            dc_channels = dc_candidate["channels"]
+    except (ValueError, TypeError):
         pass
     center_freq = float(np.squeeze(mat.get("CenterFreq", [[0.0]])).item())
     slm = mat.get("SLm")
@@ -1739,6 +1760,8 @@ def load_legacy_vna(path: str | Path) -> SavedSession:
             iepe_current_ma = 2.1
             native_channels = native_acquisition.get("channel_settings", {})
             native_channel = native_channels.get(channel_name, {}) if isinstance(native_channels, dict) else {}
+            if not isinstance(native_channel, dict):
+                native_channel = {}
             try:
                 native_iepe = native_channel["iepe_enabled"]
                 native_current = float(native_channel["iepe_current_ma"])
@@ -1748,6 +1771,17 @@ def load_legacy_vna(path: str | Path) -> SavedSession:
                     iepe_enabled, iepe_current_ma = native_iepe, native_current
                     sensitivity = native_sensitivity
             except (KeyError, TypeError, ValueError, OverflowError):
+                pass
+            dc_enabled, dc_cutoff = False, 0.1
+            try:
+                dc_setting = dc_channels.get(channel_name, {})
+                if not isinstance(dc_setting, dict):
+                    dc_setting = {}
+                requested = dc_setting.get("enabled", native_channel.get("dc_removal_enabled", False))
+                cutoff = float(dc_setting.get("cutoff_hz", native_channel.get("dc_removal_cutoff_hz", 0.1)))
+                if isinstance(requested, bool) and np.isfinite(cutoff) and 0 < cutoff < sample_rate / 2:
+                    dc_enabled, dc_cutoff = requested, cutoff
+            except (TypeError, ValueError, OverflowError):
                 pass
             channels.append(
                 ChannelConfig(
@@ -1760,6 +1794,8 @@ def load_legacy_vna(path: str | Path) -> SavedSession:
                     offset=offset,
                     iepe_enabled=iepe_enabled,
                     iepe_current_ma=iepe_current_ma,
+                    dc_removal_enabled=dc_enabled,
+                    dc_removal_cutoff_hz=dc_cutoff,
                     engineering_unit=eu_text,
                     sensitivity=sensitivity,
                     per_eu_mode=per_eu_mode,
@@ -1999,7 +2035,7 @@ def load_legacy_vna(path: str | Path) -> SavedSession:
         impulse_responses=impulse_responses,
         metadata={
             "source": "legacy_vna",
-            **({"daq_backend": "netdaq", "daq_provenance": native_acquisition.get("provenance", {})}
+            **({"daq_backend": native_acquisition["backend"], "daq_provenance": native_acquisition.get("provenance", {})}
                if native_acquisition else {}),
             "center_freq": center_freq,
             "rbw_hz": float(fdxvec[1] - fdxvec[0]) if fdxvec.size > 1 else 0.0,
