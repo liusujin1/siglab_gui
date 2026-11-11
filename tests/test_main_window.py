@@ -14,7 +14,7 @@ import numpy as np
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6 import QtCore, QtGui, QtTest, QtWidgets
 
 from python_vna.controller import VnaController
 from python_vna.continuous_recording import RecordingStatus
@@ -1149,6 +1149,46 @@ class MainWindowTests(unittest.TestCase):
 
         self.assertIn("avg:2/4", self.window.run_info_label.text())
         self.assertIn("Avg frame 2/4 acquired", self.window.statusBar().currentMessage())
+        self.assertFalse(self.window.average_progress.isHidden())
+        self.assertEqual(self.window.average_progress.value(), 2)
+        self.assertEqual(self.window.average_progress.maximum(), 4)
+        self.assertIn("2 / 4", self.window.average_progress.format())
+
+    def test_average_progress_survives_status_messages_and_finishes_with_actual_count(self):
+        for count, rejected in ((1, False), (1, True), (2, False)):
+            measurement = self._measurement()
+            measurement.metadata.update(
+                averaging_enabled=True, average_count=count, average_target=3, rejected=rejected,
+            )
+            self.window._handle_worker_measurement(measurement)
+            self.assertEqual(self.window.average_progress.value(), count)
+            if rejected:
+                self.assertIn("剔除", self.window.average_progress.format())
+        self.window.statusBar().showMessage("等待下一次触发")
+        self.assertFalse(self.window.average_progress.isHidden())
+        self.window._acquisition_thread_finished()
+        self.assertIn("2 / 3", self.window.average_progress.format())
+        self.assertIn("未完成", self.window.average_progress.format())
+
+        measurement.metadata["average_count"] = 3
+        self.window._handle_worker_measurement(measurement)
+        self.window._acquisition_thread_finished()
+        self.assertIn("3 / 3", self.window.average_progress.format())
+        self.assertIn("（完成）", self.window.average_progress.format())
+        self.window._handle_worker_measurement(self._measurement())
+        self.assertTrue(self.window.average_progress.isHidden())
+
+    def test_average_progress_starts_at_zero_and_is_readable_in_both_themes(self):
+        self.window._update_average_progress(0, 20, state="等待采集")
+        self.assertIn("0 / 20", self.window.average_progress.format())
+        for theme in ("light", "dark"):
+            self.window._set_theme(theme, persist=False)
+            style = self.window.average_progress.styleSheet()
+            self.assertIn(self.window._theme()["text"], style)
+            self.assertIn(self.window._theme()["accent"], style)
+            self.assertIn("font-weight: 700", style)
+        self.window._set_average_progress_state("停止中")
+        self.assertIn("停止中", self.window.average_progress.format())
 
     def test_avg_measurement_status_hides_internal_zero_based_frame_number(self):
         measurement = self._measurement()
@@ -1268,6 +1308,8 @@ class MainWindowTests(unittest.TestCase):
             self.assertTrue(captured["average_run"])
             self.assertEqual(captured["target_average_count"], 20)
             self.assertAlmostEqual(captured["display_interval_seconds"], 1.0)
+            self.assertFalse(self.window.average_progress.isHidden())
+            self.assertIn("0 / 20", self.window.average_progress.format())
         finally:
             main_window_module.AcquisitionWorker = original_worker
             main_window_module.QtCore.QThread = original_thread
@@ -2470,6 +2512,80 @@ class MainWindowTests(unittest.TestCase):
         self.window._clear_overlays()
         self.assertEqual(len(self.window._stored_overlays["top"]), 0)
         self.assertEqual(len(self.window._stored_overlays["bottom"]), 0)
+
+    def test_auto_ranges_include_visible_overlays_on_every_measurement(self):
+        for mode in ("y(t)", "aspec", "xfer"):
+            with self.subTest(mode=mode):
+                self.window._clear_overlays()
+                for key in ("top", "bottom"):
+                    self.window._display_combo_for_key(key).setCurrentText(mode)
+                original = self._measurement()
+                original.time_data["channels"] = {
+                    "ai0": np.array([-50., 0., 100., 0.]),
+                    "ai1": np.array([-25., 0., 50., 0.]),
+                }
+                original.spectra["autospectrum"] = {
+                    "ai0": np.array([1e-8, 1e-4, 1e4, 1e8]),
+                    "ai1": np.array([1e-8, 1e-4, 1e4, 1e8]),
+                }
+                original.frf = {"ai0->ai1": np.array([1e-8, 1e-4, 1e4, 1e8], dtype=complex)}
+                self.controller.state.measurement = original
+                self.window._plot_measurement(original)
+                for key in ("top", "bottom"):
+                    self.window._capture_overlay(key)
+                current = self._measurement()
+                self.controller.state.measurement = current
+                for _ in range(2):
+                    self.window._plot_measurement(current)
+                    for key in ("top", "bottom"):
+                        self.window._auto_scale_plot_xy(key)
+                        plot_range = self.window._plot_widget_for_key(key).viewRange()[1]
+                        curves = self.window._stored_overlays[key][0].curves
+                        for x, y in curves.values():
+                            _, y = self.window._prepare_curve_xy(key, x, y)
+                            if self.window._is_log_yscale(key):
+                                y = np.log10(y)
+                            self.assertLessEqual(plot_range[0], np.min(y))
+                            self.assertGreaterEqual(plot_range[1], np.max(y))
+                        self.assertNotIn("overlay:", " ".join(self.window._last_plot_cache[key]))
+                self.window.overlay_checkbox.setChecked(False)
+                self.window._plot_measurement(current)
+                for key in ("top", "bottom"):
+                    self.assertLess(self.window._plot_widget_for_key(key).viewRange()[1][1], 40.)
+
+    def test_overlay_auto_range_respects_visible_x_and_manual_y(self):
+        self.window.top_display_combo.setCurrentText("y(t)")
+        original = self._measurement()
+        original.time_data["channels"] = {"ai0": np.array([0.1, 0.2, 0.3, 80.])}
+        self.controller.state.measurement = original
+        self.window._plot_measurement(original)
+        self.window._capture_top_overlay()
+        current = self._measurement()
+        current.time_data["channels"] = {"ai0": np.array([0., 0.1, 0., 0.1])}
+        self.controller.state.measurement = current
+        self.window._plot_measurement(current)
+        self.window._manual_x_ranges["top"] = (0., 0.21)
+        self.window._apply_axis_scale("top", y_scope="visible")
+        self.assertLess(self.window.top_plot.viewRange()[1][1], 1.)
+        self.window._manual_y_ranges["top"] = (-0.5, 0.5)
+        self.window._plot_measurement(current)
+        np.testing.assert_allclose(self.window.top_plot.viewRange()[1], [-0.5, 0.5])
+
+    def test_overlay_range_includes_nyquist_real_and_imaginary_extents(self):
+        self.window.top_display_combo.setCurrentText("xfer")
+        self.window.top_value_mode_combo.setCurrentText("nyquist")
+        original = self._measurement()
+        original.frf = {"ai0->ai1": np.array([-50.-100.j, 100.+50.j, 0.+0.j, 0.+0.j])}
+        self.controller.state.measurement = original
+        self.window._plot_measurement(original)
+        self.window._capture_top_overlay()
+        current = self._measurement()
+        self.controller.state.measurement = current
+        self.window._plot_measurement(current)
+        self.window._apply_axis_scale("top")
+        for low, high in self.window.top_plot.viewRange():
+            self.assertLessEqual(low, -100.)
+            self.assertGreaterEqual(high, 100.)
 
     def test_overlay_persists_when_new_session_is_loaded(self):
         measurement = self._measurement()
@@ -4061,6 +4177,54 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(self.window.condition_edit.toPlainText(), "预览框修改")
             self.assertEqual(self.window.session_notes_edit.toPlainText(), "预览框修改")
             self.assertEqual(self.window.session.notes, "预览框修改")
+
+    def test_condition_ctrl_s_saves_both_editors_without_opening_vna_save_dialog(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            folder = Path(tmpdir)
+            path = folder / "003.vna"
+            (folder / "readme.txt").write_text("001:旧工况\n003：读取工况\n", encoding="utf-8")
+            self.window._apply_loaded_startup_session(SavedSession(
+                config=default_session_config(), measurement=self._measurement(), source_path=path,
+            ))
+            self.window.condition_button.setChecked(True)
+            self.window._close_confirmed = True
+            self.window.show()
+            self.window.activateWindow()
+            for editor, contents in (
+                (self.window.condition_edit, "当前工况修改"),
+                (self.window.condition_readme_preview, "001：批量修改\n003：readme修改\n"),
+            ):
+                editor.setPlainText(contents)
+                editor.setFocus()
+                QtWidgets.QApplication.processEvents()
+                with mock.patch.object(QtWidgets.QFileDialog, "getSaveFileName") as dialog:
+                    QtTest.QTest.keyClick(editor, QtCore.Qt.Key_S, QtCore.Qt.ControlModifier)
+                    QtWidgets.QApplication.processEvents()
+                    dialog.assert_not_called()
+                expected = "readme修改" if editor is self.window.condition_readme_preview else contents
+                saved = (folder / "readme.txt").read_text(encoding="utf-8-sig")
+                self.assertIn(f"003：{expected}", saved)
+                self.assertEqual(self.window.session.notes, expected)
+                self.assertFalse(self.window._condition_edit_dirty)
+                self.assertFalse(self.window._condition_preview_dirty)
+            self.assertEqual(
+                self.window.condition_save_shortcut.context(), QtCore.Qt.WidgetWithChildrenShortcut,
+            )
+            self.assertLessEqual(self.window.condition_edit.height(), 80)
+            self.assertGreater(
+                self.window.condition_readme_preview.height(), self.window.condition_edit.height() * 2,
+            )
+
+    def test_condition_save_error_preserves_editor_for_retry(self):
+        self.window._current_source_path = Path("D:/data/003.vna")
+        self.window.condition_edit.setPlainText("尚未成功保存")
+        with mock.patch.object(self.window, "_write_condition_readme_from_panel", side_effect=OSError("只读")), \
+                mock.patch.object(QtWidgets.QMessageBox, "warning") as warning:
+            self.window._apply_condition_notes()
+        warning.assert_called_once()
+        self.assertIn("保存失败", self.window.statusBar().currentMessage())
+        self.assertTrue(self.window._condition_edit_dirty)
+        self.assertEqual(self.window.condition_edit.toPlainText(), "尚未成功保存")
 
     def test_condition_panel_apply_updates_grouped_number_line(self):
         with tempfile.TemporaryDirectory() as tmpdir:

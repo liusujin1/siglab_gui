@@ -1762,6 +1762,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.right_panel.setStyleSheet(self._plot_workspace_stylesheet(theme))
         if hasattr(self, "toolbar_container"):
             self.toolbar_container.setStyleSheet(self._toolbar_stylesheet(theme))
+        if hasattr(self, "average_progress"):
+            self.average_progress.setStyleSheet(
+                f"QProgressBar {{ background: {theme['panel_bg']}; color: {theme['text']}; "
+                f"border: 2px solid {theme['accent']}; border-radius: 5px; "
+                "font-size: 11pt; font-weight: 700; text-align: center; padding: 2px; } "
+                f"QProgressBar::chunk {{ background: {theme['accent_soft']}; border-radius: 3px; }}"
+            )
         for panel_name in ("upper_axis_panel", "lower_axis_panel"):
             panel = getattr(self, panel_name, None)
             if panel is not None:
@@ -1941,6 +1948,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._attach_axis_history(self.bottom_plot, "bottom")
         self._attach_dynamic_y_scaling(self.top_plot, "top")
         self._attach_dynamic_y_scaling(self.bottom_plot, "bottom")
+        self.average_progress = QtWidgets.QProgressBar()
+        self.average_progress.setMinimumSize(270, 32)
+        self.average_progress.setTextVisible(True)
+        self.average_progress.setToolTip("仅计入有效平均的帧；暂存和剔除不增加次数。")
+        self._average_progress_count = 0
+        self._average_progress_target = 0
+        self.average_progress.hide()
+        layout.addWidget(self.average_progress, 0, QtCore.Qt.AlignLeft)
         self.statusBar().showMessage("就绪")
 
     def _create_vna_plot(self, title: str, key: str):
@@ -4040,7 +4055,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if path is None or path.suffix.lower() != ".vna" or not number:
             self.statusBar().showMessage("工况已应用到当前 VNA notes")
             return
-        self._write_condition_readme_from_panel(path, number, condition)
+        try:
+            self._write_condition_readme_from_panel(path, number, condition)
+        except OSError as exc:
+            self.statusBar().showMessage(f"工况保存失败：{exc}")
+            QtWidgets.QMessageBox.warning(self, "工况保存失败", str(exc))
+            return
         self._refresh_condition_panel()
         self.statusBar().showMessage(f"工况已写入 {path.parent / 'readme.txt'}")
 
@@ -4171,7 +4191,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(edit_label)
         self.condition_edit = QtWidgets.QPlainTextEdit()
         self.condition_edit.setPlaceholderText("例如：2号减振器主基板，开#3环境门")
-        self.condition_edit.setMinimumHeight(96)
+        self.condition_edit.setFixedHeight(max(48, self.condition_edit.fontMetrics().lineSpacing() * 3 + 12))
         self.condition_edit.textChanged.connect(self._condition_text_changed)
         layout.addWidget(self.condition_edit)
 
@@ -4179,7 +4199,7 @@ class MainWindow(QtWidgets.QMainWindow):
         preview_label.setObjectName("legacyMiniLabel")
         layout.addWidget(preview_label)
         self.condition_readme_preview = QtWidgets.QPlainTextEdit()
-        self.condition_readme_preview.setPlaceholderText("可直接编辑所有编号工况，点“应用”保存整份 readme.txt")
+        self.condition_readme_preview.setPlaceholderText("可直接编辑所有编号工况，按 Ctrl+S 或点“应用”保存 readme.txt")
         self.condition_readme_preview.setMinimumHeight(180)
         self.condition_readme_preview.textChanged.connect(self._condition_preview_changed)
         layout.addWidget(self.condition_readme_preview, 1)
@@ -4187,13 +4207,16 @@ class MainWindow(QtWidgets.QMainWindow):
         buttons = QtWidgets.QHBoxLayout()
         buttons.setSpacing(6)
         self.condition_apply_button = QtWidgets.QPushButton("应用")
-        self.condition_apply_button.setToolTip("保存当前工况和下方 readme.txt 编辑内容")
+        self.condition_apply_button.setToolTip("保存当前工况和下方 readme.txt 编辑内容（Ctrl+S）")
         self.condition_refresh_button = QtWidgets.QPushButton("刷新 readme")
         self.condition_apply_button.clicked.connect(self._apply_condition_notes)
         self.condition_refresh_button.clicked.connect(self._refresh_condition_panel)
         buttons.addWidget(self.condition_apply_button)
         buttons.addWidget(self.condition_refresh_button)
         layout.addLayout(buttons)
+        self.condition_save_shortcut = QtGui.QShortcut(QtGui.QKeySequence.StandardKey.Save, panel)
+        self.condition_save_shortcut.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
+        self.condition_save_shortcut.activated.connect(self._apply_condition_notes)
         return panel
 
     def _build_display_panel(
@@ -6303,6 +6326,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.backend_combo.setEnabled(False)
         self.device_combo.setEnabled(False)
         self.refresh_devices_button.setEnabled(False)
+        self.average_progress.hide()
         self.run_info_label.setText("State: starting record")
         self.device_info_label.setText(f"Device: {device_name}")
         self.statusBar().showMessage(f"Starting continuous recording to {output_dir}")
@@ -6392,6 +6416,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.backend_combo.setEnabled(False)
         self.device_combo.setEnabled(False)
         self.refresh_devices_button.setEnabled(False)
+        if average_run:
+            self._update_average_progress(0, target_average_count or 0, state="等待采集")
+        else:
+            self.average_progress.hide()
         self.run_info_label.setText("State: starting avg" if average_run else "State: starting")
         self.device_info_label.setText(f"Device: {device_name}")
         self.statusBar().showMessage("Starting averaged acquisition" if average_run else "Starting acquisition")
@@ -6454,6 +6482,25 @@ class MainWindow(QtWidgets.QMainWindow):
         if message.startswith("等待首锤"):
             self.statusBar().showMessage(message)
 
+    def _update_average_progress(self, count: int, target: int, *, state: str = "") -> None:
+        self._average_progress_count = max(0, int(count or 0))
+        self._average_progress_target = max(0, int(target or 0))
+        self.average_progress.setRange(0, max(1, self._average_progress_target, self._average_progress_count))
+        self.average_progress.setValue(self._average_progress_count)
+        text = f"平均  {self._average_progress_count}"
+        text += f" / {self._average_progress_target}" if self._average_progress_target else " 次"
+        if state:
+            text += f"  （{state}）"
+        self.average_progress.setFormat(text)
+        self.average_progress.setAccessibleName(text)
+        self.average_progress.show()
+
+    def _set_average_progress_state(self, state: str) -> None:
+        if not self.average_progress.isHidden():
+            self._update_average_progress(
+                self._average_progress_count, self._average_progress_target, state=state,
+            )
+
     @staticmethod
     def _acquisition_display_interval_seconds(session: SessionConfig) -> float:
         sample_rate = max(float(session.acquisition.sample_rate), 1.0)
@@ -6492,6 +6539,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.record_button.setEnabled(False)
         self._pending_measurement = None
         self._stop_requested_for_current_run = True
+        self._set_average_progress_state("停止中")
         self.run_info_label.setText("State: stopping")
         self.statusBar().showMessage("Stopping acquisition")
         if self._acquisition_stop_event is not None:
@@ -6517,6 +6565,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_device_connected(True)
         if self._stop_requested_for_current_run:
             return
+        if measurement.metadata.get("averaging_enabled", False):
+            state = "采集中"
+            if measurement.metadata.get("rejected", False):
+                state = "本帧剔除"
+            elif measurement.metadata.get("smart_hit_state") == "pending":
+                state = "暂存"
+            self._update_average_progress(
+                measurement.metadata.get("average_count", 0),
+                measurement.metadata.get("average_target", 0),
+                state=state,
+            )
+        else:
+            self.average_progress.hide()
         if "manual" in self._current_combo_value(self.trigger_mode_combo).strip().lower() and self.trigger_enable.isChecked():
             self.trigger_enable.setChecked(False)
             self._sync_trigger_arm_button()
@@ -6658,6 +6719,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.device_combo.setEnabled(idle)
         self.refresh_devices_button.setEnabled(idle)
         self.run_info_label.setText("State: error")
+        self._set_average_progress_state("采集失败")
         self.statusBar().showMessage(f"Acquisition error: {message}")
         QtWidgets.QMessageBox.critical(self, "Acquisition Failed", message)
 
@@ -6680,6 +6742,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.device_combo.setEnabled(True)
         self.refresh_devices_button.setEnabled(True)
         if self.run_info_label.text() not in {"State: error"}:
+            complete = (self._average_progress_target > 0
+                        and self._average_progress_count >= self._average_progress_target)
+            self._set_average_progress_state(
+                "完成" if complete else "未完成" if self._average_progress_target else "已停止",
+            )
             self.run_info_label.setText("State: stopped")
             self.statusBar().showMessage("Acquisition stopped")
             measurement = self.controller.state.measurement
@@ -8224,7 +8291,7 @@ class MainWindow(QtWidgets.QMainWindow):
         key: str,
         scope: str = "legacy",
     ) -> tuple[float, float] | None:
-        if scope != "visible":
+        if scope not in {"visible", "data"}:
             legacy_extent = self._legacy_y_extent_for_display(key, curves)
             if legacy_extent is not None:
                 return legacy_extent
@@ -8255,7 +8322,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         all_values = np.concatenate(values)
         if self._is_log_yscale(key) and not self._is_nyquist_display(key):
-            if scope == "visible":
+            if scope in {"visible", "data"}:
                 return float(np.min(all_values)), float(np.max(all_values))
             floor = self._legacy_log_floor(key, all_values)
             if floor is not None:
@@ -8560,7 +8627,15 @@ class MainWindow(QtWidgets.QMainWindow):
         has_manual_x = manual_range is not None
         try:
             has_legacy_x = False
-            current_curves = self._last_plot_cache.get(key, {})
+            current_curves = dict(self._last_plot_cache.get(key, {}))
+            overlay_curves_for_range = {}
+            if self.overlay_checkbox.isChecked():
+                for index, overlay_curves in enumerate(self._visible_overlay_curves(key)):
+                    for name, (x_data, y_data) in overlay_curves.items():
+                        x_data, y_data = self._prepare_curve_xy(key, x_data, y_data)
+                        if x_data.size:
+                            overlay_curves_for_range[f"overlay:{index}:{name}"] = (x_data, y_data)
+            current_curves.update(overlay_curves_for_range)
             if not preserve_x:
                 if has_manual_x:
                     xmin, xmax = manual_range
@@ -8574,11 +8649,6 @@ class MainWindow(QtWidgets.QMainWindow):
                         current_extent = self._curve_x_extent(current_curves)
                         if current_extent is not None:
                             extents.append(current_extent)
-                        if self.overlay_checkbox.isChecked():
-                            for overlay_curves in self._visible_overlay_curves(key):
-                                overlay_extent = self._curve_x_extent(overlay_curves)
-                                if overlay_extent is not None:
-                                    extents.append(overlay_extent)
                         if not extents:
                             return
                         xmin = min(item[0] for item in extents)
@@ -8600,6 +8670,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 ymin, ymax = manual_y_range
             else:
                 y_extent = self._curve_y_extent(current_curves, key, scope=y_scope)
+                # Include overlays even when a legacy preset or channel range sets the base limits.
+                overlay_extent = self._curve_y_extent(
+                    overlay_curves_for_range, key,
+                    scope="visible" if y_scope == "visible" else "data",
+                )
+                if overlay_extent is not None:
+                    y_extent = overlay_extent if y_extent is None else (
+                        min(y_extent[0], overlay_extent[0]), max(y_extent[1], overlay_extent[1]),
+                    )
                 if y_extent is None:
                     return
                 ymin, ymax = y_extent
