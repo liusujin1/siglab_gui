@@ -1,4 +1,4 @@
-"""Experimental NetDAQ backend, gated by an independently verified device profile."""
+"""Experimental NetDAQ backend with explicit verified or DASP-declared profiles."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -46,7 +46,7 @@ class NetDaqSettings:
 
 @dataclass(frozen=True)
 class NetDaqProfile:
-    """Explicit, per-device calibration. Nothing is inferred from sensor names."""
+    """Qualified calibration or explicitly unverified DASP parameter reuse."""
     model: str
     descriptor: bytes
     stream_format: str
@@ -58,13 +58,19 @@ class NetDaqProfile:
     evidence: str
     transport: str = "tcp"
     firmware_hex: str = ""
+    qualification: str = "physical_verified"
+    vendor_parameters: dict | None = None
 
     @classmethod
     def load(cls, path: str | Path):
         try:
             raw = Path(path).read_bytes()
             data = json.loads(raw.decode("utf-8-sig"))
-            if data.get("schema_version") != 1 or data.get("verified") is not True:
+            qualification = data.get("qualification", "physical_verified")
+            declared = qualification == "dasp_parameters"
+            if (data.get("schema_version") != 1 or qualification not in {"physical_verified", "dasp_parameters"}
+                    or (not declared and data.get("verified") is not True)
+                    or (declared and (data.get("verified") is not False or data.get("transport") != "usb"))):
                 raise ValueError("profile must have schema_version=1 and verified=true")
             model, evidence = str(data["model"]).strip(), str(data["evidence"]).strip()
             desc = bytes.fromhex(data["descriptor_hex"])
@@ -105,9 +111,11 @@ class NetDaqProfile:
                 wire_numbers.add(wire)
                 kind = channel["channel_type"]
                 mode = channel["input_mode"]
+                modes = ({"device_fixed_unknown"} if declared else
+                         {"iepe", "voltage_single_ended_dc", "voltage_single_ended_ac",
+                          "voltage_differential_dc", "quarter_bridge", "half_bridge", "full_bridge"})
                 if (isinstance(kind, bool) or not isinstance(kind, int) or not 0 <= kind <= 255
-                        or mode not in {"iepe", "voltage_single_ended_dc", "voltage_single_ended_ac",
-                                        "voltage_differential_dc", "quarter_bridge", "half_bridge", "full_bridge"}):
+                        or mode not in modes):
                     raise ValueError("channel_type and independently verified input_mode are required")
                 current_value = channel.get("iepe_current_ma")
                 current = float(current_value) if current_value is not None else 0.0
@@ -148,15 +156,20 @@ class NetDaqProfile:
                 mask = sum(1 << n for n in wires)
                 if init[4:] != bytes((1,)) + struct.pack("<I", mask) + bytes(4):
                     raise ValueError("USB2404 captured channel mask disagrees with stream channel order")
+                if declared:
+                    from .dasp_profile import validate_dasp_declaration
+
+                    validate_dasp_declaration(data, usb_info)
             return cls(model, desc, fmt, init, offset, maximum, tuple(channels),
-                       hashlib.sha256(raw).hexdigest(), evidence, transport, data.get("firmware_hex", ""))
+                       hashlib.sha256(raw).hexdigest(), evidence, transport, data.get("firmware_hex", ""),
+                       qualification, data.get("vendor_parameters"))
         except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
             raise DaqBackendError(f"NetDAQ device profile is invalid: {exc}") from exc
 
     def option(self, index: int, channel) -> dict:
         reported = self.channels[index]
         settings = self.iepe_settings(index)
-        iepe = settings["enabled"]
+        iepe = bool(settings["enabled"])
         expected_current = settings["current_ma"] or 0.0
         if channel.iepe_enabled != iepe or (iepe and not math.isclose(
                 expected_current, channel.iepe_current_ma, abs_tol=1e-6)):
@@ -171,6 +184,11 @@ class NetDaqProfile:
     def iepe_settings(self, index: int) -> dict:
         """Supply facts from the qualified profile, never inferred from !A/!B."""
         entry = self.channels[index]
+        if entry["input_mode"] == "device_fixed_unknown":
+            return {
+                "enabled": None, "supply": "unspecified", "current_ma": None,
+                "current_known": False, "mode_known": False, "control": "read_only",
+            }
         enabled = entry["input_mode"] == "iepe"
         value = entry.get("iepe_current_ma")
         current = float(value) if enabled and value is not None and float(value) > 0 else None
@@ -188,6 +206,14 @@ def profile_preview(path):
         return {"valid": False, "reason": str(exc), "hardware_accessed": False}
     return {
         "valid": True, "hardware_accessed": False, "model": profile.model,
+        "qualification": profile.qualification,
+        "electrical_calibration_verified": profile.qualification == "physical_verified",
+        "sensor_import_errors": (profile.vendor_parameters or {}).get("sensor_import_errors", []),
+        "parameter_note": (
+            "有效传感器参数会在应用连接时导入。未导入通道保留当前系数；请核对上方错误。"
+            "dc 仅表示软件保留直流，IEPE 和硬件耦合仍未确认，不发送配置命令。"
+            if profile.qualification == "dasp_parameters" else ""),
+        "vendor_parameters": profile.vendor_parameters,
         "transport": profile.transport, "sha256": profile.digest, "evidence": profile.evidence,
         "max_sample_rate": profile.max_sample_rate, "stream_format": profile.stream_format,
         "channels": [{
@@ -298,7 +324,9 @@ class NetDaqBackend(BaseDaqBackend):
         profile = self.profile if result["profile_matches"] else None
         iepe = bool(profile and any(c["input_mode"] == "iepe" for c in profile.channels))
         return [BackendDevice(
-            self.device_name, f"NetDAQ {profile.model if profile else '未标定 / 仅只读探测'} (experimental)",
+            self.device_name, f"NetDAQ {profile.model if profile else '未配置 / 仅只读探测'}"
+            + ("（DASP 参数兼容；电气模式未确认）" if profile and profile.qualification == "dasp_parameters"
+               else " (experimental)"),
             [f"{self.device_name}/ai{i}" for i in range(len(profile.channels))] if profile else [], [],
             BackendCapability(supports_iepe=iepe, supports_analog_trigger=bool(profile),
                               supports_pretrigger=bool(profile),
@@ -313,7 +341,7 @@ class NetDaqBackend(BaseDaqBackend):
         if self.stop_uncertain:
             raise DaqBackendError("NetDAQ 上次停止未确认；请检查设备状态后重新应用连接设置")
         if not self.ready:
-            raise DaqBackendError("NetDAQ 尚未标定：请先获取设备描述并导入经实机验证的设备配置；禁止采集")
+            raise DaqBackendError("NetDAQ 尚无有效配置，禁止采集；请导入已核实配置或建立 USB DASP 参数兼容配置")
         if device_name not in (None, self.device_name):
             raise DaqBackendError("NetDAQ selected device does not match connection settings")
         acq = session.acquisition
@@ -389,7 +417,13 @@ class NetDaqBackend(BaseDaqBackend):
         try:
             # Channel type is device-owned. Validate ALL selected types before
             # writing anything; input mode is never switched via !C.
-            for index, name, option in self._selected:
+            to_check = self._selected
+            if profile.qualification == "dasp_parameters":
+                # The opaque bytes might affect shared ADC state. Check the
+                # entire captured stream, including host-disabled channels.
+                to_check = [(i, f"ai{i}", entry["options"][0])
+                            for i, entry in enumerate(profile.channels)]
+            for index, name, option in to_check:
                 entry = profile.channels[index]
                 kind, _count = self._control.channel_descriptor(entry["wire_number"])
                 if kind != entry["channel_type"]:
@@ -462,6 +496,8 @@ class NetDaqBackend(BaseDaqBackend):
                 self._pending.extend(self._stream.receive(needed - len(self._pending), deadline=deadline))
         values = decode_counts(bytes(self._pending[:needed]), bits).reshape(frame_size, count).T
         del self._pending[:needed]
+        if self.settings.transport == "usb" and np.any((values < -8388608) | (values > 8388607)):
+            raise NetDaqProtocolError("USBDAQ stream contains invalid signed 24-bit samples")
         data = np.vstack([(values[index].astype(np.float64) - float(option["zero_count"]))
                           * float(option["volts_per_count"]) for index, name, option in self._selected])
         frame = BackendFrame(
@@ -478,7 +514,7 @@ class NetDaqBackend(BaseDaqBackend):
         if self._session is None:
             raise DaqBackendError("NetDAQ must be configured before reading acquisition provenance")
         profile = self.profile
-        return {
+        result = {
             "backend": "netdaq", "experimental": True, "device_model": profile.model,
             "transport": self.settings.transport, "profile_sha256": profile.digest,
             "requested_sample_rate": self._requested_rate, "actual_sample_rate": self._rate,
@@ -495,6 +531,15 @@ class NetDaqBackend(BaseDaqBackend):
                                         for index, name, option in self._selected},
             "trigger_implementation": "host_absolute_window" if self._trigger is not None else "free_run",
         }
+        result["qualification"] = profile.qualification
+        result["electrical_calibration_verified"] = profile.qualification == "physical_verified"
+        if profile.qualification == "dasp_parameters":
+            result["channel_nominal_ranges"] = result.pop("channel_hardware_ranges")
+            result["voltage_conversion_basis"] = "dasp_declared_nominal_voltage"
+            result["vendor_parameter_sha256"] = profile.vendor_parameters["sha256"]
+            result["vendor_parameter_source"] = profile.vendor_parameters["path"]
+            result["hardware_coupling"] = "unknown_preserved"
+        return result
 
     def request_stop(self):
         self._cancel.set()

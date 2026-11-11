@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes as ct
+from copy import deepcopy
 import json
 import struct
 import threading
@@ -964,6 +965,172 @@ def test_hardware_validation_cli_failure_is_saved_and_does_not_open_device(usb, 
     assert report["status"] == "failed"
     assert "ValueError" in report["cycles"][0]["error"]
     assert not usb.native_threads
+
+
+@pytest.fixture
+def dasp_declared(usb, tmp_path):
+    from python_vna.daq.dasp_profile import build_dasp_usb_profile, save_dasp_usb_profile
+
+    source = tmp_path / "Channel.ini"
+    source.write_text(
+        "[Channel 0]\nSensitivity=0.08\nUnit=N\nSensitivity Physical Unit=m/s^2\n"
+        "[Channel 1]\nLabel=Sensor Y\nUnit=m/s^2\nSensitivity Physical Unit=m/s^2\n"
+        "Voltage Unit=mV\nSensitivity=50\nGain=2\nExternal gain=5\nOffset comp=4000\n",
+        encoding="utf-8")
+    report = NetDaqBackend(NetDaqSettings(transport="usb")).probe(range(4))
+    data = build_dasp_usb_profile(source, report)
+    target = tmp_path / "dasp-compatible.json"
+    save_dasp_usb_profile(data, target)
+    return data, target, source
+
+
+def test_dasp_compatibility_preserves_unknown_modes_and_provenance(usb, dasp_declared):
+    from python_vna.daq.dasp_profile import apply_dasp_profile_sensors
+
+    data, path, source = dasp_declared
+    assert data["verified"] is False
+    assert data["vendor_parameters"]["sensor_import_errors"]
+    b = NetDaqBackend(NetDaqSettings(transport="usb", profile_path=str(path)))
+    assert b.ready and b.profile.qualification == "dasp_parameters"
+    assert b.profile.iepe_settings(1)["enabled"] is None
+    session = config()
+    session.acquisition.frame_size = 2
+    for channel in session.ai_channels:
+        channel.full_scale = 10
+    previous_unit = session.ai_channels[0].engineering_unit
+    apply_dasp_profile_sensors(session.ai_channels, b.profile)
+    assert session.ai_channels[1].sensitivity == 2
+    assert session.ai_channels[1].offset == 0
+    assert session.ai_channels[0].engineering_unit == previous_unit
+    samples = np.array([[0, 4194304, -4194304, 0], [8388607, 0, 0, -8388608]], dtype="<i4")
+    usb.data = samples.tobytes()
+    b.configure(session)
+    try:
+        b.start()
+        frame = b.read_frame()
+        np.testing.assert_array_equal(frame.data, samples.T.astype(float) * 10 / 8388608)
+        # Sensor gains affect engineering units only, not backend volts.
+        assert frame.data[1, 0] == 5
+        assert frame.data[1, 0] * session.ai_channels[1].sensitivity == 10
+        assert not frame.metadata["electrical_calibration_verified"]
+        assert frame.metadata["hardware_coupling"] == "unknown_preserved"
+        assert frame.metadata["channel_modes"]["ai1"]["iepe"]["enabled"] is None
+        assert "channel_hardware_ranges" not in frame.metadata
+        assert frame.metadata["vendor_parameter_source"] == str(source.resolve())
+    finally:
+        b.close()
+    assert all(cmd != 0x43 for cmd, _ in usb.commands)
+
+
+@pytest.mark.parametrize("change", [
+    "verified", "tcp", "iepe", "coupling", "scale", "offset", "range", "rate", "missing_source",
+    "firmware", "partial_stream",
+])
+def test_dasp_compatibility_declaration_cannot_claim_extra_qualification(dasp_declared, change):
+    data, path, _ = dasp_declared
+    data = deepcopy(data)
+    if change == "verified":
+        data["verified"] = True
+    elif change == "tcp":
+        data["transport"] = "tcp"
+    elif change == "iepe":
+        data["channels"][0]["input_mode"] = "iepe"
+    elif change == "coupling":
+        data["channels"][0]["options"][0]["coupling"] = "ac"
+    elif change in {"scale", "offset", "range"}:
+        key = {"scale": "volts_per_count", "offset": "zero_count", "range": "full_scale_v"}[change]
+        data["channels"][0]["options"][0][key] = 1
+    elif change == "rate":
+        data["max_sample_rate"] = 128000
+    elif change == "firmware":
+        data["firmware_hex"] = reply(0x56, bytes((3, 0))).hex()
+    elif change == "partial_stream":
+        data["channels"].pop()
+        data["init_ad_payload_hex"] = (
+            struct.pack(">I", 1) + b"\x01" + struct.pack("<I", 7) + bytes(4)).hex()
+    else:
+        data.pop("vendor_parameters")
+    path.write_text(json.dumps(data))
+    with pytest.raises(DaqBackendError):
+        NetDaqProfile.load(path)
+
+
+def test_dasp_compatibility_still_refuses_configuration_drift(usb, dasp_declared):
+    _, path, _ = dasp_declared
+    b = NetDaqBackend(NetDaqSettings(transport="usb", profile_path=str(path)))
+    session = config()
+    for channel in session.ai_channels:
+        channel.full_scale = 10
+    b.configure(session)
+    usb.configurations[0] = b"\x07"
+    with pytest.raises(DaqBackendError, match="configuration changed"):
+        b.start()
+    b.close()
+    assert not any(cmd in {0x49, 0x53, 0x43} for cmd, _ in usb.commands)
+
+
+def test_dasp_compatibility_checks_host_disabled_channel_configuration(usb, dasp_declared):
+    _, path, _ = dasp_declared
+    b = NetDaqBackend(NetDaqSettings(transport="usb", profile_path=str(path)))
+    session = config()
+    for channel in session.ai_channels:
+        channel.full_scale = 10
+    session.ai_channels[0].enabled = False
+    b.configure(session)
+    usb.configurations[0] = b"\x07"
+    with pytest.raises(DaqBackendError, match="ai0.*configuration changed"):
+        b.start()
+    b.close()
+    assert not any(cmd in {0x49, 0x53, 0x43} for cmd, _ in usb.commands)
+
+
+def test_dasp_compatibility_preserves_source_and_target_on_failed_save(usb, dasp_declared):
+    from python_vna.daq.dasp_profile import save_dasp_usb_profile
+
+    data, path, source = dasp_declared
+    original, source_original = path.read_bytes(), source.read_bytes()
+    data["verified"] = True
+    with pytest.raises(DaqBackendError):
+        save_dasp_usb_profile(data, path)
+    assert path.read_bytes() == original and source.read_bytes() == source_original
+    assert not list(path.parent.glob("tmp_dasp_*"))
+
+
+def test_dasp_compatibility_never_overwrites_vendor_parameters(dasp_declared):
+    from python_vna.daq.dasp_profile import save_dasp_usb_profile
+
+    data, _, source = dasp_declared
+    original = source.read_bytes()
+    with pytest.raises(DaqBackendError, match="不能覆盖"):
+        save_dasp_usb_profile(data, source)
+    assert source.read_bytes() == original
+
+
+def test_dasp_compatibility_vna_restores_exact_engineering_scale(usb, dasp_declared, tmp_path):
+    from python_vna.controller import VnaController
+    from python_vna.daq.dasp_profile import apply_dasp_profile_sensors
+
+    _, profile_path, _ = dasp_declared
+    b = NetDaqBackend(NetDaqSettings(transport="usb", profile_path=str(profile_path)))
+    session = config()
+    for channel in session.ai_channels:
+        channel.full_scale = 10
+    apply_dasp_profile_sensors(session.ai_channels, b.profile)
+    ctl = VnaController(b, session)
+    ctl.configure()
+    try:
+        ctl.start()
+        ctl.read_and_process()
+    finally:
+        ctl.close()
+    path = tmp_path / "dasp.vna"
+    save_legacy_vna(ctl.snapshot(), path)
+    loaded = load_legacy_vna(path)
+    assert loaded.config.ai_channels[1].sensitivity == 2
+    provenance = loaded.measurement.metadata["daq_provenance"]
+    assert provenance["qualification"] == "dasp_parameters"
+    assert provenance["electrical_calibration_verified"] is False
+    assert provenance["channel_modes"]["ai1"]["iepe"]["enabled"] is None
 
 
 def test_usb_controller_vna_roundtrip(usb, tmp_path):

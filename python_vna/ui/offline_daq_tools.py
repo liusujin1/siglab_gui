@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
+import re
 
 from PySide6 import QtCore, QtWidgets
 
@@ -10,14 +12,20 @@ from python_vna.daq.dasp_import import load_dasp_channels
 
 
 class DaspImportDialog(QtWidgets.QDialog):
-    def __init__(self, path, parent=None):
+    def __init__(self, path, parent=None, *, channel_names=None):
         super().__init__(parent)
         self.setWindowTitle("导入 DASP 通道参数（预览）")
         self.resize(720, 390)
         errors = []
         self.channels = load_dasp_channels(path, errors=errors)
-        self.table = QtWidgets.QTableWidget(len(self.channels), 6)
-        self.table.setHorizontalHeaderLabels(["导入", "通道", "标签", "原灵敏度", "EU/Volt", "单位"])
+        if channel_names is None:
+            targets = list(range(max(4, max(c.index for c in self.channels) + 1)))
+        else:
+            targets = sorted({int(name[2:]) for name in channel_names
+                              if re.fullmatch(r"ai\d+", name)})
+        self.table = QtWidgets.QTableWidget(len(self.channels), 7)
+        self.table.setHorizontalHeaderLabels(
+            ["导入", "源通道", "标签 / 传感器", "原灵敏度", "EU/Volt", "单位", "目标通道"])
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         for row, channel in enumerate(self.channels):
             check = QtWidgets.QTableWidgetItem()
@@ -28,6 +36,15 @@ class DaspImportDialog(QtWidgets.QDialog):
                                            f"{channel.source_sensitivity:g}", f"{channel.eu_per_volt:.10g}",
                                            channel.unit), 1):
                 self.table.setItem(row, column, QtWidgets.QTableWidgetItem(value))
+            if channel.transducer:
+                self.table.item(row, 2).setText(f"{channel.label}\n{channel.transducer}")
+            destination = QtWidgets.QComboBox()
+            for index in targets:
+                destination.addItem(f"CH {index + 1}", index)
+            selected = destination.findData(channel.index)
+            if selected >= 0:
+                destination.setCurrentIndex(selected)
+            self.table.setCellWidget(row, 6, destination)
             self.table.item(row, 4).setToolTip(
                 f"灵敏度：{channel.source_sensitivity:g} {channel.voltage_unit}/({channel.unit})\n"
                 f"Gain={channel.gain:g}；External gain={channel.external_gain:g}\n"
@@ -35,9 +52,11 @@ class DaspImportDialog(QtWidgets.QDialog):
                 "仅用于工程量折算，不写入硬件增益。")
         self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.resizeRowsToContents()
         note = QtWidgets.QLabel(
             "按原灵敏度换算为 EU/Volt，Gain 和 External gain 在工程量换算中各除一次。\n"
-            "仅导入勾选通道的标签、启用状态、单位与灵敏度；保留当前零漂、量程、耦合和 IEPE。")
+            "可按传感器选择导入目标通道；多个源参数不能同时导入同一目标。\n"
+            "仅导入标签、启用状态、单位与灵敏度；保留当前零漂、量程、耦合和 IEPE。")
         note.setWordWrap(True)
         self.buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
@@ -57,8 +76,27 @@ class DaspImportDialog(QtWidgets.QDialog):
         layout.addWidget(self.buttons)
 
     def selected_channels(self):
-        return [channel for row, channel in enumerate(self.channels)
-                if self.table.item(row, 0).checkState() == QtCore.Qt.Checked]
+        selected = []
+        targets = set()
+        for row, channel in enumerate(self.channels):
+            if self.table.item(row, 0).checkState() != QtCore.Qt.Checked:
+                continue
+            index = self.table.cellWidget(row, 6).currentData()
+            if index is None:
+                raise ValueError("没有可导入的目标通道")
+            if index in targets:
+                raise ValueError(f"多个源参数选择了同一个目标 CH {index + 1}，请只保留一个")
+            targets.add(index)
+            selected.append(replace(channel, index=index))
+        return selected
+
+    def accept(self):
+        try:
+            self.selected_channels()
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "请检查目标通道", str(exc))
+            return
+        super().accept()
 
 
 class QualityReportDialog(QtWidgets.QDialog):

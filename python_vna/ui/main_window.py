@@ -1611,6 +1611,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._build_menus()
         self._apply_legacy_theme()
         self._refresh_toolbar_size()
+        self._apply_backend_sensor_defaults()
         self._load_session_to_widgets()
         self._refresh_condition_panel()
         self._update_window_title()
@@ -5179,7 +5180,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         entry = backend.profile.channels[row]
         iepe = backend.profile.iepe_settings(row)
-        enabled = iepe["enabled"]
+        enabled = bool(iepe["enabled"])
+        mode_known = iepe.get("mode_known", True)
         current = iepe["current_ma"] or 0.0
         previous = self._channel_editor_loading
         self._channel_editor_loading = True
@@ -5187,9 +5189,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.channel_table.item(row, 4).setCheckState(QtCore.Qt.Checked if enabled else QtCore.Qt.Unchecked)
             self.channel_table.item(row, 5).setText(f"{current:g}")
             if row == self.channel_list.currentRow():
-                self.channel_iepe_checkbox.setText("IEPE")
+                self.channel_iepe_checkbox.setText("IEPE" if mode_known else "IEPE（设备模式未确认）")
                 self.channel_iepe_checkbox.setChecked(enabled)
-                self.channel_iepe_current_edit.setSpecialValueText("未确认" if enabled and not iepe["current_known"] else "")
+                self.channel_iepe_current_edit.setSpecialValueText(
+                    "未确认" if not mode_known or enabled and not iepe["current_known"] else "")
                 self.channel_iepe_current_edit.setValue(current)
                 supply_text = {"device_fixed": "设备固定供电", "external": "外部适调器供电",
                                "unspecified": "供电来源未记录", "none": "未启用"}[iepe["supply"]]
@@ -5199,6 +5202,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.channel_iepe_checkbox.setToolTip(
                     f"已核实配置：{entry['input_mode']} / {supply_text}；硬件类型码 {entry['channel_type']}；"
                     "模式及电流只读，勾选状态不会开启恒流源")
+                if not mode_known:
+                    if not hasattr(self, "_dasp_original_range_tooltips"):
+                        self._dasp_original_range_tooltips = (
+                            self.channel_coupling_combo.toolTip(), self.channel_full_scale_combo.toolTip())
+                    self.channel_iepe_checkbox.setToolTip(
+                        "DASP 参数兼容：IEPE 实际状态及电流未知，保留设备当前状态，不发送供电或模式命令。")
+                    self.channel_coupling_combo.setToolTip(
+                        "DASP 参数兼容：硬件耦合未知。dc 仅表示软件保留原始直流，不设置硬件耦合。")
+                    self.channel_full_scale_combo.setToolTip(
+                        "DASP 声明的标称 ADC ±10 V 换算；不代表已确认硬件增益或完成独立校准。")
+                elif hasattr(self, "_dasp_original_range_tooltips"):
+                    self.channel_coupling_combo.setToolTip(self._dasp_original_range_tooltips[0])
+                    self.channel_full_scale_combo.setToolTip(self._dasp_original_range_tooltips[1])
+                    del self._dasp_original_range_tooltips
                 writable = entry["channel_type"] in {0, 6, 8} and backend.settings.transport != "usb"
                 self.channel_coupling_combo.setEnabled(writable)
                 self.channel_full_scale_combo.setEnabled(writable)
@@ -6201,7 +6218,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if not path:
             return
         try:
-            dialog = DaspImportDialog(path, self)
+            dialog = DaspImportDialog(
+                path, self, channel_names=[channel.name for channel in self.session.ai_channels])
             if dialog.exec() == QtWidgets.QDialog.Accepted:
                 session = self._read_session_from_widgets()
                 selected = dialog.selected_channels()
@@ -6277,11 +6295,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self.channel_iepe_checkbox.setToolTip("")
             self.channel_iepe_current_edit.setSpecialValueText("")
             self.channel_iepe_current_edit.setToolTip("")
+            if hasattr(self, "_dasp_original_range_tooltips"):
+                self.channel_coupling_combo.setToolTip(self._dasp_original_range_tooltips[0])
+                self.channel_full_scale_combo.setToolTip(self._dasp_original_range_tooltips[1])
+                del self._dasp_original_range_tooltips
         if hasattr(self, "excitation_enabled_action"):
             self.excitation_enabled_action.setEnabled(not (netdaq or replay))
         self.trigger_mode_combo.setToolTip(
             "Avg 使用主机软件绝对阈值触发，支持 Delay；非设备硬件触发，Inst/Record 自由运行"
-            if host_trigger_ready else ("缺少已验证配置，只能只读探测" if netdaq else ""))
+            if host_trigger_ready else ("缺少有效设备配置，只能只读探测" if netdaq else ""))
         idle = self._acquisition_thread is None and self._recording_thread is None
         if idle:
             ready = not netdaq or backend.ready
@@ -6290,7 +6312,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 if netdaq and backend.stop_uncertain:
                     button.setToolTip("设备停止未确认；请检查设备状态后重新应用连接设置")
                 elif netdaq:
-                    button.setToolTip("NetDAQ 缺少已验证设备配置，只能只读探测" if not ready else button.text())
+                    button.setToolTip(
+                        "NetDAQ 缺少有效设备配置，只能只读探测" if not ready else
+                        "DASP 参数兼容采集：工程量使用原参数，电气模式及 IEPE 未独立核实"
+                        if backend.profile.qualification == "dasp_parameters" else button.text())
         self.backend_combo.setToolTip("NetDAQ 为实验性后端，需在文件 / 设备连接中配置")
 
     def _backend_changed(self, backend_name: str, netdaq_settings=None) -> None:
@@ -6311,11 +6336,24 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as exc:
             self.statusBar().showMessage(str(exc))
             return
+        if backend_name == "netdaq" and backend.profile is not None and backend.profile.qualification == "dasp_parameters":
+            self._read_session_from_widgets()
         self.controller.close()
         self.controller.backend = backend
+        if backend_name == "netdaq" and backend.profile is not None and backend.profile.qualification == "dasp_parameters":
+            self._apply_backend_sensor_defaults()
+            self._load_session_to_widgets()
         self._apply_netdaq_limits()
         append_log(f"backend changed: end {backend_name}")
         self.refresh_devices_async()
+
+    def _apply_backend_sensor_defaults(self) -> None:
+        backend = self.controller.backend
+        if (backend.__class__.__name__ == "NetDaqBackend" and backend.profile is not None
+                and backend.profile.qualification == "dasp_parameters"):
+            from python_vna.daq.dasp_profile import apply_dasp_profile_sensors
+
+            apply_dasp_profile_sensors(self.session.ai_channels, backend.profile)
 
     def _map_channels_to_selected_device(self) -> None:
         device_name = self.device_combo.currentData()
@@ -9622,6 +9660,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.controller.set_session(imported.config)
         self.controller.state.measurement = imported.measurement
         self.session = imported.config
+        self._apply_backend_sensor_defaults()
         self._current_source_path = imported.source_path
         self._update_window_title()
         append_log("startup session apply: controller session end")

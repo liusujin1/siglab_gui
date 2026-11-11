@@ -9,8 +9,11 @@ installer, or new shared analysis/storage change is included in this extension.
 
 In **File / Device connection** select `netdaq`, then the
 `USB2404V10 (0547:1003)` transport. IP/port controls are disabled for USB.
-Device index starts at zero. An empty verified-profile field allows read-only
-probing, not Inst/Avg/Record. Connection settings are remembered without changing
+Device index starts at zero. An empty profile field allows read-only probing,
+not Inst/Avg/Record. In addition to independently verified profiles, the explicit
+DASP parameter compatibility path below permits nominal-voltage acquisition
+without claiming verified hardware modes or calibration.
+Connection settings are remembered without changing
 the NI startup default. Physical query numbers are explicit; do not infer real
 channel count from the range of indices that answer queries.
 
@@ -439,3 +442,84 @@ open. No real qualified profile is generated. Inst/Avg/trigger/rejection/Record
 GUI acceptance and a physical 13-hour recording remain gated by those facts;
 short successful reads do not certify amplitude, frequency accuracy, sample
 continuity or long-duration stability.
+
+## DASP parameter compatibility and CH1 sensor check (2026-11-11)
+
+An explicit compatibility option now reuses original DASP declarations instead
+of asking the operator to recreate an electrical calibration. In
+**File / Device connection**, select NetDAQ / USB and choose
+**From DASP parameters / USB compatibility**. Select `Channel.ini` or a saved
+`CH n.par`, review the read-only probe and save a separate JSON profile.
+This never rewrites the vendor source file.
+
+The generated profile has `verified=false`, `qualification=dasp_parameters`
+and a source snapshot with SHA-256. It requires the captured four-channel
+USB2404V10 / firmware 2.0 / nominal +/-10 V layout. It retains all four opaque
+configuration bytes and checks them again before Start, including host-disabled
+channels. It uses the original signed 24-bit nominal conversion,
+`10 / 8388608` V/count, and divisor-derived actual sampling rate. Out-of-range
+signed 24-bit data is an error.
+
+This path does not establish a hardware gain table, IEPE supply/current or
+physical coupling. The profile's `dc` means that software preserves raw DC;
+it is not a claim that the frontend is DC coupled. UI controls and provenance
+explicitly show these facts as unknown/read-only. Raw voltage and unverified
+calibration status survive VNA and Record persistence. No `!C`, zero-drift
+subtraction or startup frame discard is introduced.
+
+Valid sensor coefficients are imported once as host EU/Volt settings. The
+source inspected on this date has an inconsistent CH1 force-sensor unit, so
+that entry is skipped with an explanation; CH2--4 acceleration entries remain
+available. The separate sensor import preview shows the transducer identifier
+and lets the operator select a destination channel. Thus an accelerometer's
+saved CH2 parameters can explicitly be assigned to current CH1, without
+reinterpreting hardware bytes. Duplicate destination selections are refused.
+Ordinary refreshes do not replace subsequent user sensitivity edits.
+
+Real compatibility-backend checks completed at 2560 samples/s:
+
+- Inst and three-count Avg were saved and read back as VNA. Four enabled
+  channels produced `ai0->ai1`, `ai0->ai2`, `ai0->ai3` FRF keys during Avg.
+- Record wrote and reread 7680 samples/channel across five binary segments.
+  The completed manifest retained source/configuration provenance.
+- Eighteen backend Stop/release trials at 2560 and 32000 samples/s, with
+  requests 0, 20 or 200 ms after Start, all completed. The largest observed
+  request-to-release latency was 94.46 ms.
+
+The operator subsequently connected an IEPE accelerometer to CH1. An
+eight-second transport capture and a thirty-second CH1-only Record returned
+no full-code samples and stopped cleanly. The latter contained 76800 samples,
+mean -0.02999997 V, AC RMS 0.06875144 V, minimum -0.86326122 V and maximum
+0.65004706 V, using the nominal voltage conversion. Its binary data was read
+back in full. These values describe that particular physical input period;
+they do not identify IEPE current or independently certify voltage accuracy.
+
+Three-count software-triggered Avg was also exercised with Delay -25%, 0%
+and +25% of a 1024-sample frame. Reported event offsets were +256, 0 and -256
+samples respectively; plotted time started at zero in each case. Smart-hit
+selection was disabled for this conventional Avg test. Each result was saved
+and loaded with identical raw time samples and only CH1 enabled.
+
+The operator specified the connected sensor sensitivity as **5 V/g**. This
+corresponds to **0.2 g/V**, or **1.96133 (m/s^2)/V** with standard gravity
+9.80665 m/s^2. This replaces the old force-sensor setting for the current
+sensor; it must not be inferred from that old DASP CH1 entry.
+
+A further ten-second Record with that coefficient contained 25600 CH1 samples,
+no invalid or full-code samples, nominal voltage limits -5.795362..7.084183 V
+and AC RMS 0.576231 V. The Record reader and VNA reader both recovered the
+1.96133 engineering factor. Loading the saved VNA through the main plotting
+path was checked against raw volts times this factor, confirming one
+engineering conversion. A local plot and `acceptance.json` are retained in
+`tmp_dasp_live_20261111/iepe_5Vg/`. None of these checks measures IEPE current.
+
+Detailed local artifacts are under `tmp_dasp_live_20261111/`, including the
+unverified compatibility JSON, VNA files, Record manifests and trigger reports.
+They are ignored measurement artifacts, not shipped verified device profiles.
+Electrical gain/IEPE qualification, shared-signal reference comparison and
+physical 13-hour continuous acquisition remain separate acceptance items.
+
+Final product validation:
+`powershell -NoProfile -File scripts\test_vna_product.ps1 -Product python_vna_test`
+passed all 650 tests. This change adds no shared analysis/storage module change,
+new dependency, version bump or packaged release.

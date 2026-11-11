@@ -82,6 +82,52 @@ def test_dasp_preview_import_selection_and_units(app, tmp_path):
     dialog.deleteLater()
 
 
+def test_dasp_sensor_can_move_to_ch1_without_hardware_or_second_scaling(app, tmp_path):
+    from python_vna.daq.dasp_import import apply_dasp_channels
+
+    path = tmp_path / "Channel.ini"
+    path.write_text("[Channel 1]\nLabel=Top X\nTransducer=SAE300X1C_X\nUnit=m/s^2\n"
+                    "Sensitivity Physical Unit=m/s^2\nSensitivity=511\nGain=1\nExternal gain=1\n",
+                    encoding="utf-8")
+    dialog = DaspImportDialog(path, channel_names=["ai0", "ai1", "ai2", "ai3"])
+    assert "SAE300X1C_X" in dialog.table.item(0, 2).text()
+    target = dialog.table.cellWidget(0, 6)
+    target.setCurrentIndex(target.findData(0))
+    selected = dialog.selected_channels()
+    assert dialog.channels[0].index == 1
+    assert selected[0].index == 0
+    session = default_session_config()
+    before = asdict(session.ai_channels[0])
+    apply_dasp_channels(session.ai_channels, selected)
+    actual = asdict(session.ai_channels[0])
+    assert actual["sensitivity"] == pytest.approx(1000 / 511)
+    assert actual["engineering_unit"] == "m/s^2"
+    for field in ("offset", "full_scale", "coupling", "iepe_enabled", "iepe_current_ma"):
+        assert actual[field] == before[field]
+    assert session.ai_channels[1].sensitivity == 1
+    dialog.accept()
+    assert dialog.result() == QtWidgets.QDialog.Accepted
+    dialog.deleteLater()
+
+
+def test_dasp_import_duplicate_or_missing_destinations_cannot_apply(app, tmp_path):
+    path = tmp_path / "Channel.ini"
+    path.write_text("[Channel 0]\nSensitivity=50\n[Channel 1]\nSensitivity=100\n",
+                    encoding="utf-8")
+    dialog = DaspImportDialog(path, channel_names=["ai0"])
+    with pytest.raises(ValueError, match="同一个目标"):
+        dialog.selected_channels()
+    with mock.patch.object(QtWidgets.QMessageBox, "warning") as warning:
+        dialog.accept()
+    assert warning.called and dialog.result() != QtWidgets.QDialog.Accepted
+    dialog.reject()
+    missing = DaspImportDialog(path, channel_names=[])
+    with pytest.raises(ValueError, match="没有可导入"):
+        missing.selected_channels()
+    dialog.deleteLater()
+    missing.deleteLater()
+
+
 def test_profile_preview_is_offline_even_without_device_address(app, tmp_path):
     path = tmp_path / "bad.json"
     path.write_text("{}")
@@ -335,3 +381,97 @@ def test_iepe_sensitivity_display_uses_reciprocal_mv_per_unit_once(window):
     window._plot_measurement(measurement)
     _, y = window._last_plot_cache["top"]["ai0"]
     np.testing.assert_allclose(y, waveform, atol=1e-12)
+
+
+def test_dasp_compatibility_unknown_iepe_and_fixed_ranges_are_visible(window):
+    backend = NetDaqBackend(NetDaqSettings(transport="usb"))
+    entries = tuple({
+        "wire_number": i, "channel_type": 0, "input_mode": "device_fixed_unknown",
+        "options": [{"coupling": "dc", "full_scale_v": 10, "configuration_hex": "01"}],
+    } for i in range(4))
+    backend.profile = NetDaqProfile(
+        "synthetic DASP declaration", b"!D!" + bytes(30), "raw32", bytes(13),
+        0, 64000, entries, "test", "test-only", "usb", "", "dasp_parameters", {})
+    window.controller.backend = backend
+    window._apply_netdaq_limits()
+    window.channel_list.setCurrentRow(1)
+    window._load_channel_editor_from_row(1)
+    assert window.start_button.isEnabled()
+    assert "未确认" in window.channel_iepe_checkbox.text()
+    assert "未确认" in window.channel_iepe_current_edit.text()
+    assert not window.channel_iepe_checkbox.isEnabled()
+    assert not window.channel_full_scale_combo.isEnabled()
+    assert not window.channel_coupling_combo.isEnabled()
+    assert "不设置硬件耦合" in window.channel_coupling_combo.toolTip()
+    assert "DASP 参数兼容" in window.avg_button.toolTip()
+    config = window._read_session_from_widgets()
+    assert not config.ai_channels[1].iepe_enabled
+    assert config.ai_channels[1].iepe_current_ma == 0
+    window.controller.backend = build_backend("simulated")
+    window._apply_netdaq_limits()
+    assert window.channel_coupling_combo.isEnabled()
+    assert "DASP 参数兼容" not in window.channel_coupling_combo.toolTip()
+
+
+def test_dasp_connection_generation_queries_then_saves_without_start(app, tmp_path, monkeypatch):
+    dialog = DeviceConnectionDialog("netdaq", NetDaqSettings(transport="usb"))
+    source = tmp_path / "Channel.ini"
+    source.write_text("[Channel 0]\nSensitivity=1\nUnit=mV\n", encoding="utf-8")
+    report = dict(transport="usb", usb={"product": "USB2404V10"},
+                  descriptor_hex="21442100011804040001f400ffffd8f000002710ff800000007fffff000081160d",
+                  firmware_hex="2156070200800d", channels={
+                      str(i): dict(type=0, config_bytes=1, current_configuration_hex="01")
+                      for i in range(4)})
+    observed = []
+
+    def probe(_self, channels, **kwargs):
+        observed.append(tuple(channels))
+        return report
+
+    monkeypatch.setattr(NetDaqBackend, "probe", probe)
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileName", lambda *a: (str(source), ""))
+    target = tmp_path / "compatible"
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName", lambda *a: (str(target), ""))
+    dialog._create_dasp_profile()
+    deadline = time.monotonic() + 3
+    while dialog._thread is not None and time.monotonic() < deadline:
+        QTest.qWait(5)
+    assert observed == [(0, 1, 2, 3)]
+    result = NetDaqProfile.load(target.with_suffix(".json"))
+    assert result.qualification == "dasp_parameters"
+    assert "dasp_parameters" in dialog.report.toPlainText()
+    assert dialog.profile_edit.text() == str(target.with_suffix(".json"))
+    dialog.reject()
+    dialog.deleteLater()
+
+
+def test_dasp_defaults_apply_at_startup_but_do_not_undo_user_edits(app, tmp_path, monkeypatch):
+    from python_vna.daq.dasp_import import DaspChannel
+
+    monkeypatch.setenv("PYTHON_VNA_UI_SETTINGS", str(tmp_path / "ui.json"))
+    backend = NetDaqBackend(NetDaqSettings(transport="usb"))
+    entries = tuple({
+        "wire_number": i, "channel_type": 0, "input_mode": "device_fixed_unknown",
+        "options": [{"coupling": "dc", "full_scale_v": 10, "configuration_hex": "01"}],
+    } for i in range(4))
+    sensor = DaspChannel(1, "DASP Y", True, "m/s^2", 20.0, 50.0, ())
+    backend.profile = NetDaqProfile(
+        "synthetic DASP declaration", b"!D!" + bytes(30), "raw32", bytes(13),
+        0, 64000, entries, "test", "test-only", "usb", "", "dasp_parameters",
+        {"sensor_defaults": [asdict(sensor)]})
+    session = default_session_config()
+    window = MainWindow(VnaController(backend, session), session)
+    window._device_poll_timer.stop()
+    try:
+        window.channel_list.setCurrentRow(1)
+        window._load_channel_editor_from_row(1)
+        assert window.channel_sensitivity_edit.value() == 20
+        assert window.channel_unit_edit.text() == "m/s^2"
+        window.channel_sensitivity_edit.setValue(30)
+        assert window._read_session_from_widgets().ai_channels[1].sensitivity == 30
+        window._apply_netdaq_limits()
+        assert window._read_session_from_widgets().ai_channels[1].sensitivity == 30
+    finally:
+        window._close_confirmed = True
+        window.close()
+        app.processEvents()

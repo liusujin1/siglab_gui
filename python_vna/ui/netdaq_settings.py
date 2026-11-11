@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+from pathlib import Path
 import threading
 
 from PySide6 import QtCore, QtWidgets
@@ -16,11 +17,12 @@ class NetDaqProbeWorker:
         self.channels = channels
         self.stop_event = threading.Event()
         self.message = ""
+        self.result = None
 
     def run(self):
         try:
-            report = NetDaqBackend(self.settings).probe(self.channels, stop_event=self.stop_event)
-            self.message = json.dumps(report, ensure_ascii=False, indent=2)
+            self.result = NetDaqBackend(self.settings).probe(self.channels, stop_event=self.stop_event)
+            self.message = json.dumps(self.result, ensure_ascii=False, indent=2)
         except Exception as exc:
             self.message = f"只读探测未完成：{exc}"
 
@@ -33,6 +35,7 @@ class DeviceConnectionDialog(QtWidgets.QDialog):
         self._thread = None
         self._worker = None
         self._pending_close = False
+        self._dasp_source = None
         self._probe_timer = QtCore.QTimer(self)
         self._probe_timer.setInterval(25)
         self._probe_timer.timeout.connect(self._probe_finished)
@@ -73,11 +76,12 @@ class DeviceConnectionDialog(QtWidgets.QDialog):
         form.addRow("控制端口", self.legacy_port_edit)
         form.addRow("数据端口", self.stream_port_edit)
         form.addRow("超时（秒）", self.timeout_edit)
-        form.addRow("已验证设备配置", profile_row)
+        form.addRow("设备配置 / DASP 参数配置", profile_row)
         form.addRow("只读查询通道", self.probe_channels_edit)
         note = QtWidgets.QLabel(
-            "NetDAQ 为实验性后端。没有已验证的量程、IEPE、通道顺序及电压标定配置时，"
-            "只能只读探测，不能开始采集。Avg 支持主机软件触发（非硬件触发），AO 暂不支持。")
+            "NetDAQ 为实验性后端。USB 可从 DASP 参数建立兼容配置，保留设备当前模式、"
+            "使用原软件声明的电压换算及传感器参数；不会宣称已确认 IEPE 或重新标定。"
+            "Avg 使用主机软件触发，AO 暂不支持。")
         note.setWordWrap(True)
         self.probe_button = QtWidgets.QPushButton("只读探测")
         self.probe_button.clicked.connect(self._probe)
@@ -92,6 +96,8 @@ class DeviceConnectionDialog(QtWidgets.QDialog):
         preview.clicked.connect(self._preview_profile)
         row.addWidget(preview)
         row.addStretch()
+        self.dasp_button = QtWidgets.QPushButton("从 DASP 参数建立 USB 兼容配置...")
+        self.dasp_button.clicked.connect(self._create_dasp_profile)
         self.buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         self.buttons.button(QtWidgets.QDialogButtonBox.Ok).setText("应用")
@@ -102,6 +108,7 @@ class DeviceConnectionDialog(QtWidgets.QDialog):
         layout.addLayout(form)
         layout.addWidget(note)
         layout.addLayout(row)
+        layout.addWidget(self.dasp_button)
         layout.addWidget(self.report, 1)
         layout.addWidget(self.buttons)
         self.transport_combo.currentIndexChanged.connect(self._transport_changed)
@@ -116,6 +123,41 @@ class DeviceConnectionDialog(QtWidgets.QDialog):
         for widget in (self.host_edit, self.legacy_port_edit, self.stream_port_edit):
             widget.setEnabled(not usb)
         self.usb_index_edit.setEnabled(usb)
+        self.dasp_button.setEnabled(usb and self._thread is None)
+
+    def _create_dasp_profile(self):
+        if self._thread is not None:
+            return
+        source, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "选择 DASP 原通道参数", self.profile_edit.text(), "DASP 参数 (*.ini *.par)")
+        if not source:
+            return
+        self._dasp_source = source
+        self.backend_combo.setCurrentText("netdaq")
+        self.probe_channels_edit.setText("0,1,2,3")
+        self._probe()
+
+    def _save_dasp_profile(self, source, probe):
+        from python_vna.daq.dasp_profile import build_dasp_usb_profile, save_dasp_usb_profile
+
+        try:
+            data = build_dasp_usb_profile(source, probe)
+            self.report.setPlainText(json.dumps(data, ensure_ascii=False, indent=2))
+            initial = self.profile_edit.text() or str(Path(source).parent / "USB2404_DASP.json")
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self, "保存 DASP 参数兼容配置（电气模式保留，尚未独立核实）", initial, "JSON (*.json)")
+            if not path:
+                return
+            target = Path(path)
+            if target.suffix.lower() != ".json":
+                target = target.with_suffix(".json")
+            if target.resolve() == Path(source).resolve():
+                raise ValueError("设备配置不能覆盖 DASP 原参数")
+            save_dasp_usb_profile(data, target)
+            self.profile_edit.setText(str(target))
+            self.report.setPlainText(json.dumps(profile_preview(target), ensure_ascii=False, indent=2))
+        except Exception as exc:
+            self.report.setPlainText(f"DASP 兼容配置未保存：{exc}")
 
     def settings(self):
         return NetDaqSettings(self.host_edit.text().strip(), self.legacy_port_edit.value(),
@@ -125,7 +167,7 @@ class DeviceConnectionDialog(QtWidgets.QDialog):
 
     def _browse(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "选择已验证的 NetDAQ 设备配置", self.profile_edit.text(), "JSON (*.json)")
+            self, "选择 NetDAQ 设备配置或 DASP 参数兼容配置", self.profile_edit.text(), "JSON (*.json)")
         if path:
             self.profile_edit.setText(path)
 
@@ -158,9 +200,11 @@ class DeviceConnectionDialog(QtWidgets.QDialog):
             if len(channels) > 64 or len(set(channels)) != len(channels) or any(not 0 <= n <= 255 for n in channels):
                 raise ValueError("通道号必须是互不重复的 0..255 整数，最多 64 个")
         except Exception as exc:
+            self._dasp_source = None
             self.report.setPlainText(str(exc))
             return
         self.probe_button.setEnabled(False)
+        self.dasp_button.setEnabled(False)
         self.buttons.button(QtWidgets.QDialogButtonBox.Ok).setEnabled(False)
         self.report.setPlainText("正在读取描述、固件及所选通道当前配置；不会设置采样率、量程、IEPE 或启动设备。")
         worker = NetDaqProbeWorker(settings, channels)
@@ -178,12 +222,17 @@ class DeviceConnectionDialog(QtWidgets.QDialog):
             return
         self._thread.join(0)
         self._probe_timer.stop()
-        self.report.setPlainText(self._worker.message)
+        worker = self._worker
+        self.report.setPlainText(worker.message)
+        source, self._dasp_source = self._dasp_source, None
         self._thread = self._worker = None
         self.probe_button.setEnabled(True)
+        self.dasp_button.setEnabled(self.transport_combo.currentData() == "usb")
         self.buttons.button(QtWidgets.QDialogButtonBox.Ok).setEnabled(True)
         if self._pending_close:
             super().reject()
+        elif source and worker.result is not None:
+            self._save_dasp_profile(source, worker.result)
 
     def reject(self):
         if self._thread is not None:

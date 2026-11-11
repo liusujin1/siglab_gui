@@ -71,6 +71,7 @@ class DaspChannel:
     gain: float = 1.0
     external_gain: float = 1.0
     voltage_unit: str = "mV"
+    transducer: str = ""
 
 
 def load_dasp_channels(path, *, errors=None):
@@ -116,7 +117,8 @@ def load_dasp_channels(path, *, errors=None):
                                        section.get("Used", "1") == "1", unit,
                                        1.0 / denominator,
                                        sensitivity, tuple(warnings), gain, external_gain,
-                                       {"mv": "mV", "v": "V", "uv": "uV"}[voltage_unit]))
+                                       {"mv": "mV", "v": "V", "uv": "uV"}[voltage_unit],
+                                       section.get("Transducer", "").strip()))
         except (ValueError, TypeError) as exc:
             message = f"{name}：{exc}"
             if errors is None:

@@ -68,6 +68,7 @@
         "python_vna/controller.py",
         "python_vna/daq/**",
         "python_vna/daq/usbdaq_validation.py",
+        "python_vna/daq/dasp_profile.py",
         "python_vna/signal_pipeline.py",
         "python_vna/impact_selection.py",
         "python_vna/ui/main_window.py",
