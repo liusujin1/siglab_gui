@@ -370,3 +370,72 @@ non-unity hardware gains, high-rate throughput and long-run continuity remain
 hardware acceptance items. This update does not manufacture a verified device
 profile, remove profile matching, issue `!C`, reset the USB configuration, or
 subtract stored zero drift. It changes no shared analysis/storage modules.
+
+## Reconnected hardware acceptance (2026-11-11)
+
+The connected USB2404V10 reports the same descriptor and firmware 2.0 as above.
+Its four channel types remain 0. Current opaque configurations are now
+`07 / 01 / 01 / 01`; the earlier CH1 value was `06`. Neither byte is interpreted
+as a gain, coupling or IEPE setting. All tests leave these bytes unchanged.
+Windows also enumerates NI USB-6000 as Dev4; this establishes neither shared
+signal wiring nor an independent voltage reference.
+
+`python_vna.daq.usbdaq_validation` provides reproducible transport checks.
+Default invocation sends only descriptor, firmware and channel queries:
+
+```powershell
+.\.venv\Scripts\python.exe -m python_vna.daq.usbdaq_validation --output .\tmp_usb_probe.json
+```
+
+An explicit nonzero duration enables the existing checked InitAD/Start/Stop
+sequence. It does not load a synthetic profile or relax the application's
+independent-profile requirement:
+
+```powershell
+.\.venv\Scripts\python.exe -m python_vna.daq.usbdaq_validation --seconds 6 --sample-rate 2560 --output .\tmp_usb_capture.json
+.\.venv\Scripts\python.exe -m python_vna.daq.usbdaq_validation --seconds 0.064 --sample-rate 1000 --cycles 100 --output .\tmp_usb_cycles.json
+```
+
+The report file must be new and its directory writable before hardware opens.
+Each completed cycle is flushed to JSON. Reports retain descriptor/configuration
+snapshots, selected wire order, ADC limits, nominal voltage/DC/RMS/rail statistics,
+Stop acknowledgement and transport release state. Invalid signed 24-bit data,
+configuration drift, cancellation and failed cleanup cannot be reported as
+ordinary capture success. Statistics use bounded blocks, without startup
+discard or DC subtraction. Voltage conversion is explicitly uncalibrated.
+
+Real four-channel results:
+
+| Requested samples/s/channel | Divisor-derived samples/s/channel | Delivered samples/channel | Host delivery estimate |
+| ---: | ---: | ---: | ---: |
+| 1000 | 1000 | 6000 | 996.79 |
+| 2560 | 2560 | 15360 | 2559.94 |
+| 10000 | 10666.6667 | 64000 | 10580.55 |
+| 25600 | 32000 | 192000 | 31914.09 |
+| 64000 | 64000 | 384000 | 63998.98 |
+
+Each row is a six-second data window. Delivery estimates exclude the first
+returned frame but include transfer/frame boundary quantization; they are not
+an independent clock calibration. A requested rate is not silently reported
+as the actual divisor-derived rate. All five runs had checked Stop replies,
+unchanged configuration and no full-code samples in the captured data.
+
+An additional 100 open/query/InitAD/Start/read/Stop/close cycles at 1000 Hz
+passed. Thirty cancellation tests at 1000 and 32000 Hz requested Stop 0,
+20 or 200 ms after checked Start, five repetitions each. Only the owner thread
+called native APIs; the timer thread set the Stop event. Every case received
+checked Stop acknowledgement and closed the transport. The slowest measured
+request-to-close time was 87.4 ms. No quarantined pending transfer was needed.
+These are transport checks, not acceptance of the GUI acquisition workflow.
+
+Local detailed reports are `tmp_usb_validation_20261111_100_cycles.json`,
+`tmp_usb_validation_20261111_rate_*.json` and
+`tmp_usb_validation_20261111_pending_stop.json` in the feature worktree.
+They are intentionally ignored test artifacts.
+
+Physical input identification, comparison against a shared NI-measured signal,
+electrical range/gain, IEPE supply/current and channel-mode qualification remain
+open. No real qualified profile is generated. Inst/Avg/trigger/rejection/Record
+GUI acceptance and a physical 13-hour recording remain gated by those facts;
+short successful reads do not certify amplitude, frequency accuracy, sample
+continuity or long-duration stability.

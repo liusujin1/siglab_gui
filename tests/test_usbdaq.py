@@ -842,6 +842,130 @@ def test_100_simulated_cycles(usb, tmp_path):
     assert sum(cmd == 0x50 for cmd, _ in usb.commands) == 100
 
 
+def test_hardware_validation_default_probe_sends_no_acquisition_commands(usb):
+    from python_vna.daq.usbdaq_validation import validate_usb_device
+
+    report = validate_usb_device()
+    assert report["status"] == "passed"
+    assert report["configuration_unchanged"] and report["transport_closed"]
+    assert report["stop_acknowledged"] is None
+    assert not report["calibration_verified"] and not report["stream_continuity_verified"]
+    assert not any(cmd in {0x49, 0x53, 0x50, 0x43} for cmd, _ in usb.commands)
+
+
+def test_hardware_validation_streams_statistics_without_changing_configuration(usb):
+    from python_vna.daq.usbdaq_validation import validate_usb_device
+
+    samples = np.array([[-8388608, 0, 8388607, 1], [0, 2, -4, -1]], dtype="<i4")
+    usb.data = samples.tobytes()
+    report = validate_usb_device(seconds=.002, sample_rate=1000)
+    assert report["samples_per_channel"] == 2
+    assert report["counts_min"] == [-8388608, 0, -4, -1]
+    assert report["counts_max"] == [0, 2, 8388607, 1]
+    assert report["stop_acknowledged"] and report["configuration_unchanged"]
+    assert report["configured_sample_rate"] == 1000
+    assert report["quality"]["channels"]["ai0"]["mean_v"] == -5
+    assert report["quality"]["channels"]["ai1"]["mean_v"] == 10 / 8388608
+    assert report["quality"]["channels"]["ai2"]["rail_fraction"] == .5
+    assert all(cmd != 0x43 for cmd, _ in usb.commands)
+
+
+def test_hardware_validation_invalid_samples_stop_and_preserve_failure_report(usb):
+    from python_vna.daq.usbdaq_validation import validate_usb_device, UsbValidationFailure
+
+    usb.data = np.array([8388608, 0, 0, 0], dtype="<i4").tobytes()
+    with pytest.raises(UsbValidationFailure) as caught:
+        validate_usb_device(seconds=.001, sample_rate=1000)
+    report = caught.value.report
+    assert report["status"] == "failed" and report["stop_acknowledged"]
+    assert report["transport_closed"] and not usb.pending
+    assert "invalid signed 24-bit" in report["error"]
+
+
+def test_hardware_validation_stop_failure_cannot_report_success(usb):
+    from python_vna.daq.usbdaq_validation import validate_usb_device, UsbValidationFailure
+
+    usb.reject_stop = True
+    with pytest.raises(UsbValidationFailure) as caught:
+        validate_usb_device(seconds=.001, sample_rate=1000)
+    report = caught.value.report
+    assert report["status"] == "failed" and report["stop_acknowledged"] is False
+    assert report["transport_closed"]
+
+
+def test_hardware_validation_configuration_drift_detected(usb, monkeypatch):
+    from python_vna.daq.usbdaq_validation import validate_usb_device, UsbValidationFailure
+
+    original = usb.usb_bulk_write
+
+    def change_after_stop(handle, endpoint, buffer, size, timeout):
+        result = original(handle, endpoint, buffer, size, timeout)
+        if usb.commands[-1][0] == 0x50:
+            usb.configurations[0] = b"\x07"
+        return result
+
+    monkeypatch.setattr(usb, "usb_bulk_write", change_after_stop)
+    with pytest.raises(UsbValidationFailure) as caught:
+        validate_usb_device(seconds=.001, sample_rate=1000)
+    assert caught.value.report["configuration_unchanged"] is False
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"seconds": -1}, {"seconds": float("nan")}, {"sample_rate": 0},
+    {"sample_rate": float("inf")}, {"channel_mask": 0}, {"channel_mask": True},
+])
+def test_hardware_validation_bad_arguments_never_open_device(usb, kwargs):
+    from python_vna.daq.usbdaq_validation import validate_usb_device
+
+    with pytest.raises(ValueError):
+        validate_usb_device(**kwargs)
+    assert not usb.native_threads
+
+
+def test_hardware_validation_cli_keeps_report_and_refuses_overwrite(usb, tmp_path):
+    from python_vna.daq.usbdaq_validation import main
+
+    target = tmp_path / "hardware-report.json"
+    assert main(["--output", str(target), "--cycles", "2"]) == 0
+    report = json.loads(target.read_text())
+    assert report["status"] == "passed" and len(report["cycles"]) == 2
+    count = len(usb.commands)
+    with pytest.raises(FileExistsError):
+        main(["--output", str(target)])
+    assert len(usb.commands) == count
+
+
+def test_hardware_validation_cancel_pending_read_keeps_owner_stop(usb, monkeypatch):
+    from python_vna.daq.usbdaq_validation import validate_usb_device, UsbValidationFailure
+
+    event = threading.Event()
+    original = usb.usb_submit_async
+
+    def cancel_after_submission(*args):
+        result = original(*args)
+        event.set()
+        return result
+
+    monkeypatch.setattr(usb, "usb_submit_async", cancel_after_submission)
+    with pytest.raises(UsbValidationFailure) as caught:
+        validate_usb_device(seconds=1, sample_rate=1000, stop_event=event)
+    report = caught.value.report
+    assert report["status"] == "cancelled" and report["stop_acknowledged"]
+    assert report["transport_closed"] and not usb.pending
+    assert set(usb.native_threads) == {threading.get_ident()}
+
+
+def test_hardware_validation_cli_failure_is_saved_and_does_not_open_device(usb, tmp_path):
+    from python_vna.daq.usbdaq_validation import main
+
+    target = tmp_path / "failed-report.json"
+    assert main(["--output", str(target), "--seconds", "-1"]) == 1
+    report = json.loads(target.read_text())
+    assert report["status"] == "failed"
+    assert "ValueError" in report["cycles"][0]["error"]
+    assert not usb.native_threads
+
+
 def test_usb_controller_vna_roundtrip(usb, tmp_path):
     from python_vna.controller import VnaController
 
