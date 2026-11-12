@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "verified": false,
+  "qualification": "dasp_parameters",
+  "transport": "usb",
+  "model": "USB2404V10",
+  "descriptor_hex": "21442100011804040001f400ffffd8f000002710ff800000007fffff000081160d",
+  "firmware_hex": "2156070200800d",
+  "stream_format": "raw32",
+  "divisor_offset": 0,
+  "max_sample_rate": 64000.0,
+  "init_ad_payload_hex": "00000001010f00000000000000",
+  "channels": [
+    {
+      "wire_number": 0,
+      "channel_type": 0,
+      "input_mode": "iepe",
+      "options": [
+        {"full_scale_v": 10.0, "coupling": "bias", "volts_per_count": 1.1920928955078125e-06, "zero_count": 0.0, "configuration_hex": "01"},
+        {"full_scale_v": 10.0, "coupling": "dc", "volts_per_count": 1.1920928955078125e-06, "zero_count": 0.0, "configuration_hex": "00"}
+      ],
+      "mode_control": "usb2404_coupling",
+      "iepe_supply": "device_fixed",
+      "iepe_current_ma": null
+    },
+    {
+      "wire_number": 1,
+      "channel_type": 0,
+      "input_mode": "iepe",
+      "options": [
+        {"full_scale_v": 10.0, "coupling": "bias", "volts_per_count": 1.1920928955078125e-06, "zero_count": 0.0, "configuration_hex": "01"},
+        {"full_scale_v": 10.0, "coupling": "dc", "volts_per_count": 1.1920928955078125e-06, "zero_count": 0.0, "configuration_hex": "00"}
+      ],
+      "mode_control": "usb2404_coupling",
+      "iepe_supply": "device_fixed",
+      "iepe_current_ma": null
+    },
+    {
+      "wire_number": 2,
+      "channel_type": 0,
+      "input_mode": "voltage_single_ended_dc",
+      "options": [
+        {"full_scale_v": 10.0, "coupling": "dc", "volts_per_count": 1.1920928955078125e-06, "zero_count": 0.0, "configuration_hex": "00"},
+        {"full_scale_v": 10.0, "coupling": "bias", "volts_per_count": 1.1920928955078125e-06, "zero_count": 0.0, "configuration_hex": "01"}
+      ],
+      "mode_control": "usb2404_coupling",
+      "iepe_supply": "device_fixed",
+      "iepe_current_ma": null
+    },
+    {
+      "wire_number": 3,
+      "channel_type": 0,
+      "input_mode": "voltage_single_ended_dc",
+      "options": [
+        {"full_scale_v": 10.0, "coupling": "dc", "volts_per_count": 1.1920928955078125e-06, "zero_count": 0.0, "configuration_hex": "00"},
+        {"full_scale_v": 10.0, "coupling": "bias", "volts_per_count": 1.1920928955078125e-06, "zero_count": 0.0, "configuration_hex": "01"}
+      ],
+      "mode_control": "usb2404_coupling",
+      "iepe_supply": "device_fixed",
+      "iepe_current_ma": null
+    }
+  ],
+  "evidence": "DASP declared ADC conversion and USB2404V10/2.0 DC/IEPE transport checks. Nominal voltage conversion is not independent electrical calibration.",
+  "vendor_parameters": {
+    "format": "dasp_parameter_snapshot",
+    "path": "DASP/Channel.ini",
+    "sha256": "19dcf0775eeebfb418ff548841a4f3dbc090db2e470195141c470e16e3f7c489",
+    "electrical_calibration_verified": false,
+    "conversion_basis": "dasp_declared_nominal_voltage",
+    "sections": {},
+    "sensor_defaults": [
+      {
+        "index": 0, "label": "CH 1", "enabled": true, "unit": "m/s^2",
+        "eu_per_volt": 1.9569471624266144, "source_sensitivity": 511.0,
+        "warnings": [], "gain": 1.0, "external_gain": 1.0, "voltage_unit": "mV", "transducer": ""
+      },
+      {
+        "index": 1, "label": "CH 2", "enabled": true, "unit": "m/s^2",
+        "eu_per_volt": 1.9569471624266144, "source_sensitivity": 511.0,
+        "warnings": [], "gain": 1.0, "external_gain": 1.0, "voltage_unit": "mV", "transducer": "SAE300X1C_X"
+      },
+      {
+        "index": 2, "label": "CH 3", "enabled": true, "unit": "m/s^2",
+        "eu_per_volt": 1.955034213098729, "source_sensitivity": 511.5,
+        "warnings": [], "gain": 1.0, "external_gain": 1.0, "voltage_unit": "mV", "transducer": "SAE300X1C_Y"
+      },
+      {
+        "index": 3, "label": "CH 4", "enabled": true, "unit": "m/s^2",
+        "eu_per_volt": 1.9704433497536944, "source_sensitivity": 507.5,
+        "warnings": [], "gain": 1.0, "external_gain": 1.0, "voltage_unit": "mV", "transducer": "SAE300X1C_Z"
+      }
+    ]
+  }
+}

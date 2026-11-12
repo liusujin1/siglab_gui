@@ -1025,6 +1025,65 @@ def test_usb_dialog_needs_no_ip_and_remembers_explicit_transport(app):
     assert not NetDaqBackend(dialog.settings()).ready
     dialog.deleteLater()
 
+def test_bundled_usb_preset_is_an_explicit_offline_choice(app, tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData"))
+    saved = str(tmp_path / "custom.json")
+    dialog = DeviceConnectionDialog(
+        "netdaq", NetDaqSettings(transport="usb", usb_index=1, profile_path=saved))
+    try:
+        assert dialog.profile_edit.text() == saved
+        assert dialog.usb_preset_button.isEnabled()
+        with mock.patch.object(NetDaqBackend, "probe", side_effect=AssertionError("No hardware query")):
+            dialog._use_usb_preset()
+        selected = dialog.settings()
+        assert selected.usb_index == 1
+        assert selected.profile_path.startswith(str(tmp_path / "AppData"))
+        profile = NetDaqProfile.load(selected.profile_path)
+        assert profile.qualification == "dasp_parameters"
+        assert all(profile.has_usb_coupling_control(row) for row in range(4))
+        assert "请核对实际传感器" in dialog.report.toPlainText()
+        assert not (tmp_path / "custom.json").exists()
+    finally:
+        dialog.reject()
+        dialog.deleteLater()
+
+
+def test_missing_bundled_usb_preset_preserves_selected_profile(app, tmp_path, monkeypatch):
+    import python_vna.ui.netdaq_settings as connection_module
+
+    dialog = DeviceConnectionDialog(
+        "netdaq", NetDaqSettings(transport="usb", profile_path="custom.json"))
+    try:
+        monkeypatch.setattr(connection_module, "resource_path", lambda _: tmp_path / "missing.json")
+        dialog._use_usb_preset()
+        assert dialog.profile_edit.text() == "custom.json"
+        assert "随包配置不可用" in dialog.report.toPlainText()
+        dialog.transport_combo.setCurrentIndex(dialog.transport_combo.findData("tcp"))
+        assert not dialog.usb_preset_button.isEnabled()
+    finally:
+        dialog.reject()
+        dialog.deleteLater()
+
+
+def test_unconfigured_usb_channel_setup_opens_connection_settings(window):
+    window.controller.backend = NetDaqBackend(NetDaqSettings(transport="usb"))
+    with mock.patch.object(window, "_open_device_connection") as configure, \
+            mock.patch("python_vna.ui.main_window.MCSetupDialog") as setup:
+        window._open_mc_setup_dialog()
+    configure.assert_called_once()
+    setup.assert_not_called()
+
+
+def test_configured_usb_channel_setup_continues_after_applying_connection(window):
+    window.controller.backend = NetDaqBackend(NetDaqSettings(transport="usb"))
+    def configure():
+        window.controller.backend = _selectable_usb_backend()
+    with mock.patch.object(window, "_open_device_connection", side_effect=configure), \
+            mock.patch("python_vna.ui.main_window.MCSetupDialog") as setup:
+        window._open_mc_setup_dialog()
+    setup.assert_called_once_with(window)
+    setup.return_value.exec.assert_called_once()
+
 
 def test_usb_probe_uses_same_cancellable_worker_without_an_ip(app):
     dialog = DeviceConnectionDialog("netdaq", NetDaqSettings(transport="usb"))

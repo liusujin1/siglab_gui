@@ -2459,6 +2459,14 @@ class MainWindow(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(0, self.close)
 
     def _open_mc_setup_dialog(self) -> None:
+        backend = self.controller.backend
+        if (backend.__class__.__name__ == "NetDaqBackend"
+                and backend.settings.transport == "usb" and backend.profile is None):
+            self.statusBar().showMessage("USB2404 尚未配置，请选择 USB 配置后应用")
+            self._open_device_connection()
+            backend = self.controller.backend
+            if backend.__class__.__name__ == "NetDaqBackend" and not backend.ready:
+                return
         dialog = MCSetupDialog(self)
         dialog.exec()
 
@@ -5783,7 +5791,16 @@ class MainWindow(QtWidgets.QMainWindow):
             key=lambda i: abs(self.TRIGGER_LEVEL_PERCENT_VALUES[i] - percent),
         )
         self.trigger_level_percent_combo.blockSignals(True)
-        if exact and not np.isclose(self.TRIGGER_LEVEL_PERCENT_VALUES[index], percent, atol=1e-10, rtol=0.0):
+        while self.trigger_level_percent_combo.count() > len(self.TRIGGER_LEVEL_PERCENT_OPTIONS):
+            self.trigger_level_percent_combo.removeItem(self.trigger_level_percent_combo.count() - 1)
+        legacy_match = np.isclose(
+            self.TRIGGER_LEVEL_PERCENT_VALUES[index], percent, atol=1e-6, rtol=0.0,
+        )
+        nominal_match = np.isclose(
+            self._parse_trigger_percent_text(self.TRIGGER_LEVEL_PERCENT_OPTIONS[index]),
+            percent, atol=1e-10, rtol=0.0,
+        )
+        if exact and not (legacy_match or nominal_match):
             label = f"{percent:.12g}%"
             exact_index = self.trigger_level_percent_combo.findText(label)
             if exact_index < 0:
@@ -6417,9 +6434,8 @@ class MainWindow(QtWidgets.QMainWindow):
             else "immediate"
         )
         session.acquisition.trigger.level = abs(self.trigger_level_edit.value())
-        session.acquisition.trigger.level_percent = abs(
-            self._parse_trigger_percent_text(self.trigger_level_percent_combo.currentText())
-        )
+        full_scale = self._channel_full_scale_for_trigger(self._trigger_channel_index())
+        session.acquisition.trigger.level_percent = session.acquisition.trigger.level / full_scale * 100.0
         session.acquisition.trigger.slope = "either"
         session.acquisition.trigger.pretrigger_samples = self.pretrigger_samples_edit.value()
         session.acquisition.trigger.timeout_seconds = self.trigger_timeout_edit.value()

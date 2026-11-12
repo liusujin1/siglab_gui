@@ -118,6 +118,7 @@ COMMON_DATAS = [
     ("dsa\\vna\\default.vna", "dsa\\vna"),
     ("update_config.json", "."),
     ("update_config.example.json", "."),
+    ("profiles\\USB2404_DASP_modes.json", "profiles"),
     ("assets\\python_vna_icon.ico", "assets"),
     ("assets\\python_vna_icon.png", "assets"),
     ("assets\\vianalysis_icon.ico", "assets"),

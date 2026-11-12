@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 import json
+import os
 from pathlib import Path
 import threading
 
 from PySide6 import QtCore, QtWidgets
 
 from python_vna.daq.netdaq import NetDaqBackend, NetDaqProfile, NetDaqSettings, profile_preview
+from python_vna.resources import resource_path
 
 
 class NetDaqProbeWorker:
@@ -99,6 +102,8 @@ class DeviceConnectionDialog(QtWidgets.QDialog):
         row.addStretch()
         self.dasp_button = QtWidgets.QPushButton("从 DASP 参数建立 USB 兼容配置...")
         self.dasp_button.clicked.connect(self._create_dasp_profile)
+        self.usb_preset_button = QtWidgets.QPushButton("使用随包 USB2404 配置")
+        self.usb_preset_button.clicked.connect(self._use_usb_preset)
         self.buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         self.buttons.button(QtWidgets.QDialogButtonBox.Ok).setText("应用")
@@ -110,6 +115,7 @@ class DeviceConnectionDialog(QtWidgets.QDialog):
         layout.addWidget(note)
         layout.addLayout(row)
         layout.addWidget(self.dasp_button)
+        layout.addWidget(self.usb_preset_button)
         layout.addWidget(self.report, 1)
         layout.addWidget(self.buttons)
         self.transport_combo.currentIndexChanged.connect(self._transport_changed)
@@ -125,6 +131,45 @@ class DeviceConnectionDialog(QtWidgets.QDialog):
             widget.setEnabled(not usb)
         self.usb_index_edit.setEnabled(usb)
         self.dasp_button.setEnabled(usb and self._thread is None)
+        self.usb_preset_button.setEnabled(usb and self._thread is None)
+
+    def _use_usb_preset(self):
+        if self._thread is not None:
+            return
+        path = resource_path("profiles/USB2404_DASP_modes.json")
+        try:
+            profile = NetDaqProfile.load(path)
+            if profile.transport != "usb" or not all(
+                    profile.has_usb_coupling_control(i) for i in range(len(profile.channels))):
+                raise ValueError("随包配置没有有效的 USB DC/IEPE 模式")
+            # Keep the selected preset available after moving or replacing the installation.
+            content = path.read_bytes()
+            directory = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / ".python_vna")))
+            directory = directory / "PythonVNA" / "devices"
+            directory.mkdir(parents=True, exist_ok=True)
+            cached = directory / f"USB2404_DASP_{hashlib.sha256(content).hexdigest()[:16]}.json"
+            try:
+                with cached.open("xb") as stream:
+                    stream.write(content)
+            except FileExistsError:
+                pass
+            if cached.read_bytes() != content:
+                raise ValueError("本地预设副本已修改，请通过“选择配置”加载")
+            path = cached
+        except Exception as exc:
+            self.report.setPlainText(f"USB2404 随包配置不可用：{exc}")
+            return
+        self.backend_combo.setCurrentText("netdaq")
+        self.transport_combo.setCurrentIndex(self.transport_combo.findData("usb"))
+        self.profile_edit.setText(str(path))
+        modes = [
+            f"CH{i + 1}：{'IEPE' if entry['options'][0]['coupling'] == 'bias' else 'DC'}"
+            for i, entry in enumerate(profile.channels)
+        ]
+        self.report.setPlainText(
+            f"{profile.model} / 固件 2.0\n" + "，".join(modes)
+            + "\n传感器系数来自既有 DASP 参数，请核对实际传感器。"
+            "\n电压按标称值换算；IEPE 电流及独立电压标定未确认。")
 
     def _create_dasp_profile(self):
         if self._thread is not None:
@@ -206,6 +251,7 @@ class DeviceConnectionDialog(QtWidgets.QDialog):
             return
         self.probe_button.setEnabled(False)
         self.dasp_button.setEnabled(False)
+        self.usb_preset_button.setEnabled(False)
         self.buttons.button(QtWidgets.QDialogButtonBox.Ok).setEnabled(False)
         self.report.setPlainText("正在读取描述、固件及所选通道当前配置；不会设置采样率、量程、IEPE 或启动设备。")
         worker = NetDaqProbeWorker(settings, channels)
@@ -229,6 +275,7 @@ class DeviceConnectionDialog(QtWidgets.QDialog):
         self._thread = self._worker = None
         self.probe_button.setEnabled(True)
         self.dasp_button.setEnabled(self.transport_combo.currentData() == "usb")
+        self.usb_preset_button.setEnabled(self.transport_combo.currentData() == "usb")
         self.buttons.button(QtWidgets.QDialogButtonBox.Ok).setEnabled(True)
         if self._pending_close:
             super().reject()

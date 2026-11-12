@@ -2063,6 +2063,29 @@ class MainWindowTests(unittest.TestCase):
         self.assertAlmostEqual(self.window.trigger_level_edit.value(), 0.0455)
         self.assertEqual(self.window.trigger_level_percent_combo.currentText(), "14.56%")
 
+    def test_legacy_and_nominal_trigger_percent_share_the_same_preset(self):
+        for percent in (35.35533905932738, 35.0):
+            with self.subTest(percent=percent):
+                trigger = self.controller.state.session.acquisition.trigger
+                trigger.level = percent / 10.0
+                trigger.level_percent = percent
+                self.window._load_session_to_widgets()
+                combo = self.window.trigger_level_percent_combo
+                self.assertEqual(combo.currentText(), "35%")
+                self.assertEqual(combo.count(), 9)
+                self.assertAlmostEqual(self.window.trigger_level_edit.value(), percent / 10.0)
+                restored = self.window._read_session_from_widgets().acquisition.trigger
+                self.assertAlmostEqual(restored.level_percent, percent, places=7)
+
+    def test_loading_trigger_values_replaces_stale_custom_percent_options(self):
+        for percent, expected_count in ((14.56, 10), (28.125, 10), (35.35533905932738, 9)):
+            with self.subTest(percent=percent):
+                trigger = self.controller.state.session.acquisition.trigger
+                trigger.level = percent / 10.0
+                trigger.level_percent = percent
+                self.window._load_session_to_widgets()
+                self.assertEqual(self.window.trigger_level_percent_combo.count(), expected_count)
+
     def test_every_average_click_recalibrates_first_hit_on_worker_thread(self):
         from test_first_hit_ranging import RangeBackend, ranging_session
 
