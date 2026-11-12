@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import replace
 from pathlib import Path
 import re
@@ -9,6 +10,7 @@ import re
 from PySide6 import QtCore, QtWidgets
 
 from python_vna.daq.dasp_import import load_dasp_channels
+from python_vna.models import DEFAULT_DC_REMOVAL_CUTOFF_HZ
 
 
 class DaspImportDialog(QtWidgets.QDialog):
@@ -164,7 +166,10 @@ class DcRemovalDialog(QtWidgets.QDialog):
         self.table.horizontalHeader().setStretchLastSection(True)
         note = QtWidgets.QLabel(
             "一阶高通，状态跨帧保留；首次用首个采样值初始化，不丢帧、不逐帧减均值。\n"
-            "默认 0.1 Hz；截止频率附近会衰减和移相，低频振动请按关注频段选择。\n"
+            f"默认 {DEFAULT_DC_REMOVAL_CUTOFF_HZ:g} Hz；截止频率附近会衰减和移相，低频振动请按关注频段选择。\n"
+            f"此默认值对偏置阶跃约需 {math.log(100) / (2 * math.pi * DEFAULT_DC_REMOVAL_CUTOFF_HZ):.2f} "
+            "秒衰减至 1%；启动时可能偏离零轴，不保证每帧均值为零。\n"
+            "采集质量报告中可比较原始均值与 processed_voltage（处理后电压）均值。\n"
             "触发、显示、分析用校正信号；连续记录保存原始电压，回放按保存参数处理。\n"
             "VNA 保存当前处理后的时域；普通 Analysis 直接打开连续记录仍显示原始数据。")
         note.setWordWrap(True)
@@ -189,7 +194,9 @@ class DcRemovalDialog(QtWidgets.QDialog):
 
         for row, channel in enumerate(self.channels):
             channel.dc_removal_enabled = self.table.item(row, 2).checkState() == QtCore.Qt.Checked
-            channel.dc_removal_cutoff_hz = self.table.cellWidget(row, 3).value()
+            cutoff = self.table.cellWidget(row, 3)
+            cutoff.interpretText()
+            channel.dc_removal_cutoff_hz = cutoff.value()
         try:
             DcRemoval(self.channels, self.rate)
         except (DaqBackendError, ValueError) as exc:

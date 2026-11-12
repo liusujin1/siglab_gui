@@ -240,6 +240,54 @@ def backend(tmp_path):
     return NetDaqBackend(NetDaqSettings(transport="usb", profile_path=str(profile(tmp_path)), timeout=.2))
 
 
+@pytest.mark.parametrize("size", [128, 512, 4096, 8192])
+def test_usb_host_record_length_and_timing_match_sent_divisor(usb, tmp_path, size):
+    b = backend(tmp_path)
+    session = config()
+    session.acquisition.sample_rate = 1500
+    session.acquisition.frame_size = size
+    usb.data = np.tile(np.array([100, 200, -100, 0], dtype="<i4"), size * 2).tobytes()
+    preview = b.preview_timing(1500)
+    assert usb.commands == []
+    try:
+        b.configure(session)
+        b.start()
+        result = b.read_frame()
+        init = next(body for cmd, body in usb.commands if cmd == 0x49)
+        assert struct.unpack_from(">I", init)[0] == preview["divisor"]
+        assert result.data.shape == (4, size)
+        assert session.acquisition.sample_rate == preview["actual_sample_rate"]
+        np.testing.assert_allclose(result.timestamps, np.arange(size) / result.sample_rate)
+        assert result.metadata["frame_size"] == size
+        assert result.metadata["frequency_resolution_hz"] == result.sample_rate / size
+        assert not result.metadata["hardware_lowpass_configurable"]
+    finally:
+        b.close()
+
+
+def test_usb_transfer_function_can_use_ch2_as_reference(usb, tmp_path):
+    from python_vna.controller import VnaController
+
+    session = config()
+    session.acquisition.frame_size = 512
+    session.acquisition.reference_channel = "ai1"
+    session.acquisition.response_channels = ["ai0", "ai2", "ai3"]
+    base = np.round(1000 * np.sin(2 * np.pi * np.arange(1024) * 16 / 512)).astype("<i4")
+    usb.data = np.column_stack((base * 2, base, base * 3, base * 4)).astype("<i4").tobytes()
+    controller = VnaController(backend(tmp_path), session)
+    controller.set_averaging_enabled(True)
+    try:
+        controller.configure()
+        controller.start()
+        measurement = controller.read_and_process()
+        assert measurement.metadata["reference_channel"] == "ai1"
+        assert set(measurement.frf) == {"ai1->ai0", "ai1->ai2", "ai1->ai3"}
+        for response, gain in (("ai0", 2), ("ai2", 3), ("ai3", 4)):
+            assert measurement.frf[f"ai1->{response}"][16] == pytest.approx(gain)
+    finally:
+        controller.close()
+
+
 def test_qualified_usb_mode_write_checks_ack_readback_and_other_channels(usb):
     before = dict(usb.configurations)
     with u.UsbConnection() as control:

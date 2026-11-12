@@ -23,6 +23,30 @@ from python_vna.storage import (
 
 
 class StorageTests(unittest.TestCase):
+    def test_default_dc_cutoff_is_point_seven_without_enabling_or_changing_legacy_layout(self):
+        session = default_session_config()
+        self.assertTrue(all(c.dc_removal_cutoff_hz == .7 for c in session.ai_channels))
+        self.assertFalse(any(c.dc_removal_enabled for c in session.ai_channels))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "default.vna"
+            save_legacy_vna(SavedSession(session), path)
+            self.assertNotIn("PythonVNADcRemoval_json", loadmat(path))
+            restored = load_legacy_vna(path).config
+        self.assertTrue(all(c.dc_removal_cutoff_hz == .7 for c in restored.ai_channels))
+        self.assertFalse(any(c.dc_removal_enabled for c in restored.ai_channels))
+
+    def test_previous_explicit_dc_cutoff_is_preserved_even_when_disabled(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled), tempfile.TemporaryDirectory() as tmpdir:
+                session = default_session_config()
+                session.ai_channels[0].dc_removal_enabled = enabled
+                session.ai_channels[0].dc_removal_cutoff_hz = .1
+                path = Path(tmpdir) / "previous.vna"
+                save_legacy_vna(SavedSession(session), path)
+                restored = load_legacy_vna(path).config.ai_channels[0]
+                self.assertEqual(restored.dc_removal_cutoff_hz, .1)
+                self.assertEqual(restored.dc_removal_enabled, enabled)
+
     def test_netdaq_iepe_state_and_precise_sensitivity_are_independent_of_coupling(self):
         session = self._sample_session()
         channel = session.config.ai_channels[0]

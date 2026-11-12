@@ -96,6 +96,178 @@ def _selectable_usb_backend():
     return backend
 
 
+def test_usb_configuration_controls_match_supported_hardware_and_host_features(window):
+    window.controller.backend = _selectable_usb_backend()
+    window._apply_backend_sensor_defaults()
+    window._load_session_to_widgets()
+    assert not window.setup_action.isEnabled()
+    assert not window.excitation_setup_page.isEnabled()
+    assert not window.exc_amplitude_edit.isEnabled()
+    assert not window.ao_channel_edit.isEnabled()
+    assert not window.channel_offset_edit.isEnabled()
+    assert not window.channel_physical_edit.isEnabled()
+    assert not window.channel_reference_checkbox.isEnabled()
+    assert not window.channel_auto_range_button.isEnabled()
+    assert window.channel_sensitivity_edit.isEnabled()
+    assert window.channel_label_edit.isEnabled()
+    assert window.window_combo.isEnabled()
+    assert "不是可编程硬件低通" in window.bandwidth_combo.toolTip()
+    assert "尚未确认" in window.aa_filters_button.toolTip()
+    assert not window._read_session_from_widgets().acquisition.anti_alias_filters_enabled
+    dialog = MCSetupDialog(window)
+    try:
+        for row in range(4):
+            assert not dialog.table.item(row, 3).flags() & QtCore.Qt.ItemIsEditable
+            assert not dialog.table.item(row, 8).flags() & QtCore.Qt.ItemIsEditable
+        dialog.table.item(0, 3).setText("2.5")
+        dialog._apply_to_main()
+        assert window.session.ai_channels[0].offset == 0
+    finally:
+        dialog.close()
+    window.controller.backend = build_backend("simulated")
+    window._apply_netdaq_limits()
+    assert window.setup_action.isEnabled()
+    assert window.exc_amplitude_edit.isEnabled()
+    assert window.channel_offset_edit.isEnabled()
+    assert window.channel_physical_edit.isEnabled()
+    assert window.channel_reference_checkbox.isEnabled()
+    assert window.channel_grid.item(0, 4).flags() & QtCore.Qt.ItemIsEditable
+    assert window.channel_auto_range_button.isEnabled()
+    assert window._read_session_from_widgets().acquisition.anti_alias_filters_enabled
+
+
+def test_dc_removal_dialog_uses_point_seven_default_and_commits_pending_text(app):
+    dialog = DcRemovalDialog(default_session_config())
+    try:
+        assert dialog.table.cellWidget(1, 3).value() == .7
+        dialog.table.item(1, 2).setCheckState(QtCore.Qt.Checked)
+        dialog.table.cellWidget(1, 3).lineEdit().setText("0.700")
+        dialog.accept()
+        assert dialog.channels[1].dc_removal_enabled
+        assert dialog.channels[1].dc_removal_cutoff_hz == .7
+    finally:
+        dialog.close()
+
+
+def test_usb_frequency_preview_and_frame_length_use_actual_clock_without_io(window):
+    window.controller.backend = _selectable_usb_backend()
+    window._apply_netdaq_limits()
+    window.bandwidth_combo.setCurrentText("BW=10.0KHz")
+    window.frame_size_edit.setValue(8192)
+    assert window.sample_rate_edit.value() == 25600
+    assert "Fs=32000 Hz" in window.df_label.text()
+    assert "dF=3.906" in window.df_label.text()
+    assert "每帧 8192 点" in window.df_label.toolTip()
+    session = window._read_session_from_widgets()
+    assert session.acquisition.frame_size == 8192
+    assert session.acquisition.sample_rate == 25600
+    session.acquisition.sample_rate = 32000
+    window._load_session_to_widgets()
+    assert window.sample_rate_edit.value() == 32000
+    assert window.session.acquisition.bandwidth_hz == 10000
+
+
+def test_profile_rate_limit_disables_unavailable_bandwidth_choices(window):
+    backend = _selectable_usb_backend()
+    backend.profile = replace(backend.profile, max_sample_rate=2000)
+    window.controller.backend = backend
+    window._apply_netdaq_limits()
+    assert window.sample_rate_edit.maximum() == 2000
+    low = window.bandwidth_combo.findText("BW=0.39KHz")
+    high = window.bandwidth_combo.findText("BW=10.0KHz")
+    assert window.bandwidth_combo.model().item(low).isEnabled()
+    assert not window.bandwidth_combo.model().item(high).isEnabled()
+    window.controller.backend = build_backend("simulated")
+    window._apply_netdaq_limits()
+    assert window.sample_rate_edit.maximum() == 102400
+    assert window.bandwidth_combo.model().item(high).isEnabled()
+
+
+def test_usb_trigger_disables_ignored_overlap_and_disabled_sources(window):
+    window.controller.backend = _selectable_usb_backend()
+    window._apply_backend_sensor_defaults()
+    window._load_session_to_widgets()
+    window.overlap_combo.setCurrentIndex(window.overlap_combo.findData(50))
+    window.trigger_mode_combo.setCurrentIndex(window.trigger_mode_combo.findData("Every Frame"))
+    assert not window.overlap_combo.isEnabled()
+    assert window.overlap_combo.currentData() == 0
+    assert window.pretrigger_samples_edit.minimum() == -99
+    dialog = MCSetupDialog(window)
+    try:
+        dialog.table.item(0, 0).setCheckState(QtCore.Qt.Unchecked)
+        dialog._apply_to_main()
+    finally:
+        dialog.close()
+    window._apply_netdaq_limits()
+    assert not window.trigger_source_combo.model().item(0).isEnabled()
+    assert window.trigger_source_combo.currentText() == "Ch2"
+    window.trigger_level_edit.setValue(.02)
+    session = window._read_session_from_widgets()
+    assert session.acquisition.trigger.enabled
+    assert session.acquisition.trigger.source == "ai1"
+    assert session.acquisition.trigger.level == .02
+    window.trigger_mode_combo.setCurrentIndex(window.trigger_mode_combo.findData("Off (Free Run)"))
+    assert window.overlap_combo.isEnabled()
+    window.controller.backend = build_backend("simulated")
+    window._apply_netdaq_limits()
+    assert window.trigger_source_combo.model().item(0).isEnabled()
+
+
+def test_usb_reference_is_explicit_and_independent_of_channel_editor_and_trigger(window):
+    window.controller.backend = _selectable_usb_backend()
+    window._apply_backend_sensor_defaults()
+    window._load_session_to_widgets()
+    dialog = MCSetupDialog(window)
+    try:
+        assert dialog.reference_combo.currentData() == "ai0"
+        dialog.reference_combo.setCurrentIndex(dialog.reference_combo.findData("ai1"))
+        dialog._apply_to_main()
+        assert window._current_reference_name() == "ai1"
+        assert window.session.acquisition.reference_channel == "ai1"
+        assert window.session.acquisition.response_channels == ["ai0", "ai2", "ai3"]
+        assert [c.name for c in window.session.ai_channels if c.is_reference] == ["ai1"]
+        window.channel_select_combo.setCurrentIndex(3)
+        window.trigger_mode_combo.setCurrentIndex(window.trigger_mode_combo.findData("Every Frame"))
+        window.trigger_source_combo.setCurrentText("Ch3")
+        window._read_session_from_widgets()
+        assert window.session.acquisition.reference_channel == "ai1"
+        assert window.session.acquisition.trigger.source == "ai2"
+        dialog.reload_from_main()
+        assert dialog.reference_combo.currentData() == "ai1"
+        dialog.table.item(1, 0).setCheckState(QtCore.Qt.Unchecked)
+        assert dialog.reference_combo.currentData() == "ai0"
+        dialog._apply_to_main()
+        assert window.session.acquisition.reference_channel == "ai0"
+    finally:
+        dialog.close()
+
+
+def test_usb_processing_configuration_cannot_change_during_a_run(window):
+    window.controller.backend = _selectable_usb_backend()
+    window._apply_backend_sensor_defaults()
+    window._load_session_to_widgets()
+    window._acquisition_thread = object()
+    try:
+        window._sync_usb_mode_editability()
+        for widget in (window.frame_size_edit, window.sample_rate_edit, window.bandwidth_combo,
+                       window.trigger_source_combo, window.channel_sensitivity_edit,
+                       window.reject_combo, window.average_count_edit):
+            assert not widget.isEnabled()
+        window.channel_select_combo.setCurrentIndex(1)
+        assert not window.channel_sensitivity_edit.isEnabled()
+        dialog = MCSetupDialog(window)
+        try:
+            assert not dialog.table.isEnabled()
+            assert not dialog.reference_combo.isEnabled()
+        finally:
+            dialog.close()
+    finally:
+        window._acquisition_thread = None
+        window._apply_netdaq_limits()
+    assert window.frame_size_edit.isEnabled()
+    assert window.channel_sensitivity_edit.isEnabled()
+
+
 def test_usb_mode_editor_and_mc_setup_apply_dc_iepe_without_ni_defaults(window):
     window.controller.backend = _selectable_usb_backend()
     window._apply_backend_sensor_defaults()

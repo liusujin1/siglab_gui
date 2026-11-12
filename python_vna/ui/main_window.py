@@ -17,7 +17,7 @@ from python_vna.continuous_recording import (
     RecordingStatus,
     available_recording_directory,
 )
-from python_vna.daq.base import BackendDevice
+from python_vna.daq.base import BackendDevice, DaqBackendError
 from python_vna.daq.replay import ReplayComplete
 from python_vna.display_transforms import (
     align_vector_to_values,
@@ -43,7 +43,9 @@ from python_vna.condition_notes import (
 from python_vna.diagnostics import append_log
 from python_vna.measurement_filter import filter_measurement_to_enabled_channels
 from python_vna.impact_selection import HAMMER_FULL_SCALE_STEPS, smart_hit_active, validate_first_hit_source
-from python_vna.models import ChannelConfig, MeasurementSet, SavedSession, SessionConfig
+from python_vna.models import (
+    DEFAULT_DC_REMOVAL_CUTOFF_HZ, ChannelConfig, MeasurementSet, SavedSession, SessionConfig,
+)
 from python_vna.optional import require
 from python_vna import __version__ as PYTHON_VNA_VERSION
 from python_vna.daq.device_probe import probe_ni_devices_subprocess
@@ -869,6 +871,18 @@ class MCSetupDialog(QtWidgets.QDialog):
         self.table.setFixedWidth(902)
         self.table.itemChanged.connect(self._item_changed)
         layout.addWidget(self.table)
+
+        self.reference_row = QtWidgets.QWidget()
+        reference_layout = QtWidgets.QHBoxLayout(self.reference_row)
+        reference_layout.setContentsMargins(0, 0, 0, 0)
+        reference_layout.addWidget(QtWidgets.QLabel("传函参考通道"))
+        self.reference_combo = QtWidgets.QComboBox()
+        self.reference_combo.setMinimumWidth(140)
+        reference_layout.addWidget(self.reference_combo)
+        reference_layout.addWidget(QtWidgets.QLabel("xfer / coh 使用此参考通道；触发通道独立设置"))
+        reference_layout.addStretch(1)
+        self.reference_row.setVisible(not main_window._first_channel_locked())
+        layout.addWidget(self.reference_row)
         if main_window.controller.backend.__class__.__name__ == "NetDaqBackend":
             mode_note = QtWidgets.QLabel(
                 "已启用 USB 模式控制的通道可选择 DC / IEPE，下次开始采集前写入并回读。"
@@ -880,6 +894,10 @@ class MCSetupDialog(QtWidgets.QDialog):
         self.set_all_checkbox = QtWidgets.QCheckBox("设置 Ch 3 至 Ch 4 =")
         self.copy_source_combo = QtWidgets.QComboBox()
         self.copy_source_combo.addItems(["Ch 1", "Ch 2", "Ch 3", "Ch 4"])
+        if main_window.controller.backend.__class__.__name__ == "NetDaqBackend":
+            for control in (self.set_all_checkbox, self.copy_source_combo):
+                control.setEnabled(False)
+                control.setToolTip("此弹窗尚未实现批量复制，请逐通道编辑并应用。")
         self.apply_button = QtWidgets.QPushButton("应用")
         self.undo_button = QtWidgets.QPushButton("撤销")
         self.save_as_button = QtWidgets.QPushButton("另存为")
@@ -898,6 +916,11 @@ class MCSetupDialog(QtWidgets.QDialog):
         self.save_as_button.clicked.connect(main_window._save_session)
         self.close_button.clicked.connect(self.accept)
         self.reload_from_main()
+        idle = main_window._acquisition_thread is None and main_window._recording_thread is None
+        if not main_window._first_channel_locked() and not idle:
+            self.table.setEnabled(False)
+            self.apply_button.setEnabled(False)
+            self.save_as_button.setEnabled(False)
         self.setFixedHeight(self.sizeHint().height())
 
     def _fit_table_height(self) -> None:
@@ -951,12 +974,34 @@ class MCSetupDialog(QtWidgets.QDialog):
                         item.flags() | QtCore.Qt.ItemIsEditable if writable
                         else item.flags() & ~QtCore.Qt.ItemIsEditable)
                     item.setToolTip("" if writable else FIXED_CHANNEL_OPTIONS_TOOLTIP)
+                elif col in (3, 8) and not self.main_window._channel_offset_writable():
+                    item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEditable)
+                    item.setToolTip("此后端未实现硬件偏移或极性设置；自动去直流请使用文件菜单中的软件高通。")
+        self._sync_reference_options(reset=True)
         self.table.blockSignals(False)
         self._fit_table_height()
+
+    def _sync_reference_options(self, *, reset: bool = False) -> None:
+        reference = (self.main_window._current_reference_name() if reset
+                     else self.reference_combo.currentData())
+        with QtCore.QSignalBlocker(self.reference_combo):
+            self.reference_combo.clear()
+            for row in range(self.table.rowCount()):
+                if self.table.item(row, 0).checkState() != QtCore.Qt.Checked:
+                    continue
+                name = self.main_window.channel_table.item(row, 1).text()
+                label = self.table.item(row, 4).text().strip()
+                self.reference_combo.addItem(f"Ch{row + 1}" + (f" ({label})" if label else ""), name)
+            index = self.reference_combo.findData(reference)
+            self.reference_combo.setCurrentIndex(max(0, index))
+        self.reference_combo.setEnabled(
+            self.main_window._acquisition_thread is None and self.main_window._recording_thread is None)
 
     def _item_changed(self, item: QtWidgets.QTableWidgetItem) -> None:
         if item.column() == 0:
             self._enforce_channel_enable_rules(item.row())
+        if item.column() in (0, 4):
+            self._sync_reference_options()
         self.apply_button.setEnabled(True)
 
     def _enforce_channel_enable_rules(self, changed_row: int) -> None:
@@ -997,7 +1042,8 @@ class MCSetupDialog(QtWidgets.QDialog):
             if self.main_window._channel_coupling_writable(row):
                 target.item(row, 6).setText(
                     self.main_window._parse_channel_coupling(row, self.table.item(row, 2).text()))
-            target.item(row, 11).setText(f"{self.main_window._parse_float(self.table.item(row, 3).text(), 0.0):.6g}")
+            if self.main_window._channel_offset_writable():
+                target.item(row, 11).setText(f"{self.main_window._parse_float(self.table.item(row, 3).text(), 0.0):.6g}")
             target.item(row, 10).setText(self.table.item(row, 4).text().strip())
             target.item(row, 7).setText(f"{self.main_window._parse_float(self.table.item(row, 5).text(), 1.0):.6g}")
             target.item(row, 8).setText(self.table.item(row, 6).text().strip() or "V")
@@ -1008,6 +1054,8 @@ class MCSetupDialog(QtWidgets.QDialog):
             if not np.isclose(old_full_scale, new_full_scale, rtol=1e-12, atol=1e-12):
                 full_scale_changed_aliases.update(old_aliases)
                 full_scale_changed_aliases.update(self.main_window._channel_aliases_for_table_row(row))
+        if not self.main_window._first_channel_locked() and self.reference_combo.currentData():
+            self.main_window.session.acquisition.reference_channel = self.reference_combo.currentData()
         self.main_window._rebuild_channel_list()
         self.main_window._sync_channel_grid()
         self.main_window._reload_channel_selectors(include_new_responses=True)
@@ -5027,6 +5075,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _first_channel_locked(self) -> bool:
         return self.controller.backend.__class__.__name__ not in {"NetDaqBackend", "ReplayBackend"}
 
+    def _channel_offset_writable(self) -> bool:
+        return self.controller.backend.__class__.__name__ != "NetDaqBackend"
+
     def _channel_hardware_settings_writable(self, row: int) -> bool:
         backend = self.controller.backend
         if backend.__class__.__name__ != "NetDaqBackend":
@@ -5059,6 +5110,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if any(self._channel_usb_mode_control(row) for row in range(self.channel_table.rowCount())):
             self._load_channel_editor_from_row(self.channel_list.currentRow())
             self._sync_channel_grid()
+        self._sync_backend_config_controls()
 
     def _channel_coupling_options(self, row: int) -> list[str]:
         return ["DC", "IEPE"] if self._channel_usb_mode_control(row) else self.CHANNEL_COUPLING_OPTIONS
@@ -5135,6 +5187,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 if col == 1:
                     item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEditable)
                     item.setToolTip(physical)
+                elif col == 4 and not self._channel_offset_writable():
+                    item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEditable)
+                    item.setToolTip("该后端不支持偏移设置；自动去直流使用独立的软件高通。")
                 elif col in (2, 3) and not (
                         self._channel_coupling_writable(row) if col == 3
                         else self._channel_hardware_settings_writable(row)):
@@ -5159,6 +5214,9 @@ class MainWindow(QtWidgets.QMainWindow):
         row = item.row()
         col = item.column()
         if row < 0 or row >= self.channel_table.rowCount():
+            return
+        if col == 4 and not self._channel_offset_writable():
+            self._sync_channel_grid()
             return
         if col in (2, 3) and not (
                 self._channel_coupling_writable(row) if col == 3
@@ -5302,6 +5360,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.channel_full_scale_combo.setCurrentText(option_text)
         self._channel_editor_loading = False
         self._sync_netdaq_channel_mode(row)
+        self._sync_backend_config_controls()
 
     def _sync_netdaq_channel_mode(self, row: int) -> None:
         backend = self.controller.backend
@@ -5309,6 +5368,17 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.channel_iepe_checkbox.setEnabled(False)
         self.channel_iepe_current_edit.setEnabled(False)
+        self.channel_coupling_combo.setEnabled(False)
+        self.channel_full_scale_combo.setEnabled(False)
+        self.__dict__.setdefault("_netdaq_editor_tooltips", {
+            name: getattr(self, name).toolTip() for name in (
+                "channel_offset_edit", "channel_physical_edit", "channel_reference_checkbox")})
+        self.channel_offset_edit.setEnabled(False)
+        self.channel_offset_edit.setToolTip("该后端不支持偏移设置；自动去直流使用独立的软件高通。")
+        self.channel_physical_edit.setEnabled(False)
+        self.channel_physical_edit.setToolTip("物理通道由设备配置和通道编号确定。")
+        self.channel_reference_checkbox.setEnabled(False)
+        self.channel_reference_checkbox.setToolTip("请在通道设置弹窗中选择传函参考通道。")
         if backend.profile is None or not 0 <= row < len(backend.profile.channels):
             if row == self.channel_list.currentRow():
                 self.channel_iepe_checkbox.setToolTip("NetDAQ IEPE 属于设备上报的通道模式，不能通过耦合索引设置")
@@ -5555,6 +5625,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if "manual" not in normalized:
             self.trigger_enable.setChecked(False)
         self._sync_trigger_arm_button()
+        self._sync_backend_config_controls()
 
     def _toggle_trigger_arm(self) -> None:
         if "manual" not in self._current_combo_value(self.trigger_mode_combo).strip().lower():
@@ -5572,6 +5643,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if manual_mode
             else "Arm is only used by Manual Arm trigger modes."
         )
+        self._sync_backend_config_controls()
 
     def _trigger_source_combo_changed(self, text: str) -> None:
         if text.startswith("Ch"):
@@ -5658,7 +5730,23 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         frame_size = max(1, int(self.frame_size_edit.value()))
         sample_rate = float(self.sample_rate_edit.value())
+        backend = self.controller.backend
+        if backend.__class__.__name__ == "NetDaqBackend":
+            try:
+                timing = backend.preview_timing(sample_rate)
+            except DaqBackendError as exc:
+                self.df_label.setText("采样率不可用")
+                self.df_label.setToolTip(str(exc))
+                return
+            actual = timing["actual_sample_rate"]
+            self.df_label.setText(f"Fs={actual:.6g} Hz\ndF={actual / frame_size:.4g} Hz")
+            self.df_label.setToolTip(
+                f"请求 {sample_rate:g} Hz；分频值 {timing['divisor']}；实际 {actual:.9g} Hz。\n"
+                f"每帧 {frame_size} 点，时长 {frame_size / actual:.6g} 秒。\n"
+                "记录长度是主机读帧/FFT 长度，不是设备停止采集的样本数。")
+            return
         self.df_label.setText(f"dF={sample_rate / frame_size:.4g} Hz")
+        self.df_label.setToolTip("")
 
     def _bandwidth_changed(self, text: str) -> None:
         bandwidth = self.BANDWIDTH_OPTIONS_HZ.get(text)
@@ -5977,7 +6065,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.BANDWIDTH_OPTIONS_HZ,
                 key=lambda label: abs(self.BANDWIDTH_OPTIONS_HZ[label] - self.session.acquisition.bandwidth_hz),
             )
-            self.bandwidth_combo.setCurrentText(bandwidth_label)
+            if self.controller.backend.__class__.__name__ in {"NetDaqBackend", "ReplayBackend"}:
+                with QtCore.QSignalBlocker(self.bandwidth_combo):
+                    self.bandwidth_combo.setCurrentText(bandwidth_label)
+            else:
+                self.bandwidth_combo.setCurrentText(bandwidth_label)
         average_index = self.average_mode_combo.findData(
             self.session.acquisition.averaging.mode
         )
@@ -6170,7 +6262,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     min_value=-float(self.channel_table.item(row, 9).text()),
                     max_value=float(self.channel_table.item(row, 9).text()),
                     dc_removal_enabled=previous.dc_removal_enabled if previous else False,
-                    dc_removal_cutoff_hz=previous.dc_removal_cutoff_hz if previous else 0.1,
+                    dc_removal_cutoff_hz=(
+                        previous.dc_removal_cutoff_hz if previous else DEFAULT_DC_REMOVAL_CUTOFF_HZ),
                 )
             )
 
@@ -6187,7 +6280,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 session.acquisition.sample_rate / 2.56,
             )
         if hasattr(self, "aa_filters_button"):
-            session.acquisition.anti_alias_filters_enabled = True
+            session.acquisition.anti_alias_filters_enabled = (
+                self.controller.backend.__class__.__name__ not in {"NetDaqBackend", "ReplayBackend"})
         if hasattr(self, "window_combo"):
             session.acquisition.processing_window = self._processing_window_value(
                 self.window_combo.currentText()
@@ -6505,8 +6599,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self._restore_channel_hardware_labels()
             valid = 0 <= self.channel_list.currentRow() < self.channel_table.rowCount()
             for widget in (self.channel_iepe_checkbox, self.channel_iepe_current_edit,
-                           self.channel_coupling_combo, self.channel_full_scale_combo):
+                           self.channel_coupling_combo, self.channel_full_scale_combo,
+                           self.channel_offset_edit, self.channel_physical_edit,
+                           self.channel_reference_checkbox):
                 widget.setEnabled(valid)
+            for name, tooltip in self.__dict__.pop("_netdaq_editor_tooltips", {}).items():
+                getattr(self, name).setToolTip(tooltip)
+            self._sync_channel_grid()
             self.channel_iepe_checkbox.setText("IEPE")
             self.channel_iepe_checkbox.setToolTip("")
             self.channel_iepe_current_edit.setSpecialValueText("")
@@ -6537,6 +6636,106 @@ class MainWindow(QtWidgets.QMainWindow):
                         if backend.profile.qualification == "dasp_parameters" else button.text())
         self.backend_combo.setToolTip("NetDAQ 为实验性后端，需在文件 / 设备连接中配置")
         self._sync_usb_mode_editability()
+
+    def _sync_backend_config_controls(self) -> None:
+        if not hasattr(self, "excitation_setup_page") or not hasattr(self, "overlap_combo"):
+            return
+        backend = self.controller.backend
+        netdaq = backend.__class__.__name__ == "NetDaqBackend"
+        replay = backend.__class__.__name__ == "ReplayBackend"
+        managed = netdaq or replay
+        idle = self._acquisition_thread is None and self._recording_thread is None
+        host_ready = replay or (netdaq and backend.ready)
+        host_trigger = host_ready and self._current_combo_value(self.trigger_mode_combo) != "Off (Free Run)"
+        tooltips = self.__dict__.setdefault("_backend_control_tooltips", {})
+
+        def control(name, enabled, tooltip=None):
+            widget = getattr(self, name, None)
+            if widget is None:
+                return
+            if managed:
+                tooltips.setdefault(name, widget.toolTip())
+                widget.setEnabled(enabled)
+                if tooltip is not None:
+                    widget.setToolTip(tooltip)
+            elif name in tooltips:
+                widget.setToolTip(tooltips.pop(name))
+                widget.setEnabled(True)
+
+        ao_note = "当前后端不支持 AO 输出，这些激励设置不会下发。"
+        for name in ("excitation_setup_page", "setup_action", "excitation_enabled_action"):
+            control(name, False, ao_note)
+        for name in ("bandwidth_combo", "sample_rate_edit", "frame_size_edit", "frame_size_slider",
+                     "average_mode_combo", "average_count_edit", "average_count_slider",
+                     "window_combo", "reject_combo", "channel_grid", "channel_enabled_checkbox",
+                     "channel_label_edit", "channel_sensitivity_edit", "channel_unit_edit",
+                     "channel_per_eu_combo", "channel_db_ref_edit", "channel_set_all_checkbox",
+                     "channel_copy_first_button", "channel_apply_button"):
+            control(name, idle)
+        control("dc_removal_action", idle, "连续高通只在主机处理；采集中不能修改截止频率。")
+        control("channel_auto_range_button", not netdaq and idle,
+                "USB/NetDAQ 不能通过此按钮设置硬件自动量程。")
+        for name in ("trigger_mode_combo", "trigger_source_combo", "trigger_level_edit",
+                     "trigger_level_percent_combo", "pretrigger_samples_edit",
+                     "trigger_delay_slider", "trigger_timeout_edit"):
+            control(name, host_ready and idle)
+        control("overlap_combo", idle and not host_trigger,
+                "主机触发按独立事件取帧，不应用 overlap；Inst 自由运行时可使用重叠。"
+                if host_trigger else
+                "主机重叠处理用于瞬时/平均帧；连续记录始终保存连续原始电压。")
+        if host_trigger and idle and self.overlap_combo.currentData() != 0:
+            self.overlap_combo.setCurrentIndex(self.overlap_combo.findData(0))
+        if managed:
+            self.pretrigger_samples_edit.setRange(-99, 100)
+            self.trigger_delay_slider.setRange(-99, 100)
+            if not host_ready or not idle:
+                self.trigger_enable.setEnabled(False)
+            if netdaq:
+                if idle and backend.profile is not None:
+                    self.__dict__.setdefault("_pre_netdaq_sample_rate_maximum", self.sample_rate_edit.maximum())
+                    self.sample_rate_edit.setMaximum(backend.profile.max_sample_rate)
+                for index in range(self.bandwidth_combo.count()):
+                    item = self.bandwidth_combo.model().item(index)
+                    requested = self.BANDWIDTH_OPTIONS_HZ[self.bandwidth_combo.itemText(index)] * 2.56
+                    try:
+                        backend.preview_timing(requested)
+                    except DaqBackendError as exc:
+                        item.setEnabled(False)
+                        item.setToolTip(str(exc))
+                    else:
+                        item.setEnabled(True)
+                        item.setToolTip("")
+                self.bandwidth_combo.setToolTip(
+                    "BW 设置分析带宽，并以 2.56 × BW 请求采样率；实际采样率由设备分频决定。\n"
+                    "不是可编程硬件低通截止频率；本设备尚无已确认的低通设置命令。")
+                self.frame_size_edit.setToolTip(
+                    "主机每帧读取/处理的样本数，FFT 和触发窗口均使用此值。\n"
+                    "设备仍连续送数；Record 每帧写盘，不在达到此点数后自动停止。")
+                self.aa_filters_button.setToolTip(
+                    "USB2404 的硬件抗混叠滤波状态和可调截止频率尚未确认，不能由此按钮设置。")
+            self._sync_host_trigger_source()
+            available = set(self._enabled_channel_names())
+            for index in range(self.trigger_source_combo.count()):
+                text = self.trigger_source_combo.itemText(index)
+                if text.startswith("Ch") and text[2:].isdigit():
+                    self.trigger_source_combo.model().item(index).setEnabled(
+                        f"ai{int(text[2:]) - 1}" in available)
+        else:
+            self.dc_removal_action.setEnabled(False)
+            self.pretrigger_samples_edit.setRange(-65536, 65536)
+            self.trigger_delay_slider.setRange(-100, 100)
+            maximum = self.__dict__.pop("_pre_netdaq_sample_rate_maximum", None)
+            if maximum is not None:
+                self.sample_rate_edit.setMaximum(maximum)
+            for index in range(self.bandwidth_combo.count()):
+                item = self.bandwidth_combo.model().item(index)
+                item.setEnabled(True)
+                item.setToolTip("")
+            self.aa_filters_button.setToolTip(
+                "NI USB-4431 的抗混叠滤波由 DAQmx 管理，此处不能手动切换。")
+            for index in range(self.trigger_source_combo.count()):
+                self.trigger_source_combo.model().item(index).setEnabled(True)
+        self._update_frequency_readout()
 
     def _backend_changed(self, backend_name: str, netdaq_settings=None) -> None:
         append_log(f"backend changed: begin {backend_name}")

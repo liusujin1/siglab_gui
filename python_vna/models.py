@@ -5,6 +5,9 @@ from pathlib import Path
 from typing import Any
 
 
+DEFAULT_DC_REMOVAL_CUTOFF_HZ = 0.7
+
+
 @dataclass(slots=True)
 class ChannelConfig:
     name: str
@@ -24,7 +27,7 @@ class ChannelConfig:
     max_value: float = 10.0
     is_reference: bool = False
     dc_removal_enabled: bool = False
-    dc_removal_cutoff_hz: float = 0.1
+    dc_removal_cutoff_hz: float = DEFAULT_DC_REMOVAL_CUTOFF_HZ
 
 
 @dataclass(slots=True)

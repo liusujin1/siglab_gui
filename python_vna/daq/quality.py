@@ -11,6 +11,7 @@ class AcquisitionQuality:
         self.backend_name = backend_name
         self.ranges = {c.name: (float(c.min_value), float(c.max_value)) for c in channels if c.enabled}
         self.stats = {}
+        self.processed_stats = {}
         self.rail_basis = {}
         self.started = time.monotonic()
         self.frames = self.bytes = 0
@@ -18,6 +19,20 @@ class AcquisitionQuality:
     def add(self, frame):
         self.frames += 1
         self.bytes += int(frame.data.nbytes)
+        if frame.raw_data is not None:
+            for name, values in zip(frame.channel_names, frame.data):
+                x = np.asarray(values, dtype=float)
+                finite = x[np.isfinite(x)]
+                if not finite.size:
+                    continue
+                stat = self.processed_stats.setdefault(
+                    name, dict(samples=0, mean_v=0.0, sum_squares=0.0))
+                count, mean = int(finite.size), float(np.mean(finite))
+                stat["mean_v"] += (mean - stat["mean_v"]) * count / (stat["samples"] + count)
+                stat["samples"] += count
+                stat["sum_squares"] += float(np.dot(finite, finite))
+                stat["last_frame_mean_v"] = mean
+                stat["last_frame_rms_v"] = float(np.sqrt(np.mean(finite * finite)))
         raw = frame.raw_data if frame.raw_data is not None else frame.data
         for name, values in zip(frame.channel_names, raw):
             reported = frame.metadata.get("channel_hardware_ranges", {}).get(name)
@@ -60,6 +75,15 @@ class AcquisitionQuality:
                 rail_limits_v=self.ranges.get(name),
                 rail_basis=self.rail_basis.get(name, "configured_input_limits"),
             )
+            processed = self.processed_stats.get(name)
+            if processed:
+                channels[name]["processed_voltage"] = {
+                    "samples": processed["samples"], "mean_v": processed["mean_v"],
+                    "rms_v": (processed["sum_squares"] / processed["samples"]) ** .5,
+                    "last_frame_mean_v": processed["last_frame_mean_v"],
+                    "last_frame_rms_v": processed["last_frame_rms_v"],
+                }
         return dict(format="python_vna_acquisition_quality", backend=self.backend_name, frames=self.frames,
                     elapsed_seconds=elapsed, bytes_read=self.bytes, bytes_per_second=self.bytes / elapsed,
-                    channels=channels, note="软件去直流前的电压统计，吞吐率按交付帧计算；接近量程并不等于传感器断线。未自动标定。")
+                    channels=channels, note="主统计为软件去直流前的电压；processed_voltage 为处理后电压。"
+                    "连续高通不保证每帧均值为零；吞吐率按交付帧计算，接近量程不等于传感器断线。未自动标定。")

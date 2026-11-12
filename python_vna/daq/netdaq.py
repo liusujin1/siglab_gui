@@ -352,13 +352,32 @@ class NetDaqBackend(BaseDaqBackend):
             for i, c in enumerate(profile.channels)))
         return [BackendDevice(
             self.device_name, f"NetDAQ {profile.model if profile else '未配置 / 仅只读探测'}"
-            + ("（DASP 参数兼容；电气模式未确认）" if profile and profile.qualification == "dasp_parameters"
+            + (("（DASP 标称换算；DC/IEPE 可选）"
+                if any(profile.has_usb_coupling_control(i) for i in range(len(profile.channels)))
+                else "（DASP 参数兼容；电气模式未确认）")
+               if profile and profile.qualification == "dasp_parameters"
                else " (experimental)"),
             [f"{self.device_name}/ai{i}" for i in range(len(profile.channels))] if profile else [], [],
             BackendCapability(supports_iepe=iepe, supports_analog_trigger=bool(profile),
                               supports_pretrigger=bool(profile),
                               max_ai_sample_rate=profile.max_sample_rate if profile else None),
         )]
+
+    def preview_timing(self, requested_rate: float) -> dict:
+        """Use the same divisor and limits as configure, without device access."""
+        if self.profile is None:
+            raise DaqBackendError("缺少设备配置，无法确定实际采样率")
+        if not math.isfinite(requested_rate) or not 0 < requested_rate <= self.profile.max_sample_rate:
+            raise DaqBackendError("NetDAQ requested sample rate exceeds the verified device limit")
+        encoder = sampling_divisor
+        if self.settings.transport == "usb":
+            from .usbdaq import sampling_divisor as encoder
+
+        divisor, actual = encoder(self.profile.descriptor, requested_rate)
+        if actual > self.profile.max_sample_rate:
+            raise DaqBackendError("NetDAQ coerced sample rate exceeds the verified device limit")
+        return {"requested_sample_rate": requested_rate, "actual_sample_rate": actual,
+                "divisor": divisor}
 
     def configure(self, session, device_name=None):
         if self._owner is not None:
@@ -379,15 +398,8 @@ class NetDaqBackend(BaseDaqBackend):
         profile = self.profile
         if acq.frame_size * len(profile.channels) * 8 > 64 * 1024 * 1024:
             raise DaqBackendError("NetDAQ frame allocation exceeds the 64 MiB safety limit")
-        if not math.isfinite(acq.sample_rate) or acq.sample_rate > profile.max_sample_rate:
-            raise DaqBackendError("NetDAQ requested sample rate exceeds the verified device limit")
-        rate_encoder = sampling_divisor
-        if self.settings.transport == "usb":
-            from .usbdaq import sampling_divisor as rate_encoder
-
-        divisor, actual = rate_encoder(profile.descriptor, acq.sample_rate)
-        if actual > profile.max_sample_rate:
-            raise DaqBackendError("NetDAQ coerced sample rate exceeds the verified device limit")
+        timing = self.preview_timing(acq.sample_rate)
+        divisor, actual = timing["divisor"], timing["actual_sample_rate"]
         selected = []
         for channel in session.ai_channels:
             if not channel.enabled:
@@ -569,6 +581,10 @@ class NetDaqBackend(BaseDaqBackend):
             "backend": "netdaq", "experimental": True, "device_model": profile.model,
             "transport": self.settings.transport, "profile_sha256": profile.digest,
             "requested_sample_rate": self._requested_rate, "actual_sample_rate": self._rate,
+            "frame_size": self._session.acquisition.frame_size,
+            "frame_duration_seconds": self._session.acquisition.frame_size / self._rate,
+            "frequency_resolution_hz": self._rate / self._session.acquisition.frame_size,
+            "hardware_lowpass_configurable": False,
             "channel_modes": {name: {
                 "channel_type": profile.channels[index]["channel_type"],
                 "wire_number": profile.channels[index]["wire_number"],

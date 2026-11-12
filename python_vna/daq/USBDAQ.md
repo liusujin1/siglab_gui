@@ -534,7 +534,9 @@ new dependency, version bump or packaged release.
 
 **File / Automatic DC removal** opens a per-channel enable/cutoff dialog for
 NetDAQ USB/TCP and offline replay. It is disabled for NI, which retains its
-existing hardware coupling path. Settings default to disabled and 0.1 Hz.
+existing hardware coupling path. Settings initially defaulted to disabled and
+0.1 Hz; the cutoff default was changed to 0.7 Hz on 2026-11-12. Explicit values
+in existing saved configurations remain unchanged.
 The acquisition layout and MATLAB-style channel matrix are unchanged.
 
 Enabled channels use a first-order Butterworth high-pass in voltage units,
@@ -745,3 +747,63 @@ Validation of this follow-up:
 
 This is a short functional regression, not a current/compliance-voltage
 measurement, independent amplitude calibration or thirteen-hour endurance test.
+
+## Acquisition controls and DC-removal follow-up, 2026-11-12
+
+The UI now previews the same divisor calculation used by configure. The
+frequency panel shows actual Fs and dF, and restoring a saved coerced sample
+rate does not overwrite it with 2.56 times the BW selection. Unsupported BW
+choices are disabled using the profile's rate limit. BW sets requested sampling
+rate and analysis bandwidth; it is not a programmable USB hardware low-pass.
+The hardware anti-alias state remains unknown and its button is read-only.
+
+Record length controls host read/FFT/trigger-window sample count. InitAD
+contains the clock divisor and fixed stream mask, not a finite sample-count
+command. Real reads returned exactly 2048, 4096 and 8192 samples at the selected
+lengths. Requested/actual sampling rates checked were 2560/2560,
+5120/5333.333333, 12800/12800 and 25600/32000 Hz.
+
+Unsupported AO settings, hardware autorange, physical-path editing, input
+offset/polarity and the unimplemented MC Setup bulk-copy controls are disabled.
+Qualified DC/IEPE selection and host sensor units/scales remain available.
+Acquisition locks configuration controls until the worker finishes. Host
+trigger mode disables overlap and excludes disabled channels as trigger sources.
+NI controls are restored when switching back to that backend.
+
+MC Setup exposes the transfer-function reference for NetDAQ/replay independently
+of the channel editor and trigger source. CH1 remains the default while enabled.
+Real Qt acquisition workers completed three averages for each of -25%, zero and
++25% Delay using CH2 as the trigger and transfer reference. Returned keys were
+ai1->ai0, ai1->ai2 and ai1->ai3; this checks routing, not physical FRF accuracy.
+The same GUI checks passed with the new 0.7 Hz software high-pass and provenance
+confirmed that cutoff. Electrical channel modes remained 01/01/00/00.
+
+New/default channel configurations use a 0.7 Hz high-pass cutoff, with enable
+still explicit per channel. Models, UI and VNA fallback use a common constant.
+Existing explicit 0.1 Hz or other cutoffs are retained, even when disabled.
+The first-order filter remains continuous across blocks and initializes from
+the first sample, without discarding frames or subtracting each frame's mean.
+At 0.7 Hz an ideal DC step decays to 1% in approximately 1.05 seconds; this
+does not guarantee that a finite vibration frame has zero mean.
+
+A 20-second CH2 comparison, performed before changing the default, measured
+raw mean 3.586872 mV. With 0.1 Hz filtering, the last ten seconds averaged
+2.259751 microvolts, while the full run averaged 0.286697 mV because of its
+initial transient. Acquisition quality reports now retain separate raw and
+processed-voltage means/RMS, including the last processed frame, so residual
+drift and startup behavior can be checked without changing the signal.
+Continuous Record still preserves original voltage.
+
+Local evidence is in tmp_usb_controls_20261112/report.json, gui_report.json,
+gui_report_07.json and the rendered configuration dialogs. These ignored files
+are not calibration assets. No version, dependency or packaging changes were
+made. The shared model/storage edits only change the missing/default cutoff;
+both product suites are required for this follow-up.
+
+Product regression passed 735 tests and 58 subtests. The VIanalysis regression
+passed 457 tests and 28 subtests, with one skip and one pre-existing failure:
+AnalysisDataTests.test_load_continuous_multiple_segments_keeps_manifest_order
+creates a default 2560 Hz recording but supplies 100 Hz frames. The same failure
+was reproduced in an exported, unmodified eacfdad snapshot. The recording
+sample-rate consistency guard was not weakened, and the other product's test
+fixture was not edited.

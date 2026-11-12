@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 
-from python_vna.models import SavedSession, SessionConfig
+from python_vna.models import DEFAULT_DC_REMOVAL_CUTOFF_HZ, SavedSession, SessionConfig
 
 
 def _construct_dataclass(cls, payload: dict[str, Any]):
@@ -1436,7 +1436,8 @@ def save_legacy_vna(session: SavedSession, path: str | Path) -> Path:
         "EULabel": eu_label,
         "SLm": slm,
     }
-    if any(channel.dc_removal_enabled or channel.dc_removal_cutoff_hz != 0.1 for channel in channels):
+    if any(channel.dc_removal_enabled or channel.dc_removal_cutoff_hz != DEFAULT_DC_REMOVAL_CUTOFF_HZ
+           for channel in channels):
         mat_variables["PythonVNADcRemoval_json"] = json.dumps({
             "version": 1,
             "channels": {channel.name: {
@@ -1772,13 +1773,14 @@ def load_legacy_vna(path: str | Path) -> SavedSession:
                     sensitivity = native_sensitivity
             except (KeyError, TypeError, ValueError, OverflowError):
                 pass
-            dc_enabled, dc_cutoff = False, 0.1
+            dc_enabled, dc_cutoff = False, DEFAULT_DC_REMOVAL_CUTOFF_HZ
             try:
                 dc_setting = dc_channels.get(channel_name, {})
                 if not isinstance(dc_setting, dict):
                     dc_setting = {}
                 requested = dc_setting.get("enabled", native_channel.get("dc_removal_enabled", False))
-                cutoff = float(dc_setting.get("cutoff_hz", native_channel.get("dc_removal_cutoff_hz", 0.1)))
+                cutoff = float(dc_setting.get("cutoff_hz", native_channel.get(
+                    "dc_removal_cutoff_hz", DEFAULT_DC_REMOVAL_CUTOFF_HZ)))
                 if isinstance(requested, bool) and np.isfinite(cutoff) and 0 < cutoff < sample_rate / 2:
                     dc_enabled, dc_cutoff = requested, cutoff
             except (TypeError, ValueError, OverflowError):

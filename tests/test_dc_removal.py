@@ -134,7 +134,49 @@ def test_quality_reports_raw_dc_and_rail_even_when_preview_is_centered():
     report = q.report()["channels"]["ai0"]
     assert report["mean_v"] == 10
     assert report["rail_fraction"] == 1
+    assert abs(report["processed_voltage"]["mean_v"]) < 1e-9
+    assert abs(report["processed_voltage"]["last_frame_mean_v"]) < 1e-9
     np.testing.assert_allclose(frame.data[0], 0, atol=1e-9)
+
+
+def test_selected_cutoff_changes_response_without_forcing_each_frame_mean_to_zero():
+    s = session_for(rate=256, size=128)
+    time = np.arange(256 * 60) / 256
+    signal = 3.5 + .02 * np.sin(2 * np.pi * .2 * time)
+    rms = []
+    for cutoff in (.1, .7, 1.0):
+        s.ai_channels[0].dc_removal_cutoff_hz = cutoff
+        correction = DcRemoval(s.ai_channels[:1], 256)
+        frames = [correction.process(["ai0"], signal[None, i:i + 128])[0]
+                  for i in range(0, signal.size, 128)]
+        values = np.concatenate(frames)
+        assert correction.description()["channels"]["ai0"]["cutoff_hz"] == cutoff
+        assert abs(values[-2560:].mean()) < 1e-7
+        assert abs(frames[-1].mean()) > 1e-6
+        rms.append(np.sqrt(np.mean(values[-2560:] ** 2)))
+    assert rms[0] == pytest.approx(.02 / np.sqrt(2) * .2 / np.hypot(.2, .1), rel=.001)
+    assert rms[1] == pytest.approx(.02 / np.sqrt(2) * .2 / np.hypot(.2, .7), rel=.001)
+    assert rms[2] == pytest.approx(.02 / np.sqrt(2) * .2 / np.hypot(.2, 1), rel=.001)
+    assert rms[0] > rms[2] * 4
+
+
+def test_quality_keeps_raw_and_processed_statistics_separate_across_frames():
+    from python_vna.daq.quality import AcquisitionQuality
+
+    s = session_for()
+    quality = AcquisitionQuality(s.ai_channels)
+    for values in (np.array([.1, .2, -.1]), np.array([-.2, .3])):
+        data = values[None, :]
+        frame = BackendFrame(128, ["ai0"], data, np.arange(values.size) / 128, 0,
+                             raw_data=data + 3)
+        quality.add(frame)
+    report = quality.report()["channels"]["ai0"]
+    assert report["mean_v"] == pytest.approx(3.06)
+    processed = report["processed_voltage"]
+    assert processed["samples"] == 5
+    assert processed["mean_v"] == pytest.approx(.06)
+    assert processed["rms_v"] == pytest.approx(np.sqrt(.19 / 5))
+    assert processed["last_frame_mean_v"] == pytest.approx(.05)
 
 
 @pytest.mark.parametrize("enabled", [True, False])
