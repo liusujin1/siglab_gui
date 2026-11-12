@@ -170,6 +170,7 @@ class DcRemovalDialog(QtWidgets.QDialog):
             f"此默认值对偏置阶跃约需 {math.log(100) / (2 * math.pi * DEFAULT_DC_REMOVAL_CUTOFF_HZ):.2f} "
             "秒衰减至 1%；启动时可能偏离零轴，不保证每帧均值为零。\n"
             "采集质量报告中可比较原始均值与 processed_voltage（处理后电压）均值。\n"
+            "USB2404 的已确认 IEPE 档含硬件隔直，其截止频率未知；此处软件高通为额外处理，不自动开启。\n"
             "触发、显示、分析用校正信号；连续记录保存原始电压，回放按保存参数处理。\n"
             "VNA 保存当前处理后的时域；普通 Analysis 直接打开连续记录仍显示原始数据。")
         note.setWordWrap(True)

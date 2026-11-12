@@ -1,6 +1,7 @@
 # Experimental USB2404 transport
 
-This feature belongs to PythonVNATest. NI remains the startup default. USB uses
+This feature belongs to PythonVNATest. NI remains the initial backend; idle
+automatic discovery can select USB as described below. USB uses
 the existing NetDAQ backend with `transport="usb"`; it does not use TCP ports.
 No third-party Python package, vendor 32-bit DAQ DLL, firmware loader or driver
 installer is introduced. Optional file metadata extensions are described below.
@@ -807,3 +808,103 @@ creates a default 2560 Hz recording but supplies 100 Hz frames. The same failure
 was reproduced in an exported, unmodified eacfdad snapshot. The recording
 sample-rate consistency guard was not weakened, and the other product's test
 fixture was not edited.
+
+## Automatic device selection and updated protocol review, 2026-11-12
+
+File / automatic acquisition-device detection is enabled by default and its
+checked state is remembered. Startup and idle polls discover NI USB-4431 and
+USB2404 candidates in the background. NI enumeration remains isolated in the
+existing bounded subprocess. USB discovery only enumerates VID/PID and native
+node names; it does not open/claim an interface, read vendor endpoints, write
+channel modes, initialize sampling, or start acquisition. The existing USB lease
+also excludes passive enumeration during an owned transfer or quarantine.
+
+The initial CLI backend remains NI. Automatic selection retains the last
+hardware backend when both supported families are present, uses the available
+one otherwise, and never substitutes a reference USB-6000. Other NI models remain
+available through manual selection with automatic detection disabled.
+TCP, simulation and replay selections remain manual. No switching occurs while
+acquiring, recording, loading the startup session, closing, or editing a modal
+dialog. An unconfirmed Stop blocks further automatic polling/switching.
+
+USB acquisition reuses the remembered USB transport/index/profile. A missing
+or invalid profile leaves the detected USB backend read-only with Start/Avg/
+Record disabled and a configuration prompt; a broken saved profile path is
+retained for repair. Presence is not a descriptor/firmware or calibration
+verification: acquisition still performs those existing checks before InitAD.
+No profiles are fabricated from a VID/PID match.
+
+NI and USB channel/acquisition settings are cached separately during a running
+session; USB caches are additionally keyed by profile path and device index.
+Switching back restores the corresponding settings. The current test title and
+notes remain current. Periodic presence updates do not reload defaults or reset
+channel edits. The last hardware choice and connection profile are persisted,
+while these per-backend session caches are in memory.
+
+Device-refresh QObjects/QThreads are retained until a nonblocking wait confirms
+native thread completion. The native USB integration check exposed a thread-local
+storage teardown race when releasing them immediately on finished; the new
+completion path waits through that interval without blocking the UI. Start is
+also gated while discovery/startup loading owns configuration.
+
+Updated external references reviewed (not runtime dependencies):
+
+```text
+PROTOCOL_USB.md    b3f09ead13b1e4082fc648ad65e6445b941c68b176f52260013d89b18f9e5571
+netdaq_usb.py      bdc57f9ed4c0e182c4fc86c35a69a01d7ed714a318cd58fd6a54d35778aecf99
+device_usb2404.json
+                  7536ac078af9153185258c24d031056df2cbb2f7d418cf5ffd3ed0126c7d50a5
+```
+
+The reference's 180 offline protocol checks and 39 profile checks pass.
+Sections 2 and 6.4 confirm firmware bytes 02/00, seven-byte digital-input
+response `214507ff006c0d`, and the IEPE frontend's DC-blocking behavior.
+Read-only probe reports now decode firmware 2.0 and qualified channel modes.
+Known IEPE/DC modes carry hardware_ac_coupled true/false; unknown modes and
+the hardware high-pass cutoff stay unknown. These facts also appear in
+acquisition provenance without changing the shared storage format.
+
+`UsbConnection.digital_inputs()` validates the seven-byte reply and returns
+exactly its two raw data bytes. Explicit diagnostics can request
+`NetDaqBackend.probe(include_digital_inputs=True)` on the qualified descriptor/
+firmware. Neither automatic detection nor ordinary acquisition requests this
+command. Pin count/bit mapping are not inferred, digital output stays disabled,
+and charge/other channel values remain rejected. Source files reporting
+nominal software ranges are still not independent amplitude calibration.
+
+Hardware DC blocking and the optional 0.7 Hz software filter are separate.
+The application does not automatically enable the software filter for IEPE and
+does not remove each frame's mean or discard startup frames. The software
+dialog explains the additional attenuation/phase change.
+
+### CH2 raw IEPE observation
+
+With the operator's sensor on CH2, a 30-second capture at 2560 samples/s stored
+76800 raw-voltage samples. Software DC removal, triggering and excitation were
+disabled. No channel-mode write was permitted by the check. All four modes
+remained 01/01/00/00 before and after capture.
+
+Nominal-voltage results: mean +3.613334 mV, standard deviation 3.160911 mV,
+minimum -21.015406 mV, maximum +20.905733 mV, zero samples at the nominal rails.
+The last ten seconds averaged +3.588931 mV; one-second means ranged from
++3.462516 to +3.676760 mV. The observation is consistent with the documented
+DC-blocking frontend, but is not a controlled DC step or cutoff measurement.
+Residual millivolt offset is not proof that hardware isolation is absent.
+
+Applying the continuous 0.7 Hz software filter offline to exactly those saved
+samples gave a last-ten-second mean -0.233472 microvolts. This comparison
+does not alter the captured raw data or automatically enable filtering in the
+operator's UI. Local evidence is retained in
+`tmp_usb_iepe_ch2_20261112/report.json` and `ch2_raw.npz`.
+Three separate GUI startup checks selected the real USB candidate using a saved
+profile, enabled capture and disabled AO, with zero vendor probe calls; evidence
+is in `tmp_auto_device_20261112/report.json`. These ignored local artifacts are
+not shipped calibration profiles. No shared modules, dependencies or versions
+are changed by this follow-up.
+
+Final required product regression:
+`powershell -NoProfile -File scripts/test_vna_product.ps1 -Product python_vna_test -Quiet`
+passed 770 tests and 58 subtests. All changed modules/tests belong to
+python_vna_test under the existing suite manifest; no new Python module or test
+file was added. The external reference self-checks and actual CH2 observation
+are additional evidence, not substitutes for this product regression.

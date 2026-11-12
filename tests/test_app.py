@@ -14,7 +14,10 @@ from python_vna.app import (
 from python_vna.conversion_app import parse_args as parse_conversion_args
 import sys
 
-from python_vna.daq.device_probe import probe_ni_devices_subprocess
+from python_vna.daq.device_probe import (
+    choose_hardware_backend, discover_hardware, probe_ni_devices_subprocess,
+)
+from python_vna.daq.base import BackendDevice
 from python_vna.models import SavedSession
 from python_vna.storage import default_session_config
 
@@ -106,6 +109,48 @@ class AppArgumentTests(unittest.TestCase):
 
         self.assertEqual(devices, [])
         self.assertEqual(run.call_args.args[0], [sys.executable, "--probe-ni-devices-json"])
+
+    def test_hardware_choice_retains_preference_when_both_present(self):
+        snapshot = {"ni_devices": [BackendDevice("Dev1", "NI USB-4431")],
+                    "usb_devices": [{"index": 0}]}
+        self.assertEqual(choose_hardware_backend(snapshot, preferred="usb", current="ni"), "usb")
+        self.assertEqual(choose_hardware_backend(snapshot, preferred="ni", current="usb"), "ni")
+        self.assertEqual(choose_hardware_backend(snapshot, current="usb"), "usb")
+        self.assertEqual(choose_hardware_backend(snapshot), "ni")
+
+    def test_hardware_choice_uses_only_available_saved_usb_index(self):
+        snapshot = {"ni_devices": [], "usb_devices": [{"index": 0}]}
+        self.assertEqual(choose_hardware_backend(snapshot, preferred="ni"), "usb")
+        self.assertIsNone(choose_hardware_backend(snapshot, usb_index=1))
+        self.assertIsNone(choose_hardware_backend({}))
+
+    def test_hardware_discovery_survives_missing_ni_driver(self):
+        with mock.patch("python_vna.daq.usbdaq.enumerate_candidates",
+                        return_value=[{"index": 0}]) as usb, mock.patch(
+                "python_vna.daq.device_probe.probe_ni_devices_subprocess",
+                side_effect=RuntimeError("NI driver unavailable")):
+            result = discover_hardware()
+        usb.assert_called_once_with()
+        self.assertEqual(result["usb_devices"], [{"index": 0}])
+        self.assertEqual(result["ni_devices"], [])
+        self.assertEqual(result["errors"], {"ni": "NI driver unavailable"})
+
+    def test_hardware_discovery_survives_missing_usb_driver(self):
+        device = BackendDevice("Dev1", "NI USB-4431")
+        with mock.patch("python_vna.daq.usbdaq.enumerate_candidates",
+                        side_effect=OSError("USB driver unavailable")), mock.patch(
+                "python_vna.daq.device_probe.probe_ni_devices_subprocess", return_value=[device]):
+            result = discover_hardware()
+        self.assertEqual(result["ni_devices"], [device])
+        self.assertEqual(result["usb_devices"], [])
+        self.assertEqual(result["errors"], {"usb": "USB driver unavailable"})
+
+    def test_hardware_discovery_does_not_mistake_reference_6000_for_vibration_device(self):
+        devices = [BackendDevice("Dev4", "USB-6000"), BackendDevice("Dev1", "USB-4431")]
+        with mock.patch("python_vna.daq.usbdaq.enumerate_candidates", return_value=[]), mock.patch(
+                "python_vna.daq.device_probe.probe_ni_devices_subprocess", return_value=devices):
+            result = discover_hardware()
+        self.assertEqual(result["ni_devices"], devices[1:])
 
 
 if __name__ == "__main__":

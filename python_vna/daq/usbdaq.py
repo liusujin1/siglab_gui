@@ -117,6 +117,40 @@ def load_library():
     return lib
 
 
+def enumerate_candidates():
+    """Enumerate VID/PID candidates without opening, claiming or commanding USB."""
+    if not _lease.acquire(blocking=False):
+        raise NetDaqProtocolError("USBDAQ is busy; passive discovery deferred")
+    try:
+        lib = load_library()
+        lib.usb_init()
+        if lib.usb_find_busses() < 0 or lib.usb_find_devices() < 0:
+            raise NetDaqProtocolError("USBDAQ passive enumeration failed")
+        result, bus = [], lib.usb_get_busses()
+        # A damaged native list must not make discovery loop indefinitely.
+        visited = set()
+        while bus:
+            address = ct.addressof(bus.contents)
+            if address in visited or len(visited) >= 4096:
+                raise NetDaqProtocolError("USBDAQ invalid bus enumeration")
+            visited.add(address)
+            dev, devices = bus.contents.devices, set()
+            while dev:
+                address = ct.addressof(dev.contents)
+                if address in devices or len(devices) >= 4096:
+                    raise NetDaqProtocolError("USBDAQ invalid device enumeration")
+                devices.add(address)
+                descriptor = dev.contents.descriptor
+                if (descriptor.vid, descriptor.pid) == (VID, PID):
+                    result.append({"index": len(result), "vid": VID, "pid": PID,
+                                   "node": dev.contents.filename.decode(errors="replace")})
+                dev = dev.contents.next
+            bus = bus.contents.next
+        return result
+    finally:
+        _lease.release()
+
+
 def checked_reply(raw, command, size=0):
     if (len(raw) < 6 or (size and len(raw) != size)
             or raw[:2] != bytes((0x21, command)) or raw[2] != len(raw)
@@ -296,7 +330,7 @@ class UsbConnection:
         self.close()
 
     def command(self, command, payload=b"", size=6):
-        if command not in {0x44, 0x56, 0x41, 0x42, 0x49, 0x53, 0x50}:
+        if command not in {0x44, 0x56, 0x41, 0x42, 0x49, 0x53, 0x50, 0x45}:
             raise NetDaqProtocolError("USBDAQ unsupported command; use the qualified channel_set for mode selection")
         return self._exchange(command, payload, size)
 
@@ -360,6 +394,10 @@ class UsbConnection:
             self.channel_descriptor(number)
         count = self._channel_lengths[number]
         return self.command(0x42, bytes((number,)), count + 6)[4:-2]
+
+    def digital_inputs(self):
+        """Return the two raw !E bytes; pin count/bit meanings are unqualified."""
+        return self.command(0x45, size=7)[3:5]
 
     def channel_set(self, number, configuration):
         """Write one qualified mode and check !COK plus independent !B readback."""

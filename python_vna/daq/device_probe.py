@@ -46,6 +46,37 @@ def probe_ni_devices_subprocess(timeout_s: float = 4.0) -> list[BackendDevice]:
     return [_device_from_payload(item) for item in payload if isinstance(item, dict)]
 
 
+def discover_hardware() -> dict:
+    """Run on a background worker; USB discovery never opens the device."""
+    from python_vna.daq.usbdaq import enumerate_candidates
+
+    result = {"ni_devices": [], "usb_devices": [], "errors": {}}
+    for name, probe in (("usb", enumerate_candidates), ("ni", probe_ni_devices_subprocess)):
+        try:
+            devices = probe()
+            # This acquisition UI targets the USB-4431. A reference USB-6000
+            # on the same PC must not take priority over the vibration device.
+            if name == "ni":
+                devices = [d for d in devices if "4431" in d.product_type]
+            result[f"{name}_devices"] = devices
+        except Exception as exc:
+            result["errors"][name] = str(exc)
+    return result
+
+
+def choose_hardware_backend(snapshot: dict, *, preferred: str = "", current: str = "",
+                            usb_index: int = 0) -> str | None:
+    available = set()
+    if snapshot.get("ni_devices"):
+        available.add("ni")
+    if any(device["index"] == usb_index for device in snapshot.get("usb_devices", [])):
+        available.add("usb")
+    for choice in (preferred, current, "ni", "usb"):
+        if choice in available:
+            return choice
+    return None
+
+
 def _probe_ni_devices_json() -> str:
     from python_vna.daq.ni import NIDaqBackend
 

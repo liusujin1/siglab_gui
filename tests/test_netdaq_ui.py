@@ -46,6 +46,236 @@ def test_ni_remains_default_and_netdaq_cli_is_explicit():
     assert args.netdaq_profile == ""
 
 
+def _ni_device():
+    from python_vna.daq.base import BackendDevice
+
+    return BackendDevice("Dev1", "NI USB-4431", [f"Dev1/ai{i}" for i in range(4)], ["Dev1/ao0"])
+
+
+def _discovery_snapshot(*, ni=False, usb=False):
+    return {"ni_devices": [_ni_device()] if ni else [],
+            "usb_devices": [{"index": 0}] if usb else [], "errors": {}}
+
+
+def test_auto_detection_defaults_on_and_can_be_remembered(window, monkeypatch):
+    assert window.auto_device_action.isChecked()
+    monkeypatch.setattr(window, "refresh_devices_async", lambda: None)
+    window._write_connection_preferences(theme="light", netdaq={"host": "example.invalid"})
+    window.auto_device_action.setChecked(False)
+    settings = window._connection_preferences()
+    assert settings["auto_device_detection"] is False
+    assert settings["theme"] == "light" and settings["netdaq"]["host"] == "example.invalid"
+    window.controller.backend = build_backend("ni")
+    assert not window._automatic_hardware_detection()
+    window.auto_device_action.setChecked(True)
+    assert window._automatic_hardware_detection()
+
+
+def test_auto_detection_respects_manual_simulation_tcp_and_replay(window):
+    assert not window._automatic_hardware_detection()
+    window._apply_hardware_snapshot(_discovery_snapshot(ni=True, usb=True))
+    assert window.controller.backend.__class__.__name__ == "SimulatedDaqBackend"
+    window.controller.backend = NetDaqBackend(NetDaqSettings(host="192.0.2.1"))
+    assert not window._automatic_hardware_detection()
+    window._apply_hardware_snapshot(_discovery_snapshot(usb=True))
+    assert window.controller.backend.settings.transport == "tcp"
+    from python_vna.daq.replay import ReplayBackend
+    window.controller.backend = ReplayBackend("not-opened.vna")
+    assert not window._automatic_hardware_detection()
+
+
+def test_auto_detection_switches_to_unconfigured_usb_without_probing(window, monkeypatch):
+    window.controller.backend = build_backend("ni")
+    with mock.patch.object(NetDaqBackend, "probe", side_effect=AssertionError("No vendor commands")):
+        window._apply_hardware_snapshot(_discovery_snapshot(usb=True))
+    assert window._hardware_backend_key() == "usb"
+    assert window.backend_combo.currentText() == "netdaq"
+    assert window.device_combo.currentData() == window.controller.backend.device_name
+    assert window.device_status_light.property("connected")
+    assert not window.start_button.isEnabled()
+    assert not window.avg_button.isEnabled()
+    assert "选择已保存" in window.statusBar().currentMessage()
+    assert window._connection_preferences()["usbdaq"]["transport"] == "usb"
+
+
+def test_auto_detection_switches_ready_usb_and_restores_ni_configuration(window, monkeypatch):
+    from python_vna import app as app_module
+
+    ni, usb = build_backend("ni"), _selectable_usb_backend()
+    window.controller.backend = ni
+    window.session.ai_channels[0].label = "NI sensor"
+    window.session.ai_channels[0].sensitivity = 7
+    window.session.ai_channels[0].iepe_enabled = True
+    window.session.ai_channels[0].iepe_current_ma = 2.1
+    window.session.acquisition.frame_size = 8192
+    window._load_session_to_widgets()
+    original_build = app_module.build_backend
+    monkeypatch.setattr(app_module, "build_backend",
+                        lambda name, **kwargs: usb if name == "netdaq" else original_build(name, **kwargs))
+    window._apply_hardware_snapshot(_discovery_snapshot(usb=True))
+    assert window._hardware_backend_key() == "usb"
+    assert window.start_button.isEnabled()
+    assert not window.exc_enable.isEnabled()
+    assert window.channel_table.item(0, 5).text() == "0"
+    window.session.ai_channels[0].label = "USB sensor"
+    window.session.acquisition.frame_size = 2048
+    window._load_session_to_widgets()
+    window._apply_hardware_snapshot(_discovery_snapshot(ni=True))
+    assert window._hardware_backend_key() == "ni"
+    assert window.exc_enable.isEnabled()
+    assert window.session.ai_channels[0].label == "NI sensor"
+    assert window.session.ai_channels[0].sensitivity == 7
+    assert window.session.ai_channels[0].iepe_current_ma == 2.1
+    assert window.session.acquisition.frame_size == 8192
+    window._apply_hardware_snapshot(_discovery_snapshot(usb=True))
+    assert window.session.ai_channels[0].label == "USB sensor"
+    assert window.session.ai_channels[0].iepe_current_ma == 0
+    assert window.session.acquisition.frame_size == 2048
+
+
+def test_auto_detection_keeps_last_choice_and_does_not_reset_edits(window):
+    window.controller.backend = build_backend("ni")
+    window._write_connection_preferences(last_hardware_backend="ni")
+    window._apply_hardware_snapshot(_discovery_snapshot(ni=True, usb=True))
+    with mock.patch.object(window, "_apply_device_list") as apply:
+        window.channel_table.item(0, 10).setText("Edited sensor")
+        window._apply_hardware_snapshot(_discovery_snapshot(ni=True, usb=True))
+    apply.assert_not_called()
+    assert window.channel_table.item(0, 10).text() == "Edited sensor"
+    assert window._hardware_backend_key() == "ni"
+
+
+def test_auto_detection_disconnection_and_reconnection_updates_indicator(window):
+    window.controller.backend = build_backend("ni")
+    window._apply_hardware_snapshot(_discovery_snapshot(ni=True))
+    assert window.device_status_light.property("connected")
+    window._apply_hardware_snapshot(_discovery_snapshot())
+    window._apply_netdaq_limits()
+    assert not window.device_status_light.property("connected")
+    assert not window.start_button.isEnabled()
+    window._apply_hardware_snapshot(_discovery_snapshot(ni=True))
+    window._apply_netdaq_limits()
+    assert window.device_status_light.property("connected")
+    assert window.start_button.isEnabled()
+
+
+@pytest.mark.parametrize("state", ["_acquisition_thread", "_recording_thread",
+                                  "_startup_session_thread", "_close_confirmed"])
+def test_auto_detection_ignores_results_while_busy_or_closing(window, state):
+    window.controller.backend = build_backend("ni")
+    old = getattr(window, state)
+    setattr(window, state, True)
+    try:
+        window._apply_hardware_snapshot(_discovery_snapshot(usb=True))
+        assert window._hardware_backend_key() == "ni"
+        with mock.patch.object(window, "refresh_devices_async") as refresh:
+            window._poll_device_connection()
+        refresh.assert_not_called()
+    finally:
+        setattr(window, state, old)
+
+
+def test_auto_detection_does_not_bypass_uncertain_stop(window):
+    window.controller.backend = _selectable_usb_backend()
+    window.controller.backend.stop_uncertain = True
+    assert not window._automatic_hardware_detection()
+    window._apply_hardware_snapshot(_discovery_snapshot(ni=True))
+    assert window._hardware_backend_key() == "usb"
+    with mock.patch.object(window, "refresh_devices_async") as refresh:
+        window._poll_device_connection()
+    refresh.assert_not_called()
+
+
+def test_auto_detection_missing_profile_uses_readonly_usb_without_erasing_saved_path(window):
+    window.controller.backend = build_backend("ni")
+    settings = NetDaqSettings(transport="usb", profile_path="does-not-exist.json")
+    window._write_connection_preferences(usbdaq=asdict(settings))
+    window._apply_hardware_snapshot(_discovery_snapshot(usb=True))
+    assert window._hardware_backend_key() == "usb"
+    assert not window.start_button.isEnabled()
+    assert window.controller.backend.profile is None
+    assert "原配置不可用" in window.statusBar().currentMessage()
+    assert window._connection_preferences()["usbdaq"]["profile_path"] == settings.profile_path
+    window._apply_hardware_snapshot(_discovery_snapshot(usb=True))
+    assert window._connection_preferences()["usbdaq"]["profile_path"] == settings.profile_path
+    assert window._netdaq_preferences().profile_path == settings.profile_path
+
+
+def test_auto_detection_skips_open_configuration_dialogs(window, monkeypatch):
+    window.controller.backend = build_backend("ni")
+    monkeypatch.setattr(QtWidgets.QApplication, "activeModalWidget", lambda: object())
+    with mock.patch.object(window, "refresh_devices_async") as refresh:
+        window._poll_device_connection()
+        window._apply_hardware_snapshot(_discovery_snapshot(usb=True))
+    refresh.assert_not_called()
+    assert window._hardware_backend_key() == "ni"
+
+
+def test_auto_detection_cannot_switch_when_previous_backend_close_fails(window):
+    window.controller.backend = build_backend("ni")
+    with mock.patch.object(window.controller, "close", side_effect=RuntimeError("pending native read")):
+        window._apply_hardware_snapshot(_discovery_snapshot(usb=True))
+    assert window._hardware_backend_key() == "ni"
+    assert "未切换连接" in window.statusBar().currentMessage()
+
+
+def test_auto_detection_preserves_selected_ni_when_device_list_expands(window):
+    from python_vna.daq.base import BackendDevice
+
+    window.controller.backend = build_backend("ni")
+    device = _ni_device()
+    second = BackendDevice("Dev2", "USB-4431", [f"Dev2/ai{i}" for i in range(4)])
+    window._apply_device_list([second])
+    snapshot = _discovery_snapshot(ni=True)
+    snapshot["ni_devices"].append(second)
+    window._apply_hardware_snapshot(snapshot)
+    assert window.device_combo.currentData() == "Dev2"
+
+
+def test_auto_detection_background_worker_applies_after_thread_finishes(window, app, monkeypatch):
+    import threading
+    from python_vna.ui import main_window
+
+    owner = threading.get_ident()
+    calls = []
+    release = threading.Event()
+    def scan():
+        calls.append(threading.get_ident())
+        release.wait(2)
+        return _discovery_snapshot(usb=True)
+    monkeypatch.setattr(main_window, "discover_hardware", scan)
+    window.controller.backend = build_backend("ni")
+    window.refresh_devices_async()
+    assert window._device_refresh_thread is not None
+    # A second poll cannot start another worker; acquisition cannot race enumeration.
+    window.refresh_devices_async()
+    window._start_run(False)
+    assert window._acquisition_thread is None
+    release.set()
+    deadline = time.monotonic() + 4
+    while window._device_refresh_thread is not None and time.monotonic() < deadline:
+        app.processEvents()
+        QTest.qWait(5)
+    assert window._device_refresh_thread is None
+    assert len(calls) == 1 and calls[0] != owner
+    assert window._hardware_backend_key() == "usb"
+
+
+def test_auto_detection_retains_wrappers_until_native_thread_has_joined(window, monkeypatch):
+    thread, worker = mock.Mock(), object()
+    thread.wait.side_effect = [False, True]
+    window._device_refresh_thread, window._device_refresh_worker = thread, worker
+    scheduled = []
+    monkeypatch.setattr(QtCore.QTimer, "singleShot", lambda delay, callback: scheduled.append(callback))
+    window._device_refresh_finished()
+    assert window._device_refresh_thread is thread
+    assert window._device_refresh_worker is worker
+    thread.deleteLater.assert_not_called()
+    assert len(scheduled) == 1
+    scheduled[0]()
+    assert window._device_refresh_thread is None and window._device_refresh_worker is None
+    thread.deleteLater.assert_called_once_with()
+
 def test_connection_entry_unknown_profile_gates_controls_and_indicator(window):
     assert window.device_connection_action.text() == "设备连接..."
     window.controller.backend = NetDaqBackend(NetDaqSettings(host="127.0.0.1"))

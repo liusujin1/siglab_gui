@@ -308,7 +308,7 @@ class NetDaqBackend(BaseDaqBackend):
         return LegacyConnection(self.settings.host, self.settings.legacy_port,
                                 self.settings.timeout, self if cancellable else None)
 
-    def probe(self, channel_numbers=(), *, stop_event=None) -> dict:
+    def probe(self, channel_numbers=(), *, stop_event=None, include_digital_inputs=False) -> dict:
         if self.settings.transport != "usb" and not self.settings.host:
             raise DaqBackendError("请先设置 NetDAQ 设备 IP；未自动连接任何默认地址")
         channel_numbers = tuple(channel_numbers)
@@ -323,8 +323,13 @@ class NetDaqBackend(BaseDaqBackend):
             usb_info = getattr(control, "device_info", None)
             if usb_info and any(n >= usb_info["channel_count"] for n in channel_numbers):
                 raise DaqBackendError("USBDAQ probe channel exceeds the reported physical channel count")
-            # Firmware is retained as raw bytes until its version encoding is verified.
+            # USB firmware bytes are major/minor. TCP encoding stays unqualified.
             firmware = control.command(0x56, size=7)
+            qualified_usb = False
+            if self.settings.transport == "usb":
+                from .usbdaq import COUPLING_DESCRIPTOR, COUPLING_FIRMWARE
+
+                qualified_usb = raw == COUPLING_DESCRIPTOR and firmware == COUPLING_FIRMWARE
             channels = {}
             for number in channel_numbers:
                 kind, count = control.channel_descriptor(number)
@@ -332,6 +337,20 @@ class NetDaqBackend(BaseDaqBackend):
                     "type": kind, "config_bytes": count,
                     "current_configuration_hex": control.channel_configuration(number).hex(),
                 }
+                entry = channels[str(number)]
+                if qualified_usb and (kind, count) == (0, 1):
+                    mode = entry["current_configuration_hex"]
+                    entry["input_mode"] = {"00": "voltage_single_ended_dc", "01": "iepe"}.get(mode, "unknown")
+                    entry["hardware_ac_coupled"] = {"00": False, "01": True}.get(mode)
+                    entry["hardware_highpass_cutoff_hz"] = None
+            diagnostics = {}
+            if qualified_usb:
+                diagnostics["firmware_version"] = f"{firmware[3]}.{firmware[4]}"
+            if include_digital_inputs:
+                if not qualified_usb:
+                    raise DaqBackendError("数字输入诊断仅支持已确认的 USB2404V10 / 2.0")
+                diagnostics["digital_inputs"] = {
+                    "raw_hex": control.digital_inputs().hex(), "pin_mapping": "unknown"}
         matches = bool(self.profile and raw == self.profile.descriptor)
         if self.settings.transport == "usb":
             matches = matches and firmware.hex() == self.profile.firmware_hex
@@ -340,7 +359,7 @@ class NetDaqBackend(BaseDaqBackend):
                 "usb_descriptor": usb_info,
                 "firmware_hex": firmware.hex(), "channels": channels,
                 "profile_matches": matches,
-                "experimental": True}
+                "experimental": True, **diagnostics}
 
     def list_devices(self):
         if self.settings.transport != "usb" and not self.settings.host:
@@ -593,6 +612,9 @@ class NetDaqBackend(BaseDaqBackend):
                 ) if profile.has_usb_coupling_control(index) else profile.channels[index]["input_mode"],
                 "iepe": profile.iepe_settings(index, option["coupling"]),
                 "configuration_hex": option.get("configuration_hex"),
+                "hardware_ac_coupled": (option["coupling"] == "bias")
+                    if profile.has_usb_coupling_control(index) else None,
+                "hardware_highpass_cutoff_hz": None,
             } for index, name, option in self._selected},
             "units": "V", "stream_continuity_verified": False,
             "channel_full_scales": {name: float(option["full_scale_v"])

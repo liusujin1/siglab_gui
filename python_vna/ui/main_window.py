@@ -17,7 +17,7 @@ from python_vna.continuous_recording import (
     RecordingStatus,
     available_recording_directory,
 )
-from python_vna.daq.base import BackendDevice, DaqBackendError
+from python_vna.daq.base import BackendCapability, BackendDevice, DaqBackendError
 from python_vna.daq.replay import ReplayComplete
 from python_vna.display_transforms import (
     align_vector_to_values,
@@ -48,7 +48,9 @@ from python_vna.models import (
 )
 from python_vna.optional import require
 from python_vna import __version__ as PYTHON_VNA_VERSION
-from python_vna.daq.device_probe import probe_ni_devices_subprocess
+from python_vna.daq.device_probe import (
+    choose_hardware_backend, discover_hardware, probe_ni_devices_subprocess,
+)
 from python_vna.resources import resource_path
 from python_vna.storage import (
     default_session_config,
@@ -1397,15 +1399,18 @@ class DeviceRefreshWorker(QtCore.QObject):
     error = QtCore.Signal(str)
     finished = QtCore.Signal()
 
-    def __init__(self, controller: VnaController) -> None:
+    def __init__(self, controller: VnaController, *, automatic: bool = False) -> None:
         super().__init__()
         self._controller = controller
+        self._automatic = automatic
 
     @QtCore.Slot()
     def run(self) -> None:
         try:
             append_log("device refresh worker: begin")
-            if self._controller.backend.__class__.__name__ == "NIDaqBackend":
+            if self._automatic:
+                self.devices_ready.emit(discover_hardware())
+            elif self._controller.backend.__class__.__name__ == "NIDaqBackend":
                 self.devices_ready.emit(probe_ni_devices_subprocess())
             else:
                 self.devices_ready.emit(self._controller.list_devices())
@@ -1707,6 +1712,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recording_output_dir: Path | None = None
         self._device_refresh_thread: QtCore.QThread | None = None
         self._device_refresh_worker: DeviceRefreshWorker | None = None
+        self._pending_hardware_snapshot = None
+        self._hardware_session_cache = {}
+        self._auto_hardware_presence = None
         self._startup_session_thread: QtCore.QThread | None = None
         self._startup_session_worker: StartupSessionWorker | None = None
         self._analysis_viewer = None
@@ -1748,14 +1756,19 @@ class MainWindow(QtWidgets.QMainWindow):
             "设备已连接" if connected else ("设备未连接" if hardware else "模拟模式")
         )
         self.device_status_label.setToolTip(
-            "空闲时每 5 秒只读检查所选设备；采集时根据数据和错误更新状态。绿色不代表已完成标定。"
+            "空闲时每 5 秒检查设备；自动识别 USB 仅枚举 VID/PID，不读取或改写电气模式。"
+            "采集时根据数据和错误更新状态。绿色不代表型号、配置和标定已经验证；采集前另行校验。"
         )
 
     def _poll_device_connection(self) -> None:
         if (self._acquisition_thread is not None or self._recording_thread is not None
-                or self._close_confirmed):
+                or self._startup_session_thread is not None or self._close_confirmed
+                or QtWidgets.QApplication.activeModalWidget() is not None):
             return
         if self.controller.backend.__class__.__name__ not in {"NIDaqBackend", "NetDaqBackend"}:
+            self._set_device_connected(False)
+            return
+        if getattr(self.controller.backend, "stop_uncertain", False):
             self._set_device_connected(False)
             return
         self.refresh_devices_async(connection_only=True)
@@ -2223,6 +2236,13 @@ class MainWindow(QtWidgets.QMainWindow):
         file_menu.addAction("保存 VNA", self._save_session)
         file_menu.addAction("保存为默认", self._save_to_default_vna)
         self.device_connection_action = file_menu.addAction("设备连接...", self._open_device_connection)
+        self.auto_device_action = file_menu.addAction("自动识别采集设备")
+        self.auto_device_action.setCheckable(True)
+        self.auto_device_action.setChecked(self._connection_preferences().get("auto_device_detection", True) is not False)
+        self.auto_device_action.setToolTip(
+            "空闲时自动识别 NI USB-4431 / USB2404；同时连接时沿用上次选择。"
+            "其他 NI 型号、模拟、回放、网络设备保留手动选择（可关闭自动识别）。")
+        self.auto_device_action.toggled.connect(self._auto_device_toggled)
         file_menu.addAction("导入 DASP 通道参数...", self._import_dasp_parameters)
         self.dc_removal_action = file_menu.addAction("自动去直流...", self._configure_dc_removal)
         file_menu.addAction("离线回放数据文件...", self._open_replay_file)
@@ -6401,18 +6421,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_device_list(devices)
 
     def refresh_devices_async(self, *, connection_only: bool = False) -> None:
-        if self._device_refresh_thread is not None:
+        if (self._device_refresh_thread is not None or self._acquisition_thread is not None
+                or self._recording_thread is not None or self._close_confirmed):
+            return
+        if self._startup_session_thread is not None:
             return
         append_log("device refresh async: schedule")
         self._device_refresh_connection_only = connection_only
-        if not connection_only:
+        self._device_refresh_automatic = self._automatic_hardware_detection()
+        self._pending_hardware_snapshot = None
+        if not connection_only and not self._device_refresh_automatic:
             self._set_device_connected(False)
             self.device_combo.clear()
             self.device_combo.addItem("正在加载设备...", None)
             self.refresh_devices_button.setEnabled(False)
             self.statusBar().showMessage("正在只读刷新设备...")
+        elif not connection_only:
+            self.statusBar().showMessage("正在自动识别 NI USB-4431 / USB2404...")
         thread = QtCore.QThread(self)
-        worker = DeviceRefreshWorker(self.controller)
+        worker = DeviceRefreshWorker(self.controller, automatic=self._device_refresh_automatic)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.devices_ready.connect(self._handle_devices_ready)
@@ -6420,15 +6447,20 @@ class MainWindow(QtWidgets.QMainWindow):
         worker.finished.connect(thread.quit, QtCore.Qt.DirectConnection)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(self._device_refresh_finished)
-        thread.finished.connect(thread.deleteLater)
         self._device_refresh_thread = thread
         self._device_refresh_worker = worker
         thread.start()
 
     @QtCore.Slot(object)
     def _handle_devices_ready(self, devices) -> None:
+        if getattr(self, "_device_refresh_automatic", False):
+            self._pending_hardware_snapshot = devices
+            return
         if getattr(self, "_device_refresh_connection_only", False):
             selected = self.device_combo.currentData()
+            if selected is None:
+                self._apply_device_list(list(devices or []))
+                return
             self._set_device_connected(any(device.name == selected for device in (devices or [])))
             return
         self._apply_device_list(list(devices or []))
@@ -6441,17 +6473,168 @@ class MainWindow(QtWidgets.QMainWindow):
         self.device_combo.clear()
         self.statusBar().showMessage(f"Device refresh failed: {message}")
 
+    @QtCore.Slot()
     def _device_refresh_finished(self) -> None:
+        thread = self._device_refresh_thread
+        # finished is emitted before native TLS teardown completes. Keep both
+        # wrappers alive until wait confirms completion, without blocking the UI.
+        if thread is not None and not thread.wait(0):
+            QtCore.QTimer.singleShot(10, self._device_refresh_finished)
+            return
+        if thread is not None:
+            thread.deleteLater()
         self._device_refresh_thread = None
         self._device_refresh_worker = None
+        snapshot = self._pending_hardware_snapshot
+        self._pending_hardware_snapshot = None
+        if snapshot is not None:
+            self._apply_hardware_snapshot(snapshot)
         self.refresh_devices_button.setEnabled(True)
         self._apply_netdaq_limits()
+        if snapshot is not None and not self.auto_device_action.isChecked() and not self._close_confirmed:
+            QtCore.QTimer.singleShot(0, self.refresh_devices_async)
+
+    def _connection_preferences(self) -> dict:
+        try:
+            result = json.loads(self._ui_settings_path.read_text(encoding="utf-8"))
+            return result if isinstance(result, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _write_connection_preferences(self, **values) -> None:
+        payload = self._connection_preferences()
+        payload.update(values)
+        self._ui_settings_path.parent.mkdir(parents=True, exist_ok=True)
+        self._ui_settings_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def _hardware_backend_key(self) -> str:
+        backend = self.controller.backend
+        if backend.__class__.__name__ == "NIDaqBackend":
+            return "ni"
+        if backend.__class__.__name__ == "NetDaqBackend" and backend.settings.transport == "usb":
+            return "usb"
+        return ""
+
+    def _automatic_hardware_detection(self) -> bool:
+        return bool(self.auto_device_action.isChecked() and self._hardware_backend_key()
+                    and not getattr(self.controller.backend, "stop_uncertain", False))
+
+    def _auto_device_toggled(self, enabled: bool) -> None:
+        try:
+            self._write_connection_preferences(auto_device_detection=enabled)
+        except OSError as exc:
+            self.statusBar().showMessage(f"自动识别设置无法保存：{exc}")
+        self._auto_hardware_presence = None
+        self._apply_netdaq_limits()
+        if enabled and self._acquisition_thread is None and self._recording_thread is None:
+            self.refresh_devices_async()
+
+    def _usbdaq_preferences(self):
+        from python_vna.daq.netdaq import NetDaqSettings
+
+        backend = self.controller.backend
+        if backend.__class__.__name__ == "NetDaqBackend" and backend.settings.transport == "usb":
+            return backend.settings
+        preferences = self._connection_preferences()
+        value = preferences.get("usbdaq", preferences.get("netdaq", {}))
+        try:
+            settings = NetDaqSettings(**value)
+            if settings.transport == "usb":
+                return settings
+        except (ValueError, TypeError, RuntimeError):
+            pass
+        return NetDaqSettings(transport="usb")
+
+    def _apply_hardware_snapshot(self, snapshot: dict) -> None:
+        if (not self._automatic_hardware_detection() or self._close_confirmed
+                or self._acquisition_thread is not None or self._recording_thread is not None
+                or self._startup_session_thread is not None
+                or QtWidgets.QApplication.activeModalWidget() is not None):
+            return
+        current = self._hardware_backend_key()
+        settings = self._usbdaq_preferences()
+        choice = choose_hardware_backend(
+            snapshot, preferred=self._connection_preferences().get("last_hardware_backend", ""),
+            current=current, usb_index=settings.usb_index)
+        if choice is None:
+            self._auto_hardware_presence = False
+            self.device_combo.clear()
+            self._set_device_connected(False)
+            errors = snapshot.get("errors", {})
+            self.statusBar().showMessage(
+                "未检测到采集设备" + ("；" + "；".join(errors.values()) if errors else ""))
+            return
+        profile_error = ""
+        if choice == "usb" and current != "usb" and settings.profile_path:
+            from dataclasses import replace
+            from python_vna.daq.netdaq import NetDaqProfile
+
+            try:
+                if NetDaqProfile.load(settings.profile_path).transport != "usb":
+                    raise ValueError("配置文件不是 USB 设备配置")
+            except Exception as exc:
+                profile_error = f"已检测到 USB2404，但原配置不可用：{exc}；请在设备连接中重新选择配置。"
+                settings = replace(settings, profile_path="")
+        if choice != current:
+            if not self._backend_changed("netdaq" if choice == "usb" else "ni",
+                                         netdaq_settings=settings, refresh=False):
+                return
+        self._auto_hardware_presence = True
+        if choice == "ni":
+            devices = snapshot["ni_devices"]
+        else:
+            backend = self.controller.backend
+            profile = backend.profile
+            iepe = bool(profile and any(
+                entry["input_mode"] == "iepe" or profile.has_usb_coupling_control(i)
+                for i, entry in enumerate(profile.channels)))
+            devices = [BackendDevice(
+                backend.device_name,
+                f"{profile.model}（USB 已检测）" if profile else "USB2404 候选设备（需选择配置）",
+                [f"{backend.device_name}/ai{i}" for i in range(len(profile.channels))] if profile else [],
+                [], BackendCapability(supports_iepe=iepe,
+                                      supports_analog_trigger=bool(profile),
+                                      supports_pretrigger=bool(profile),
+                                      max_ai_sample_rate=profile.max_sample_rate if profile else None))]
+        selected = self.device_combo.currentData()
+        # Passive refresh must not reload defaults or reset edits every five seconds.
+        names = [device.name for device in devices]
+        existing = [self.device_combo.itemData(i) for i in range(self.device_combo.count())]
+        if existing != names or selected not in names:
+            self._apply_device_list(devices)
+            if selected in names and self.device_combo.currentData() != selected:
+                self.device_combo.setCurrentIndex(self.device_combo.findData(selected))
+                self._map_channels_to_selected_device()
+        else:
+            self._set_device_connected(True)
+        try:
+            from dataclasses import asdict
+
+            values = {"last_hardware_backend": choice}
+            if (choice == "usb" and not profile_error
+                    and (settings.profile_path or not self._connection_preferences().get("usbdaq"))):
+                values["usbdaq"] = asdict(settings)
+            if any(self._connection_preferences().get(key) != value for key, value in values.items()):
+                self._write_connection_preferences(**values)
+        except OSError as exc:
+            append_log(f"automatic device preference save failed: {exc}")
+        if choice == "usb" and not self.controller.backend.ready:
+            self.statusBar().showMessage(
+                profile_error or "已检测到 USB2404；请在文件 / 设备连接中选择已保存的 USB 配置。")
 
     def _netdaq_preferences(self):
         from python_vna.daq.netdaq import NetDaqSettings
 
         if self.controller.backend.__class__.__name__ == "NetDaqBackend":
-            return self.controller.backend.settings
+            settings = self.controller.backend.settings
+            if settings.transport == "usb" and not settings.profile_path:
+                try:
+                    saved = NetDaqSettings(**self._connection_preferences().get("usbdaq", {}))
+                    if saved.transport == "usb":
+                        return saved
+                except (ValueError, TypeError, RuntimeError):
+                    pass
+            return settings
         try:
             payload = json.loads(self._ui_settings_path.read_text(encoding="utf-8"))
             return NetDaqSettings(**payload.get("netdaq", {}))
@@ -6480,6 +6663,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if not isinstance(payload, dict):
                 payload = {}
             payload["netdaq"] = asdict(settings)
+            if dialog.backend_combo.currentText() == "netdaq" and settings.transport == "usb":
+                payload["usbdaq"] = asdict(settings)
             self._ui_settings_path.parent.mkdir(parents=True, exist_ok=True)
             self._ui_settings_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         except OSError as exc:
@@ -6622,6 +6807,8 @@ class MainWindow(QtWidgets.QMainWindow):
         idle = self._acquisition_thread is None and self._recording_thread is None
         if idle:
             ready = not netdaq or backend.ready
+            if self._automatic_hardware_detection() and self._auto_hardware_presence is False:
+                ready = False
             for button in (self.start_button, self.avg_button, self.record_button):
                 button.setEnabled(ready)
                 if netdaq and backend.stop_uncertain:
@@ -6737,12 +6924,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.trigger_source_combo.model().item(index).setEnabled(True)
         self._update_frequency_readout()
 
-    def _backend_changed(self, backend_name: str, netdaq_settings=None) -> None:
+    def _backend_changed(self, backend_name: str, netdaq_settings=None, *, refresh: bool = True) -> bool:
         append_log(f"backend changed: begin {backend_name}")
         if (self._acquisition_thread is not None or self._recording_thread is not None
                 or self._device_refresh_thread is not None):
             self._stop_acquisition()
-            return
+            return False
         from python_vna.app import build_backend
 
         try:
@@ -6754,17 +6941,57 @@ class MainWindow(QtWidgets.QMainWindow):
                 backend = build_backend(backend_name)
         except Exception as exc:
             self.statusBar().showMessage(str(exc))
-            return
-        if backend_name == "netdaq" and backend.profile is not None and backend.profile.qualification == "dasp_parameters":
-            self._read_session_from_widgets()
-        self.controller.close()
+            return False
+        from copy import deepcopy
+
+        previous_key = self._hardware_backend_key()
+        try:
+            if previous_key:
+                self._read_session_from_widgets()
+                self._hardware_session_cache[self._hardware_session_key()] = deepcopy(self.session)
+            self.controller.close()
+        except Exception as exc:
+            self._set_device_connected(False)
+            self.statusBar().showMessage(f"设备资源尚未释放，未切换连接：{exc}")
+            return False
         self.controller.backend = backend
-        if backend_name == "netdaq" and backend.profile is not None and backend.profile.qualification == "dasp_parameters":
+        self.device_combo.clear()
+        next_key = self._hardware_backend_key()
+        session_key = self._hardware_session_key()
+        if next_key:
+            config = self._hardware_session_cache.get(session_key)
+            if config is not None:
+                config = deepcopy(config)
+                config.title, config.notes = self.session.title, self.session.notes
+                self.session = config
+            elif next_key == "ni":
+                config = default_session_config()
+                config.title, config.notes = self.session.title, self.session.notes
+                self.session = config
+            self.controller.state.session = self.session
+        if next_key == "usb" and session_key not in self._hardware_session_cache:
             self._apply_backend_sensor_defaults()
-            self._load_session_to_widgets()
+        self._auto_hardware_presence = None
+        with QtCore.QSignalBlocker(self.backend_combo):
+            self.backend_combo.setCurrentText(backend_name)
+        self._load_session_to_widgets()
         self._apply_netdaq_limits()
+        if next_key:
+            try:
+                self._write_connection_preferences(last_hardware_backend=next_key)
+            except OSError as exc:
+                append_log(f"device preference save failed: {exc}")
         append_log(f"backend changed: end {backend_name}")
-        self.refresh_devices_async()
+        if refresh:
+            self.refresh_devices_async()
+        return True
+
+    def _hardware_session_key(self):
+        key = self._hardware_backend_key()
+        if key == "usb":
+            settings = self.controller.backend.settings
+            return (key, settings.usb_index, settings.profile_path)
+        return key
 
     def _apply_backend_sensor_defaults(self) -> None:
         backend = self.controller.backend
@@ -6956,6 +7183,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _start_continuous_recording(self) -> None:
         if self._acquisition_thread is not None or self._recording_thread is not None:
             return
+        if self._device_refresh_thread is not None or self._startup_session_thread is not None:
+            self.statusBar().showMessage("正在识别设备或加载设置，请稍后开始采集")
+            return
         parent_dir = get_existing_directory(
             self,
             "Select Continuous Recording Folder",
@@ -7030,6 +7260,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _start_run(self, average_run: bool) -> None:
         if self._acquisition_thread is not None or self._recording_thread is not None:
+            return
+        if self._device_refresh_thread is not None or self._startup_session_thread is not None:
+            self.statusBar().showMessage("正在识别设备或加载设置，请稍后开始采集")
             return
         self._map_channels_to_selected_device()
         self._reload_channel_selectors(include_new_responses=True)

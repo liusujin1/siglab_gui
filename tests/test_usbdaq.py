@@ -118,6 +118,9 @@ class FakeUsb:
             self.response = reply(cmd, body + bytes((0, self.config_lengths[body[0]])))
         elif cmd == 0x42:
             self.response = reply(cmd, body + self.configurations[body[0]])
+        elif cmd == 0x45:
+            assert body == b""
+            self.response = reply(cmd, b"\xff\x00")
         elif cmd == 0x43:
             assert len(raw) == 8 and raw[-1] == 0
             assert len(body) == 2 and body[1] in (0, 1)
@@ -203,6 +206,95 @@ def usb(monkeypatch):
     monkeypatch.setattr(u, "load_library", lambda: lib)
     monkeypatch.setattr(u, "DRAIN_SECONDS", .03)
     return lib
+
+
+def test_passive_enumeration_never_opens_claims_or_commands(usb, monkeypatch):
+    def forbidden(*_args):
+        pytest.fail("Passive discovery must not open or command the USB device")
+    for name in ("usb_open", "usb_claim_interface", "usb_bulk_read", "usb_bulk_write"):
+        monkeypatch.setattr(usb, name, forbidden)
+    assert u.enumerate_candidates() == [
+        {"index": 0, "vid": u.VID, "pid": u.PID, "node": "TEST DOUBLE ONLY"}]
+    assert not usb.commands
+    assert usb.close_count == usb.release_count == 0
+
+
+def test_passive_enumeration_filters_devices_and_keeps_usb_indices(usb):
+    second, other = u.UsbDevice(), u.UsbDevice()
+    second.filename = b"SECOND"
+    second.descriptor.vid, second.descriptor.pid = u.VID, u.PID
+    other.descriptor.vid, other.descriptor.pid = 123, 456
+    usb.dev.next, other.next = ct.pointer(other), ct.pointer(second)
+    assert [(d["index"], d["node"]) for d in u.enumerate_candidates()] == [
+        (0, "TEST DOUBLE ONLY"), (1, "SECOND")]
+
+
+def test_passive_enumeration_defers_while_usb_owned(usb):
+    assert u._lease.acquire(blocking=False)
+    try:
+        with pytest.raises(RuntimeError, match="busy"):
+            u.enumerate_candidates()
+        assert usb.native_threads == []
+    finally:
+        u._lease.release()
+
+
+def test_passive_enumeration_checks_native_errors_and_releases_lease(usb, monkeypatch):
+    monkeypatch.setattr(usb, "usb_find_devices", lambda: -1)
+    with pytest.raises(RuntimeError, match="enumeration failed"):
+        u.enumerate_candidates()
+    assert u._lease.acquire(blocking=False)
+    u._lease.release()
+
+
+def test_passive_enumeration_rejects_native_cycles(usb):
+    usb.dev.next = ct.pointer(usb.dev)
+    with pytest.raises(RuntimeError, match="invalid device enumeration"):
+        u.enumerate_candidates()
+
+def test_usb_digital_inputs_read_exact_seven_byte_reply_without_interpreting_pins(usb):
+    backend = NetDaqBackend(NetDaqSettings(transport="usb"))
+    report = backend.probe(include_digital_inputs=True)
+    assert report["firmware_version"] == "2.0"
+    assert report["digital_inputs"] == {"raw_hex": "ff00", "pin_mapping": "unknown"}
+    assert {cmd for cmd, _ in usb.commands} == {0x44, 0x56, 0x45}
+    assert not backend.ready
+
+
+@pytest.mark.parametrize("raw", [
+    b"\xff\x00\r", reply(0x45, b"\xff"), reply(0x45, b"\xff\x00\x01"),
+    reply(0x56, b"\xff\x00"), bytes.fromhex("214507ff006d0d"),
+])
+def test_usb_digital_inputs_rejects_truncated_wrong_echo_and_checksum(usb, monkeypatch, raw):
+    with u.UsbConnection() as control:
+        original = usb.usb_bulk_write
+        def write(*args):
+            size = original(*args)
+            usb.response = raw
+            return size
+        monkeypatch.setattr(usb, "usb_bulk_write", write)
+        with pytest.raises(RuntimeError, match="invalid"):
+            control.digital_inputs()
+
+
+def test_usb_digital_inputs_requires_qualified_signature(usb):
+    usb.firmware = reply(0x56, b"\x03\x00")
+    with pytest.raises(DaqBackendError, match="USB2404V10"):
+        NetDaqBackend(NetDaqSettings(transport="usb")).probe(include_digital_inputs=True)
+    assert 0x45 not in [cmd for cmd, _ in usb.commands]
+
+
+def test_usb_probe_reports_only_qualified_iepe_and_dc_modes(usb):
+    usb.configurations = {0: b"\x01", 1: b"\x00", 2: b"\x02", 3: b"\x07"}
+    report = NetDaqBackend(NetDaqSettings(transport="usb")).probe((0, 1, 2, 3))
+    assert report["channels"]["0"]["input_mode"] == "iepe"
+    assert report["channels"]["0"]["hardware_ac_coupled"] is True
+    assert report["channels"]["1"]["hardware_ac_coupled"] is False
+    assert report["channels"]["0"]["hardware_highpass_cutoff_hz"] is None
+    for channel in ("2", "3"):
+        assert report["channels"][channel]["input_mode"] == "unknown"
+        assert report["channels"][channel]["hardware_ac_coupled"] is None
+    assert 0x45 not in [cmd for cmd, _ in usb.commands]
 
 
 def profile(tmp_path):
