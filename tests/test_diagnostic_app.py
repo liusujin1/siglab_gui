@@ -1334,6 +1334,83 @@ class DiagnosticAppTests(unittest.TestCase):
         self.assertIn("Reserved", parsed.log_groups)
         self.assertEqual(parsed.log_group_labels["PS Position"], ["PS_H1(um)", "PS_H2(um)"])
 
+    def test_vibration_sensor_log_with_single_time_header_preserves_channels(self):
+        headers = ["SN_PS_H1", "SN_PS_H2", "SN_PS_H3", "SN_PS_H4", "SN_PS_V1"]
+        expected = np.array(
+            [[68.43, 55.77, -118.16, 34.39, 502.11],
+             [66.07, 61.84, -115.44, 28.36, 502.60]]
+        )
+        times = ["2025-11-06 14:03:02", "2025-11-06 14:03:03"]
+        for delimiter in ("\t", "     ", ",", ";"):
+            with self.subTest(delimiter=delimiter), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "sensor_2025-11-06.dat"
+                path.write_text(
+                    delimiter.join(["time", *headers]) + "\n"
+                    + "\n".join(
+                        delimiter.join([timestamp, *(str(value) for value in row)])
+                        for timestamp, row in zip(times, expected)
+                    ) + "\n",
+                    encoding="utf-8",
+                )
+                parsed = load_vibration_analysis_file(path)
+
+                self.assertEqual(parsed.table.kind, "log")
+                self.assertEqual(parsed.table.headers, headers)
+                np.testing.assert_allclose(parsed.table.data, expected)
+                self.assertEqual(parsed.table.metadata["raw_time_text"], times)
+                np.testing.assert_array_equal(parsed.table.metadata["sample_index"], [1, 2])
+                self.assertEqual(parsed.log_groups["PS Position"], list(range(5)))
+                self.assertEqual(parsed.log_groups["All Channels"], list(range(5)))
+                self.assertEqual(parsed.log_group_labels["PS Position"], headers)
+                self.assertEqual(parsed.frequency_pairs, [])
+                page = VibrationAnalysisPage()
+                try:
+                    page.load_paths([path])
+                    self.assertEqual(page.log_group_combo.currentText(), "PS Position")
+                    self.assertEqual(
+                        [page.log_channel_list.item(i).text() for i in range(5)],
+                        headers,
+                    )
+                    page.plot_current()
+                    for index, name in enumerate(headers):
+                        x, y = page._plot_curves[page.log_plot][name]
+                        np.testing.assert_array_equal(x, [1, 2])
+                        np.testing.assert_allclose(y, expected[:, index])
+                    self.assertEqual(
+                        page._time_text_for_curve_point(page.log_plot, headers[0], 1),
+                        times[0],
+                    )
+                finally:
+                    page.close()
+
+    def test_vibration_sn_sensor_groups_support_date_time_and_existing_prefixes(self):
+        headers = [
+            "SN_PS_H1", "PS_H2(um)", "SN_VS_H1", "SN_VFS_H1",
+            "SN_TS_H1", "SN_WS1_X", "SN_RS_Y", "SN_AC_V1", "SN_RESERVED1",
+            "SN_CUSTOM_A", "SN_CUSTOM_B",
+        ]
+        for axis_headers in ("time", "Date Time"):
+            with self.subTest(axis_headers=axis_headers), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "sensor.dat"
+                path.write_text(
+                    axis_headers + " " + " ".join(headers) + "\n"
+                    + "2025-11-06 14:03:02 "
+                    + " ".join(str(value) for value in range(1, len(headers) + 1)) + "\n",
+                    encoding="utf-8",
+                )
+                parsed = load_vibration_analysis_file(path)
+
+                self.assertEqual(parsed.table.headers, headers)
+                self.assertEqual(parsed.log_groups["PS Position"], [0, 1])
+                self.assertEqual(parsed.log_groups["VS Velocity"], [2])
+                self.assertEqual(parsed.log_groups["VFS Filtered Velocity"], [3])
+                self.assertEqual(parsed.log_groups["TS Temperature"], [4])
+                self.assertEqual(parsed.log_groups["WS/RS Stage"], [5, 6])
+                self.assertEqual(parsed.log_groups["AC Actuator Force"], [7])
+                self.assertEqual(parsed.log_groups["Reserved"], [8])
+                self.assertEqual(parsed.log_groups["Auto SN_CUSTOM"], [9, 10])
+                np.testing.assert_array_equal(parsed.table.data[0], np.arange(1, 12))
+
     def test_vibration_log_groups_show_legacy_profiles_for_34_column_logs(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "legacy34.txt"

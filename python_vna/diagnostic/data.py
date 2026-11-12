@@ -347,7 +347,9 @@ def _canonical_log_header_name(header: str) -> str:
     text = re.sub(r"[-./]+", "_", text)
     text = re.sub(r"__+", "_", text)
     text = re.sub(r"\b(VALUE|VALVE)_(\d+)_", r"\1\2_", text, flags=re.I)
-    return text.strip("_").upper()
+    text = text.strip("_").upper()
+    # SN marks sensor names in newer logs; keep it in display labels.
+    return re.sub(r"^SN_(?=(PS_|VS_|VFS_|TS_|WS\d*_|RS_|AC_|RESERVED))", "", text)
 
 
 def _allowed_log_group_names(category: str) -> tuple[str, ...]:
@@ -1780,9 +1782,11 @@ def _has_leading_time_tokens(line: str, n_numeric: int) -> bool:
 
 
 def _derive_wide_log_headers(header_tokens: list[str], n_numeric: int) -> list[str]:
-    if len(header_tokens) < n_numeric + 2:
+    # A single time header can label a date/time pair in the data rows.
+    axis_count = _leading_log_axis_count(header_tokens) or 2
+    if len(header_tokens) < n_numeric + axis_count:
         return [f"Col {index + 1}" for index in range(n_numeric)]
-    raw = header_tokens[2:]
+    raw = header_tokens[axis_count:]
     if len(raw) == n_numeric:
         return raw
 
