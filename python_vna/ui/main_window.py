@@ -103,6 +103,21 @@ pg = require("pyqtgraph", "python -m pip install -e .[gui]")
 # process-local OpenGL before constructing the interactive acquisition window.
 pg.setConfigOption("antialias", False)
 
+FIXED_CHANNEL_OPTIONS_TOOLTIP = (
+    "硬件量程与耦合只读，使用设备配置中的固定值，不下发通道设置。"
+    "DASP 参数兼容时显示标称电压范围，实际电气量程仍待核实。")
+
+
+def _expected_acquisition_stop(controller, stop_event, error) -> bool:
+    if not stop_event.is_set() or isinstance(error, OSError):
+        return False
+    if getattr(controller, "backend", None).__class__.__name__ == "NetDaqBackend":
+        from python_vna.daq.netdaq_protocol import NetDaqStopped
+
+        return isinstance(error, NetDaqStopped)
+    return True
+
+
 ARCHIVE_CONTAINER_SUFFIXES = {
     ".7z",
     ".zip",
@@ -820,6 +835,9 @@ class MCSetupDialog(QtWidgets.QDialog):
 
         self.table = QtWidgets.QTableWidget(0, len(self.HEADERS))
         self.table.setHorizontalHeaderLabels(self.HEADERS)
+        if (main_window.controller.backend.__class__.__name__ == "NetDaqBackend"
+                and main_window.controller.backend.settings.transport == "usb"):
+            self.table.horizontalHeaderItem(2).setText("输入模式")
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
@@ -851,6 +869,12 @@ class MCSetupDialog(QtWidgets.QDialog):
         self.table.setFixedWidth(902)
         self.table.itemChanged.connect(self._item_changed)
         layout.addWidget(self.table)
+        if main_window.controller.backend.__class__.__name__ == "NetDaqBackend":
+            mode_note = QtWidgets.QLabel(
+                "固定前端的输入模式和量程只读；DASP 兼容模式保留设备当前状态，"
+                "不通过此表切换耦合或 IEPE。标称量程不代表已核实的电气量程。")
+            mode_note.setWordWrap(True)
+            layout.addWidget(mode_note)
 
         bottom = QtWidgets.QHBoxLayout()
         self.set_all_checkbox = QtWidgets.QCheckBox("设置 Ch 3 至 Ch 4 =")
@@ -902,6 +926,9 @@ class MCSetupDialog(QtWidgets.QDialog):
                 "",
                 source.item(row, 13).text(),
             ]
+            row_values[2] = self.main_window._channel_coupling_label(row)
+            if self.main_window._channel_range_is_nominal(row):
+                row_values[1] += "（标称）"
             for col, value in enumerate(row_values):
                 item = self.table.item(row, col)
                 if item is None:
@@ -910,13 +937,19 @@ class MCSetupDialog(QtWidgets.QDialog):
                 item.setText(value)
                 item.setTextAlignment(QtCore.Qt.AlignCenter)
                 if col == 0:
-                    flags = item.flags() | QtCore.Qt.ItemIsUserCheckable
+                    flags = item.flags() | QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsEnabled
                     flags &= ~QtCore.Qt.ItemIsEditable
                     item.setFlags(flags)
                     item.setCheckState(QtCore.Qt.Checked if enabled else QtCore.Qt.Unchecked)
-                    if row == 0:
+                    if row == 0 and self.main_window._first_channel_locked():
                         item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEnabled)
                         item.setCheckState(QtCore.Qt.Checked)
+                elif col in (1, 2):
+                    writable = self.main_window._channel_hardware_settings_writable(row)
+                    item.setFlags(
+                        item.flags() | QtCore.Qt.ItemIsEditable if writable
+                        else item.flags() & ~QtCore.Qt.ItemIsEditable)
+                    item.setToolTip("" if writable else FIXED_CHANNEL_OPTIONS_TOOLTIP)
         self.table.blockSignals(False)
         self._fit_table_height()
 
@@ -930,7 +963,7 @@ class MCSetupDialog(QtWidgets.QDialog):
             return
         self.table.blockSignals(True)
         first_item = self.table.item(0, 0)
-        if first_item is not None:
+        if first_item is not None and self.main_window._first_channel_locked():
             first_item.setCheckState(QtCore.Qt.Checked)
         if not any(
             self.table.item(row, 0) is not None
@@ -955,12 +988,12 @@ class MCSetupDialog(QtWidgets.QDialog):
                 if enabled_item is not None and enabled_item.checkState() == QtCore.Qt.Checked
                 else QtCore.Qt.Unchecked
             )
-            full_scale_text = self.table.item(row, 1).text().strip()
-            target.item(row, 9).setText(
-                f"{self.main_window._parse_full_scale_text(full_scale_text, 10.0):.6g}"
-            )
-            target.item(row, 6).setText(self.table.item(row, 2).text().strip() or "ac")
-            target.item(row, 6).setText(target.item(row, 6).text().strip().lower())
+            if self.main_window._channel_hardware_settings_writable(row):
+                full_scale_text = self.table.item(row, 1).text().strip()
+                target.item(row, 9).setText(
+                    f"{self.main_window._parse_full_scale_text(full_scale_text, 10.0):.6g}"
+                )
+                target.item(row, 6).setText(self.table.item(row, 2).text().strip().lower() or "ac")
             target.item(row, 11).setText(f"{self.main_window._parse_float(self.table.item(row, 3).text(), 0.0):.6g}")
             target.item(row, 10).setText(self.table.item(row, 4).text().strip())
             target.item(row, 7).setText(f"{self.main_window._parse_float(self.table.item(row, 5).text(), 1.0):.6g}")
@@ -1068,7 +1101,7 @@ class AcquisitionWorker(QtCore.QObject):
                 self.measurement_ready.emit(latest_measurement)
             self.status_changed.emit(str(exc))
         except Exception as exc:
-            if not self._stop_requested.is_set():
+            if not _expected_acquisition_stop(self._controller, self._stop_requested, exc):
                 self.error.emit(str(exc))
         finally:
             append_log("acquisition cleanup: begin")
@@ -1082,6 +1115,8 @@ class AcquisitionWorker(QtCore.QObject):
                 self._controller.close()
             except Exception as exc:
                 append_log(f"acquisition close failed: {exc!r}")
+                if getattr(self._controller, "backend", None).__class__.__name__ == "NetDaqBackend":
+                    self.error.emit(str(exc))
             try:
                 self._set_controller_stop_event(None)
             except Exception:
@@ -1215,7 +1250,7 @@ class ContinuousRecordingWorker(QtCore.QObject):
             completed = True
             self.status_changed.emit("离线回放结束，记录已保存")
         except Exception as exc:
-            if self._stop_requested.is_set() and not isinstance(exc, OSError):
+            if _expected_acquisition_stop(self._controller, self._stop_requested, exc):
                 completed = True
                 error_message = None
             else:
@@ -1235,6 +1270,10 @@ class ContinuousRecordingWorker(QtCore.QObject):
                 self._controller.close()
             except Exception as exc:
                 append_log(f"recording close failed: {exc!r}")
+                if getattr(self._controller, "backend", None).__class__.__name__ == "NetDaqBackend":
+                    error_message = str(exc)
+                    completed = False
+                    self.error.emit(error_message)
             try:
                 if self._writer is not None:
                     self._writer.close(completed=completed, error=error_message)
@@ -4982,6 +5021,51 @@ class MainWindow(QtWidgets.QMainWindow):
         if 0 <= row < self.channel_list.count() and self.channel_list.currentRow() != row:
             self.channel_list.setCurrentRow(row)
 
+    def _first_channel_locked(self) -> bool:
+        return self.controller.backend.__class__.__name__ not in {"NetDaqBackend", "ReplayBackend"}
+
+    def _channel_hardware_settings_writable(self, row: int) -> bool:
+        backend = self.controller.backend
+        if backend.__class__.__name__ != "NetDaqBackend":
+            return True
+        return bool(
+            backend.profile is not None and 0 <= row < len(backend.profile.channels)
+            and backend.profile.channels[row]["channel_type"] in {0, 6, 8}
+            and backend.settings.transport != "usb")
+
+    def _channel_range_is_nominal(self, row: int) -> bool:
+        backend = self.controller.backend
+        return bool(
+            backend.__class__.__name__ == "NetDaqBackend"
+            and backend.profile is not None and 0 <= row < len(backend.profile.channels)
+            and backend.profile.qualification == "dasp_parameters")
+
+    def _channel_coupling_label(self, row: int, *, compact: bool = False) -> str:
+        if self._channel_range_is_nominal(row):
+            return "设备" if compact else "设备当前模式"
+        backend = self.controller.backend
+        if (backend.__class__.__name__ == "NetDaqBackend" and backend.profile is not None
+                and 0 <= row < len(backend.profile.channels)
+                and not self._channel_hardware_settings_writable(row)
+                and backend.profile.channels[row]["input_mode"] == "iepe"):
+            return "IEPE" if compact else "IEPE（固定）"
+        return self.channel_table.item(row, 6).text()
+
+    def _restore_channel_hardware_labels(self) -> None:
+        coupling = self.channel_coupling_combo
+        scale = self.channel_full_scale_combo
+        coupling_block = QtCore.QSignalBlocker(coupling)
+        scale_block = QtCore.QSignalBlocker(scale)
+        for index in range(coupling.count()):
+            raw = coupling.itemData(index)
+            if isinstance(raw, str) and raw in self.CHANNEL_COUPLING_OPTIONS:
+                coupling.setItemText(index, raw)
+        for index in range(scale.count()):
+            value = scale.itemData(index)
+            if isinstance(value, (int, float)) and value > 0:
+                scale.setItemText(index, self._format_full_scale_option(float(value)))
+        del coupling_block, scale_block
+
     def _sync_channel_grid(self) -> None:
         if not hasattr(self, "channel_grid"):
             return
@@ -5004,7 +5088,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "On" if enabled else "Off",
                 name,
                 "Auto" if full_scale.startswith("-") else full_scale,
-                coupling,
+                self._channel_coupling_label(row),
                 offset,
                 label,
                 sensitivity,
@@ -5020,8 +5104,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 if col == 1:
                     item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEditable)
                     item.setToolTip(physical)
+                elif col in (2, 3) and not self._channel_hardware_settings_writable(row):
+                    item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEditable)
+                    item.setToolTip(FIXED_CHANNEL_OPTIONS_TOOLTIP)
                 else:
                     item.setFlags(item.flags() | QtCore.Qt.ItemIsEditable)
+                    item.setToolTip("")
         if 0 <= current_row < self.channel_grid.rowCount():
             self.channel_grid.selectRow(current_row)
             self.channel_grid.setCurrentCell(current_row, 0)
@@ -5206,6 +5294,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.channel_table.item(row, 4).setCheckState(QtCore.Qt.Checked if enabled else QtCore.Qt.Unchecked)
             self.channel_table.item(row, 5).setText(f"{current:g}")
             if row == self.channel_list.currentRow():
+                self._restore_channel_hardware_labels()
                 self.channel_iepe_checkbox.setText("IEPE" if mode_known else "IEPE（设备模式未确认）")
                 self.channel_iepe_checkbox.setChecked(enabled)
                 self.channel_iepe_current_edit.setSpecialValueText(
@@ -5226,9 +5315,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.channel_iepe_checkbox.setToolTip(
                         "DASP 参数兼容：IEPE 实际状态及电流未知，保留设备当前状态，不发送供电或模式命令。")
                     self.channel_coupling_combo.setToolTip(
-                        "DASP 参数兼容：硬件耦合未知。dc 仅表示软件保留原始直流，不设置硬件耦合。")
+                        "设备当前模式：硬件耦合和 IEPE 状态未确认，保留设备现状。"
+                        "内部 dc 仅表示软件保留原始直流，不设置硬件耦合。")
                     self.channel_full_scale_combo.setToolTip(
-                        "DASP 声明的标称 ADC ±10 V 换算；不代表已确认硬件增益或完成独立校准。")
+                        "* 表示 DASP 声明的标称 ADC 电压范围；"
+                        "不代表已确认硬件增益或完成独立校准。")
                 elif hasattr(self, "_dasp_original_range_tooltips"):
                     self.channel_coupling_combo.setToolTip(self._dasp_original_range_tooltips[0])
                     self.channel_full_scale_combo.setToolTip(self._dasp_original_range_tooltips[1])
@@ -5241,11 +5332,30 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.channel_table.item(row, 6).setText(option["coupling"])
                 self.channel_table.item(row, 9).setText(f"{float(option['full_scale_v']):g}")
                 if row == self.channel_list.currentRow():
-                    self.channel_coupling_combo.setCurrentText(option["coupling"])
+                    coupling = self.channel_coupling_combo
+                    coupling_block = QtCore.QSignalBlocker(coupling)
+                    coupling_index = coupling.findData(option["coupling"])
+                    if coupling_index < 0:
+                        coupling_index = coupling.findText(option["coupling"])
+                    if coupling_index >= 0:
+                        coupling.setItemData(coupling_index, option["coupling"])
+                        coupling.setItemText(coupling_index, self._channel_coupling_label(row, compact=True))
+                        coupling.setCurrentIndex(coupling_index)
+                    del coupling_block
                     text = self._format_full_scale_option(float(option["full_scale_v"]))
-                    if self.channel_full_scale_combo.findText(text) < 0:
-                        self.channel_full_scale_combo.addItem(text, float(option["full_scale_v"]))
-                    self.channel_full_scale_combo.setCurrentText(text)
+                    scale = self.channel_full_scale_combo
+                    scale_block = QtCore.QSignalBlocker(scale)
+                    scale_index = scale.findData(float(option["full_scale_v"]))
+                    if scale_index < 0:
+                        scale_index = scale.findText(text)
+                    if scale_index < 0:
+                        scale.addItem(text, float(option["full_scale_v"]))
+                        scale_index = scale.count() - 1
+                    scale.setItemData(scale_index, float(option["full_scale_v"]))
+                    scale.setItemText(scale_index, text + (
+                        "*" if self._channel_range_is_nominal(row) else ""))
+                    scale.setCurrentIndex(scale_index)
+                    del scale_block
         finally:
             self._channel_editor_loading = previous
 
@@ -5308,7 +5418,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.channel_table.item(row, 3).setCheckState(
             QtCore.Qt.Checked if self.channel_reference_checkbox.isChecked() else QtCore.Qt.Unchecked
         )
-        coupling = self.channel_coupling_combo.currentText().strip().lower() or "ac"
+        coupling = self._current_combo_value(self.channel_coupling_combo).strip().lower() or "ac"
         bias_selected = coupling == "bias"
         self.channel_table.item(row, 4).setCheckState(
             QtCore.Qt.Checked if (self.channel_iepe_checkbox.isChecked() or bias_selected) else QtCore.Qt.Unchecked
@@ -5380,6 +5490,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.trigger_source_edit.setText("immediate")
         elif self.trigger_source_edit.text().strip().lower() == "immediate":
             self.trigger_source_edit.setText("ai0")
+        self._sync_host_trigger_source()
         if "manual" not in normalized:
             self.trigger_enable.setChecked(False)
         self._sync_trigger_arm_button()
@@ -6044,6 +6155,9 @@ class MainWindow(QtWidgets.QMainWindow):
         session.acquisition.reference_channel = (
             self.reference_channel_combo.currentText().strip() or "ai0"
         )
+        if not self._first_channel_locked():
+            for channel in channels:
+                channel.is_reference = channel.name == session.acquisition.reference_channel
         session.acquisition.response_channels = [
             item.text()
             for item in self.response_channel_list.selectedItems()
@@ -6327,6 +6441,7 @@ class MainWindow(QtWidgets.QMainWindow):
             for row in range(self.channel_table.rowCount()):
                 self._sync_netdaq_channel_mode(row)
         elif hasattr(self, "channel_list"):
+            self._restore_channel_hardware_labels()
             valid = 0 <= self.channel_list.currentRow() < self.channel_table.rowCount()
             for widget in (self.channel_iepe_checkbox, self.channel_iepe_current_edit,
                            self.channel_coupling_combo, self.channel_full_scale_combo):
@@ -6444,7 +6559,21 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.response_channel_list.selectedItems():
             for index in range(self.response_channel_list.count()):
                 self.response_channel_list.item(index).setSelected(True)
+        self._sync_host_trigger_source()
         self._refresh_trace_lists_from_available_sources()
+
+    def _sync_host_trigger_source(self) -> None:
+        if self._first_channel_locked() or not hasattr(self, "trigger_source_combo"):
+            return
+        channels = self._enabled_channel_names()
+        source = self.trigger_source_edit.text().strip()
+        if not channels or source == "immediate":
+            return
+        if source not in channels:
+            source = channels[0]
+            self.trigger_source_edit.setText(source)
+        if re.fullmatch(r"ai\d+", source):
+            self.trigger_source_combo.setCurrentText(f"Ch{int(source[2:]) + 1}")
 
     def _enabled_channel_names(self) -> list[str]:
         channels: list[str] = []

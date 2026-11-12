@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import json
 import os
 import time
@@ -17,7 +17,7 @@ from python_vna.app import build_backend, parse_args
 from python_vna.controller import VnaController
 from python_vna.daq.netdaq import NetDaqBackend, NetDaqProfile, NetDaqSettings
 from python_vna.storage import default_session_config
-from python_vna.ui.main_window import MainWindow
+from python_vna.ui.main_window import MainWindow, MCSetupDialog
 from python_vna.ui.netdaq_settings import DeviceConnectionDialog
 from python_vna.ui.offline_daq_tools import DaspImportDialog, QualityReportDialog, DcRemovalDialog
 
@@ -64,6 +64,208 @@ def test_connection_entry_unknown_profile_gates_controls_and_indicator(window):
     assert window.exc_enable.isEnabled()
     window._set_device_connected(True)
     assert not window.device_status_light.property("connected")
+
+
+def _usb_channel_setup_backend():
+    backend = NetDaqBackend(NetDaqSettings(transport="usb"))
+    entries = tuple({
+        "wire_number": i, "channel_type": 0, "input_mode": "voltage_single_ended_dc",
+        "options": [{"coupling": "dc", "full_scale_v": 10, "configuration_hex": "01"}],
+    } for i in range(4))
+    backend.profile = NetDaqProfile(
+        "SYNTHETIC UI ONLY", b"", "raw32", bytes(13), 0, 64000,
+        entries, "test", "No hardware qualification", transport="usb")
+    return backend
+
+
+def test_usb_mc_setup_can_disable_ch1_and_use_ch2_as_reference_and_trigger(window):
+    window.controller.backend = _usb_channel_setup_backend()
+    window._apply_netdaq_limits()
+    dialog = MCSetupDialog(window)
+    try:
+        assert dialog.table.item(0, 0).flags() & QtCore.Qt.ItemIsEnabled
+        for row in (0, 2, 3):
+            dialog.table.item(row, 0).setCheckState(QtCore.Qt.Unchecked)
+        dialog._apply_to_main()
+        session = window._read_session_from_widgets()
+        assert [c.name for c in session.ai_channels if c.enabled] == ["ai1"]
+        assert session.acquisition.reference_channel == "ai1"
+        assert [c.name for c in session.ai_channels if c.is_reference] == ["ai1"]
+        window.trigger_mode_combo.setCurrentIndex(
+            window.trigger_mode_combo.findData("Every Frame"))
+        session = window._read_session_from_widgets()
+        assert session.acquisition.trigger.source == "ai1"
+        assert session.acquisition.trigger.enabled
+        dialog.reload_from_main()
+        assert dialog.table.item(0, 0).checkState() == QtCore.Qt.Unchecked
+        for row in range(dialog.table.rowCount()):
+            dialog.table.item(row, 0).setCheckState(QtCore.Qt.Unchecked)
+        assert any(dialog.table.item(row, 0).checkState() == QtCore.Qt.Checked
+                   for row in range(dialog.table.rowCount()))
+    finally:
+        dialog.close()
+
+
+def test_usb_mc_setup_and_matrix_show_hardware_options_read_only(window):
+    window.controller.backend = _usb_channel_setup_backend()
+    window._apply_netdaq_limits()
+    window._sync_channel_grid()
+    dialog = MCSetupDialog(window)
+    try:
+        for row in range(4):
+            for column in (1, 2):
+                assert not dialog.table.item(row, column).flags() & QtCore.Qt.ItemIsEditable
+                assert "只读" in dialog.table.item(row, column).toolTip()
+            for column in (2, 3):
+                assert not window.channel_grid.item(row, column).flags() & QtCore.Qt.ItemIsEditable
+            assert dialog.table.item(row, 5).flags() & QtCore.Qt.ItemIsEditable
+    finally:
+        dialog.close()
+    window.controller.backend = build_backend("simulated")
+    dialog = MCSetupDialog(window)
+    try:
+        assert not dialog.table.item(0, 0).flags() & QtCore.Qt.ItemIsEnabled
+        assert dialog.table.item(0, 1).flags() & QtCore.Qt.ItemIsEditable
+    finally:
+        dialog.close()
+
+
+def test_dasp_unknown_frontend_is_not_displayed_as_hardware_dc(window):
+    backend = _usb_channel_setup_backend()
+    for entry in backend.profile.channels:
+        entry["input_mode"] = "device_fixed_unknown"
+    backend.profile = replace(backend.profile, qualification="dasp_parameters",
+                              vendor_parameters={"sensor_defaults": []})
+    window.controller.backend = backend
+    window.channel_list.setCurrentRow(1)
+    window._apply_netdaq_limits()
+    window._sync_channel_grid()
+    assert window.channel_coupling_combo.currentText() == "设备"
+    assert window.channel_coupling_combo.currentData() == "dc"
+    assert window.channel_full_scale_combo.currentText().endswith("*")
+    count = window.channel_full_scale_combo.count()
+    for _ in range(5):
+        window._read_session_from_widgets()
+        window._load_channel_editor_from_row(1)
+    assert window.channel_full_scale_combo.count() == count
+    assert window.channel_grid.item(1, 3).text() == "设备当前模式"
+    dialog = MCSetupDialog(window)
+    try:
+        assert dialog.table.horizontalHeaderItem(2).text() == "输入模式"
+        assert dialog.table.item(1, 2).text() == "设备当前模式"
+        assert "标称" in dialog.table.item(1, 1).text()
+        dialog._apply_to_main()
+        session = window._read_session_from_widgets()
+        assert session.ai_channels[1].coupling == "dc"
+        assert session.ai_channels[1].full_scale == 10
+    finally:
+        dialog.close()
+    window.controller.backend = build_backend("simulated")
+    window._apply_netdaq_limits()
+    assert window.channel_coupling_combo.currentText() == "dc"
+    assert not window.channel_full_scale_combo.currentText().endswith("*")
+
+
+def test_verified_iepe_frontend_display_keeps_independent_coupling_value(window):
+    backend = _usb_channel_setup_backend()
+    backend.profile.channels[1].update(
+        input_mode="iepe", iepe_supply="device_fixed", iepe_current_ma=2.0)
+    backend.profile.channels[1]["options"][0]["coupling"] = "ac"
+    window.controller.backend = backend
+    window.channel_list.setCurrentRow(1)
+    window._apply_netdaq_limits()
+    assert window.channel_coupling_combo.currentText() == "IEPE"
+    assert window.channel_coupling_combo.currentData() == "ac"
+    assert window._read_session_from_widgets().ai_channels[1].iepe_enabled
+    dialog = MCSetupDialog(window)
+    try:
+        assert dialog.table.item(1, 2).text() == "IEPE（固定）"
+        dialog._apply_to_main()
+        assert window._read_session_from_widgets().ai_channels[1].coupling == "ac"
+    finally:
+        dialog.close()
+
+
+def test_tcp_editable_coupling_is_not_replaced_by_fixed_input_mode_label(window):
+    backend = _usb_channel_setup_backend()
+    backend.settings = replace(backend.settings, transport="tcp")
+    backend.profile = replace(backend.profile, transport="tcp")
+    backend.profile.channels[1].update(
+        input_mode="iepe", iepe_supply="device_fixed", iepe_current_ma=2.0)
+    window.controller.backend = backend
+    window._apply_netdaq_limits()
+    dialog = MCSetupDialog(window)
+    try:
+        assert dialog.table.item(1, 2).text() in {"ac", "dc", "bias"}
+        assert dialog.table.item(1, 2).flags() & QtCore.Qt.ItemIsEditable
+        dialog.table.item(1, 2).setText("dc")
+        dialog._apply_to_main()
+        assert window._read_session_from_widgets().ai_channels[1].coupling == "dc"
+    finally:
+        dialog.close()
+
+
+@pytest.mark.parametrize("record", [False, True])
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_netdaq_stop_does_not_hide_data_error(app, tmp_path, monkeypatch, record, corrupt):
+    from python_vna.daq.netdaq_protocol import NetDaqProtocolError, NetDaqStopped
+    from python_vna.ui.main_window import AcquisitionWorker, ContinuousRecordingWorker
+
+    backend = NetDaqBackend(NetDaqSettings(transport="usb"))
+    session = default_session_config()
+    controller = VnaController(backend, session)
+    for name in ("configure", "start", "stop", "close"):
+        monkeypatch.setattr(backend, name, lambda *a, **kw: None)
+    monkeypatch.setattr(backend, "acquisition_provenance", lambda: {"backend": "netdaq"})
+    worker = (ContinuousRecordingWorker(controller, None, tmp_path / "record")
+              if record else AcquisitionWorker(controller, None))
+    def read():
+        worker.request_stop()
+        raise (NetDaqProtocolError("injected corrupt USB frame") if corrupt
+               else NetDaqStopped("requested cancellation"))
+    monkeypatch.setattr(backend, "read_frame", read)
+    errors = []
+    worker.error.connect(errors.append)
+    worker.run()
+    assert bool(errors) == corrupt
+    if corrupt:
+        assert any("corrupt USB" in error for error in errors)
+    if record:
+        manifest = json.loads((tmp_path / "record/manifest.json").read_text())
+        assert manifest["completed"] == (not corrupt)
+        if corrupt:
+            assert "corrupt USB" in manifest["error"]
+
+
+@pytest.mark.parametrize("record", [False, True])
+def test_netdaq_close_error_is_reported_and_record_marked_incomplete(
+        app, tmp_path, monkeypatch, record):
+    from python_vna.daq.base import DaqBackendError
+    from python_vna.daq.netdaq_protocol import NetDaqStopped
+    from python_vna.ui.main_window import AcquisitionWorker, ContinuousRecordingWorker
+
+    backend = NetDaqBackend(NetDaqSettings(transport="usb"))
+    controller = VnaController(backend, default_session_config())
+    for name in ("configure", "start", "stop"):
+        monkeypatch.setattr(backend, name, lambda *a, **kw: None)
+    monkeypatch.setattr(backend, "acquisition_provenance", lambda: {"backend": "netdaq"})
+    worker = (ContinuousRecordingWorker(controller, None, tmp_path / "record")
+              if record else AcquisitionWorker(controller, None))
+    def read():
+        worker.request_stop()
+        raise NetDaqStopped("requested cancellation")
+    def close():
+        raise DaqBackendError("injected release failure")
+    monkeypatch.setattr(backend, "read_frame", read)
+    monkeypatch.setattr(backend, "close", close)
+    errors = []
+    worker.error.connect(errors.append)
+    worker.run()
+    assert any("release failure" in error for error in errors)
+    if record:
+        manifest = json.loads((tmp_path / "record/manifest.json").read_text())
+        assert not manifest["completed"]
+        assert "release failure" in manifest["error"]
 
 
 def test_dasp_preview_import_selection_and_units(app, tmp_path):

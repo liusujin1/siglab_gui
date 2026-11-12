@@ -190,9 +190,11 @@ class UsbConnection:
         self.may_be_running = False
         self.stop_uncertain = False
         self._leased = False
+        self._claimed = False
         self._context = ct.c_void_p()
         self._buffer = ct.create_string_buffer(512)
         self._pending = False
+        self._prefetch = False
 
     @property
     def connected(self):
@@ -245,6 +247,7 @@ class UsbConnection:
             # Use the driver's active configuration; SET_CONFIGURATION could reset
             # an ongoing device. Never dereference guessed config-structure offsets.
             self._check(lib.usb_claim_interface(self.handle, 0), "claim interface 0")
+            self._claimed = True
             for key in ("manufacturer", "product", "serial"):
                 index = getattr(device.contents.descriptor, key)
                 b = ct.create_string_buffer(256)
@@ -373,7 +376,14 @@ class UsbConnection:
             self._check(n, "read sample stream")
             if not 0 < n <= len(self._buffer):
                 raise NetDaqProtocolError("USBDAQ empty/invalid sample block")
-            return self._buffer.raw[:n]
+            # Copy before reusing the native buffer. Keep one receive outstanding
+            # while the owner processes/writes this block, without another thread.
+            data = self._buffer.raw[:n]
+            if self._prefetch and not (self.stop_event is not None and self.stop_event.is_set()):
+                self._check(self.lib.usb_submit_async(
+                    self._context, self._buffer, len(self._buffer)), "submit data read")
+                self._pending = True
+            return data
 
     def prepare_stream(self, rate, channel_count):
         self._owner_check()
@@ -383,6 +393,7 @@ class UsbConnection:
         # reads bound normal Stop latency even for old drivers with broken abort.
         size = max(512, min(16384, int(rate * channel_count * 4 * .1) // 512 * 512))
         self._buffer = ct.create_string_buffer(size)
+        self._prefetch = True
 
     def cancel_data(self):
         self._owner_check()
@@ -430,13 +441,26 @@ class UsbConnection:
                 if self not in _quarantined:
                     _quarantined.append(self)
             elif self.handle:
-                self.lib.usb_release_interface(self.handle, 0)
-                self.lib.usb_close(self.handle)
-                self.handle = None
-            if self._leased and not self._pending:
+                if self._claimed:
+                    try:
+                        self._check(self.lib.usb_release_interface(self.handle, 0), "release interface 0")
+                        self._claimed = False
+                    except Exception as exc:
+                        self.stop_uncertain = True
+                        error = error or exc
+                try:
+                    self._check(self.lib.usb_close(self.handle), "close device")
+                    self.handle = None
+                    self._claimed = False
+                except Exception as exc:
+                    self.stop_uncertain = True
+                    error = error or exc
+                    if self not in _quarantined:
+                        _quarantined.append(self)
+            if self._leased and not self._pending and not self.handle:
                 self._leased = False
                 _lease.release()
-            if not self._pending and self in _quarantined:
+            if not self._pending and not self.handle and self in _quarantined:
                 _quarantined.remove(self)
         if error is not None:
             raise NetDaqProtocolError(f"USBDAQ stop/cleanup unconfirmed: {error}") from error

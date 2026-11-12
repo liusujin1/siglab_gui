@@ -803,6 +803,121 @@ def test_polling_timeout_keeps_same_transfer(usb):
     control.close()
 
 
+def test_prepared_stream_prefetches_without_overwriting_delivered_bytes(usb, monkeypatch):
+    control = u.UsbConnection().connect()
+    control.prepare_stream(32000, 4)
+    control.start()
+    original_submit = usb.usb_submit_async
+    def submit(context, buffer, size):
+        result = original_submit(context, buffer, size)
+        # A queued transfer is allowed to write the buffer immediately.
+        ct.memset(buffer, 0x99, size)
+        return result
+    monkeypatch.setattr(usb, "usb_submit_async", submit)
+    try:
+        first = control.read_chunk(time.monotonic() + 1)
+        assert usb.pending and control._pending and usb.submit_count == 2
+        second = control.read_chunk(time.monotonic() + 1)
+        assert first + second == usb.data[:254]
+        assert usb.pending and usb.submit_count == 3
+    finally:
+        control.close()
+    assert not usb.pending and usb.cancel_count == 0
+    assert set(usb.native_threads) == {threading.get_ident()}
+
+
+def test_prefetch_timeout_polls_existing_native_transfer(usb):
+    control = u.UsbConnection().connect()
+    control.prepare_stream(32000, 4)
+    control.start()
+    control.read_chunk(time.monotonic() + 1)
+    usb.pause = True
+    try:
+        with pytest.raises(DaqBackendError, match="timed out"):
+            control.read_chunk(time.monotonic() + .01)
+        assert usb.pending and usb.submit_count == 2
+        assert usb.cancel_count == 0
+    finally:
+        usb.pause = False
+        control.close()
+
+
+def test_stop_after_reap_does_not_prefetch_another_transfer(usb, monkeypatch):
+    event = threading.Event()
+    control = u.UsbConnection(stop_event=event).connect()
+    control.prepare_stream(32000, 4)
+    control.start()
+    original_reap = usb.usb_reap_async_nocancel
+    def reap(context, timeout):
+        result = original_reap(context, timeout)
+        event.set()
+        return result
+    monkeypatch.setattr(usb, "usb_reap_async_nocancel", reap)
+    try:
+        assert control.read_chunk(time.monotonic() + 1) == usb.data[:127]
+        assert not usb.pending and not control._pending
+        assert usb.submit_count == 1
+    finally:
+        control.close()
+    assert usb.cancel_count == 0
+
+
+def test_failed_prefetch_is_reported_and_handle_still_closes(usb, monkeypatch):
+    control = u.UsbConnection().connect()
+    control.prepare_stream(32000, 4)
+    control.start()
+    original_submit = usb.usb_submit_async
+    def submit(context, buffer, size):
+        if usb.submit_count:
+            return -5
+        return original_submit(context, buffer, size)
+    monkeypatch.setattr(usb, "usb_submit_async", submit)
+    try:
+        with pytest.raises(DaqBackendError, match="submit data read"):
+            control.read_chunk(time.monotonic() + 1)
+        assert not control._pending
+    finally:
+        control.close()
+    assert not control.connected and usb.close_count == 1
+
+
+def test_failed_claim_never_releases_an_interface_it_does_not_own(usb):
+    usb.claim_error = -5
+    with pytest.raises(DaqBackendError, match="claim interface 0"):
+        u.UsbConnection().connect()
+    assert usb.release_count == 0
+    assert usb.close_count == 1
+    usb.claim_error = 0
+    u.UsbConnection().connect().close()
+
+
+def test_failed_interface_release_still_attempts_close_and_reports_error(usb, monkeypatch):
+    control = u.UsbConnection().connect()
+    monkeypatch.setattr(usb, "usb_release_interface", lambda *a: -5)
+    with pytest.raises(DaqBackendError, match="release interface 0"):
+        control.close()
+    assert not control.connected and control.stop_uncertain
+    assert usb.close_count == 1
+
+
+def test_failed_handle_close_keeps_lease_and_quarantines_owner(usb, monkeypatch):
+    control = u.UsbConnection().connect()
+    original_close = usb.usb_close
+    monkeypatch.setattr(usb, "usb_close", lambda *a: -5)
+    try:
+        with pytest.raises(DaqBackendError, match="close device"):
+            control.close()
+        assert control.connected and control.stop_uncertain
+        assert control in u._quarantined
+        with pytest.raises(DaqBackendError, match="busy"):
+            u.UsbConnection().connect()
+    finally:
+        # Only the test double's failed close is known to leave a retryable handle.
+        monkeypatch.setattr(usb, "usb_close", original_close)
+        control.close()
+    assert not control.connected and control not in u._quarantined
+
+
 def test_unconfirmed_native_cancel_never_frees_pending_buffer(usb, monkeypatch):
     control = u.UsbConnection().connect()
     usb.pause = True

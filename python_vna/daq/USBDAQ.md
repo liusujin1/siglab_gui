@@ -592,3 +592,81 @@ Additional malformed optional-setting checks fall back to disabled defaults.
 The enabled-filter USB Stop cases at 0, 20 and 200 ms after Start all released
 normally; the largest measured request-to-release interval was 90.26 ms.
 Settings also round-trip in a default VNA saved before the first acquisition.
+
+## CH2 acceptance and continuous receive (2026-11-12)
+
+The operator moved the 5 V/g IEPE accelerometer to CH2. Short raw capture and
+backend/controller checks at 2560 samples/s used only CH2 as the enabled user
+channel while retaining the device's established four-channel physical stream.
+Wire lane 1 maps to `ai1`. Engineering scaling is applied once, using
+9.80665 / 5 = 1.96133 (m/s^2)/V when that operator-supplied sensitivity is selected.
+The DASP snapshot's separate sensor coefficient is not a new hardware calibration.
+No channel mode, gain, coupling or IEPE-supply command was sent.
+
+A 20-second run with 0.1 Hz software DC removal stored 51200 samples without
+full-code samples. Raw/corrected means were 0.0041846 / 0.0003424 V.
+Streaming filtering matched uninterrupted filtering within 1e-13 V.
+Raw data, exact sensitivity and correction settings survived the VNA round-trip.
+Local evidence: `tmp_usb_ch2_backend_20261112/report.json`.
+
+Channel configuration now permits disabling CH1 and using CH2 as the reference
+and host-trigger source for NetDAQ/replay. NI/simulated retain their existing
+first-channel convention. Fixed USB hardware fields are read-only in both
+channel editors. The DASP compatibility profile displays "设备当前模式", rather
+than presenting its internal `dc` preservation setting as verified hardware DC
+coupling; its range is marked nominal. Independently qualified fixed IEPE
+profiles display IEPE, while editable TCP coupling retains its own enum.
+The narrow left-side controls use "设备" and a nominal-range asterisk, with full
+tooltips; the channel dialog retains the complete labels. Display labels never
+enter stored configuration or backend command values.
+The user can still edit channel enablement, labels and engineering sensitivity.
+Hardware mode/current remain unknown in the current compatibility profile.
+
+Two initial high-rate Record attempts failed safely after approximately
+122.88 and 81.792 stored seconds with invalid signed-24-bit container values.
+The audited second failure began 2048 bytes into a frame; a two-byte phase
+shift explains the invalid containers, but does not establish the lost samples
+or recover channel order. Invalid data is rejected, never silently resynchronized
+or zero-filled. These failed recordings retain incomplete manifests.
+
+USB receive now copies a completed native block and immediately submits the
+next receive on the same context before returning the copied block to the host.
+There is still only one outstanding transfer, one buffer and one owner thread.
+Polling timeout and quarantine behavior are retained. Stop drains the short
+pending transfer without requeueing. Release/close return codes are checked;
+an unconfirmed native close retains its handle and process-local lease.
+Worker error handling distinguishes actual cancellation from protocol/data
+errors even if Stop arrives concurrently; close failure also marks Record
+incomplete rather than reporting successful completion.
+
+With this change, an actual CH2 recording requested 25600 samples/s and used the
+device's coerced 32000 samples/s. It stored 19267584 samples over 602.112 seconds,
+crossing the default ten-minute boundary into a second binary segment:
+154140672 bytes total, complete manifest, no invalid wire blocks or cleanup
+errors. The original four-channel physical stream remained in use. Observed
+process memory remained approximately 194 MB between 168 and 368 wall seconds.
+Chunked replay matched the two raw segment files byte-for-byte (SHA-256
+`d94e19ad0eba4bab56254fab9a2c04577c03e761de7e8201c99da1166ecb457a`);
+Analysis opened the recording lazily with one CH2 series. Stored voltage stayed
+raw while previews used the enabled DC filter.
+Evidence: `tmp_usb_record_boundary_20261112_prefetch/report.json` and
+`readback_report.json`.
+
+Actual acquisition-window workers also passed six short Inst/Stop cases,
+three-frame averaging with 50% overlap, and three-frame software-trigger
+averaging with -25%, zero and +25% Delay. Trigger location matched the requested
+offset and the display started at zero seconds. CH2-only selection and 1.96133
+sensitivity survived GUI save/load. A further 100 owner-thread USB start/stop
+cycles all released cleanly, with a maximum measured request-to-release time
+of 100.84 ms. Evidence: `tmp_usb_workflow_20261112_final2/report.json` and
+`tmp_usb_cycles_ch2_20261112/report.json`.
+
+These checks do not qualify electrical range/gain, IEPE current, CH1 behavior,
+thirteen-hour stability or absolute sample continuity. Without a device sample
+counter, absence of invalid containers cannot independently prove no samples
+were lost. The backend remains experimental, and NI remains the startup default.
+
+Final PythonVNATest validation after the channel-display changes passed
+687 tests and 56 subtests using `scripts/test_vna_product.ps1`.
+Only acquisition-owned runtime/UI modules were changed in this follow-up;
+no shared storage, analysis algorithm, version or packaging changes were made.
