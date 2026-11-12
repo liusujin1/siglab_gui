@@ -1074,6 +1074,7 @@ class AnalysisDataTests(unittest.TestCase):
 
     def test_load_continuous_multiple_segments_keeps_manifest_order(self):
         session = default_session_config()
+        session.acquisition.sample_rate = 100.0
         with tempfile.TemporaryDirectory() as tmpdir:
             output_dir = Path(tmpdir) / "recording"
             writer = ContinuousDatWriter(
@@ -1112,7 +1113,7 @@ class AnalysisDataTests(unittest.TestCase):
             dataset = load_analysis_path(output_dir / "manifest.json")
             time_s, channels = load_continuous_channels(dataset, ["ai0"])
 
-        np.testing.assert_allclose(time_s, np.arange(4, dtype=float) / 2560.0)
+        np.testing.assert_allclose(time_s, np.arange(4, dtype=float) / 100.0)
         np.testing.assert_allclose(channels["ai0"], [1.0, 2.0, 3.0, 4.0])
 
     def test_load_numeric_text_attaches_readme_condition_for_grouped_numbers(self):

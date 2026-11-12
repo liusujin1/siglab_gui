@@ -12,7 +12,7 @@ from python_vna.resources import resource_path
 from python_vna.storage import default_session_config, load_legacy_vna
 from python_vna.update_client import cleanup_stale_updater_runner
 
-def build_backend(name: str):
+def build_backend(name: str, *, netdaq_settings=None, replay_path=None):
     if name == "ni":
         from python_vna.daq.ni import NIDaqBackend
 
@@ -21,6 +21,16 @@ def build_backend(name: str):
         from python_vna.daq.simulated import SimulatedDaqBackend
 
         return SimulatedDaqBackend()
+    if name == "netdaq":
+        from python_vna.daq.netdaq import NetDaqBackend
+
+        return NetDaqBackend(netdaq_settings)
+    if name == "replay":
+        from python_vna.daq.replay import ReplayBackend
+
+        if not replay_path:
+            raise ValueError("离线回放需要选择数据文件或目录")
+        return ReplayBackend(replay_path)
     raise ValueError(f"Unsupported backend '{name}'.")
 
 
@@ -33,11 +43,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--backend",
-        choices=["simulated", "ni"],
+        choices=["simulated", "ni", "netdaq", "replay"],
         default="ni",
         help="DAQ backend to use.",
     )
     parser.add_argument("--device", default=None, help="Preferred device name.")
+    parser.add_argument("--replay-path", default="", help="Offline VNA/DASP/continuous recording source.")
+    parser.add_argument("--netdaq-host", default="", help="Explicit NetDAQ IP/hostname; no automatic default.")
+    parser.add_argument("--netdaq-profile", default="", help="Verified NetDAQ device profile JSON.")
+    parser.add_argument("--netdaq-transport", choices=["tcp", "usb"], default="tcp")
+    parser.add_argument("--netdaq-usb-index", type=int, default=0)
+    parser.add_argument("--netdaq-probe-channels", default="", help="Explicit physical channel numbers, comma-separated.")
+    parser.add_argument("--netdaq-legacy-port", type=int, default=60000)
+    parser.add_argument("--netdaq-stream-port", type=int, default=60003)
+    parser.add_argument("--probe-netdaq-json", action="store_true", help="Read-only NetDAQ probe, without GUI.")
     return parser.parse_args(argv)
 
 
@@ -76,6 +95,24 @@ def main(argv: list[str] | None = None) -> int:
         from python_vna.daq.device_probe import main as probe_main
 
         return probe_main(["--json"])
+    netdaq_settings = None
+    if args.backend == "netdaq" or args.probe_netdaq_json:
+        from python_vna.daq.netdaq import NetDaqBackend, NetDaqSettings
+
+        netdaq_settings = NetDaqSettings(
+            host=args.netdaq_host, legacy_port=args.netdaq_legacy_port,
+            stream_port=args.netdaq_stream_port, profile_path=args.netdaq_profile,
+            transport=args.netdaq_transport, usb_index=args.netdaq_usb_index)
+        if args.probe_netdaq_json:
+            import json
+
+            try:
+                channels = tuple(int(n.strip()) for n in args.netdaq_probe_channels.split(",")) if args.netdaq_probe_channels else ()
+                print(json.dumps(NetDaqBackend(netdaq_settings).probe(channels), ensure_ascii=False))
+            except Exception as exc:
+                print(json.dumps({"error": str(exc)}, ensure_ascii=False))
+                return 1
+            return 0
     QtWidgets = require("PySide6.QtWidgets", "python -m pip install -e .[gui]")
     QtGui = require("PySide6.QtGui", "python -m pip install -e .[gui]")
     QtCore = require("PySide6.QtCore", "python -m pip install -e .[gui]")
@@ -94,7 +131,7 @@ def main(argv: list[str] | None = None) -> int:
     if icon_path.exists():
         app.setWindowIcon(QtGui.QIcon(str(icon_path)))
     append_log(f"backend build: begin {args.backend}")
-    backend = build_backend(args.backend)
+    backend = build_backend(args.backend, netdaq_settings=netdaq_settings, replay_path=args.replay_path)
     append_log(f"backend build: end {args.backend}")
     session_config = default_session_config()
     controller = VnaController(backend, session_config)

@@ -210,7 +210,8 @@ class MainWindowTests(unittest.TestCase):
         ]
         self.assertEqual(
             file_action_texts,
-            ["打开 VNA", "保存 VNA", "保存为默认", "检查更新", "退出"],
+            ["打开 VNA", "保存 VNA", "保存为默认", "设备连接...", "自动识别采集设备", "导入 DASP 通道参数...", "自动去直流...",
+             "离线回放数据文件...", "离线回放记录目录...", "采集质量报告...", "检查更新", "退出"],
         )
         display_menu = menu_actions["显示"].menu()
         self.assertIsNotNone(display_menu)

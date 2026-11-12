@@ -535,6 +535,20 @@ class LanUpdateTests(unittest.TestCase):
                         '-SkipRuntime', '-SkipNetwork')
         self.assertEqual(result_file.read_text(), 'keep')
 
+    def run_rescue_fixture(self, installed, *, running_pid=None, environment=None):
+        # Isolate the launcher's process inventory from the user's open apps.
+        # A separate fixture below verifies refusal with a non-empty inventory.
+        inventory = f"[pscustomobject]@{{Id={int(running_pid)}}}" if running_pid is not None else ""
+        script = str(TOOLS / 'start-update-with-runtime.ps1').replace("'", "''")
+        target = str(installed).replace("'", "''")
+        command = (
+            "function Get-Process { [CmdletBinding()] param([string[]]$Name); "
+            + inventory + " }; & '" + script + "' -InstallPath '" + target + "'"
+        )
+        return subprocess.run([
+            POWERSHELL, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command,
+        ], env=environment, capture_output=True, text=True, errors='replace', timeout=30)
+
     def test_rescue_launcher_preserves_update_lock(self):
         installed = self.folder / 'installed'
         installed.mkdir()
@@ -542,8 +556,21 @@ class LanUpdateTests(unittest.TestCase):
         (installed / '_internal').mkdir()
         lock = installed / '.python_vna_update.lock'
         lock.write_text('keep')
-        self.run_script('start-update-with-runtime.ps1', '-InstallPath', installed, success=False)
+        result = self.run_rescue_fixture(installed)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('An update lock exists', result.stdout)
         self.assertEqual(lock.read_text(), 'keep')
+
+    def test_rescue_launcher_refuses_running_suite_before_preparing_runtime(self):
+        installed = self.folder / 'installed'
+        installed.mkdir()
+        (installed / 'PythonVNAUpdater.exe').touch()
+        (installed / '_internal').mkdir()
+        result = self.run_rescue_fixture(installed, running_pid=424242)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Close both applications', result.stdout)
+        self.assertIn('Running PIDs: 424242', result.stdout)
+        self.assertNotIn('Preparing updater', result.stdout)
 
     def test_rescue_launcher_copies_root_dlls_and_passes_existing_settings(self):
         import os
@@ -578,10 +605,7 @@ public class Probe {
         self.assertEqual(compile_result.returncode, 0, compile_result.stderr)
         environment = dict(os.environ, TEMP=str(self.folder), TMP=str(self.folder))
         environment.pop('PYTHON_VNA_UPDATE_MANIFEST_URL', None)
-        result = subprocess.run([
-            POWERSHELL, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
-            str(TOOLS / 'start-update-with-runtime.ps1'), '-InstallPath', str(installed),
-        ], env=environment, capture_output=True, text=True, errors='replace', timeout=30)
+        result = self.run_rescue_fixture(installed, environment=environment)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         arguments = (installed / 'LAUNCH_ARGUMENTS.txt').read_text().splitlines()
         self.assertEqual(arguments[arguments.index('--current-version') + 1], '3.2.23')
