@@ -79,8 +79,9 @@ class DeviceConnectionDialog(QtWidgets.QDialog):
         form.addRow("设备配置 / DASP 参数配置", profile_row)
         form.addRow("只读查询通道", self.probe_channels_edit)
         note = QtWidgets.QLabel(
-            "NetDAQ 为实验性后端。USB 可从 DASP 参数建立兼容配置，保留设备当前模式、"
-            "使用原软件声明的电压换算及传感器参数；不会宣称已确认 IEPE 或重新标定。"
+            "NetDAQ 为实验性后端。USB 可从 DASP 参数建立兼容配置，"
+            "支持已确认的电压/DC 与 IEPE 选择，使用原软件声明的电压换算及传感器参数；"
+            "IEPE 电流与独立电压标定仍未确认。"
             "Avg 使用主机软件触发，AO 暂不支持。")
         note.setWordWrap(True)
         self.probe_button = QtWidgets.QPushButton("只读探测")
@@ -141,11 +142,11 @@ class DeviceConnectionDialog(QtWidgets.QDialog):
         from python_vna.daq.dasp_profile import build_dasp_usb_profile, save_dasp_usb_profile
 
         try:
-            data = build_dasp_usb_profile(source, probe)
+            data = build_dasp_usb_profile(source, probe, enable_coupling_control=True)
             self.report.setPlainText(json.dumps(data, ensure_ascii=False, indent=2))
             initial = self.profile_edit.text() or str(Path(source).parent / "USB2404_DASP.json")
             path, _ = QtWidgets.QFileDialog.getSaveFileName(
-                self, "保存 DASP 参数兼容配置（电气模式保留，尚未独立核实）", initial, "JSON (*.json)")
+                self, "保存 USB 兼容配置（DC/IEPE 可选；幅值尚未独立标定）", initial, "JSON (*.json)")
             if not path:
                 return
             target = Path(path)

@@ -58,6 +58,7 @@ class FakeUsb:
         self.chunk_size = 127
         self.product = b"USB2404V10"
         self.configurations = {n: bytes((n + 1,)) for n in range(4)}
+        self.reject_mode = self.ignore_mode = False
 
     def note(self):
         self.native_threads.append(threading.get_ident())
@@ -117,6 +118,12 @@ class FakeUsb:
             self.response = reply(cmd, body + bytes((0, self.config_lengths[body[0]])))
         elif cmd == 0x42:
             self.response = reply(cmd, body + self.configurations[body[0]])
+        elif cmd == 0x43:
+            assert len(raw) == 8 and raw[-1] == 0
+            assert len(body) == 2 and body[1] in (0, 1)
+            if not self.reject_mode and not self.ignore_mode:
+                self.configurations[body[0]] = body[1:]
+            self.response = reply(cmd, accepted=not self.reject_mode)
         elif cmd in (0x49, 0x53, 0x50):
             self.response = reply(cmd, accepted=not (cmd == 0x50 and self.reject_stop))
             if cmd == 0x53:
@@ -231,6 +238,56 @@ def config():
 
 def backend(tmp_path):
     return NetDaqBackend(NetDaqSettings(transport="usb", profile_path=str(profile(tmp_path)), timeout=.2))
+
+
+def test_qualified_usb_mode_write_checks_ack_readback_and_other_channels(usb):
+    before = dict(usb.configurations)
+    with u.UsbConnection() as control:
+        assert control.channel_set(0, u.COUPLING_VOLTAGE) == b"\x00"
+        assert control.channel_set(0, u.COUPLING_IEPE) == b"\x01"
+    assert usb.configurations == before
+    assert [body for cmd, body in usb.commands if cmd == 0x43] == [b"\x00\x00", b"\x00\x01"]
+
+
+@pytest.mark.parametrize("value", [2, 3, 6, 7, -1, 256, True, "01", b"\x01"])
+def test_usb_mode_write_rejects_unqualified_values_before_any_command(usb, value):
+    with u.UsbConnection() as control:
+        with pytest.raises(DaqBackendError):
+            control.channel_set(0, value)
+    assert not usb.commands
+
+
+def test_usb_mode_write_same_value_is_read_only(usb):
+    with u.UsbConnection() as control:
+        assert control.channel_set(0, 1) == b"\x01"
+    assert not any(cmd == 0x43 for cmd, _ in usb.commands)
+
+
+@pytest.mark.parametrize("failure", ["firmware", "length", "running", "rejected", "readback", "wrong_ack"])
+def test_usb_mode_write_fails_closed(usb, failure, monkeypatch):
+    if failure == "firmware":
+        usb.firmware = reply(0x56, b"\x03\x00")
+    if failure == "length":
+        usb.config_lengths[0] = 2
+    usb.reject_mode = failure == "rejected"
+    usb.ignore_mode = failure == "readback"
+    if failure == "wrong_ack":
+        original = usb.usb_bulk_write
+
+        def wrong_ack(*args):
+            result = original(*args)
+            if usb.commands[-1][0] == 0x43:
+                usb.response = reply(0x50)
+            return result
+
+        monkeypatch.setattr(usb, "usb_bulk_write", wrong_ack)
+    with u.UsbConnection() as control:
+        if failure == "running":
+            control.start()
+        with pytest.raises(DaqBackendError):
+            control.channel_set(0, 0)
+    assert sum(cmd == 0x43 for cmd, _ in usb.commands) == (
+        1 if failure in {"rejected", "readback", "wrong_ack"} else 0)
 
 
 def test_usb_dc_filter_precedes_trigger_and_retains_original_voltage(usb, tmp_path):
@@ -1155,6 +1212,147 @@ def dasp_declared(usb, tmp_path):
     target = tmp_path / "dasp-compatible.json"
     save_dasp_usb_profile(data, target)
     return data, target, source
+
+
+@pytest.fixture
+def selectable_dasp(usb, dasp_declared, tmp_path):
+    from python_vna.daq.dasp_profile import build_dasp_usb_profile, save_dasp_usb_profile
+
+    _, _, source = dasp_declared
+    usb.configurations = {0: b"\x01", 1: b"\x01", 2: b"\x00", 3: b"\x00"}
+    probe = NetDaqBackend(NetDaqSettings(transport="usb")).probe(range(4))
+    data = build_dasp_usb_profile(source, probe, enable_coupling_control=True)
+    target = tmp_path / "selectable-dasp.json"
+    save_dasp_usb_profile(data, target)
+    return data, target
+
+
+def test_selectable_dasp_modes_write_only_enabled_channels_and_save_actual_provenance(
+        usb, selectable_dasp, tmp_path):
+    _, path = selectable_dasp
+    b = NetDaqBackend(NetDaqSettings(transport="usb", profile_path=str(path)))
+    session = config()
+    session.ai_channels[0].enabled = session.ai_channels[3].enabled = False
+    session.ai_channels[2].coupling = "bias"
+    session.ai_channels[2].iepe_enabled = True
+    session.ai_channels[2].iepe_current_ma = 0
+    session.acquisition.frame_size = 2
+    usb.data = np.zeros((16, 4), dtype="<i4").tobytes()
+    b.configure(session)
+    try:
+        b.start()
+        frame = b.read_frame()
+        assert frame.channel_names == ["ai1", "ai2"]
+        modes = frame.metadata["channel_modes"]
+        assert modes["ai1"]["input_mode"] == "voltage_single_ended_dc"
+        assert modes["ai2"]["input_mode"] == "iepe"
+        assert modes["ai2"]["configuration_hex"] == "01"
+        assert modes["ai2"]["iepe"]["current_ma"] is None
+        assert modes["ai2"]["iepe"]["control"] == "selectable"
+        assert frame.metadata["hardware_coupling"] == "usb2404_voltage_iepe"
+        assert not frame.metadata["electrical_calibration_verified"]
+    finally:
+        b.close()
+    writes = [body for cmd, body in usb.commands if cmd == 0x43]
+    assert writes == [b"\x01\x00", b"\x02\x01"]
+    assert usb.configurations == {0: b"\x01", 1: b"\x00", 2: b"\x01", 3: b"\x00"}
+    assert usb.commands.index((0x50, b"")) < usb.commands.index((0x43, b"\x01\x00"))
+
+
+def test_selectable_dasp_preflights_all_channels_before_first_write(usb, selectable_dasp):
+    _, path = selectable_dasp
+    b = NetDaqBackend(NetDaqSettings(transport="usb", profile_path=str(path)))
+    session = config()
+    session.ai_channels[3].enabled = False
+    b.configure(session)
+    usb.configurations[3] = b"\x07"
+    try:
+        with pytest.raises(DaqBackendError, match="unknown USB mode 07"):
+            b.start()
+    finally:
+        b.close()
+    assert not any(cmd in {0x43, 0x49, 0x53} for cmd, _ in usb.commands)
+
+
+def test_selectable_iepe_never_programs_ni_default_current(usb, selectable_dasp):
+    _, path = selectable_dasp
+    b = NetDaqBackend(NetDaqSettings(transport="usb", profile_path=str(path)))
+    session = config()
+    session.ai_channels[0].coupling = "bias"
+    session.ai_channels[0].iepe_enabled = True
+    session.ai_channels[0].iepe_current_ma = 2.1
+    count = len(usb.commands)
+    with pytest.raises(DaqBackendError, match="unknown"):
+        b.configure(session)
+    assert len(usb.commands) == count
+
+
+def test_selected_iepe_mode_and_unknown_current_survive_vna_roundtrip(
+        usb, selectable_dasp, tmp_path):
+    from python_vna.controller import VnaController
+
+    _, path = selectable_dasp
+    b = NetDaqBackend(NetDaqSettings(transport="usb", profile_path=str(path)))
+    session = config()
+    session.ai_channels[0].coupling = "bias"
+    session.ai_channels[0].iepe_enabled = True
+    session.ai_channels[0].iepe_current_ma = 0
+    session.ai_channels[0].sensitivity = 1.96133
+    controller = VnaController(b, session)
+    controller.configure()
+    try:
+        controller.start()
+        controller.read_and_process()
+        result = controller.snapshot()
+    finally:
+        controller.close()
+    target = tmp_path / "selectable-iepe.vna"
+    save_legacy_vna(result, target)
+    restored = load_legacy_vna(target)
+    channel = restored.config.ai_channels[0]
+    assert channel.iepe_enabled and channel.iepe_current_ma == 0
+    assert channel.coupling == "bias"
+    assert channel.sensitivity == pytest.approx(1.96133)
+    assert restored.measurement.metadata["daq_provenance"]["channel_modes"]["ai0"]["configuration_hex"] == "01"
+
+
+@pytest.mark.parametrize("change", ["charge", "coupling", "type", "firmware", "current", "different_scale"])
+def test_selectable_usb_profile_cannot_broaden_verified_modes(selectable_dasp, change):
+    data, path = selectable_dasp
+    entry = data["channels"][0]
+    if change == "charge":
+        entry["options"][0]["configuration_hex"] = "02"
+    elif change == "coupling":
+        entry["options"][0]["coupling"] = "ac"
+    elif change == "type":
+        entry["channel_type"] = 6
+    elif change == "firmware":
+        data["firmware_hex"] = reply(0x56, b"\x03\x00").hex()
+    elif change == "current":
+        entry["iepe_current_ma"] = 2.1
+    else:
+        entry["options"][1]["volts_per_count"] *= 2
+    path.write_text(json.dumps(data))
+    with pytest.raises(DaqBackendError):
+        NetDaqProfile.load(path)
+
+
+def test_selectable_profile_keeps_unknown_configuration_read_only(usb, dasp_declared, tmp_path):
+    from python_vna.daq.dasp_profile import build_dasp_usb_profile, save_dasp_usb_profile
+
+    _, _, source = dasp_declared
+    usb.configurations[0] = b"\x07"
+    usb.configurations[1] = b"\x01"
+    data = build_dasp_usb_profile(
+        source, NetDaqBackend(NetDaqSettings(transport="usb")).probe(range(4)),
+        enable_coupling_control=True)
+    path = tmp_path / "mixed.json"
+    save_dasp_usb_profile(data, path)
+    p = NetDaqProfile.load(path)
+    assert not p.has_usb_coupling_control(0)
+    assert p.iepe_settings(0)["enabled"] is None
+    assert p.channels[0]["options"][0]["configuration_hex"] == "07"
+    assert p.has_usb_coupling_control(1)
 
 
 def test_dasp_compatibility_preserves_unknown_modes_and_provenance(usb, dasp_declared):

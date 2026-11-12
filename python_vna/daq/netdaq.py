@@ -111,7 +111,15 @@ class NetDaqProfile:
                 wire_numbers.add(wire)
                 kind = channel["channel_type"]
                 mode = channel["input_mode"]
-                modes = ({"device_fixed_unknown"} if declared else
+                control = channel.get("mode_control")
+                if control is not None:
+                    if transport != "usb" or control != "usb2404_coupling":
+                        raise ValueError("unsupported channel mode control")
+                    from .usbdaq import validate_coupling_options
+
+                    validate_coupling_options(channel, desc, bytes.fromhex(data["firmware_hex"]))
+                modes = ({"voltage_single_ended_dc", "iepe"} if control else
+                         {"device_fixed_unknown"} if declared else
                          {"iepe", "voltage_single_ended_dc", "voltage_single_ended_ac",
                           "voltage_differential_dc", "quarter_bridge", "half_bridge", "full_bridge"})
                 if (isinstance(kind, bool) or not isinstance(kind, int) or not 0 <= kind <= 255
@@ -147,7 +155,7 @@ class NetDaqProfile:
                             value = option[key]
                             if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 255:
                                 raise ValueError(f"invalid {key}")
-                    elif len(options) != 1 or not bytes.fromhex(option["configuration_hex"]):
+                    elif not control and (len(options) != 1 or not bytes.fromhex(option["configuration_hex"])):
                         raise ValueError("non-writable types need one captured, fixed configuration")
             if transport == "usb":
                 wires = [c["wire_number"] for c in channels]
@@ -168,11 +176,15 @@ class NetDaqProfile:
 
     def option(self, index: int, channel) -> dict:
         reported = self.channels[index]
-        settings = self.iepe_settings(index)
+        settings = self.iepe_settings(index, channel.coupling)
         iepe = bool(settings["enabled"])
         expected_current = settings["current_ma"] or 0.0
         if channel.iepe_enabled != iepe or (iepe and not math.isclose(
                 expected_current, channel.iepe_current_ma, abs_tol=1e-6)):
+            if self.has_usb_coupling_control(index):
+                raise DaqBackendError(
+                    f"NetDAQ {channel.name}: DC/IEPE selection disagrees with IEPE state; "
+                    "the unmeasured USB IEPE current must remain 0 (unknown)")
             raise DaqBackendError(f"NetDAQ {channel.name}: IEPE is a read-only channel mode, not a coupling switch")
         for option in reported["options"]:
             if (math.isclose(float(option["full_scale_v"]), channel.full_scale, rel_tol=1e-8)
@@ -181,9 +193,20 @@ class NetDaqProfile:
         raise DaqBackendError(
             f"NetDAQ {channel.name}: no verified option for range/coupling/IEPE; no settings were written")
 
-    def iepe_settings(self, index: int) -> dict:
-        """Supply facts from the qualified profile, never inferred from !A/!B."""
+    def has_usb_coupling_control(self, index: int) -> bool:
+        return bool(self.transport == "usb"
+                    and self.channels[index].get("mode_control") == "usb2404_coupling")
+
+    def iepe_settings(self, index: int, coupling: str | None = None) -> dict:
+        """Keep selectable USB modes separate from fixed TCP channel types."""
         entry = self.channels[index]
+        if self.has_usb_coupling_control(index):
+            enabled = (coupling or entry["options"][0]["coupling"]) == "bias"
+            return {
+                "enabled": enabled, "supply": "device_fixed" if enabled else "none",
+                "current_ma": None, "current_known": False, "mode_known": True,
+                "control": "selectable",
+            }
         if entry["input_mode"] == "device_fixed_unknown":
             return {
                 "enabled": None, "supply": "unspecified", "current_ma": None,
@@ -211,7 +234,8 @@ def profile_preview(path):
         "sensor_import_errors": (profile.vendor_parameters or {}).get("sensor_import_errors", []),
         "parameter_note": (
             "有效传感器参数会在应用连接时导入。未导入通道保留当前系数；请核对上方错误。"
-            "dc 仅表示软件保留直流，IEPE 和硬件耦合仍未确认，不发送配置命令。"
+            "具备 usb2404_coupling 标记的通道支持电压/DC 与 IEPE；"
+            "其他通道保留原始配置。IEPE 电流与独立电压标定仍未确认。"
             if profile.qualification == "dasp_parameters" else ""),
         "vendor_parameters": profile.vendor_parameters,
         "transport": profile.transport, "sha256": profile.digest, "evidence": profile.evidence,
@@ -219,6 +243,7 @@ def profile_preview(path):
         "channels": [{
             "application_channel": f"ai{index}", "wire_number": entry["wire_number"],
             "reported_type": entry["channel_type"], "input_mode": entry["input_mode"],
+            "mode_control": entry.get("mode_control", "read_only"),
             "iepe": profile.iepe_settings(index),
             "options": [{key: option[key] for key in
                          ("coupling", "full_scale_v", "volts_per_count", "zero_count")}
@@ -322,7 +347,9 @@ class NetDaqBackend(BaseDaqBackend):
             return []
         result = self.probe()
         profile = self.profile if result["profile_matches"] else None
-        iepe = bool(profile and any(c["input_mode"] == "iepe" for c in profile.channels))
+        iepe = bool(profile and any(
+            c["input_mode"] == "iepe" or profile.has_usb_coupling_control(i)
+            for i, c in enumerate(profile.channels)))
         return [BackendDevice(
             self.device_name, f"NetDAQ {profile.model if profile else '未配置 / 仅只读探测'}"
             + ("（DASP 参数兼容；电气模式未确认）" if profile and profile.qualification == "dasp_parameters"
@@ -418,14 +445,16 @@ class NetDaqBackend(BaseDaqBackend):
             raise DaqBackendError("NetDAQ is already running")
         profile = self.profile
         try:
-            # Channel type is device-owned. Validate ALL selected types before
-            # writing anything; input mode is never switched via !C.
+            # Validate every captured channel before any mode writes. Disabled
+            # channels are checked and preserved, never silently reconfigured.
             to_check = self._selected
-            if profile.qualification == "dasp_parameters":
+            if profile.qualification == "dasp_parameters" or any(
+                    profile.has_usb_coupling_control(i) for i in range(len(profile.channels))):
                 # The opaque bytes might affect shared ADC state. Check the
                 # entire captured stream, including host-disabled channels.
                 to_check = [(i, f"ai{i}", entry["options"][0])
                             for i, entry in enumerate(profile.channels)]
+            current_configurations = {}
             for index, name, option in to_check:
                 entry = profile.channels[index]
                 kind, _count = self._control.channel_descriptor(entry["wire_number"])
@@ -433,8 +462,27 @@ class NetDaqBackend(BaseDaqBackend):
                     raise DaqBackendError(f"NetDAQ {name}: reported channel type changed; no settings were written")
                 if kind not in {0, 6, 8} or self.settings.transport == "usb":
                     current = self._control.channel_configuration(entry["wire_number"])
-                    if current != bytes.fromhex(option["configuration_hex"]):
+                    current_configurations[index] = current
+                    if profile.has_usb_coupling_control(index):
+                        if current not in {b"\x00", b"\x01"}:
+                            raise DaqBackendError(f"NetDAQ {name}: unknown USB mode {current.hex()}; no settings were written")
+                    elif current != bytes.fromhex(option["configuration_hex"]):
                         raise DaqBackendError(f"NetDAQ {name}: read-only channel configuration changed")
+            mode_changes = [(index, option) for index, name, option in self._selected
+                            if profile.has_usb_coupling_control(index)
+                            and current_configurations[index] != bytes.fromhex(option["configuration_hex"])]
+            if mode_changes:
+                self._control.stop()
+            for index, option in mode_changes:
+                self._check_stop()
+                self._control.channel_set(
+                    profile.channels[index]["wire_number"], int(option["configuration_hex"], 16))
+            if mode_changes:
+                expected = dict(current_configurations)
+                expected.update({i: bytes.fromhex(o["configuration_hex"]) for i, o in mode_changes})
+                for index, value in expected.items():
+                    if self._control.channel_configuration(profile.channels[index]["wire_number"]) != value:
+                        raise DaqBackendError(f"NetDAQ ai{index}: configuration changed during mode selection")
             for index, name, option in self._selected:
                 self._check_stop()
                 entry = profile.channels[index]
@@ -524,8 +572,11 @@ class NetDaqBackend(BaseDaqBackend):
             "channel_modes": {name: {
                 "channel_type": profile.channels[index]["channel_type"],
                 "wire_number": profile.channels[index]["wire_number"],
-                "input_mode": profile.channels[index]["input_mode"],
-                "iepe": profile.iepe_settings(index),
+                "input_mode": (
+                    "iepe" if option["coupling"] == "bias" else "voltage_single_ended_dc"
+                ) if profile.has_usb_coupling_control(index) else profile.channels[index]["input_mode"],
+                "iepe": profile.iepe_settings(index, option["coupling"]),
+                "configuration_hex": option.get("configuration_hex"),
             } for index, name, option in self._selected},
             "units": "V", "stream_continuity_verified": False,
             "channel_full_scales": {name: float(option["full_scale_v"])
@@ -545,7 +596,10 @@ class NetDaqBackend(BaseDaqBackend):
             result["voltage_conversion_basis"] = "dasp_declared_nominal_voltage"
             result["vendor_parameter_sha256"] = profile.vendor_parameters["sha256"]
             result["vendor_parameter_source"] = profile.vendor_parameters["path"]
-            result["hardware_coupling"] = "unknown_preserved"
+            result["hardware_coupling"] = (
+                "usb2404_voltage_iepe" if any(profile.has_usb_coupling_control(i)
+                                             for i, _, _ in self._selected)
+                else "unknown_preserved")
         return result
 
     def request_stop(self):

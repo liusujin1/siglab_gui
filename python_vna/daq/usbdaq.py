@@ -1,4 +1,4 @@
-"""Gated USB2404 transport. No channel writes, firmware upload, or driver install.
+"""Gated USB2404 transport with qualified voltage/IEPE mode selection.
 
 Wire evidence: _ana/PROTOCOL_USB.md, USB2404V10 firmware 2.0. ctypes ABI:
 libusb-win32 lusb0_usb.h (byte-packed structures, including usb_device/bus).
@@ -19,11 +19,34 @@ from .netdaq_protocol import (
 )
 
 VID, PID = 0x0547, 0x1003
+COUPLING_VOLTAGE, COUPLING_IEPE = 0x00, 0x01
+COUPLING_DESCRIPTOR = bytes.fromhex(
+    "21442100011804040001f400ffffd8f000002710ff800000007fffff000081160d")
+COUPLING_FIRMWARE = bytes.fromhex("2156070200800d")
 _lease = threading.Lock()
 _library = None
 _quarantined = []
 CANCEL_CONFIRM_SECONDS = 2.0
 DRAIN_SECONDS = 1.0
+
+
+def validate_coupling_options(entry, descriptor, firmware):
+    """Only the observed USB2404/2.0 voltage and IEPE values are selectable."""
+    if (descriptor != COUPLING_DESCRIPTOR or firmware != COUPLING_FIRMWARE
+            or entry["channel_type"] != 0):
+        raise ValueError("USB coupling control requires the qualified USB2404V10/2.0 layout")
+    options = entry["options"]
+    if (len(options) != 2
+            or {o["configuration_hex"] for o in options} != {"00", "01"}
+            or any(o["coupling"] != {"00": "dc", "01": "bias"}[o["configuration_hex"]]
+                   for o in options)):
+        raise ValueError("USB coupling options must be exactly DC=00 and IEPE=01")
+    expected = "iepe" if options[0]["coupling"] == "bias" else "voltage_single_ended_dc"
+    if entry["input_mode"] != expected:
+        raise ValueError("USB default input mode disagrees with the captured configuration")
+    for key in ("full_scale_v", "volts_per_count", "zero_count"):
+        if float(options[0][key]) != float(options[1][key]):
+            raise ValueError("USB coupling selection cannot change range or calibration")
 
 
 class DeviceDescriptor(ct.Structure):
@@ -273,12 +296,15 @@ class UsbConnection:
         self.close()
 
     def command(self, command, payload=b"", size=6):
+        if command not in {0x44, 0x56, 0x41, 0x42, 0x49, 0x53, 0x50}:
+            raise NetDaqProtocolError("USBDAQ unsupported command; use the qualified channel_set for mode selection")
+        return self._exchange(command, payload, size)
+
+    def _exchange(self, command, payload=b"", size=6):
         self._owner_check()
         self._check_stop()
         if not self.handle:
             raise NetDaqProtocolError("USBDAQ is not open")
-        if command not in {0x44, 0x56, 0x41, 0x42, 0x49, 0x53, 0x50}:
-            raise NetDaqProtocolError("USBDAQ unsupported command (channel writes are disabled)")
         frame = legacy_request(command, payload)
         if command == 0x53:
             if self.stop_uncertain or self.may_be_running:
@@ -295,7 +321,7 @@ class UsbConnection:
             if n > len(b):
                 raise NetDaqProtocolError("USBDAQ reply exceeds buffer")
             raw = b.raw[:n]
-            if command in {0x49, 0x53, 0x50}:
+            if command in {0x43, 0x49, 0x53, 0x50}:
                 checked_ack(raw, command)
             else:
                 checked_reply(raw, command, size)
@@ -334,6 +360,28 @@ class UsbConnection:
             self.channel_descriptor(number)
         count = self._channel_lengths[number]
         return self.command(0x42, bytes((number,)), count + 6)[4:-2]
+
+    def channel_set(self, number, configuration):
+        """Write one qualified mode and check !COK plus independent !B readback."""
+        self._owner_check()
+        self._check_channel(number)
+        if (isinstance(configuration, bool) or not isinstance(configuration, int)
+                or configuration not in {COUPLING_VOLTAGE, COUPLING_IEPE}):
+            raise NetDaqProtocolError("USBDAQ permits only voltage/DC=00 or IEPE=01; charge is unqualified")
+        if self.may_be_running or self.stop_uncertain or self._pending or self._context.value:
+            raise NetDaqProtocolError("USBDAQ channel mode can only change while stopped")
+        if (self.descriptor() != COUPLING_DESCRIPTOR
+                or self.command(0x56, size=7) != COUPLING_FIRMWARE):
+            raise NetDaqProtocolError("USBDAQ coupling control is not qualified for this device/firmware")
+        if self.channel_descriptor(number) != (0, 1):
+            raise NetDaqProtocolError("USBDAQ coupling control requires type 0 and one configuration byte")
+        desired = bytes((configuration,))
+        if self.channel_configuration(number) != desired:
+            self._exchange(0x43, bytes((number, configuration)))
+        back = self.channel_configuration(number)
+        if back != desired:
+            raise NetDaqProtocolError(f"USBDAQ mode readback mismatch: wrote {desired.hex()}, got {back.hex()}")
+        return back
 
     def initialize_ad(self, payload):
         if len(payload) != 13:

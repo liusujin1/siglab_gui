@@ -11,8 +11,10 @@ In **File / Device connection** select `netdaq`, then the
 `USB2404V10 (0547:1003)` transport. IP/port controls are disabled for USB.
 Device index starts at zero. An empty profile field allows read-only probing,
 not Inst/Avg/Record. In addition to independently verified profiles, the explicit
-DASP parameter compatibility path below permits nominal-voltage acquisition
-without claiming verified hardware modes or calibration.
+DASP parameter compatibility path below permits nominal-voltage acquisition.
+Newly created compatibility profiles can opt into the qualified voltage/DC and
+IEPE selector described at the end of this document. This does not certify
+absolute voltage calibration, IEPE current or the charge-input setting.
 Connection settings are remembered without changing
 the NI startup default. Physical query numbers are explicit; do not infer real
 channel count from the range of indices that answer queries.
@@ -37,11 +39,13 @@ Use the [NetDAQ profile contract](NETDAQ.md), with these USB-specific constraint
 - `divisor_offset`: zero; the first four InitAD bytes are BIG-endian. Other
   InitAD bytes are captured unchanged. Its little-endian channel mask must agree
   with the ascending, independently verified physical stream order (0..3 only).
-- Each channel has exactly ONE fixed range/coupling option with captured
-  `configuration_hex`. USB does not write `!C`, even for type 0/6/8. Current
+- Legacy channels have exactly ONE fixed range/coupling option with captured
+  `configuration_hex`. Without explicit `mode_control="usb2404_coupling"`,
+  USB does not write `!C`, even for type 0/6/8. Current
   reported type/configuration must match. The configuration length comes from
   `!A`; `!B` must return exactly that many bytes after the channel echo.
-  Range/coupling and IEPE are read-only.
+  Range/coupling and IEPE are read-only. Opt-in channels instead have the two
+  checked DC=00 / IEPE=01 options; voltage range remains fixed.
 - `volts_per_count`, `zero_count`, physical mode/supply, maximum sample rate and
   channel order MUST come from independent calibration/qualification, not from
   a convenient descriptor ratio or a successful protocol acknowledgement.
@@ -169,6 +173,8 @@ regressions. No device was accessed during these tests.
 
 ## IEPE software path, offline
 
+This section describes the original fixed-profile path. See the 2026-11-12
+follow-up below for opt-in USB mode selection. In the original path,
 USB IEPE is a qualified channel interpretation, not a writable coupling index.
 A profile can use `input_mode="iepe"` with the actual observed vendor type
 (including type 0 if independently established). Type 0 by itself proves
@@ -670,3 +676,72 @@ Final PythonVNATest validation after the channel-display changes passed
 687 tests and 56 subtests using `scripts/test_vna_product.ps1`.
 Only acquisition-owned runtime/UI modules were changed in this follow-up;
 no shared storage, analysis algorithm, version or packaging changes were made.
+
+## USB voltage/DC and IEPE selector, 2026-11-12
+
+Updated vendor-reference evidence correlates a DASP channel-settings screenshot
+with checked `!B` responses: CH1/CH2 show IEPE and return 01; CH3/CH4 show voltage
+and return 00. The application's earlier read-only snapshots independently
+recorded 07/01/01/01, followed by 07/01/00/00 after operator changes. An explicitly
+requested CH1 write 07 -> 01 received checked !COK, then read back 01/01/00/00.
+The operator reports that CH1 no longer saturates in that configuration.
+These historical 07 values were parsed configuration BODY bytes, not the
+seven-byte reply's length field. Their physical meaning remains unqualified.
+
+The reviewed reference `PROTOCOL_USB.md` SHA256 is
+`641a736df6403e0a80f1df7a13ba26277540d4d191167c75c60bc061bbed19f5`;
+`netdaq_usb.py` is
+`fd2ac1bc07835bf377e355056f722417c930528103c17f7947c594dfd5d95588`;
+`device_usb2404.json` is
+`d7ee39f3b6dd7c702fe300d48b98f2c4e09bb719772b67c4486e41e40ceeed45`.
+The reference's 37 offline consistency checks pass. This does not upgrade its
+other inferred clock tiers, absolute voltage calibration or charge semantics.
+
+Implementation:
+
+- `UsbConnection.channel_set` permits only 00 (voltage/DC) and 01 (IEPE), on the
+  exact captured USB2404V10 descriptor and firmware 2.0. It checks the channel
+  index, reported type 0, configuration length 1, stopped state, !COK and a
+  separate !B readback. It does not retry ambiguous writes. Raw command access
+  still cannot issue arbitrary !C. The native wire request includes the even
+  padding byte, while the declared command length remains seven.
+- In **File / Device connection / Create USB compatibility profile from DASP**,
+  rebuilding a profile adds `mode_control="usb2404_coupling"` only to channels
+  currently returning 00/01. Both mode options retain exactly the same voltage
+  conversion and fixed range. Unknown bytes, including 02/03/06/07, stay in
+  legacy read-only entries. Existing profile files are not silently rewritten.
+- The compact channel editor, channel matrix and MC Setup show DC/IEPE and can
+  edit those qualified entries. Range and unknown current stay read-only.
+  Internally DC uses `dc`; IEPE uses `bias` with `iepe_enabled=True` and current
+  sentinel 0. This sentinel does not mean zero excitation.
+- On Start, the acquisition owner validates all stream channels before writing.
+  It confirms Stop before needed mode changes, writes only enabled channels,
+  verifies enabled and disabled channels, then performs InitAD/Start. A rejected
+  command, wrong readback or unknown observed mode prevents acquisition.
+  Mode editing is disabled during Inst/Avg/Record.
+- Acquisition/VNA/Record provenance uses the selected mode and configuration
+  bytes, not the profile's originally captured default. DASP nominal calibration
+  remains explicitly unverified. TCP type/coupling/gain rules and NI defaults
+  are unchanged; no shared storage-format changes are needed.
+
+Hardware IEPE may settle after a switch. No startup frames are discarded, no
+per-frame mean is removed, and software high-pass/DC removal remains an explicit,
+independent option. The charge setting 02 is deliberately unavailable.
+
+Validation of this follow-up:
+
+- `scripts/test_vna_product.ps1 -Product python_vna_test -Quiet` passed
+  719 tests and 56 subtests, including NI/default startup, USB mode/ack/readback
+  failure cases, legacy profile behavior, disabled-channel preservation,
+  channel-editor/MC Setup changes and VNA exact mode/current round-trip.
+- Real owner-thread CH1 DC -> IEPE acquisition completed two 1024-sample frames
+  per mode at 2560 samples/s. Each mode's VNA reloaded with the selected coupling,
+  IEPE flag and unknown-current sentinel. Final independent readback was
+  01/01/00/00, equal to the pre-test snapshot. Evidence is retained locally in
+  `tmp_usb_coupling_20261112/report.json`; the generated compatibility profile
+  and VNA samples are not shipped as calibrated product profiles.
+- The offscreen MC Setup render was checked with IEPE/IEPE/DC/DC labels and
+  all four rows visible. No DASP window automation was required.
+
+This is a short functional regression, not a current/compliance-voltage
+measurement, independent amplitude calibration or thirteen-hour endurance test.

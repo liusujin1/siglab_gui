@@ -13,7 +13,7 @@ import tempfile
 
 from .base import DaqBackendError
 from .dasp_import import apply_dasp_channels, DaspChannel, dasp_voltage_scale, load_dasp_channels, read_parameters
-from .usbdaq import checked_reply, descriptor_info, sample_clock
+from .usbdaq import checked_reply, descriptor_info, sample_clock, validate_coupling_options
 
 
 def validate_dasp_declaration(data, info):
@@ -36,10 +36,15 @@ def validate_dasp_declaration(data, info):
     high = info["nominal_voltage_max_mv"] * .001
     zero = info["adc_min"] - low / step
     for entry in data["channels"]:
-        if entry["input_mode"] != "device_fixed_unknown":
+        selectable = entry.get("mode_control") == "usb2404_coupling"
+        if selectable:
+            validate_coupling_options(entry, bytes.fromhex(data["descriptor_hex"]), firmware)
+            if entry.get("iepe_supply") != "device_fixed" or entry.get("iepe_current_ma") not in (None, 0):
+                raise ValueError("DASP USB mode control cannot claim a measured IEPE current")
+        elif entry["input_mode"] != "device_fixed_unknown":
             raise ValueError("DASP compatibility cannot assert a known electrical mode or IEPE supply")
         for option in entry["options"]:
-            if (option["coupling"] != "dc"
+            if ((not selectable and option["coupling"] != "dc")
                     or not math.isclose(float(option["full_scale_v"]), max(abs(low), abs(high)), rel_tol=1e-12)
                     or not math.isclose(float(option["volts_per_count"]), step, rel_tol=1e-12)
                     or not math.isclose(float(option["zero_count"]), zero, abs_tol=1e-12)):
@@ -69,7 +74,7 @@ def sensor_from_snapshot(item):
     return channel
 
 
-def build_dasp_usb_profile(path, probe):
+def build_dasp_usb_profile(path, probe, *, enable_coupling_control=False):
     """Build a compatibility declaration from vendor files and a read-only probe."""
     path = Path(path).resolve()
     if path.suffix.lower() not in {".ini", ".par"}:
@@ -114,6 +119,21 @@ def build_dasp_usb_profile(path, probe):
                 wire_number=number, channel_type=entry["type"], input_mode="device_fixed_unknown",
                 options=[dict(full_scale_v=10.0, coupling="dc", volts_per_count=step,
                               zero_count=0.0, configuration_hex=cfg.hex())]))
+            # Existing profiles remain read-only. Newly requested profiles can
+            # opt into just the two modes confirmed for this device/firmware.
+            if enable_coupling_control and cfg in {b"\x00", b"\x01"}:
+                selected = "bias" if cfg == b"\x01" else "dc"
+                entry = entries[-1]
+                entry.update(
+                    mode_control="usb2404_coupling",
+                    input_mode="iepe" if selected == "bias" else "voltage_single_ended_dc",
+                    iepe_supply="device_fixed", iepe_current_ma=None,
+                )
+                first = entry["options"][0]
+                entry["options"] = [
+                    {**first, "coupling": mode, "configuration_hex": "01" if mode == "bias" else "00"}
+                    for mode in (selected, "dc" if selected == "bias" else "bias")
+                ]
         if path.read_bytes() != before:
             raise ValueError("DASP 参数文件在读取期间发生变化，请重新导入")
         clock, factor = sample_clock(raw)
@@ -124,15 +144,17 @@ def build_dasp_usb_profile(path, probe):
             max_sample_rate=min(info["nominal_max_sample_rate"], clock / factor),
             init_ad_payload_hex=(struct.pack(">I", 1) + b"\x01" + struct.pack("<I", 15) + bytes(4)).hex(),
             channels=entries,
-            evidence="DASP declared ADC conversion plus checked USB readback; electrical modes "
-                     "remain unknown. No channel writes, zero-drift subtraction or recalibration.",
+            evidence="DASP declared ADC conversion plus checked USB readback. Explicit "
+                     "usb2404_coupling entries support DC=00 and IEPE=01; current, charge "
+                     "and independent voltage calibration remain unqualified.",
             vendor_parameters=dict(
                 format="dasp_parameter_snapshot", path=str(path), sha256=hashlib.sha256(before).hexdigest(),
                 imported_utc=datetime.now(timezone.utc).isoformat(),
                 electrical_calibration_verified=False, conversion_basis="dasp_declared_nominal_voltage",
                 sections={name: dict(parameters[name]) for name in parameters.sections()},
                 sensor_defaults=[asdict(s) for s in sensors], sensor_import_errors=errors,
-                note="dc means preserve raw DC in software; hardware coupling and IEPE remain unknown."))
+                note="Only usb2404_coupling entries permit qualified DC/IEPE mode selection. "
+                     "Legacy entries retain opaque device settings. No automatic DC subtraction."))
         validate_dasp_declaration(data, info)
         return data
     except (ValueError, KeyError, TypeError, AttributeError) as exc:

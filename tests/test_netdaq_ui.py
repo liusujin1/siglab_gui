@@ -78,6 +78,104 @@ def _usb_channel_setup_backend():
     return backend
 
 
+def _selectable_usb_backend():
+    from python_vna.daq.usbdaq import COUPLING_DESCRIPTOR, COUPLING_FIRMWARE
+
+    backend = _usb_channel_setup_backend()
+    for entry in backend.profile.channels:
+        entry.update(input_mode="iepe", mode_control="usb2404_coupling",
+                     iepe_supply="device_fixed", iepe_current_ma=None)
+        entry["options"] = [
+            dict(coupling=mode, full_scale_v=10, configuration_hex=cfg,
+                 volts_per_count=10 / 8388608, zero_count=0)
+            for mode, cfg in (("bias", "01"), ("dc", "00"))
+        ]
+    backend.profile = replace(
+        backend.profile, descriptor=COUPLING_DESCRIPTOR, firmware_hex=COUPLING_FIRMWARE.hex(),
+        qualification="dasp_parameters", vendor_parameters={"sensor_defaults": []})
+    return backend
+
+
+def test_usb_mode_editor_and_mc_setup_apply_dc_iepe_without_ni_defaults(window):
+    window.controller.backend = _selectable_usb_backend()
+    window._apply_backend_sensor_defaults()
+    window._load_session_to_widgets()
+    window.channel_list.setCurrentRow(1)
+    assert window.channel_coupling_combo.isEnabled()
+    assert window.channel_coupling_combo.currentText() == "IEPE"
+    assert window.channel_coupling_combo.currentData() == "bias"
+    assert not window.channel_full_scale_combo.isEnabled()
+    assert not window.channel_iepe_current_edit.isEnabled()
+    assert window.channel_iepe_current_edit.value() == 0
+    assert window._channel_coupling_options(1) == ["DC", "IEPE"]
+    window.channel_coupling_combo.setCurrentIndex(window.channel_coupling_combo.findData("dc"))
+    session = window._read_session_from_widgets()
+    assert session.ai_channels[1].coupling == "dc"
+    assert not session.ai_channels[1].iepe_enabled
+    assert session.ai_channels[1].iepe_current_ma == 0
+    window.channel_coupling_combo.setCurrentIndex(window.channel_coupling_combo.findData("bias"))
+    assert window._read_session_from_widgets().ai_channels[1].iepe_enabled
+    dialog = MCSetupDialog(window)
+    try:
+        assert dialog.table.item(1, 2).text() == "IEPE"
+        assert dialog.table.item(1, 2).flags() & QtCore.Qt.ItemIsEditable
+        assert not dialog.table.item(1, 1).flags() & QtCore.Qt.ItemIsEditable
+        editor = dialog.table.itemDelegateForColumn(2).createEditor(
+            dialog.table, None, dialog.table.model().index(1, 2))
+        assert [editor.itemText(i) for i in range(editor.count())] == ["DC", "IEPE"]
+        editor.deleteLater()
+        dialog.table.item(1, 2).setText("DC")
+        dialog._apply_to_main()
+        assert window._read_session_from_widgets().ai_channels[1].coupling == "dc"
+        dialog.reload_from_main()
+        assert dialog.table.item(1, 2).text() == "DC"
+        dialog.table.item(1, 2).setText("IEPE")
+        dialog._apply_to_main()
+        session = window._read_session_from_widgets()
+        assert session.ai_channels[1].coupling == "bias"
+        assert session.ai_channels[1].iepe_enabled
+        assert session.ai_channels[1].iepe_current_ma == 0
+    finally:
+        dialog.close()
+    window.controller.backend = build_backend("simulated")
+    window._apply_netdaq_limits()
+    assert "DC=00" not in window.channel_coupling_combo.toolTip()
+    assert all(window.channel_coupling_combo.model().item(i).isEnabled()
+               for i in range(window.channel_coupling_combo.count()))
+
+
+def test_usb_mode_selection_is_locked_during_acquisition(window):
+    window.controller.backend = _selectable_usb_backend()
+    window._apply_netdaq_limits()
+    window._acquisition_thread = object()
+    try:
+        window._sync_usb_mode_editability()
+        assert not window.channel_coupling_combo.isEnabled()
+        assert not window.channel_grid.item(1, 3).flags() & QtCore.Qt.ItemIsEditable
+        dialog = MCSetupDialog(window)
+        try:
+            assert not dialog.table.item(1, 2).flags() & QtCore.Qt.ItemIsEditable
+        finally:
+            dialog.close()
+    finally:
+        window._acquisition_thread = None
+        window._sync_usb_mode_editability()
+    assert window.channel_coupling_combo.isEnabled()
+    assert window.channel_grid.item(1, 3).flags() & QtCore.Qt.ItemIsEditable
+
+
+@pytest.mark.parametrize("iepe", [False, True])
+def test_legacy_ac_setting_uses_explicit_iepe_flag_in_selectable_usb(window, iepe):
+    window.controller.backend = _selectable_usb_backend()
+    window.channel_table.item(1, 6).setText("ac")
+    window.channel_table.item(1, 4).setCheckState(QtCore.Qt.Checked if iepe else QtCore.Qt.Unchecked)
+    window._sync_netdaq_channel_mode(1)
+    channel = window._read_session_from_widgets().ai_channels[1]
+    assert channel.coupling == ("bias" if iepe else "dc")
+    assert channel.iepe_enabled is iepe
+    assert channel.iepe_current_ma == 0
+
+
 def test_usb_mc_setup_can_disable_ch1_and_use_ch2_as_reference_and_trigger(window):
     window.controller.backend = _usb_channel_setup_backend()
     window._apply_netdaq_limits()

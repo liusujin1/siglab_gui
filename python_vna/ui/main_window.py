@@ -767,7 +767,7 @@ class ComboBoxDelegate(QtWidgets.QStyledItemDelegate):
 
     def createEditor(self, parent, _option, _index):
         editor = QtWidgets.QComboBox(parent)
-        editor.addItems(self._items)
+        editor.addItems(self._items(_index.row()) if callable(self._items) else self._items)
         return editor
 
     def setEditorData(self, editor, index) -> None:
@@ -854,7 +854,7 @@ class MCSetupDialog(QtWidgets.QDialog):
             ),
         )
         self.table.setItemDelegateForColumn(
-            2, ComboBoxDelegate(main_window.CHANNEL_COUPLING_OPTIONS, self.table)
+            2, ComboBoxDelegate(main_window._channel_coupling_options, self.table)
         )
         self.table.setItemDelegateForColumn(
             7, ComboBoxDelegate(main_window.CHANNEL_PER_EU_OPTIONS, self.table)
@@ -871,8 +871,8 @@ class MCSetupDialog(QtWidgets.QDialog):
         layout.addWidget(self.table)
         if main_window.controller.backend.__class__.__name__ == "NetDaqBackend":
             mode_note = QtWidgets.QLabel(
-                "固定前端的输入模式和量程只读；DASP 兼容模式保留设备当前状态，"
-                "不通过此表切换耦合或 IEPE。标称量程不代表已核实的电气量程。")
+                "已启用 USB 模式控制的通道可选择 DC / IEPE，下次开始采集前写入并回读。"
+                "其他前端模式和量程仍只读。IEPE 电流未确认，标称量程不代表独立标定。")
             mode_note.setWordWrap(True)
             layout.addWidget(mode_note)
 
@@ -945,7 +945,8 @@ class MCSetupDialog(QtWidgets.QDialog):
                         item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEnabled)
                         item.setCheckState(QtCore.Qt.Checked)
                 elif col in (1, 2):
-                    writable = self.main_window._channel_hardware_settings_writable(row)
+                    writable = (self.main_window._channel_coupling_writable(row) if col == 2
+                                else self.main_window._channel_hardware_settings_writable(row))
                     item.setFlags(
                         item.flags() | QtCore.Qt.ItemIsEditable if writable
                         else item.flags() & ~QtCore.Qt.ItemIsEditable)
@@ -993,7 +994,9 @@ class MCSetupDialog(QtWidgets.QDialog):
                 target.item(row, 9).setText(
                     f"{self.main_window._parse_full_scale_text(full_scale_text, 10.0):.6g}"
                 )
-                target.item(row, 6).setText(self.table.item(row, 2).text().strip().lower() or "ac")
+            if self.main_window._channel_coupling_writable(row):
+                target.item(row, 6).setText(
+                    self.main_window._parse_channel_coupling(row, self.table.item(row, 2).text()))
             target.item(row, 11).setText(f"{self.main_window._parse_float(self.table.item(row, 3).text(), 0.0):.6g}")
             target.item(row, 10).setText(self.table.item(row, 4).text().strip())
             target.item(row, 7).setText(f"{self.main_window._parse_float(self.table.item(row, 5).text(), 1.0):.6g}")
@@ -4756,7 +4759,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ),
         )
         self.channel_grid.setItemDelegateForColumn(
-            3, ComboBoxDelegate(self.CHANNEL_COUPLING_OPTIONS, self.channel_grid)
+            3, ComboBoxDelegate(self._channel_coupling_options, self.channel_grid)
         )
         self.channel_grid.setItemDelegateForColumn(
             7, ComboBoxDelegate(self.CHANNEL_PER_EU_OPTIONS, self.channel_grid)
@@ -5040,7 +5043,33 @@ class MainWindow(QtWidgets.QMainWindow):
             and backend.profile is not None and 0 <= row < len(backend.profile.channels)
             and backend.profile.qualification == "dasp_parameters")
 
+    def _channel_usb_mode_control(self, row: int) -> bool:
+        backend = self.controller.backend
+        return bool(
+            backend.__class__.__name__ == "NetDaqBackend" and backend.profile is not None
+            and 0 <= row < len(backend.profile.channels)
+            and backend.profile.has_usb_coupling_control(row))
+
+    def _channel_coupling_writable(self, row: int) -> bool:
+        if self._channel_usb_mode_control(row):
+            return self._acquisition_thread is None and self._recording_thread is None
+        return self._channel_hardware_settings_writable(row)
+
+    def _sync_usb_mode_editability(self) -> None:
+        if any(self._channel_usb_mode_control(row) for row in range(self.channel_table.rowCount())):
+            self._load_channel_editor_from_row(self.channel_list.currentRow())
+            self._sync_channel_grid()
+
+    def _channel_coupling_options(self, row: int) -> list[str]:
+        return ["DC", "IEPE"] if self._channel_usb_mode_control(row) else self.CHANNEL_COUPLING_OPTIONS
+
+    def _parse_channel_coupling(self, row: int, text: str) -> str:
+        raw = text.strip().lower()
+        return ("bias" if raw == "iepe" else raw) if self._channel_usb_mode_control(row) else raw or "ac"
+
     def _channel_coupling_label(self, row: int, *, compact: bool = False) -> str:
+        if self._channel_usb_mode_control(row):
+            return "IEPE" if self.channel_table.item(row, 6).text() == "bias" else "DC"
         if self._channel_range_is_nominal(row):
             return "设备" if compact else "设备当前模式"
         backend = self.controller.backend
@@ -5057,6 +5086,8 @@ class MainWindow(QtWidgets.QMainWindow):
         coupling_block = QtCore.QSignalBlocker(coupling)
         scale_block = QtCore.QSignalBlocker(scale)
         for index in range(coupling.count()):
+            if coupling.model().item(index) is not None:
+                coupling.model().item(index).setEnabled(True)
             raw = coupling.itemData(index)
             if isinstance(raw, str) and raw in self.CHANNEL_COUPLING_OPTIONS:
                 coupling.setItemText(index, raw)
@@ -5104,7 +5135,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 if col == 1:
                     item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEditable)
                     item.setToolTip(physical)
-                elif col in (2, 3) and not self._channel_hardware_settings_writable(row):
+                elif col in (2, 3) and not (
+                        self._channel_coupling_writable(row) if col == 3
+                        else self._channel_hardware_settings_writable(row)):
                     item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEditable)
                     item.setToolTip(FIXED_CHANNEL_OPTIONS_TOOLTIP)
                 else:
@@ -5127,6 +5160,11 @@ class MainWindow(QtWidgets.QMainWindow):
         col = item.column()
         if row < 0 or row >= self.channel_table.rowCount():
             return
+        if col in (2, 3) and not (
+                self._channel_coupling_writable(row) if col == 3
+                else self._channel_hardware_settings_writable(row)):
+            self._sync_channel_grid()
+            return
         text = item.text().strip()
         old_aliases = self._channel_aliases_for_table_row(row)
         old_full_scale = self._channel_table_full_scale(row)
@@ -5139,7 +5177,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"{self._parse_full_scale_text(text, 10.0):.6g}"
             )
         elif col == 3:
-            self.channel_table.item(row, 6).setText(text or "ac")
+            self.channel_table.item(row, 6).setText(self._parse_channel_coupling(row, text))
             self._apply_bias_defaults_to_table_row(row)
         elif col == 4:
             self.channel_table.item(row, 11).setText(f"{self._parse_float(text, 0.0):.6g}")
@@ -5284,7 +5322,15 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._channel_editor_loading = previous
             return
         entry = backend.profile.channels[row]
-        iepe = backend.profile.iepe_settings(row)
+        selectable = self._channel_usb_mode_control(row)
+        selected_coupling = self.channel_table.item(row, 6).text()
+        if selectable and selected_coupling not in {"dc", "bias"}:
+            # Older VNA files represented IEPE as AC + a separate flag. Plain
+            # voltage/AC must not silently turn on excitation when imported.
+            selected_coupling = (
+                "bias" if self.channel_table.item(row, 4).checkState() == QtCore.Qt.Checked else "dc")
+            self.channel_table.item(row, 6).setText(selected_coupling)
+        iepe = backend.profile.iepe_settings(row, selected_coupling)
         enabled = bool(iepe["enabled"])
         mode_known = iepe.get("mode_known", True)
         current = iepe["current_ma"] or 0.0
@@ -5308,10 +5354,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.channel_iepe_checkbox.setToolTip(
                     f"已核实配置：{entry['input_mode']} / {supply_text}；硬件类型码 {entry['channel_type']}；"
                     "模式及电流只读，勾选状态不会开启恒流源")
+                if (not mode_known or selectable) and not hasattr(self, "_dasp_original_range_tooltips"):
+                    self._dasp_original_range_tooltips = (
+                        self.channel_coupling_combo.toolTip(), self.channel_full_scale_combo.toolTip())
                 if not mode_known:
-                    if not hasattr(self, "_dasp_original_range_tooltips"):
-                        self._dasp_original_range_tooltips = (
-                            self.channel_coupling_combo.toolTip(), self.channel_full_scale_combo.toolTip())
                     self.channel_iepe_checkbox.setToolTip(
                         "DASP 参数兼容：IEPE 实际状态及电流未知，保留设备当前状态，不发送供电或模式命令。")
                     self.channel_coupling_combo.setToolTip(
@@ -5320,15 +5366,16 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.channel_full_scale_combo.setToolTip(
                         "* 表示 DASP 声明的标称 ADC 电压范围；"
                         "不代表已确认硬件增益或完成独立校准。")
-                elif hasattr(self, "_dasp_original_range_tooltips"):
+                elif not selectable and hasattr(self, "_dasp_original_range_tooltips"):
                     self.channel_coupling_combo.setToolTip(self._dasp_original_range_tooltips[0])
                     self.channel_full_scale_combo.setToolTip(self._dasp_original_range_tooltips[1])
                     del self._dasp_original_range_tooltips
                 writable = entry["channel_type"] in {0, 6, 8} and backend.settings.transport != "usb"
-                self.channel_coupling_combo.setEnabled(writable)
+                self.channel_coupling_combo.setEnabled(self._channel_coupling_writable(row))
                 self.channel_full_scale_combo.setEnabled(writable)
             if entry["channel_type"] not in {0, 6, 8} or backend.settings.transport == "usb":
-                option = entry["options"][0]
+                option = (next(o for o in entry["options"] if o["coupling"] == selected_coupling)
+                          if selectable else entry["options"][0])
                 self.channel_table.item(row, 6).setText(option["coupling"])
                 self.channel_table.item(row, 9).setText(f"{float(option['full_scale_v']):g}")
                 if row == self.channel_list.currentRow():
@@ -5341,6 +5388,20 @@ class MainWindow(QtWidgets.QMainWindow):
                         coupling.setItemData(coupling_index, option["coupling"])
                         coupling.setItemText(coupling_index, self._channel_coupling_label(row, compact=True))
                         coupling.setCurrentIndex(coupling_index)
+                    if selectable:
+                        for i in range(coupling.count()):
+                            raw = coupling.itemData(i) or coupling.itemText(i)
+                            coupling.setItemData(i, raw)
+                            if raw in {"dc", "bias"}:
+                                coupling.setItemText(i, "DC" if raw == "dc" else "IEPE")
+                            coupling.model().item(i).setEnabled(raw in {"dc", "bias"})
+                        coupling.setToolTip(
+                            "DC=00，IEPE=01。下次开始采集前由采集线程写入并回读；"
+                            "不设置 IEPE 电流，不自动去直流，也不丢弃切档后的帧。")
+                        self.channel_iepe_checkbox.setToolTip(
+                            "状态跟随输入模式选择；IEPE 恒流源的电流数值尚未确认。")
+                        self.channel_full_scale_combo.setToolTip(
+                            "输入模式切换不改变标称电压换算；此处量程只读，独立幅值标定尚未完成。")
                     del coupling_block
                     text = self._format_full_scale_option(float(option["full_scale_v"]))
                     scale = self.channel_full_scale_combo
@@ -6469,9 +6530,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 elif netdaq:
                     button.setToolTip(
                         "NetDAQ 缺少有效设备配置，只能只读探测" if not ready else
-                        "DASP 参数兼容采集：工程量使用原参数，电气模式及 IEPE 未独立核实"
+                        ("DASP 参数兼容：DC/IEPE 可选；电压为标称换算，IEPE 电流未知"
+                         if any(backend.profile.has_usb_coupling_control(i)
+                                for i in range(len(backend.profile.channels))) else
+                         "DASP 参数兼容采集：工程量使用原参数，电气模式及 IEPE 未独立核实")
                         if backend.profile.qualification == "dasp_parameters" else button.text())
         self.backend_combo.setToolTip("NetDAQ 为实验性后端，需在文件 / 设备连接中配置")
+        self._sync_usb_mode_editability()
 
     def _backend_changed(self, backend_name: str, netdaq_settings=None) -> None:
         append_log(f"backend changed: begin {backend_name}")
@@ -6509,6 +6574,11 @@ class MainWindow(QtWidgets.QMainWindow):
             from python_vna.daq.dasp_profile import apply_dasp_profile_sensors
 
             apply_dasp_profile_sensors(self.session.ai_channels, backend.profile)
+            for index, channel in enumerate(self.session.ai_channels[:len(backend.profile.channels)]):
+                if backend.profile.has_usb_coupling_control(index):
+                    channel.coupling = backend.profile.channels[index]["options"][0]["coupling"]
+                    channel.iepe_enabled = channel.coupling == "bias"
+                    channel.iepe_current_ma = 0
 
     def _map_channels_to_selected_device(self) -> None:
         device_name = self.device_combo.currentData()
@@ -6731,6 +6801,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recording_thread = thread
         self._recording_stop_event = stop_event
         self._recording_output_dir = output_dir
+        self._sync_usb_mode_editability()
         self.start_button.setEnabled(False)
         self.avg_button.setEnabled(False)
         self.record_button.setEnabled(False)
@@ -6818,6 +6889,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._acquisition_worker = worker
         self._acquisition_thread = thread
         self._acquisition_stop_event = stop_event
+        self._sync_usb_mode_editability()
         self.start_button.setEnabled(False)
         self.avg_button.setEnabled(False)
         self.record_button.setEnabled(False)
