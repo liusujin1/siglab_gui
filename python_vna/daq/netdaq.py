@@ -176,6 +176,13 @@ class NetDaqProfile:
 
     def option(self, index: int, channel) -> dict:
         reported = self.channels[index]
+        software_limit = self.software_full_scale_limit(index)
+        if software_limit is not None and (
+                not math.isfinite(channel.full_scale)
+                or not (channel.full_scale == -1 or 0 < channel.full_scale <= software_limit)):
+            raise DaqBackendError(
+                f"NetDAQ {channel.name}: 软件范围必须为 Auto 或 0 < V ≤ {software_limit:g}；"
+                "USB2404 硬件输入范围固定为 ±10 V")
         settings = self.iepe_settings(index, channel.coupling)
         iepe = bool(settings["enabled"])
         expected_current = settings["current_ma"] or 0.0
@@ -187,7 +194,8 @@ class NetDaqProfile:
                     "the unmeasured USB IEPE current must remain 0 (unknown)")
             raise DaqBackendError(f"NetDAQ {channel.name}: IEPE is a read-only channel mode, not a coupling switch")
         for option in reported["options"]:
-            if (math.isclose(float(option["full_scale_v"]), channel.full_scale, rel_tol=1e-8)
+            if ((software_limit is not None
+                 or math.isclose(float(option["full_scale_v"]), channel.full_scale, rel_tol=1e-8))
                     and option["coupling"] == channel.coupling.lower()):
                 return option
         raise DaqBackendError(
@@ -196,6 +204,13 @@ class NetDaqProfile:
     def has_usb_coupling_control(self, index: int) -> bool:
         return bool(self.transport == "usb"
                     and self.channels[index].get("mode_control") == "usb2404_coupling")
+
+    def software_full_scale_limit(self, index: int) -> float | None:
+        """A host threshold never selects a different ADC gain or conversion."""
+        if self.has_usb_coupling_control(index) and all(
+                float(option["full_scale_v"]) == 10 for option in self.channels[index]["options"]):
+            return 10.0
+        return None
 
     def iepe_settings(self, index: int, coupling: str | None = None) -> dict:
         """Keep selectable USB modes separate from fixed TCP channel types."""
@@ -623,6 +638,18 @@ class NetDaqBackend(BaseDaqBackend):
                                         for index, name, option in self._selected},
             "trigger_implementation": "host_absolute_window" if self._trigger is not None else "free_run",
         }
+        software_ranges = {
+            name: channel.full_scale
+            for channel in self._session.ai_channels
+            for index, name, _option in self._selected
+            if channel.name == name and profile.software_full_scale_limit(index) is not None
+        }
+        if software_ranges:
+            result["channel_software_ranges"] = {
+                name: (value if value > 0 else result["channel_full_scales"][name])
+                for name, value in software_ranges.items()
+            }
+            result["channel_full_scales"].update(result["channel_software_ranges"])
         result["qualification"] = profile.qualification
         if self._dc_removal.enabled:
             result["dc_removal"] = self._dc_removal.description()

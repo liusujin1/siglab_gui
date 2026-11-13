@@ -771,7 +771,7 @@ def test_usb_mode_editor_and_mc_setup_apply_dc_iepe_without_ni_defaults(window):
     assert window.channel_coupling_combo.isEnabled()
     assert window.channel_coupling_combo.currentText() == "IEPE"
     assert window.channel_coupling_combo.currentData() == "bias"
-    assert not window.channel_full_scale_combo.isEnabled()
+    assert window.channel_full_scale_combo.isEnabled()
     assert not window.channel_iepe_current_edit.isEnabled()
     assert window.channel_iepe_current_edit.value() == 0
     assert window._channel_coupling_options(1) == ["DC", "IEPE"]
@@ -786,7 +786,7 @@ def test_usb_mode_editor_and_mc_setup_apply_dc_iepe_without_ni_defaults(window):
     try:
         assert dialog.table.item(1, 2).text() == "IEPE"
         assert dialog.table.item(1, 2).flags() & QtCore.Qt.ItemIsEditable
-        assert not dialog.table.item(1, 1).flags() & QtCore.Qt.ItemIsEditable
+        assert dialog.table.item(1, 1).flags() & QtCore.Qt.ItemIsEditable
         editor = dialog.table.itemDelegateForColumn(2).createEditor(
             dialog.table, None, dialog.table.model().index(1, 2))
         assert [editor.itemText(i) for i in range(editor.count())] == ["DC", "IEPE"]
@@ -818,6 +818,7 @@ def test_usb_mode_selection_is_locked_during_acquisition(window):
     try:
         window._sync_usb_mode_editability()
         assert not window.channel_coupling_combo.isEnabled()
+        assert not window.channel_full_scale_combo.isEnabled()
         assert not window.channel_grid.item(1, 3).flags() & QtCore.Qt.ItemIsEditable
         dialog = MCSetupDialog(window)
         try:
@@ -828,7 +829,65 @@ def test_usb_mode_selection_is_locked_during_acquisition(window):
         window._acquisition_thread = None
         window._sync_usb_mode_editability()
     assert window.channel_coupling_combo.isEnabled()
+    assert window.channel_full_scale_combo.isEnabled()
     assert window.channel_grid.item(1, 3).flags() & QtCore.Qt.ItemIsEditable
+
+
+def test_usb_software_range_persists_and_updates_trigger_without_changing_hardware_mode(window, tmp_path):
+    from python_vna.storage import load_saved_session_json, save_session_json
+
+    window.controller.backend = _selectable_usb_backend()
+    window._apply_netdaq_limits()
+    window.channel_list.setCurrentRow(1)
+    window.trigger_source_combo.setCurrentText("Ch2")
+    window.trigger_level_percent_combo.setCurrentText("35%")
+    window.channel_full_scale_combo.setCurrentIndex(window.channel_full_scale_combo.findData(1.25))
+    assert window.trigger_level_edit.value() == pytest.approx(.4375)
+    for _ in range(3):
+        session = window._read_session_from_widgets()
+        window._load_channel_editor_from_row(1)
+    assert session.ai_channels[1].full_scale == 1.25
+    assert session.ai_channels[1].iepe_enabled
+    assert session.ai_channels[1].coupling == "bias"
+    assert session.acquisition.trigger.level == pytest.approx(.4375)
+    assert window.channel_full_scale_combo.currentData() == 1.25
+    assert "ADC" in window.channel_full_scale_combo.toolTip()
+    option = window.controller.backend.profile.option(1, session.ai_channels[1])
+    assert option["full_scale_v"] == 10
+    assert option["volts_per_count"] == 10 / 8388608
+    assert option["configuration_hex"] == "01"
+    target = tmp_path / "software-range.json"
+    save_session_json(window.controller.snapshot(), target)
+    assert load_saved_session_json(target).config.ai_channels[1].full_scale == 1.25
+    dialog = MCSetupDialog(window)
+    try:
+        assert dialog.table.item(1, 1).flags() & QtCore.Qt.ItemIsEditable
+        dialog.table.item(1, 1).setText(window._format_full_scale_option(2.5))
+        dialog._apply_to_main()
+        assert window._read_session_from_widgets().ai_channels[1].full_scale == 2.5
+        assert window.trigger_level_edit.value() == pytest.approx(.875)
+    finally:
+        dialog.close()
+    window.channel_grid.item(1, 2).setText(window._format_full_scale_option(.625))
+    assert window._read_session_from_widgets().ai_channels[1].full_scale == .625
+    assert window.trigger_level_edit.value() == pytest.approx(.21875)
+
+
+def test_usb_software_range_accepts_auto_and_clamps_imported_invalid_ranges(window):
+    window.controller.backend = _selectable_usb_backend()
+    window._apply_netdaq_limits()
+    window.channel_list.setCurrentRow(1)
+    window.channel_full_scale_combo.setCurrentIndex(window.channel_full_scale_combo.findData(-1))
+    session = window._read_session_from_widgets()
+    assert session.ai_channels[1].full_scale == -1
+    assert window.channel_full_scale_combo.currentText() == "Auto"
+    assert window.controller.backend.profile.option(1, session.ai_channels[1])["full_scale_v"] == 10
+    window.channel_table.item(1, 9).setText("50")
+    assert window._read_session_from_widgets().ai_channels[1].full_scale == 10
+    window.controller.backend = build_backend("ni")
+    window._apply_netdaq_limits()
+    assert window.channel_full_scale_combo.isEnabled()
+    assert "固定为 ±10" not in window.channel_full_scale_combo.toolTip()
 
 
 @pytest.mark.parametrize("iepe", [False, True])

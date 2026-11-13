@@ -880,7 +880,7 @@ class MCSetupDialog(QtWidgets.QDialog):
         self.table.setItemDelegateForColumn(
             1,
             ComboBoxDelegate(
-                [main_window._format_full_scale_option(value) for value in main_window.CHANNEL_FULL_SCALE_OPTIONS] + ["Auto"],
+                main_window._channel_full_scale_options,
                 self.table,
             ),
         )
@@ -915,7 +915,8 @@ class MCSetupDialog(QtWidgets.QDialog):
         if main_window.controller.backend.__class__.__name__ == "NetDaqBackend":
             mode_note = QtWidgets.QLabel(
                 "已启用 USB 模式控制的通道可选择 DC / IEPE，下次开始采集前写入并回读。"
-                "其他前端模式和量程仍只读。IEPE 电流未确认，标称量程不代表独立标定。")
+                "USB2404 输入固定为 ±10 V；较小电压仅设置显示、触发和过载剔除的软件范围，"
+                "不改变 ADC 增益。其他前端模式仍只读，IEPE 电流未确认。")
             mode_note.setWordWrap(True)
             layout.addWidget(mode_note)
 
@@ -998,11 +999,13 @@ class MCSetupDialog(QtWidgets.QDialog):
                         item.setCheckState(QtCore.Qt.Checked)
                 elif col in (1, 2):
                     writable = (self.main_window._channel_coupling_writable(row) if col == 2
-                                else self.main_window._channel_hardware_settings_writable(row))
+                                else self.main_window._channel_full_scale_writable(row))
                     item.setFlags(
                         item.flags() | QtCore.Qt.ItemIsEditable if writable
                         else item.flags() & ~QtCore.Qt.ItemIsEditable)
-                    item.setToolTip("" if writable else FIXED_CHANNEL_OPTIONS_TOOLTIP)
+                    item.setToolTip(
+                        self.main_window._channel_full_scale_tooltip(row) if col == 1 and writable
+                        else "" if writable else FIXED_CHANNEL_OPTIONS_TOOLTIP)
                 elif col in (3, 8) and not self.main_window._channel_offset_writable():
                     item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEditable)
                     item.setToolTip("此后端未实现硬件偏移或极性设置；自动去直流请使用文件菜单中的软件高通。")
@@ -1054,6 +1057,7 @@ class MCSetupDialog(QtWidgets.QDialog):
     def _apply_to_main(self) -> None:
         target = self.main_window.channel_table
         full_scale_changed_aliases: set[str] = set()
+        trigger_full_scale_changed = False
         for row in range(min(self.table.rowCount(), target.rowCount())):
             old_aliases = self.main_window._channel_aliases_for_table_row(row)
             old_full_scale = self.main_window._channel_table_full_scale(row)
@@ -1063,10 +1067,11 @@ class MCSetupDialog(QtWidgets.QDialog):
                 if enabled_item is not None and enabled_item.checkState() == QtCore.Qt.Checked
                 else QtCore.Qt.Unchecked
             )
-            if self.main_window._channel_hardware_settings_writable(row):
+            if self.main_window._channel_full_scale_writable(row):
                 full_scale_text = self.table.item(row, 1).text().strip()
+                value = self.main_window._parse_full_scale_text(full_scale_text, 10.0)
                 target.item(row, 9).setText(
-                    f"{self.main_window._parse_full_scale_text(full_scale_text, 10.0):.6g}"
+                    f"{self.main_window._normalize_channel_full_scale(row, value):.6g}"
                 )
             if self.main_window._channel_coupling_writable(row):
                 target.item(row, 6).setText(
@@ -1083,12 +1088,18 @@ class MCSetupDialog(QtWidgets.QDialog):
             if not np.isclose(old_full_scale, new_full_scale, rtol=1e-12, atol=1e-12):
                 full_scale_changed_aliases.update(old_aliases)
                 full_scale_changed_aliases.update(self.main_window._channel_aliases_for_table_row(row))
+                if (self.main_window._channel_software_full_scale_limit(row) is not None
+                        and row == self.main_window._trigger_channel_index()):
+                    trigger_full_scale_changed = True
         if not self.main_window._first_channel_locked() and self.reference_combo.currentData():
             self.main_window.session.acquisition.reference_channel = self.reference_combo.currentData()
         self.main_window._rebuild_channel_list()
         self.main_window._sync_channel_grid()
         self.main_window._reload_channel_selectors(include_new_responses=True)
         self.main_window._load_channel_editor_from_row(self.main_window.channel_list.currentRow())
+        if trigger_full_scale_changed:
+            self.main_window._trigger_level_percent_changed(
+                self.main_window.trigger_level_percent_combo.currentText())
         self.main_window._read_session_from_widgets()
         self.main_window._refresh_current_measurement_view()
         if full_scale_changed_aliases:
@@ -4968,7 +4979,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.channel_grid.setItemDelegateForColumn(
             2,
             ComboBoxDelegate(
-                [self._format_full_scale_option(value) for value in self.CHANNEL_FULL_SCALE_OPTIONS] + ["Auto"],
+                self._channel_full_scale_options,
                 self.channel_grid,
             ),
         )
@@ -5258,7 +5269,38 @@ class MainWindow(QtWidgets.QMainWindow):
         return bool(
             backend.__class__.__name__ == "NetDaqBackend"
             and backend.profile is not None and 0 <= row < len(backend.profile.channels)
-            and backend.profile.qualification == "dasp_parameters")
+            and backend.profile.qualification == "dasp_parameters"
+            and self._channel_software_full_scale_limit(row) is None)
+
+    def _channel_software_full_scale_limit(self, row: int) -> float | None:
+        backend = self.controller.backend
+        if (backend.__class__.__name__ == "NetDaqBackend" and backend.profile is not None
+                and 0 <= row < len(backend.profile.channels)):
+            return backend.profile.software_full_scale_limit(row)
+        return None
+
+    def _channel_full_scale_writable(self, row: int) -> bool:
+        if self._channel_software_full_scale_limit(row) is not None:
+            return self._acquisition_thread is None and self._recording_thread is None
+        return self._channel_hardware_settings_writable(row)
+
+    def _channel_full_scale_options(self, row: int) -> list[str]:
+        limit = self._channel_software_full_scale_limit(row)
+        return [self._format_full_scale_option(value) for value in self.CHANNEL_FULL_SCALE_OPTIONS
+                if limit is None or value <= limit] + ["Auto"]
+
+    def _normalize_channel_full_scale(self, row: int, value: float) -> float:
+        limit = self._channel_software_full_scale_limit(row)
+        if limit is not None and (not np.isfinite(value) or not (value == -1 or 0 < value <= limit)):
+            return limit
+        return value
+
+    def _channel_full_scale_tooltip(self, row: int) -> str:
+        if self._channel_software_full_scale_limit(row) is not None:
+            return ("硬件输入固定为 ±10 V；此处设置显示范围、百分比触发阈值及软件过载剔除阈值。\n"
+                    "不会改变 ADC 增益、电压换算或原始记录。Auto 使用 ±10 V 作为阈值基准。\n"
+                    "请在停止采集后修改；图窗自动范围不会改动此设置。")
+        return ""
 
     def _channel_usb_mode_control(self, row: int) -> bool:
         backend = self.controller.backend
@@ -5371,12 +5413,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     item.setToolTip("该后端不支持偏移设置；自动去直流使用独立的软件高通。")
                 elif col in (2, 3) and not (
                         self._channel_coupling_writable(row) if col == 3
-                        else self._channel_hardware_settings_writable(row)):
+                        else self._channel_full_scale_writable(row)):
                     item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEditable)
                     item.setToolTip(FIXED_CHANNEL_OPTIONS_TOOLTIP)
                 else:
                     item.setFlags(item.flags() | QtCore.Qt.ItemIsEditable)
-                    item.setToolTip("")
+                    item.setToolTip(self._channel_full_scale_tooltip(row) if col == 2 else "")
         if 0 <= current_row < self.channel_grid.rowCount():
             self.channel_grid.selectRow(current_row)
             self.channel_grid.setCurrentCell(current_row, 0)
@@ -5399,7 +5441,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if col in (2, 3) and not (
                 self._channel_coupling_writable(row) if col == 3
-                else self._channel_hardware_settings_writable(row)):
+                else self._channel_full_scale_writable(row)):
             self._sync_channel_grid()
             return
         text = item.text().strip()
@@ -5411,7 +5453,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         elif col == 2:
             self.channel_table.item(row, 9).setText(
-                f"{self._parse_full_scale_text(text, 10.0):.6g}"
+                f"{self._normalize_channel_full_scale(row, self._parse_full_scale_text(text, 10.0)):.6g}"
             )
         elif col == 3:
             self.channel_table.item(row, 6).setText(self._parse_channel_coupling(row, text))
@@ -5431,6 +5473,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._rebuild_channel_list()
         self.channel_list.setCurrentRow(row)
         self._reload_channel_selectors(include_new_responses=(col == 0))
+        if (col == 2 and row == self._trigger_channel_index()
+                and self._channel_software_full_scale_limit(row) is not None):
+            self._trigger_level_percent_changed(self.trigger_level_percent_combo.currentText())
         self._read_session_from_widgets()
         if col == 2:
             new_aliases = self._channel_aliases_for_table_row(row)
@@ -5619,14 +5664,17 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.channel_coupling_combo.setToolTip(self._dasp_original_range_tooltips[0])
                     self.channel_full_scale_combo.setToolTip(self._dasp_original_range_tooltips[1])
                     del self._dasp_original_range_tooltips
-                writable = entry["channel_type"] in {0, 6, 8} and backend.settings.transport != "usb"
                 self.channel_coupling_combo.setEnabled(self._channel_coupling_writable(row))
-                self.channel_full_scale_combo.setEnabled(writable)
+                self.channel_full_scale_combo.setEnabled(self._channel_full_scale_writable(row))
             if entry["channel_type"] not in {0, 6, 8} or backend.settings.transport == "usb":
                 option = (next(o for o in entry["options"] if o["coupling"] == selected_coupling)
                           if selectable else entry["options"][0])
                 self.channel_table.item(row, 6).setText(option["coupling"])
-                self.channel_table.item(row, 9).setText(f"{float(option['full_scale_v']):g}")
+                software_range = self._channel_software_full_scale_limit(row) is not None
+                full_scale = (
+                    self._normalize_channel_full_scale(row, self._channel_table_full_scale(row))
+                    if software_range else float(option["full_scale_v"]))
+                self.channel_table.item(row, 9).setText(f"{full_scale:g}")
                 if row == self.channel_list.currentRow():
                     coupling = self.channel_coupling_combo
                     coupling_block = QtCore.QSignalBlocker(coupling)
@@ -5650,18 +5698,18 @@ class MainWindow(QtWidgets.QMainWindow):
                         self.channel_iepe_checkbox.setToolTip(
                             "状态跟随输入模式选择；IEPE 恒流源的电流数值尚未确认。")
                         self.channel_full_scale_combo.setToolTip(
-                            "输入模式切换不改变标称电压换算；此处量程只读，独立幅值标定尚未完成。")
+                            self._channel_full_scale_tooltip(row))
                     del coupling_block
-                    text = self._format_full_scale_option(float(option["full_scale_v"]))
+                    text = "Auto" if full_scale < 0 else self._format_full_scale_option(full_scale)
                     scale = self.channel_full_scale_combo
                     scale_block = QtCore.QSignalBlocker(scale)
-                    scale_index = scale.findData(float(option["full_scale_v"]))
+                    scale_index = scale.findData(full_scale)
                     if scale_index < 0:
                         scale_index = scale.findText(text)
                     if scale_index < 0:
-                        scale.addItem(text, float(option["full_scale_v"]))
+                        scale.addItem(text, full_scale)
                         scale_index = scale.count() - 1
-                    scale.setItemData(scale_index, float(option["full_scale_v"]))
+                    scale.setItemData(scale_index, full_scale)
                     scale.setItemText(scale_index, text + (
                         "*" if self._channel_range_is_nominal(row) else ""))
                     scale.setCurrentIndex(scale_index)

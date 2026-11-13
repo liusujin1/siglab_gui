@@ -908,3 +908,20 @@ passed 770 tests and 58 subtests. All changed modules/tests belong to
 python_vna_test under the existing suite manifest; no new Python module or test
 file was added. The external reference self-checks and actual CH2 observation
 are additional evidence, not substitutes for this product regression.
+
+### Software voltage ranges
+
+For channels with validated `usb2404_coupling` options at +/-10 V, the channel
+editor and MC Setup allow smaller Full Scale values and Auto. These are host
+settings for plot extent, percentage-trigger voltage and software overload
+rejection. They never select ADC gain, change counts-to-volts conversion, clip
+stored samples or emit additional USB configuration writes. Auto uses 10 V as
+the trigger/rejection reference. Settings are locked while acquiring/recording.
+Unknown frontend profiles retain their previous read-only behavior.
+
+Acquisition provenance keeps the actual profile range in
+`channel_hardware_ranges` (or `channel_nominal_ranges` for DASP declarations);
+`channel_full_scales` carries the effective software rejection threshold, and
+`channel_software_ranges` identifies host-controlled values. Electrical
+qualification flags are unchanged. The operator's confirmation of a 10 V
+maximum does not establish programmable gain steps or IEPE current.

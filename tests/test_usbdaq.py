@@ -1396,6 +1396,57 @@ def selectable_dasp(usb, dasp_declared, tmp_path):
     return data, target
 
 
+@pytest.mark.parametrize("full_scale", [.01953125, 1.25, 10, -1])
+def test_usb_software_range_keeps_adc_conversion_and_hardware_commands(
+        usb, selectable_dasp, tmp_path, full_scale):
+    from python_vna.controller import VnaController
+    from python_vna.signal_pipeline import overload_details
+
+    _, path = selectable_dasp
+    b = NetDaqBackend(NetDaqSettings(transport="usb", profile_path=str(path)))
+    session = config()
+    session.ai_channels[1].full_scale = full_scale
+    usb.configurations = {index: b"\x00" for index in range(4)}
+    samples = np.tile(np.array([0, 4194304, -4194304, 0], dtype="<i4"), (8, 1))
+    usb.data = samples.tobytes()
+    controller = VnaController(b, session)
+    try:
+        controller.configure()
+        controller.start()
+        measurement = controller.read_and_process()
+        metadata = b.acquisition_provenance()
+        np.testing.assert_allclose(measurement.time_data["channels"]["ai1"], 5)
+        limit = full_scale if full_scale > 0 else 10
+        assert metadata["channel_full_scales"]["ai1"] == limit
+        assert metadata["channel_software_ranges"]["ai1"] == limit
+        assert metadata["channel_nominal_ranges"]["ai1"] == [-10, 10]
+        flags = overload_details(np.array([[5.]]), ["ai1"], metadata)
+        assert bool(flags) == (limit < 5)
+        assert all(item["kind"] == "software" for item in flags)
+        target = tmp_path / "software-range.vna"
+        save_legacy_vna(controller.snapshot(), target)
+        restored = load_legacy_vna(target)
+        assert restored.config.ai_channels[1].full_scale == pytest.approx(full_scale)
+        label = restored.config.ai_channels[1].label
+        np.testing.assert_allclose(restored.measurement.time_data["channels"][label], 5)
+        assert restored.measurement.metadata["daq_provenance"]["channel_nominal_ranges"]["ai1"] == [-10, 10]
+    finally:
+        controller.close()
+    assert not any(command == 0x43 for command, _ in usb.commands)
+
+
+@pytest.mark.parametrize("invalid", [0, -2, 10.01, 100, float("nan"), float("inf")])
+def test_usb_software_range_rejects_invalid_values_before_opening(usb, selectable_dasp, invalid):
+    _, path = selectable_dasp
+    b = NetDaqBackend(NetDaqSettings(transport="usb", profile_path=str(path)))
+    session = config()
+    session.ai_channels[1].full_scale = invalid
+    before = list(usb.commands)
+    with pytest.raises(DaqBackendError, match="软件范围"):
+        b.configure(session)
+    assert usb.commands == before
+
+
 def test_selectable_dasp_modes_write_only_enabled_channels_and_save_actual_provenance(
         usb, selectable_dasp, tmp_path):
     _, path = selectable_dasp
