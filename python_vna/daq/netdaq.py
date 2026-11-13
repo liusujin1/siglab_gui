@@ -565,8 +565,8 @@ class NetDaqBackend(BaseDaqBackend):
         needed = frame_size * count * (bits // 8)
         startup = 5.0 if self.settings.transport == "usb" and self._frame_index == 0 else 0.0
         deadline = time.monotonic() + startup + frame_size / self._rate + self.settings.timeout
-        if self._trigger is not None and self._trigger.wait_deadline is not None:
-            deadline = min(deadline, self._trigger.wait_deadline)
+        # A trigger wait interval is not a transport deadline. Keep a partial
+        # native read intact; SoftwareTrigger reports idle waiting between blocks.
         while len(self._pending) < needed:
             self._check_stop()
             if profile.stream_format == "packed24":

@@ -521,6 +521,32 @@ def test_usb_host_trigger_uses_raw_stream_without_hardware_trigger_commands(usb,
     assert all(command not in {0x43} for command, _ in usb.commands)
 
 
+def test_usb_trigger_wait_deadline_does_not_expire_a_healthy_transport_read(usb, tmp_path, monkeypatch):
+    session = config()
+    session.acquisition.trigger.enabled = True
+    session.acquisition.trigger.source = "ai0"
+    session.acquisition.trigger.mode = "Every Frame"
+    session.acquisition.trigger.level = 1
+    b = backend(tmp_path)
+    try:
+        b.configure(session)
+        b.start()
+        b._trigger.wait_deadline = time.monotonic() - 1
+        original = b._stream.receive
+        deadlines = []
+
+        def receive(length, *, deadline):
+            assert deadline > time.monotonic()
+            deadlines.append(deadline)
+            return original(length, deadline=deadline)
+
+        monkeypatch.setattr(b._stream, "receive", receive)
+        result = b._read_free_frame()
+        assert result.data.shape[1] > 0 and deadlines
+    finally:
+        b.close()
+
+
 def test_offline_profile_preview_preserves_unconfirmed_current(usb, tmp_path):
     from python_vna.daq.netdaq import profile_preview
     b, _ = iepe_backend(tmp_path, supply="external", current=None)

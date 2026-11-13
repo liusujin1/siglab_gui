@@ -20,6 +20,7 @@ from python_vna.continuous_recording import (
 )
 from python_vna.daq.base import BackendCapability, BackendDevice, DaqBackendError
 from python_vna.daq.replay import ReplayComplete
+from python_vna.daq.software_trigger import SoftwareTriggerTimeout
 from python_vna.display_transforms import (
     align_vector_to_values,
     legacy_frequency_int_vector,
@@ -1157,8 +1158,23 @@ class AcquisitionWorker(QtCore.QObject):
                 self.status_changed.emit(
                     f"等待首锤：已就绪，独立捕获阈值 {level:.6g} V；模态设置中可调整，首锤后切换为峰值的35%"
                 )
+            trigger = getattr(getattr(session, "acquisition", None), "trigger", None)
+            if (self._average_run and trigger is not None and trigger.enabled
+                    and trigger.source != "immediate"
+                    and getattr(self._controller, "backend", None).__class__.__name__
+                    in {"NetDaqBackend", "ReplayBackend"}):
+                self.status_changed.emit(SoftwareTriggerTimeout(
+                    trigger.source.rsplit("/", 1)[-1], trigger.level,
+                    trigger.timeout_seconds).waiting_message)
             while not self._stop_requested.is_set():
-                measurement = self._controller.read_and_process()
+                try:
+                    measurement = self._controller.read_and_process()
+                except SoftwareTriggerTimeout as exc:
+                    if not self._average_run:
+                        raise
+                    if not self._stop_requested.is_set():
+                        self.status_changed.emit(exc.waiting_message)
+                    continue
                 settings = measurement.metadata.get("smart_hit_auto_range", {})
                 if settings.get("state") == "applied" and not self._settings_sent:
                     self.settings_applied.emit(self._run_id, dict(settings))
@@ -1749,6 +1765,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recording_output_dir: Path | None = None
         self._device_refresh_thread: QtCore.QThread | None = None
         self._device_refresh_worker: DeviceRefreshWorker | None = None
+        self._pending_acquisition_request: str | None = None
         self._pending_hardware_snapshot = None
         self._hardware_session_cache = {}
         self._auto_hardware_presence = None
@@ -1800,6 +1817,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _poll_device_connection(self) -> None:
         if (self._acquisition_thread is not None or self._recording_thread is not None
                 or self._startup_session_thread is not None or self._close_confirmed
+                or self._pending_acquisition_request is not None
                 or QtWidgets.QApplication.activeModalWidget() is not None):
             return
         if self.controller.backend.__class__.__name__ not in {"NIDaqBackend", "NetDaqBackend"}:
@@ -6654,6 +6672,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_netdaq_limits()
         if snapshot is not None and not self.auto_device_action.isChecked() and not self._close_confirmed:
             QtCore.QTimer.singleShot(0, self.refresh_devices_async)
+        else:
+            self._resume_pending_acquisition()
 
     def _connection_preferences(self) -> dict:
         try:
@@ -6985,6 +7005,8 @@ class MainWindow(QtWidgets.QMainWindow):
                         if backend.profile.qualification == "dasp_parameters" else button.text())
         self.backend_combo.setToolTip("NetDAQ 为实验性后端，需在文件 / 设备连接中配置")
         self._sync_usb_mode_editability()
+        if self._pending_acquisition_request is not None:
+            self._lock_pending_acquisition_controls()
 
     def _sync_backend_config_controls(self) -> None:
         if not hasattr(self, "excitation_setup_page") or not hasattr(self, "overlap_combo"):
@@ -7351,11 +7373,47 @@ class MainWindow(QtWidgets.QMainWindow):
     def _start_average_acquisition(self) -> None:
         self._start_run(average_run=True)
 
+    def _lock_pending_acquisition_controls(self) -> None:
+        for button in (self.start_button, self.avg_button, self.record_button,
+                       self.backend_combo, self.device_combo, self.refresh_devices_button):
+            button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+
+    def _defer_acquisition(self, mode: str) -> bool:
+        if self._device_refresh_thread is None and self._startup_session_thread is None:
+            return False
+        self._pending_acquisition_request = mode
+        self._lock_pending_acquisition_controls()
+        label = {"inst": "瞬时采集", "avg": "平均采集", "record": "连续记录"}[mode]
+        message = f"正在等待读取设备配置，完成后自动开始{label}；可点停止取消"
+        self.run_info_label.setText(message)
+        self.statusBar().showMessage(message)
+        return True
+
+    def _resume_pending_acquisition(self) -> None:
+        if (self._pending_acquisition_request is None or self._close_confirmed
+                or self._device_refresh_thread is not None or self._startup_session_thread is not None):
+            return
+        mode = self._pending_acquisition_request
+        self._pending_acquisition_request = None
+        self.backend_combo.setEnabled(True)
+        self.device_combo.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        self._apply_netdaq_limits()
+        if not self.start_button.isEnabled() or (
+                self._hardware_backend_key() and self.device_combo.currentData() is None):
+            self.statusBar().showMessage("设备或配置尚不可用，本次采集未开始")
+            self.run_info_label.setText("State: idle")
+            return
+        if mode == "record":
+            self._start_continuous_recording()
+        else:
+            self._start_run(average_run=mode == "avg")
+
     def _start_continuous_recording(self) -> None:
         if self._acquisition_thread is not None or self._recording_thread is not None:
             return
-        if self._device_refresh_thread is not None or self._startup_session_thread is not None:
-            self.statusBar().showMessage("正在识别设备或加载设置，请稍后开始采集")
+        if self._defer_acquisition("record"):
             return
         parent_dir = get_existing_directory(
             self,
@@ -7433,8 +7491,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _start_run(self, average_run: bool) -> None:
         if self._acquisition_thread is not None or self._recording_thread is not None:
             return
-        if self._device_refresh_thread is not None or self._startup_session_thread is not None:
-            self.statusBar().showMessage("正在识别设备或加载设置，请稍后开始采集")
+        if self._defer_acquisition("avg" if average_run else "inst"):
             return
         self._map_channels_to_selected_device()
         self._reload_channel_selectors(include_new_responses=True)
@@ -7566,8 +7623,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._stop_requested_for_current_run:
             return
         self.run_info_label.setText(message)
-        if message.startswith("等待首锤"):
+        if message.startswith(("等待首锤", "等待触发")):
             self.statusBar().showMessage(message)
+            if message.startswith("等待触发"):
+                self._set_average_progress_state("等待触发")
 
     def _update_average_progress(self, count: int, target: int, *, state: str = "") -> None:
         self._average_progress_count = max(0, int(count or 0))
@@ -7605,6 +7664,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _stop_acquisition(self) -> None:
         append_log("stop acquisition: requested")
+        pending = self._pending_acquisition_request
+        self._pending_acquisition_request = None
         if self._recording_worker is not None:
             self.stop_button.setEnabled(False)
             self.avg_button.setEnabled(False)
@@ -7619,6 +7680,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.avg_button.setEnabled(True)
             self.record_button.setEnabled(True)
             self.stop_button.setEnabled(False)
+            if pending is not None:
+                self.backend_combo.setEnabled(True)
+                self.device_combo.setEnabled(True)
+                self.refresh_devices_button.setEnabled(self._device_refresh_thread is None)
+                self._apply_netdaq_limits()
+                self.statusBar().showMessage("已取消等待设备配置，不会自动开始采集")
             if self.run_info_label.text() not in {"State: idle", "State: error"}:
                 self.run_info_label.setText("State: stopped")
             return
@@ -7635,6 +7702,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot(object)
     def _acquisition_started(self, device_name: str | None) -> None:
+        self._set_device_connected(True)
         self.device_info_label.setText(f"Device: {device_name}")
         if self.controller.backend.__class__.__name__ == "NetDaqBackend":
             self.device_info_label.setText(f"NetDAQ (experimental) | Fs={self.session.acquisition.sample_rate:.9g} Hz")
@@ -10706,6 +10774,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if getattr(self, "_refresh_after_device_default", False):
             self._refresh_after_device_default = False
             self.refresh_devices_async()
+        self._resume_pending_acquisition()
 
     def _import_legacy_vna(self) -> None:
         path, _ = get_open_file_name(
@@ -10836,6 +10905,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
             self._close_confirmed = True
         self._device_poll_timer.stop()
+        self._pending_acquisition_request = None
         try:
             if self._recording_worker is not None:
                 if self._recording_stop_event is not None:

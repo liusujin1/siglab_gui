@@ -18,7 +18,7 @@ from python_vna.daq.dasp_import import apply_dasp_channels, dasp_voltage_scale, 
 from python_vna.daq.netdaq import profile_preview
 from python_vna.daq.quality import AcquisitionQuality
 from python_vna.daq.replay import ReplayBackend, ReplayComplete, ReplaySource
-from python_vna.daq.software_trigger import SoftwareTrigger
+from python_vna.daq.software_trigger import SoftwareTrigger, SoftwareTriggerTimeout
 from python_vna.storage import default_session_config, save_legacy_vna
 
 
@@ -185,6 +185,48 @@ def test_trigger_timeout_and_cancellation_are_bounded(monkeypatch):
     stopped.check_stop = stop
     with pytest.raises(DaqBackendError, match="stopped"):
         stopped.read_frame()
+
+
+def test_trigger_wait_timeout_preserves_buffered_event_and_pretrigger(monkeypatch):
+    values = np.zeros(32)
+    values[10] = -2
+    trigger = trigger_for(values, delay=-50)
+    trigger.timeout = 1.5
+    clock = [0.0]
+    original = trigger.read_block
+    calls = []
+
+    def read():
+        calls.append(1)
+        clock[0] += 1
+        return original()
+
+    trigger.read_block = read
+    monkeypatch.setattr("python_vna.daq.software_trigger.time.monotonic", lambda: clock[0])
+    with pytest.raises(SoftwareTriggerTimeout) as caught:
+        trigger.read_frame()
+    assert caught.value.source == "ai0"
+    assert caught.value.level_v == 1
+    assert "Ch1" in caught.value.waiting_message
+    assert "1 V" in caught.value.waiting_message
+    assert trigger.wait_deadline is None and trigger.index == 0
+    assert len(calls) == 2
+    result = trigger.read_frame()
+    np.testing.assert_array_equal(result.data[0], values[6:14])
+    assert result.metadata["trigger_sample_index"] == 10
+    assert result.metadata["trigger_delay_samples"] == -4
+    assert result.frame_index == 0 and len(calls) == 2
+
+
+def test_trigger_transport_failure_is_not_a_wait_timeout():
+    from python_vna.daq.netdaq_protocol import NetDaqProtocolError
+
+    trigger = trigger_for(np.zeros(32))
+    def fail():
+        raise NetDaqProtocolError("data transport timeout")
+    trigger.read_block = fail
+    with pytest.raises(NetDaqProtocolError, match="transport timeout"):
+        trigger.read_frame()
 
 
 def test_trigger_idle_scan_memory_is_bounded():
