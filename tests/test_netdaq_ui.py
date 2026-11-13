@@ -326,6 +326,135 @@ def _selectable_usb_backend():
     return backend
 
 
+def _wait_for_defaults(window, app):
+    deadline = time.monotonic() + 3
+    while window._startup_session_thread is not None and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(.001)
+    assert window._startup_session_thread is None
+    assert window._startup_session_worker is None
+
+
+def test_default_paths_and_device_titles_follow_ni_and_usb(window):
+    from python_vna.condition_notes import condition_number_from_path
+    from python_vna.resources import resource_path
+
+    window.controller.backend = build_backend("ni")
+    window._apply_device_list([_ni_device()])
+    window._current_source_path = None
+    window._update_window_title()
+    assert window._default_vna_path() == resource_path("dsa/vna/default.vna")
+    assert window.windowTitle() == "VNA - NI USB-4431 (Dev1)"
+    backend = _selectable_usb_backend()
+    backend.profile = replace(backend.profile, model="USB2404")
+    window.controller.backend = backend
+    window.device_combo.clear()
+    window._update_window_title()
+    assert window._default_vna_path() == resource_path("dsa/vna/usb2404/default.vna")
+    assert condition_number_from_path(window._default_vna_path()) is None
+    assert window.windowTitle() == "VNA - USB2404"
+    assert "USB-4431" not in window.windowTitle()
+
+
+def test_saving_and_loading_usb_defaults_preserves_exact_config_and_ni_file(window, app, tmp_path, monkeypatch):
+    from python_vna.storage import load_saved_session_json
+
+    ni_path, usb_path = tmp_path / "default.vna", tmp_path / "default_usb2404.vna"
+    monkeypatch.setattr(window, "_default_vna_path",
+                        lambda: usb_path if window._hardware_backend_key() == "usb" else ni_path)
+    window.controller.backend = build_backend("ni")
+    window.session.ai_channels[0].label = "NI sensor"
+    window.session.ai_channels[0].sensitivity = 7
+    window.session.acquisition.frame_size = 8192
+    window._load_session_to_widgets()
+    assert window._save_to_default_vna() == ni_path
+    ni_bytes = ni_path.read_bytes()
+
+    backend = _selectable_usb_backend()
+    with mock.patch("python_vna.app.build_backend", return_value=backend):
+        assert window._backend_changed("netdaq", backend.settings, refresh=False)
+    assert window._startup_session_thread is None
+    assert window.session.acquisition.frame_size == 4096
+    assert window.session.ai_channels[0].label != "NI sensor"
+    window.session.acquisition.frame_size = 2048
+    window.session.acquisition.sample_rate = 5000
+    window.session.ai_channels[0].label = "USB sensor"
+    window.session.ai_channels[0].sensitivity = 4
+    window.session.ai_channels[0].coupling = "dc"
+    window.session.ai_channels[0].iepe_enabled = False
+    window.session.ai_channels[0].dc_removal_enabled = True
+    window.session.ai_channels[0].dc_removal_cutoff_hz = .73
+    window._load_session_to_widgets()
+    expected_rate = window.sample_rate_edit.value()
+    assert window._save_to_default_vna() == usb_path
+    assert ni_path.read_bytes() == ni_bytes
+    companion = load_saved_session_json(usb_path.with_suffix(".json")).config
+    assert companion.acquisition.sample_rate == expected_rate
+    assert companion.ai_channels[0].dc_removal_enabled
+    assert companion.ai_channels[0].dc_removal_cutoff_hz == .73
+
+    window.session = default_session_config()
+    window.controller.state.session = window.session
+    window._apply_backend_sensor_defaults()
+    window._load_session_to_widgets()
+    window.load_startup_session_async()
+    _wait_for_defaults(window, app)
+    assert window.session.acquisition.frame_size == 2048
+    assert window.session.acquisition.sample_rate == expected_rate
+    channel = window.session.ai_channels[0]
+    assert channel.label == "USB sensor" and channel.sensitivity == 4
+    assert channel.coupling == "dc" and not channel.iepe_enabled
+    assert channel.dc_removal_enabled and channel.dc_removal_cutoff_hz == .73
+    assert window._current_source_path == usb_path
+
+
+def test_first_device_switch_loads_own_defaults_but_cached_edits_win(window, app, tmp_path, monkeypatch):
+    from python_vna.models import SavedSession
+    from python_vna.storage import save_legacy_vna, save_session_json
+
+    ni, usb = build_backend("ni"), _selectable_usb_backend()
+    usb_path = tmp_path / "default_usb2404.vna"
+    config = default_session_config()
+    config.acquisition.frame_size = 2048
+    config.ai_channels[0].label = "Saved USB"
+    config.ai_channels[0].sensitivity = 4
+    save_legacy_vna(SavedSession(config=config), usb_path)
+    save_session_json(SavedSession(config=config), usb_path.with_suffix(".json"))
+    monkeypatch.setattr(window, "_default_vna_path",
+                        lambda: usb_path if window._hardware_backend_key() == "usb" else tmp_path / "default.vna")
+    monkeypatch.setattr("python_vna.app.build_backend",
+                        lambda name, **kwargs: usb if name == "netdaq" else ni)
+    window.controller.backend = ni
+    window.session.acquisition.frame_size = 8192
+    window.session.notes = "当前测试工况"
+    window._load_session_to_widgets()
+    source = window._current_source_path = tmp_path / "003.vna"
+    assert window._backend_changed("netdaq", usb.settings, refresh=False)
+    assert window._startup_session_thread is not None
+    _wait_for_defaults(window, app)
+    assert window.session.acquisition.frame_size == 2048
+    assert window.session.ai_channels[0].label == "Saved USB"
+    assert window.session.notes == "当前测试工况" and window._current_source_path == source
+    window.session.ai_channels[0].sensitivity = 9
+    window._load_session_to_widgets()
+    assert window._backend_changed("ni", refresh=False)
+    assert window.session.acquisition.frame_size == 8192
+    assert window._backend_changed("netdaq", usb.settings, refresh=False)
+    assert window._startup_session_thread is None
+    assert window.session.ai_channels[0].sensitivity == 9
+
+
+def test_stale_device_default_result_cannot_overwrite_another_device(window):
+    from python_vna.models import SavedSession
+
+    window.controller.backend = _selectable_usb_backend()
+    session = window.session
+    window._startup_device_key = "ni"
+    window._startup_preserve_context = True
+    window._apply_device_default_result(SavedSession(config=default_session_config()))
+    assert window.session is session
+
+
 def test_usb_configuration_controls_match_supported_hardware_and_host_features(window):
     window.controller.backend = _selectable_usb_backend()
     window._apply_backend_sensor_defaults()

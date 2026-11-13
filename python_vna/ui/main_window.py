@@ -945,10 +945,10 @@ class MCSetupDialog(QtWidgets.QDialog):
         self.close_button.clicked.connect(self.accept)
         self.reload_from_main()
         idle = main_window._acquisition_thread is None and main_window._recording_thread is None
+        self.save_as_button.setEnabled(idle)
         if not main_window._first_channel_locked() and not idle:
             self.table.setEnabled(False)
             self.apply_button.setEnabled(False)
-            self.save_as_button.setEnabled(False)
         self.setFixedHeight(self.sizeHint().height())
 
     def _fit_table_height(self) -> None:
@@ -1458,9 +1458,10 @@ class StartupSessionWorker(QtCore.QObject):
     error = QtCore.Signal(str)
     finished = QtCore.Signal()
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, config_path: Path | None = None) -> None:
         super().__init__()
         self._path = Path(path)
+        self._config_path = config_path
 
     @QtCore.Slot()
     def run(self) -> None:
@@ -1469,7 +1470,12 @@ class StartupSessionWorker(QtCore.QObject):
             if not self._path.exists():
                 self.skipped.emit(f"未找到默认设置：{self._path}")
                 return
-            self.session_ready.emit(load_legacy_vna(self._path))
+            imported = load_legacy_vna(self._path)
+            if (self._config_path is not None and self._config_path.exists()
+                    and self._config_path.stat().st_mtime_ns >= self._path.stat().st_mtime_ns):
+                # Legacy VNA fields cannot represent every USB clock and software-DC setting.
+                imported.config = load_saved_session_json(self._config_path).config
+            self.session_ready.emit(imported)
         except Exception as exc:
             self.error.emit(str(exc))
         finally:
@@ -1916,10 +1922,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "average_progress"):
             self.average_progress.setStyleSheet(
                 f"QProgressBar {{ background: {theme['panel_bg']}; color: {theme['text']}; "
-                f"border: 2px solid {theme['accent']}; border-radius: 5px; "
-                "font-size: 11pt; font-weight: 700; text-align: center; padding: 2px; } "
+                f"border: 1px solid {theme['accent']}; border-radius: 3px; "
+                "font-size: 9pt; font-weight: 700; text-align: center; padding: 0px 4px; } "
                 f"QProgressBar::chunk {{ background: {theme['accent_soft']}; border-radius: 3px; }}"
             )
+            self._position_average_progress()
         for panel_name in ("upper_axis_panel", "lower_axis_panel"):
             panel = getattr(self, panel_name, None)
             if panel is not None:
@@ -2010,7 +2017,24 @@ class MainWindow(QtWidgets.QMainWindow):
         plot.getPlotItem().titleLabel.item.setDefaultTextColor(QtGui.QColor(str(theme["axis"])))
 
     def _update_window_title(self) -> None:
-        title = "VNA - USB-4431"
+        backend = self.controller.backend
+        backend_type = backend.__class__.__name__
+        product = self.device_combo.currentData(QtCore.Qt.UserRole + 1) or ""
+        if backend_type == "NetDaqBackend":
+            product = (backend.profile.model if backend.profile else
+                       "USB2404（待配置）" if backend.settings.transport == "usb" else "NetDAQ（待配置）")
+        elif backend_type == "NIDaqBackend" and not product:
+            product = "NI-DAQmx"
+        elif backend_type == "SimulatedDaqBackend":
+            product = "模拟设备"
+        elif backend_type == "ReplayBackend":
+            product = "离线回放"
+        title = "VNA"
+        if product:
+            title += f" - {product}"
+        device_name = self.device_combo.currentData()
+        if device_name:
+            title += f" ({device_name})"
         if self._current_source_path is not None:
             title = f"{title} - {self._current_source_path.name}"
         self.setWindowTitle(title)
@@ -2038,7 +2062,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _build_ui(self) -> None:
-        self.setWindowTitle("VNA - USB-4431")
+        self.setWindowTitle("VNA")
         self._apply_adaptive_window_size()
 
         central = QtWidgets.QWidget(self)
@@ -2099,14 +2123,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._attach_axis_history(self.bottom_plot, "bottom")
         self._attach_dynamic_y_scaling(self.top_plot, "top")
         self._attach_dynamic_y_scaling(self.bottom_plot, "bottom")
-        self.average_progress = QtWidgets.QProgressBar()
-        self.average_progress.setMinimumSize(270, 32)
+        self.average_progress = QtWidgets.QProgressBar(self.menuBar())
+        self.average_progress.resize(220, 22)
         self.average_progress.setTextVisible(True)
         self.average_progress.setToolTip("仅计入有效平均的帧；暂存和剔除不增加次数。")
         self._average_progress_count = 0
         self._average_progress_target = 0
         self.average_progress.hide()
-        layout.addWidget(self.average_progress, 0, QtCore.Qt.AlignLeft)
+        for widget in (self.menuBar(), self.avg_button, self.toolbar_container):
+            widget.installEventFilter(self)
         self.statusBar().showMessage("就绪")
 
     def _create_vna_plot(self, title: str, key: str):
@@ -2279,8 +2304,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         file_menu = menu_bar.addMenu("文件")
         file_menu.addAction("打开 VNA", self._import_legacy_vna)
-        file_menu.addAction("保存 VNA", self._save_session)
-        file_menu.addAction("保存为默认", self._save_to_default_vna)
+        self.save_session_action = file_menu.addAction("保存 VNA", self._save_session)
+        self.save_default_action = file_menu.addAction("保存为默认", self._save_to_default_vna)
         self.device_connection_action = file_menu.addAction("设备连接...", self._open_device_connection)
         self.auto_device_action = file_menu.addAction("自动识别采集设备")
         self.auto_device_action.setCheckable(True)
@@ -2387,6 +2412,31 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.analysis_viewer_action = menu_bar.addAction("分析")
         self.analysis_viewer_action.triggered.connect(self._open_analysis_viewer)
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt API
+        if (hasattr(self, "average_progress")
+                and event.type() in {QtCore.QEvent.Resize, QtCore.QEvent.Move,
+                                     QtCore.QEvent.Show, QtCore.QEvent.LayoutRequest,
+                                     QtCore.QEvent.FontChange, QtCore.QEvent.StyleChange}):
+            self._position_average_progress()
+        return super().eventFilter(watched, event)
+
+    def _position_average_progress(self) -> None:
+        menu = self.menuBar()
+        action_right = max(
+            (menu.actionGeometry(action).right() for action in menu.actions() if action.isVisible()),
+            default=0,
+        ) + 8
+        available = menu.width() - action_right - 8
+        if available <= 0:
+            return
+        width = min(available, max(190, self.average_progress.fontMetrics().horizontalAdvance(
+            self.average_progress.format()) + 20))
+        center = menu.mapFromGlobal(self.avg_button.mapToGlobal(
+            QtCore.QPoint(self.avg_button.width() // 2, 0))).x()
+        left = max(action_right, min(center - width // 2, menu.width() - width - 8))
+        height = max(16, menu.height() - 4)
+        self.average_progress.setGeometry(left, (menu.height() - height) // 2, width, height)
 
     def _open_analysis_viewer(self) -> None:
         if self._analysis_viewer is None:
@@ -3752,6 +3802,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.backend_combo.addItems(["simulated", "ni", "netdaq", "replay"])
         self.backend_combo.currentTextChanged.connect(self._backend_changed)
         self.device_combo = QtWidgets.QComboBox()
+        self.device_combo.currentIndexChanged.connect(lambda _index: self._update_window_title())
         self.refresh_devices_button = QtWidgets.QPushButton("刷新")
         self.refresh_devices_button.setToolTip("刷新设备")
         self.refresh_devices_button.clicked.connect(self.refresh_devices_async)
@@ -3838,6 +3889,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.toolbar_container.adjustSize()
         height = max(36, self.toolbar_container.sizeHint().height() + 6)
         self.toolbar_scroll_area.setFixedHeight(height)
+        if hasattr(self, "average_progress"):
+            self._position_average_progress()
 
     @staticmethod
     def _fit_button_text(button) -> None:
@@ -5206,6 +5259,19 @@ class MainWindow(QtWidgets.QMainWindow):
             self._load_channel_editor_from_row(self.channel_list.currentRow())
             self._sync_channel_grid()
         self._sync_backend_config_controls()
+        self._sync_save_controls()
+
+    def _can_save_session(self) -> bool:
+        return self._acquisition_thread is None and self._recording_thread is None
+
+    def _sync_save_controls(self) -> None:
+        idle = self._can_save_session()
+        for name in ("save_session_button", "save_session_action", "save_default_action"):
+            control = getattr(self, name, None)
+            if control is not None:
+                control.setEnabled(idle)
+        for dialog in self.findChildren(MCSetupDialog):
+            dialog.save_as_button.setEnabled(idle)
 
     def _channel_coupling_options(self, row: int) -> list[str]:
         return ["DC", "IEPE"] if self._channel_usb_mode_control(row) else self.CHANNEL_COUPLING_OPTIONS
@@ -6481,6 +6547,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.device_combo.clear()
         for device in devices:
             self.device_combo.addItem(f"{device.name} ({device.product_type})", device.name)
+            self.device_combo.setItemData(self.device_combo.count() - 1, device.product_type,
+                                          QtCore.Qt.UserRole + 1)
         preferred = self.controller.preferred_device(devices)
         self._set_device_connected(preferred is not None)
         if preferred is not None:
@@ -6494,6 +6562,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage("未找到设备")
         else:
             self.statusBar().showMessage(f"找到 {len(devices)} 个设备")
+        self._update_window_title()
+
+    def _refresh_device_descriptions(self, devices: list[BackendDevice]) -> None:
+        for device in devices:
+            index = self.device_combo.findData(device.name)
+            if index >= 0:
+                self.device_combo.setItemText(index, f"{device.name} ({device.product_type})")
+                self.device_combo.setItemData(index, device.product_type, QtCore.Qt.UserRole + 1)
+        self._update_window_title()
 
     def _refresh_devices(self) -> None:
         try:
@@ -6545,6 +6622,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._apply_device_list(list(devices or []))
                 return
             self._set_device_connected(any(device.name == selected for device in (devices or [])))
+            self._refresh_device_descriptions(list(devices or []))
             return
         self._apply_device_list(list(devices or []))
 
@@ -6690,6 +6768,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._map_channels_to_selected_device()
         else:
             self._set_device_connected(True)
+            self._refresh_device_descriptions(devices)
         try:
             from dataclasses import asdict
 
@@ -6760,7 +6839,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _offline_tools_idle(self):
         if (self._acquisition_thread is not None or self._recording_thread is not None
-                or self._device_refresh_thread is not None):
+                or self._device_refresh_thread is not None or self._startup_session_thread is not None):
             self.statusBar().showMessage("请先停止采集并等待设备查询结束")
             return False
         return True
@@ -7009,6 +7088,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _backend_changed(self, backend_name: str, netdaq_settings=None, *, refresh: bool = True) -> bool:
         append_log(f"backend changed: begin {backend_name}")
+        if self._startup_session_thread is not None:
+            self.statusBar().showMessage("正在加载设备默认配置，请稍候")
+            return False
         if (self._acquisition_thread is not None or self._recording_thread is not None
                 or self._device_refresh_thread is not None):
             self._stop_acquisition()
@@ -7047,7 +7129,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 config = deepcopy(config)
                 config.title, config.notes = self.session.title, self.session.notes
                 self.session = config
-            elif next_key == "ni":
+            else:
                 config = default_session_config()
                 config.title, config.notes = self.session.title, self.session.notes
                 self.session = config
@@ -7059,14 +7141,20 @@ class MainWindow(QtWidgets.QMainWindow):
             self.backend_combo.setCurrentText(backend_name)
         self._load_session_to_widgets()
         self._apply_netdaq_limits()
+        self._update_window_title()
         if next_key:
             try:
                 self._write_connection_preferences(last_hardware_backend=next_key)
             except OSError as exc:
                 append_log(f"device preference save failed: {exc}")
         append_log(f"backend changed: end {backend_name}")
+        if next_key and session_key not in self._hardware_session_cache:
+            self.load_startup_session_async(preserve_context=True)
         if refresh:
-            self.refresh_devices_async()
+            if self._startup_session_thread is not None:
+                self._refresh_after_device_default = True
+            else:
+                self.refresh_devices_async()
         return True
 
     def _hardware_session_key(self):
@@ -7493,6 +7581,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.average_progress.setFormat(text)
         self.average_progress.setAccessibleName(text)
         self.average_progress.show()
+        self._position_average_progress()
 
     def _set_average_progress_state(self, state: str) -> None:
         if not self.average_progress.isHidden():
@@ -10414,6 +10503,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"已导出到 {export_path}")
 
     def _save_session(self) -> None:
+        if not self._can_save_session():
+            self.statusBar().showMessage("请先停止采集，等待结束后再保存")
+            return
         self._read_session_from_widgets()
         default_save_path = self._suggest_vna_save_path()
         path, selected_filter = get_save_file_name(
@@ -10460,13 +10552,27 @@ class MainWindow(QtWidgets.QMainWindow):
         return path.with_name(f"{next_stem}{path.suffix}")
 
     def _default_vna_path(self) -> Path:
-        return resource_path("dsa/vna/default.vna")
+        filename = "usb2404/default.vna" if self._hardware_backend_key() == "usb" else "default.vna"
+        return resource_path(f"dsa/vna/{filename}")
 
-    def _save_to_default_vna(self) -> Path:
+    def _save_to_default_vna(self) -> Path | None:
+        if not self._can_save_session():
+            self.statusBar().showMessage("请先停止采集，等待结束后再保存默认配置")
+            return None
         self._read_session_from_widgets()
         save_path = self._default_vna_path()
         save_path.parent.mkdir(parents=True, exist_ok=True)
-        save_legacy_vna(self._snapshot_with_current_display_state(), save_path)
+        # Defaults describe the next test, independently of the last device's data.
+        snapshot = SavedSession(config=self.session, measurement=MeasurementSet(
+            sample_rate=self.session.acquisition.sample_rate,
+            time_data={"t": np.array([], dtype=float), "channels": {}},
+            spectra={"f": np.array([], dtype=float), "fft": {}, "autospectrum": {}},
+            frf={}, coherence={}, cross_spectra={}, correlations={}, impulse_responses={},
+            metadata={"legacy_display_state": self._capture_current_legacy_display_state()},
+        ))
+        save_legacy_vna(snapshot, save_path)
+        if self._hardware_backend_key() == "usb":
+            save_session_json(SavedSession(config=snapshot.config), save_path.with_suffix(".json"))
         self._current_source_path = save_path
         self._update_window_title()
         self.statusBar().showMessage(f"已保存默认 VNA 到 {save_path}")
@@ -10517,7 +10623,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.controller.set_session(imported.config)
         self.controller.state.measurement = imported.measurement
         self.session = imported.config
-        self._apply_backend_sensor_defaults()
+        if not (self._hardware_backend_key() == "usb" and imported.source_path == self._default_vna_path()):
+            self._apply_backend_sensor_defaults()
         self._current_source_path = imported.source_path
         self._update_window_title()
         append_log("startup session apply: controller session end")
@@ -10539,16 +10646,43 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"已从 {self._current_source_path} 加载默认设置")
         append_log("startup session apply: end")
 
-    def load_startup_session_async(self, path: str | Path | None = None) -> None:
+    @QtCore.Slot(object)
+    def _apply_device_default_result(self, imported: SavedSession) -> None:
+        if self._startup_device_key != self._hardware_session_key():
+            return
+        if not self._startup_preserve_context:
+            self._apply_loaded_startup_session(imported)
+            return
+        imported.config.title, imported.config.notes = self.session.title, self.session.notes
+        self.session = imported.config
+        measurement = self.controller.state.measurement
+        self.controller.set_session(self.session)
+        self.controller.state.measurement = measurement
+        self._reset_plot_display_state()
+        self._load_session_to_widgets()
+        self._map_channels_to_selected_device()
+        self._apply_netdaq_limits()
+        self._apply_display_defaults_for_measurement(imported.measurement)
+        self._update_window_title()
+        self.statusBar().showMessage(f"已加载设备默认配置：{imported.source_path}")
+
+    def load_startup_session_async(self, path: str | Path | None = None, *, preserve_context: bool = False) -> None:
         if self._startup_session_thread is not None:
             return
-        selected_path = Path(path) if path is not None else resource_path("dsa/vna/default.vna")
+        selected_path = Path(path) if path is not None else self._default_vna_path()
+        if preserve_context and not selected_path.exists():
+            return
+        self._startup_device_key = self._hardware_session_key()
+        self._startup_preserve_context = preserve_context
         self.statusBar().showMessage("正在加载默认设置...")
         thread = QtCore.QThread(self)
-        worker = StartupSessionWorker(selected_path)
+        config_path = (selected_path.with_suffix(".json")
+                       if selected_path == self._default_vna_path() and self._hardware_backend_key() == "usb"
+                       else None)
+        worker = StartupSessionWorker(selected_path, config_path=config_path)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.session_ready.connect(self._apply_loaded_startup_session, QtCore.Qt.QueuedConnection)
+        worker.session_ready.connect(self._apply_device_default_result, QtCore.Qt.QueuedConnection)
         worker.skipped.connect(self.statusBar().showMessage)
         worker.error.connect(self._handle_startup_session_error)
         worker.finished.connect(thread.quit, QtCore.Qt.DirectConnection)
@@ -10569,6 +10703,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._startup_session_thread.wait()
         self._startup_session_thread = None
         self._startup_session_worker = None
+        if getattr(self, "_refresh_after_device_default", False):
+            self._refresh_after_device_default = False
+            self.refresh_devices_async()
 
     def _import_legacy_vna(self) -> None:
         path, _ = get_open_file_name(
