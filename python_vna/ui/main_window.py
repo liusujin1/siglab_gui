@@ -20,6 +20,7 @@ from python_vna.continuous_recording import (
 )
 from python_vna.daq.base import BackendCapability, BackendDevice, DaqBackendError
 from python_vna.daq.replay import ReplayComplete
+from python_vna.daq.software_trigger import SoftwareTriggerTimeout
 from python_vna.display_transforms import (
     align_vector_to_values,
     legacy_frequency_int_vector,
@@ -879,7 +880,7 @@ class MCSetupDialog(QtWidgets.QDialog):
         self.table.setItemDelegateForColumn(
             1,
             ComboBoxDelegate(
-                [main_window._format_full_scale_option(value) for value in main_window.CHANNEL_FULL_SCALE_OPTIONS] + ["Auto"],
+                main_window._channel_full_scale_options,
                 self.table,
             ),
         )
@@ -914,7 +915,8 @@ class MCSetupDialog(QtWidgets.QDialog):
         if main_window.controller.backend.__class__.__name__ == "NetDaqBackend":
             mode_note = QtWidgets.QLabel(
                 "已启用 USB 模式控制的通道可选择 DC / IEPE，下次开始采集前写入并回读。"
-                "其他前端模式和量程仍只读。IEPE 电流未确认，标称量程不代表独立标定。")
+                "USB2404 输入固定为 ±10 V；较小电压仅设置显示、触发和过载剔除的软件范围，"
+                "不改变 ADC 增益。其他前端模式仍只读，IEPE 电流未确认。")
             mode_note.setWordWrap(True)
             layout.addWidget(mode_note)
 
@@ -997,11 +999,13 @@ class MCSetupDialog(QtWidgets.QDialog):
                         item.setCheckState(QtCore.Qt.Checked)
                 elif col in (1, 2):
                     writable = (self.main_window._channel_coupling_writable(row) if col == 2
-                                else self.main_window._channel_hardware_settings_writable(row))
+                                else self.main_window._channel_full_scale_writable(row))
                     item.setFlags(
                         item.flags() | QtCore.Qt.ItemIsEditable if writable
                         else item.flags() & ~QtCore.Qt.ItemIsEditable)
-                    item.setToolTip("" if writable else FIXED_CHANNEL_OPTIONS_TOOLTIP)
+                    item.setToolTip(
+                        self.main_window._channel_full_scale_tooltip(row) if col == 1 and writable
+                        else "" if writable else FIXED_CHANNEL_OPTIONS_TOOLTIP)
                 elif col in (3, 8) and not self.main_window._channel_offset_writable():
                     item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEditable)
                     item.setToolTip("此后端未实现硬件偏移或极性设置；自动去直流请使用文件菜单中的软件高通。")
@@ -1053,6 +1057,7 @@ class MCSetupDialog(QtWidgets.QDialog):
     def _apply_to_main(self) -> None:
         target = self.main_window.channel_table
         full_scale_changed_aliases: set[str] = set()
+        trigger_full_scale_changed = False
         for row in range(min(self.table.rowCount(), target.rowCount())):
             old_aliases = self.main_window._channel_aliases_for_table_row(row)
             old_full_scale = self.main_window._channel_table_full_scale(row)
@@ -1062,10 +1067,11 @@ class MCSetupDialog(QtWidgets.QDialog):
                 if enabled_item is not None and enabled_item.checkState() == QtCore.Qt.Checked
                 else QtCore.Qt.Unchecked
             )
-            if self.main_window._channel_hardware_settings_writable(row):
+            if self.main_window._channel_full_scale_writable(row):
                 full_scale_text = self.table.item(row, 1).text().strip()
+                value = self.main_window._parse_full_scale_text(full_scale_text, 10.0)
                 target.item(row, 9).setText(
-                    f"{self.main_window._parse_full_scale_text(full_scale_text, 10.0):.6g}"
+                    f"{self.main_window._normalize_channel_full_scale(row, value):.6g}"
                 )
             if self.main_window._channel_coupling_writable(row):
                 target.item(row, 6).setText(
@@ -1082,12 +1088,18 @@ class MCSetupDialog(QtWidgets.QDialog):
             if not np.isclose(old_full_scale, new_full_scale, rtol=1e-12, atol=1e-12):
                 full_scale_changed_aliases.update(old_aliases)
                 full_scale_changed_aliases.update(self.main_window._channel_aliases_for_table_row(row))
+                if (self.main_window._channel_software_full_scale_limit(row) is not None
+                        and row == self.main_window._trigger_channel_index()):
+                    trigger_full_scale_changed = True
         if not self.main_window._first_channel_locked() and self.reference_combo.currentData():
             self.main_window.session.acquisition.reference_channel = self.reference_combo.currentData()
         self.main_window._rebuild_channel_list()
         self.main_window._sync_channel_grid()
         self.main_window._reload_channel_selectors(include_new_responses=True)
         self.main_window._load_channel_editor_from_row(self.main_window.channel_list.currentRow())
+        if trigger_full_scale_changed:
+            self.main_window._trigger_level_percent_changed(
+                self.main_window.trigger_level_percent_combo.currentText())
         self.main_window._read_session_from_widgets()
         self.main_window._refresh_current_measurement_view()
         if full_scale_changed_aliases:
@@ -1157,8 +1169,23 @@ class AcquisitionWorker(QtCore.QObject):
                 self.status_changed.emit(
                     f"等待首锤：已就绪，独立捕获阈值 {level:.6g} V；模态设置中可调整，首锤后切换为峰值的35%"
                 )
+            trigger = getattr(getattr(session, "acquisition", None), "trigger", None)
+            if (self._average_run and trigger is not None and trigger.enabled
+                    and trigger.source != "immediate"
+                    and getattr(self._controller, "backend", None).__class__.__name__
+                    in {"NetDaqBackend", "ReplayBackend"}):
+                self.status_changed.emit(SoftwareTriggerTimeout(
+                    trigger.source.rsplit("/", 1)[-1], trigger.level,
+                    trigger.timeout_seconds).waiting_message)
             while not self._stop_requested.is_set():
-                measurement = self._controller.read_and_process()
+                try:
+                    measurement = self._controller.read_and_process()
+                except SoftwareTriggerTimeout as exc:
+                    if not self._average_run:
+                        raise
+                    if not self._stop_requested.is_set():
+                        self.status_changed.emit(exc.waiting_message)
+                    continue
                 settings = measurement.metadata.get("smart_hit_auto_range", {})
                 if settings.get("state") == "applied" and not self._settings_sent:
                     self.settings_applied.emit(self._run_id, dict(settings))
@@ -1749,6 +1776,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recording_output_dir: Path | None = None
         self._device_refresh_thread: QtCore.QThread | None = None
         self._device_refresh_worker: DeviceRefreshWorker | None = None
+        self._pending_acquisition_request: str | None = None
         self._pending_hardware_snapshot = None
         self._hardware_session_cache = {}
         self._auto_hardware_presence = None
@@ -1800,6 +1828,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _poll_device_connection(self) -> None:
         if (self._acquisition_thread is not None or self._recording_thread is not None
                 or self._startup_session_thread is not None or self._close_confirmed
+                or self._pending_acquisition_request is not None
                 or QtWidgets.QApplication.activeModalWidget() is not None):
             return
         if self.controller.backend.__class__.__name__ not in {"NIDaqBackend", "NetDaqBackend"}:
@@ -4950,7 +4979,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.channel_grid.setItemDelegateForColumn(
             2,
             ComboBoxDelegate(
-                [self._format_full_scale_option(value) for value in self.CHANNEL_FULL_SCALE_OPTIONS] + ["Auto"],
+                self._channel_full_scale_options,
                 self.channel_grid,
             ),
         )
@@ -5240,7 +5269,38 @@ class MainWindow(QtWidgets.QMainWindow):
         return bool(
             backend.__class__.__name__ == "NetDaqBackend"
             and backend.profile is not None and 0 <= row < len(backend.profile.channels)
-            and backend.profile.qualification == "dasp_parameters")
+            and backend.profile.qualification == "dasp_parameters"
+            and self._channel_software_full_scale_limit(row) is None)
+
+    def _channel_software_full_scale_limit(self, row: int) -> float | None:
+        backend = self.controller.backend
+        if (backend.__class__.__name__ == "NetDaqBackend" and backend.profile is not None
+                and 0 <= row < len(backend.profile.channels)):
+            return backend.profile.software_full_scale_limit(row)
+        return None
+
+    def _channel_full_scale_writable(self, row: int) -> bool:
+        if self._channel_software_full_scale_limit(row) is not None:
+            return self._acquisition_thread is None and self._recording_thread is None
+        return self._channel_hardware_settings_writable(row)
+
+    def _channel_full_scale_options(self, row: int) -> list[str]:
+        limit = self._channel_software_full_scale_limit(row)
+        return [self._format_full_scale_option(value) for value in self.CHANNEL_FULL_SCALE_OPTIONS
+                if limit is None or value <= limit] + ["Auto"]
+
+    def _normalize_channel_full_scale(self, row: int, value: float) -> float:
+        limit = self._channel_software_full_scale_limit(row)
+        if limit is not None and (not np.isfinite(value) or not (value == -1 or 0 < value <= limit)):
+            return limit
+        return value
+
+    def _channel_full_scale_tooltip(self, row: int) -> str:
+        if self._channel_software_full_scale_limit(row) is not None:
+            return ("硬件输入固定为 ±10 V；此处设置显示范围、百分比触发阈值及软件过载剔除阈值。\n"
+                    "不会改变 ADC 增益、电压换算或原始记录。Auto 使用 ±10 V 作为阈值基准。\n"
+                    "请在停止采集后修改；图窗自动范围不会改动此设置。")
+        return ""
 
     def _channel_usb_mode_control(self, row: int) -> bool:
         backend = self.controller.backend
@@ -5353,12 +5413,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     item.setToolTip("该后端不支持偏移设置；自动去直流使用独立的软件高通。")
                 elif col in (2, 3) and not (
                         self._channel_coupling_writable(row) if col == 3
-                        else self._channel_hardware_settings_writable(row)):
+                        else self._channel_full_scale_writable(row)):
                     item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEditable)
                     item.setToolTip(FIXED_CHANNEL_OPTIONS_TOOLTIP)
                 else:
                     item.setFlags(item.flags() | QtCore.Qt.ItemIsEditable)
-                    item.setToolTip("")
+                    item.setToolTip(self._channel_full_scale_tooltip(row) if col == 2 else "")
         if 0 <= current_row < self.channel_grid.rowCount():
             self.channel_grid.selectRow(current_row)
             self.channel_grid.setCurrentCell(current_row, 0)
@@ -5381,7 +5441,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if col in (2, 3) and not (
                 self._channel_coupling_writable(row) if col == 3
-                else self._channel_hardware_settings_writable(row)):
+                else self._channel_full_scale_writable(row)):
             self._sync_channel_grid()
             return
         text = item.text().strip()
@@ -5393,7 +5453,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         elif col == 2:
             self.channel_table.item(row, 9).setText(
-                f"{self._parse_full_scale_text(text, 10.0):.6g}"
+                f"{self._normalize_channel_full_scale(row, self._parse_full_scale_text(text, 10.0)):.6g}"
             )
         elif col == 3:
             self.channel_table.item(row, 6).setText(self._parse_channel_coupling(row, text))
@@ -5413,6 +5473,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._rebuild_channel_list()
         self.channel_list.setCurrentRow(row)
         self._reload_channel_selectors(include_new_responses=(col == 0))
+        if (col == 2 and row == self._trigger_channel_index()
+                and self._channel_software_full_scale_limit(row) is not None):
+            self._trigger_level_percent_changed(self.trigger_level_percent_combo.currentText())
         self._read_session_from_widgets()
         if col == 2:
             new_aliases = self._channel_aliases_for_table_row(row)
@@ -5601,14 +5664,17 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.channel_coupling_combo.setToolTip(self._dasp_original_range_tooltips[0])
                     self.channel_full_scale_combo.setToolTip(self._dasp_original_range_tooltips[1])
                     del self._dasp_original_range_tooltips
-                writable = entry["channel_type"] in {0, 6, 8} and backend.settings.transport != "usb"
                 self.channel_coupling_combo.setEnabled(self._channel_coupling_writable(row))
-                self.channel_full_scale_combo.setEnabled(writable)
+                self.channel_full_scale_combo.setEnabled(self._channel_full_scale_writable(row))
             if entry["channel_type"] not in {0, 6, 8} or backend.settings.transport == "usb":
                 option = (next(o for o in entry["options"] if o["coupling"] == selected_coupling)
                           if selectable else entry["options"][0])
                 self.channel_table.item(row, 6).setText(option["coupling"])
-                self.channel_table.item(row, 9).setText(f"{float(option['full_scale_v']):g}")
+                software_range = self._channel_software_full_scale_limit(row) is not None
+                full_scale = (
+                    self._normalize_channel_full_scale(row, self._channel_table_full_scale(row))
+                    if software_range else float(option["full_scale_v"]))
+                self.channel_table.item(row, 9).setText(f"{full_scale:g}")
                 if row == self.channel_list.currentRow():
                     coupling = self.channel_coupling_combo
                     coupling_block = QtCore.QSignalBlocker(coupling)
@@ -5632,18 +5698,18 @@ class MainWindow(QtWidgets.QMainWindow):
                         self.channel_iepe_checkbox.setToolTip(
                             "状态跟随输入模式选择；IEPE 恒流源的电流数值尚未确认。")
                         self.channel_full_scale_combo.setToolTip(
-                            "输入模式切换不改变标称电压换算；此处量程只读，独立幅值标定尚未完成。")
+                            self._channel_full_scale_tooltip(row))
                     del coupling_block
-                    text = self._format_full_scale_option(float(option["full_scale_v"]))
+                    text = "Auto" if full_scale < 0 else self._format_full_scale_option(full_scale)
                     scale = self.channel_full_scale_combo
                     scale_block = QtCore.QSignalBlocker(scale)
-                    scale_index = scale.findData(float(option["full_scale_v"]))
+                    scale_index = scale.findData(full_scale)
                     if scale_index < 0:
                         scale_index = scale.findText(text)
                     if scale_index < 0:
-                        scale.addItem(text, float(option["full_scale_v"]))
+                        scale.addItem(text, full_scale)
                         scale_index = scale.count() - 1
-                    scale.setItemData(scale_index, float(option["full_scale_v"]))
+                    scale.setItemData(scale_index, full_scale)
                     scale.setItemText(scale_index, text + (
                         "*" if self._channel_range_is_nominal(row) else ""))
                     scale.setCurrentIndex(scale_index)
@@ -6654,6 +6720,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_netdaq_limits()
         if snapshot is not None and not self.auto_device_action.isChecked() and not self._close_confirmed:
             QtCore.QTimer.singleShot(0, self.refresh_devices_async)
+        else:
+            self._resume_pending_acquisition()
 
     def _connection_preferences(self) -> dict:
         try:
@@ -6985,6 +7053,8 @@ class MainWindow(QtWidgets.QMainWindow):
                         if backend.profile.qualification == "dasp_parameters" else button.text())
         self.backend_combo.setToolTip("NetDAQ 为实验性后端，需在文件 / 设备连接中配置")
         self._sync_usb_mode_editability()
+        if self._pending_acquisition_request is not None:
+            self._lock_pending_acquisition_controls()
 
     def _sync_backend_config_controls(self) -> None:
         if not hasattr(self, "excitation_setup_page") or not hasattr(self, "overlap_combo"):
@@ -7351,11 +7421,47 @@ class MainWindow(QtWidgets.QMainWindow):
     def _start_average_acquisition(self) -> None:
         self._start_run(average_run=True)
 
+    def _lock_pending_acquisition_controls(self) -> None:
+        for button in (self.start_button, self.avg_button, self.record_button,
+                       self.backend_combo, self.device_combo, self.refresh_devices_button):
+            button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+
+    def _defer_acquisition(self, mode: str) -> bool:
+        if self._device_refresh_thread is None and self._startup_session_thread is None:
+            return False
+        self._pending_acquisition_request = mode
+        self._lock_pending_acquisition_controls()
+        label = {"inst": "瞬时采集", "avg": "平均采集", "record": "连续记录"}[mode]
+        message = f"正在等待读取设备配置，完成后自动开始{label}；可点停止取消"
+        self.run_info_label.setText(message)
+        self.statusBar().showMessage(message)
+        return True
+
+    def _resume_pending_acquisition(self) -> None:
+        if (self._pending_acquisition_request is None or self._close_confirmed
+                or self._device_refresh_thread is not None or self._startup_session_thread is not None):
+            return
+        mode = self._pending_acquisition_request
+        self._pending_acquisition_request = None
+        self.backend_combo.setEnabled(True)
+        self.device_combo.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        self._apply_netdaq_limits()
+        if not self.start_button.isEnabled() or (
+                self._hardware_backend_key() and self.device_combo.currentData() is None):
+            self.statusBar().showMessage("设备或配置尚不可用，本次采集未开始")
+            self.run_info_label.setText("State: idle")
+            return
+        if mode == "record":
+            self._start_continuous_recording()
+        else:
+            self._start_run(average_run=mode == "avg")
+
     def _start_continuous_recording(self) -> None:
         if self._acquisition_thread is not None or self._recording_thread is not None:
             return
-        if self._device_refresh_thread is not None or self._startup_session_thread is not None:
-            self.statusBar().showMessage("正在识别设备或加载设置，请稍后开始采集")
+        if self._defer_acquisition("record"):
             return
         parent_dir = get_existing_directory(
             self,
@@ -7433,8 +7539,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _start_run(self, average_run: bool) -> None:
         if self._acquisition_thread is not None or self._recording_thread is not None:
             return
-        if self._device_refresh_thread is not None or self._startup_session_thread is not None:
-            self.statusBar().showMessage("正在识别设备或加载设置，请稍后开始采集")
+        if self._defer_acquisition("avg" if average_run else "inst"):
             return
         self._map_channels_to_selected_device()
         self._reload_channel_selectors(include_new_responses=True)
@@ -7566,8 +7671,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._stop_requested_for_current_run:
             return
         self.run_info_label.setText(message)
-        if message.startswith("等待首锤"):
+        if message.startswith(("等待首锤", "等待触发")):
             self.statusBar().showMessage(message)
+            if message.startswith("等待触发"):
+                self._set_average_progress_state("等待触发")
 
     def _update_average_progress(self, count: int, target: int, *, state: str = "") -> None:
         self._average_progress_count = max(0, int(count or 0))
@@ -7605,6 +7712,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _stop_acquisition(self) -> None:
         append_log("stop acquisition: requested")
+        pending = self._pending_acquisition_request
+        self._pending_acquisition_request = None
         if self._recording_worker is not None:
             self.stop_button.setEnabled(False)
             self.avg_button.setEnabled(False)
@@ -7619,6 +7728,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.avg_button.setEnabled(True)
             self.record_button.setEnabled(True)
             self.stop_button.setEnabled(False)
+            if pending is not None:
+                self.backend_combo.setEnabled(True)
+                self.device_combo.setEnabled(True)
+                self.refresh_devices_button.setEnabled(self._device_refresh_thread is None)
+                self._apply_netdaq_limits()
+                self.statusBar().showMessage("已取消等待设备配置，不会自动开始采集")
             if self.run_info_label.text() not in {"State: idle", "State: error"}:
                 self.run_info_label.setText("State: stopped")
             return
@@ -7635,6 +7750,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot(object)
     def _acquisition_started(self, device_name: str | None) -> None:
+        self._set_device_connected(True)
         self.device_info_label.setText(f"Device: {device_name}")
         if self.controller.backend.__class__.__name__ == "NetDaqBackend":
             self.device_info_label.setText(f"NetDAQ (experimental) | Fs={self.session.acquisition.sample_rate:.9g} Hz")
@@ -10706,6 +10822,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if getattr(self, "_refresh_after_device_default", False):
             self._refresh_after_device_default = False
             self.refresh_devices_async()
+        self._resume_pending_acquisition()
 
     def _import_legacy_vna(self) -> None:
         path, _ = get_open_file_name(
@@ -10836,6 +10953,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
             self._close_confirmed = True
         self._device_poll_timer.stop()
+        self._pending_acquisition_request = None
         try:
             if self._recording_worker is not None:
                 if self._recording_stop_event is not None:

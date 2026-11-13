@@ -281,7 +281,7 @@ class ReplayBackend(BaseDaqBackend):
                 self._check_stop()
                 if (self._trigger and self._trigger.wait_deadline is not None
                         and time.monotonic() >= self._trigger.wait_deadline):
-                    raise DaqBackendError("软件触发超时")
+                    raise self._trigger.timeout_error()
                 self._cancel.wait(min(.025, max(0, deadline - time.monotonic())))
         data = self._pending[:, :count].copy()
         self._pending = self._pending[:, count:].copy()

@@ -46,6 +46,142 @@ def test_ni_remains_default_and_netdaq_cli_is_explicit():
     assert args.netdaq_profile == ""
 
 
+@pytest.mark.parametrize("average", [False, True])
+def test_start_during_device_refresh_resumes_exactly_once(window, average):
+    pending_thread = mock.Mock()
+    pending_thread.wait.return_value = True
+    window._device_refresh_thread = pending_thread
+    with mock.patch.object(window.controller, "configure") as configure:
+        window._start_run(average_run=average)
+    configure.assert_not_called()
+    assert window._pending_acquisition_request == ("avg" if average else "inst")
+    assert window.stop_button.isEnabled()
+    assert not window.start_button.isEnabled() and not window.avg_button.isEnabled()
+    with mock.patch.object(window, "_start_run") as start:
+        window._device_refresh_finished()
+        window._resume_pending_acquisition()
+    start.assert_called_once_with(average_run=average)
+    assert window._pending_acquisition_request is None
+
+
+def test_pending_start_waits_for_both_default_settings_and_device_query(window):
+    window._startup_session_thread = mock.Mock()
+    window._device_refresh_thread = mock.Mock()
+    window._device_refresh_thread.wait.return_value = True
+    window._start_average_acquisition()
+    with mock.patch.object(window, "_start_run") as start:
+        window._device_refresh_finished()
+        start.assert_not_called()
+        window._startup_session_finished()
+    start.assert_called_once_with(average_run=True)
+
+
+@pytest.mark.parametrize("cancel", ["stop", "close"])
+def test_pending_start_can_be_cancelled_and_does_not_resume(window, cancel):
+    window._device_refresh_thread = mock.Mock()
+    window._device_refresh_thread.wait.return_value = True
+    window._start_average_acquisition()
+    if cancel == "stop":
+        window._stop_acquisition()
+        assert window._pending_acquisition_request is None
+    else:
+        window._close_confirmed = True
+    with mock.patch.object(window, "_start_run") as start:
+        window._device_refresh_finished()
+    start.assert_not_called()
+
+
+def test_record_button_waits_for_query_before_opening_folder_dialog(window):
+    window._device_refresh_thread = mock.Mock()
+    window._device_refresh_thread.wait.return_value = True
+    with mock.patch("python_vna.ui.main_window.get_existing_directory") as folder:
+        window._start_continuous_recording()
+    folder.assert_not_called()
+    assert window._pending_acquisition_request == "record"
+    with mock.patch.object(window, "_start_continuous_recording") as record:
+        window._device_refresh_finished()
+    record.assert_called_once_with()
+
+
+def test_pending_start_cancels_when_hardware_discovery_finds_no_device(window):
+    window.controller.backend = build_backend("ni")
+    window._auto_hardware_presence = False
+    window.device_combo.clear()
+    window._device_refresh_thread = mock.Mock()
+    window._device_refresh_thread.wait.return_value = True
+    window._start_average_acquisition()
+    with mock.patch.object(window, "_start_run") as start:
+        window._device_refresh_finished()
+    start.assert_not_called()
+    assert window._pending_acquisition_request is None
+    assert not window.stop_button.isEnabled()
+    assert "未开始" in window.statusBar().currentMessage()
+
+
+@pytest.mark.parametrize("finish", ["averages", "stop", "transport_error"])
+def test_averaging_waits_through_trigger_intervals_without_restarting_or_counting(
+        app, monkeypatch, finish):
+    from python_vna.daq.base import BackendFrame, DaqBackendError
+    from python_vna.daq.software_trigger import SoftwareTriggerTimeout
+    from python_vna.ui.main_window import AcquisitionWorker
+
+    session = default_session_config()
+    session.acquisition.frame_size = 16
+    trigger = session.acquisition.trigger
+    trigger.enabled, trigger.source, trigger.level = True, "ai1", 1.8
+    backend = NetDaqBackend(NetDaqSettings(transport="usb"))
+    controller = VnaController(backend, session)
+    lifecycle = {}
+    for method in ("configure", "start", "stop", "close"):
+        lifecycle[method] = mock.Mock()
+        monkeypatch.setattr(backend, method, lifecycle[method])
+    worker = AcquisitionWorker(controller, None, average_run=True, target_average_count=2,
+                               display_interval_seconds=0)
+    calls = []
+
+    def read():
+        index = len(calls)
+        calls.append(index)
+        if index in {0, 2}:
+            raise SoftwareTriggerTimeout("ai1", 1.8, 5)
+        if finish == "stop":
+            worker.request_stop()
+            raise SoftwareTriggerTimeout("ai1", 1.8, 5)
+        if finish == "transport_error":
+            raise DaqBackendError("USB transport timed out")
+        return BackendFrame(2560, [f"ai{i}" for i in range(4)], np.ones((4, 16)) * .01,
+                            np.arange(16) / 2560, index)
+
+    monkeypatch.setattr(backend, "read_frame", read)
+    measurements, errors, statuses = [], [], []
+    worker.measurement_ready.connect(measurements.append)
+    worker.error.connect(errors.append)
+    worker.status_changed.connect(statuses.append)
+    worker.run()
+    assert any("Ch2" in text and "1.8 V" in text for text in statuses)
+    assert all(action.call_count == 1 for action in lifecycle.values())
+    if finish == "averages":
+        assert [m.metadata["average_count"] for m in measurements] == [1, 2]
+        assert len(calls) == 4 and not errors
+    else:
+        assert not measurements
+        assert bool(errors) == (finish == "transport_error")
+        if errors:
+            assert "transport" in errors[0]
+
+
+def test_trigger_wait_status_preserves_connection_and_average_count(window):
+    window.controller.backend = _selectable_usb_backend()
+    window._set_device_connected(True)
+    window._update_average_progress(1, 3)
+    message = "等待触发：Ch2，|电压| ≥ 1.8 V；平均次数不增加，可点停止取消"
+    window._handle_acquisition_status(message)
+    assert window.device_status_light.property("connected")
+    assert window._average_progress_count == 1
+    assert "等待触发" in window.average_progress.format()
+    assert window.statusBar().currentMessage() == message
+
+
 def _ni_device():
     from python_vna.daq.base import BackendDevice
 
@@ -635,7 +771,7 @@ def test_usb_mode_editor_and_mc_setup_apply_dc_iepe_without_ni_defaults(window):
     assert window.channel_coupling_combo.isEnabled()
     assert window.channel_coupling_combo.currentText() == "IEPE"
     assert window.channel_coupling_combo.currentData() == "bias"
-    assert not window.channel_full_scale_combo.isEnabled()
+    assert window.channel_full_scale_combo.isEnabled()
     assert not window.channel_iepe_current_edit.isEnabled()
     assert window.channel_iepe_current_edit.value() == 0
     assert window._channel_coupling_options(1) == ["DC", "IEPE"]
@@ -650,7 +786,7 @@ def test_usb_mode_editor_and_mc_setup_apply_dc_iepe_without_ni_defaults(window):
     try:
         assert dialog.table.item(1, 2).text() == "IEPE"
         assert dialog.table.item(1, 2).flags() & QtCore.Qt.ItemIsEditable
-        assert not dialog.table.item(1, 1).flags() & QtCore.Qt.ItemIsEditable
+        assert dialog.table.item(1, 1).flags() & QtCore.Qt.ItemIsEditable
         editor = dialog.table.itemDelegateForColumn(2).createEditor(
             dialog.table, None, dialog.table.model().index(1, 2))
         assert [editor.itemText(i) for i in range(editor.count())] == ["DC", "IEPE"]
@@ -682,6 +818,7 @@ def test_usb_mode_selection_is_locked_during_acquisition(window):
     try:
         window._sync_usb_mode_editability()
         assert not window.channel_coupling_combo.isEnabled()
+        assert not window.channel_full_scale_combo.isEnabled()
         assert not window.channel_grid.item(1, 3).flags() & QtCore.Qt.ItemIsEditable
         dialog = MCSetupDialog(window)
         try:
@@ -692,7 +829,65 @@ def test_usb_mode_selection_is_locked_during_acquisition(window):
         window._acquisition_thread = None
         window._sync_usb_mode_editability()
     assert window.channel_coupling_combo.isEnabled()
+    assert window.channel_full_scale_combo.isEnabled()
     assert window.channel_grid.item(1, 3).flags() & QtCore.Qt.ItemIsEditable
+
+
+def test_usb_software_range_persists_and_updates_trigger_without_changing_hardware_mode(window, tmp_path):
+    from python_vna.storage import load_saved_session_json, save_session_json
+
+    window.controller.backend = _selectable_usb_backend()
+    window._apply_netdaq_limits()
+    window.channel_list.setCurrentRow(1)
+    window.trigger_source_combo.setCurrentText("Ch2")
+    window.trigger_level_percent_combo.setCurrentText("35%")
+    window.channel_full_scale_combo.setCurrentIndex(window.channel_full_scale_combo.findData(1.25))
+    assert window.trigger_level_edit.value() == pytest.approx(.4375)
+    for _ in range(3):
+        session = window._read_session_from_widgets()
+        window._load_channel_editor_from_row(1)
+    assert session.ai_channels[1].full_scale == 1.25
+    assert session.ai_channels[1].iepe_enabled
+    assert session.ai_channels[1].coupling == "bias"
+    assert session.acquisition.trigger.level == pytest.approx(.4375)
+    assert window.channel_full_scale_combo.currentData() == 1.25
+    assert "ADC" in window.channel_full_scale_combo.toolTip()
+    option = window.controller.backend.profile.option(1, session.ai_channels[1])
+    assert option["full_scale_v"] == 10
+    assert option["volts_per_count"] == 10 / 8388608
+    assert option["configuration_hex"] == "01"
+    target = tmp_path / "software-range.json"
+    save_session_json(window.controller.snapshot(), target)
+    assert load_saved_session_json(target).config.ai_channels[1].full_scale == 1.25
+    dialog = MCSetupDialog(window)
+    try:
+        assert dialog.table.item(1, 1).flags() & QtCore.Qt.ItemIsEditable
+        dialog.table.item(1, 1).setText(window._format_full_scale_option(2.5))
+        dialog._apply_to_main()
+        assert window._read_session_from_widgets().ai_channels[1].full_scale == 2.5
+        assert window.trigger_level_edit.value() == pytest.approx(.875)
+    finally:
+        dialog.close()
+    window.channel_grid.item(1, 2).setText(window._format_full_scale_option(.625))
+    assert window._read_session_from_widgets().ai_channels[1].full_scale == .625
+    assert window.trigger_level_edit.value() == pytest.approx(.21875)
+
+
+def test_usb_software_range_accepts_auto_and_clamps_imported_invalid_ranges(window):
+    window.controller.backend = _selectable_usb_backend()
+    window._apply_netdaq_limits()
+    window.channel_list.setCurrentRow(1)
+    window.channel_full_scale_combo.setCurrentIndex(window.channel_full_scale_combo.findData(-1))
+    session = window._read_session_from_widgets()
+    assert session.ai_channels[1].full_scale == -1
+    assert window.channel_full_scale_combo.currentText() == "Auto"
+    assert window.controller.backend.profile.option(1, session.ai_channels[1])["full_scale_v"] == 10
+    window.channel_table.item(1, 9).setText("50")
+    assert window._read_session_from_widgets().ai_channels[1].full_scale == 10
+    window.controller.backend = build_backend("ni")
+    window._apply_netdaq_limits()
+    assert window.channel_full_scale_combo.isEnabled()
+    assert "固定为 ±10" not in window.channel_full_scale_combo.toolTip()
 
 
 @pytest.mark.parametrize("iepe", [False, True])

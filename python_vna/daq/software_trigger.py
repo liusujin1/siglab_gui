@@ -9,6 +9,24 @@ import numpy as np
 from .base import BackendFrame, DaqBackendError
 
 
+class SoftwareTriggerTimeout(DaqBackendError):
+    """A healthy stream did not cross the threshold during one waiting interval."""
+
+    def __init__(self, source, level_v, timeout_seconds):
+        self.source = source
+        self.level_v = float(level_v)
+        self.timeout_seconds = float(timeout_seconds)
+        super().__init__(f"软件触发超时（{self.timeout_seconds:g} 秒）")
+
+    @property
+    def waiting_message(self):
+        channel = (f"Ch{int(self.source[2:]) + 1}"
+                   if self.source.startswith("ai") and self.source[2:].isdigit()
+                   else self.source)
+        return (f"等待触发：{channel}，|电压| ≥ {self.level_v:.6g} V；"
+                "平均次数不增加，可点停止取消")
+
+
 class SoftwareTrigger:
     def __init__(self, acquisition, channel_names, read_block, check_stop):
         trigger = acquisition.trigger
@@ -49,6 +67,10 @@ class SoftwareTrigger:
         self.level = self._level(value)
         return self.level
 
+    def timeout_error(self):
+        self.wait_deadline = None
+        return SoftwareTriggerTimeout(self.names[self.source], self.level, self.timeout)
+
     def _append(self):
         self.check_stop()
         frame = self.read_block()
@@ -81,7 +103,7 @@ class SoftwareTrigger:
         while event is None and not free:
             self.check_stop()
             if time.monotonic() >= deadline:
-                raise DaqBackendError(f"软件触发超时（{self.timeout:g} 秒）")
+                raise self.timeout_error()
             offset = self.scan - self.start
             signal = self.data[self.source, offset:]
             if signal.size:
