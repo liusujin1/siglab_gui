@@ -135,7 +135,7 @@ class MainWindowTests(unittest.TestCase):
         menu.deleteLater()
 
     def test_window_initializes_before_menu_actions_exist(self):
-        self.assertEqual(self.window.windowTitle(), "VNA - USB-4431")
+        self.assertEqual(self.window.windowTitle(), "VNA")
         self.assertEqual(self.window.top_cursor_label.text(), "Top Cursor: --")
         self.assertEqual(self.window.bottom_marker_label.text(), "Bottom Marker: off")
         self.assertEqual(self.window.top_marker_fields["trace"].text(), "off")
@@ -382,7 +382,7 @@ class MainWindowTests(unittest.TestCase):
             QtWidgets.QApplication.processEvents()
 
         self.assertIn("默认设置未加载", self.window.statusBar().currentMessage())
-        self.assertEqual(self.window.windowTitle(), "VNA - USB-4431")
+        self.assertEqual(self.window.windowTitle(), "VNA")
 
     def test_loaded_startup_session_applies_config_and_measurement(self):
         imported = SavedSession(
@@ -1191,6 +1191,25 @@ class MainWindowTests(unittest.TestCase):
         self.window._set_average_progress_state("停止中")
         self.assertIn("停止中", self.window.average_progress.format())
 
+    def test_average_progress_uses_menu_row_without_covering_actions_or_plot_space(self):
+        self.window._close_confirmed = True
+        self.window.show()
+        self.window._update_average_progress(2, 20, state="采集中")
+        for width in (1180, 1000, 900):
+            self.window.resize(width, 760)
+            self.app.processEvents()
+            bar = self.window.average_progress
+            menu = self.window.menuBar()
+            self.assertIs(bar.parentWidget(), menu)
+            self.assertEqual(self.window.centralWidget().layout().indexOf(bar), -1)
+            self.assertTrue(menu.rect().contains(bar.geometry()))
+            for action in menu.actions():
+                self.assertFalse(bar.geometry().intersects(menu.actionGeometry(action)))
+            desired_center = menu.mapFromGlobal(self.window.avg_button.mapToGlobal(
+                QtCore.QPoint(self.window.avg_button.width() // 2, 0))).x()
+            if desired_center + bar.width() // 2 < menu.width() - 8:
+                self.assertLessEqual(abs(bar.geometry().center().x() - desired_center), 1)
+
     def test_avg_measurement_status_hides_internal_zero_based_frame_number(self):
         measurement = self._measurement()
         measurement.metadata.update(
@@ -1449,7 +1468,9 @@ class MainWindowTests(unittest.TestCase):
                 self.window._handle_worker_error("read failed")
             for control in (self.window.start_button, self.window.avg_button,
                             self.window.record_button, self.window.backend_combo,
-                            self.window.device_combo, self.window.refresh_devices_button):
+                            self.window.device_combo, self.window.refresh_devices_button,
+                            self.window.save_session_button, self.window.save_session_action,
+                            self.window.save_default_action):
                 self.assertFalse(control.isEnabled())
             self.window._acquisition_worker_finished()
             self.assertEqual(self.window.run_info_label.text(), "State: error")
@@ -1457,6 +1478,53 @@ class MainWindowTests(unittest.TestCase):
             self.window._acquisition_thread_finished()
         self.assertTrue(self.window.start_button.isEnabled())
         self.assertTrue(self.window.backend_combo.isEnabled())
+        self.assertTrue(self.window.save_session_button.isEnabled())
+        self.assertTrue(self.window.save_session_action.isEnabled())
+        self.assertTrue(self.window.save_default_action.isEnabled())
+
+    def test_inst_and_avg_disable_all_save_entries_until_thread_finishes(self):
+        controls = (self.window.save_session_button, self.window.save_session_action,
+                    self.window.save_default_action)
+        for average_run in (False, True):
+            with self.subTest(average_run=average_run):
+                dialog = MCSetupDialog(self.window)
+                try:
+                    with mock.patch.object(QtCore.QThread, "start"):
+                        self.window._start_run(average_run=average_run)
+                    thread = self.window._acquisition_thread
+                    worker = self.window._acquisition_worker
+                    self.assertIsNotNone(thread)
+                    for control in (*controls, dialog.save_as_button):
+                        self.assertFalse(control.isEnabled())
+                    with mock.patch.object(main_window_module, "get_save_file_name") as save_dialog, \
+                            mock.patch.object(main_window_module, "save_legacy_vna") as save_vna:
+                        self.window._save_session()
+                        self.assertIsNone(self.window._save_to_default_vna())
+                        save_dialog.assert_not_called()
+                        save_vna.assert_not_called()
+                    self.window._stop_acquisition()
+                    self.window._acquisition_worker_finished()
+                    for control in (*controls, dialog.save_as_button):
+                        self.assertFalse(control.isEnabled())
+                    self.window._acquisition_thread_finished()
+                    for control in (*controls, dialog.save_as_button):
+                        self.assertTrue(control.isEnabled())
+                    worker.deleteLater()
+                    thread.deleteLater()
+                finally:
+                    dialog.setParent(None)
+                    dialog.deleteLater()
+
+    def test_mc_setup_save_stays_disabled_even_when_first_hit_channel_locked(self):
+        self.window._acquisition_thread = object()
+        try:
+            with mock.patch.object(self.window, "_first_channel_locked", return_value=True):
+                dialog = MCSetupDialog(self.window)
+            self.assertFalse(dialog.save_as_button.isEnabled())
+            dialog.setParent(None)
+            dialog.deleteLater()
+        finally:
+            self.window._acquisition_thread_finished()
 
     def test_real_threads_repeated_stop_releases_tasks_on_owner_thread(self):
         from python_vna.daq.simulated import SimulatedDaqBackend
@@ -1498,14 +1566,21 @@ class MainWindowTests(unittest.TestCase):
                                 self.window._start_run(average_run=mode == "avg")
                                 thread = self.window._acquisition_thread
                             self.assertIsNotNone(thread)
+                            self.assertFalse(self.window.save_session_button.isEnabled())
+                            self.assertFalse(self.window.save_session_action.isEnabled())
+                            self.assertFalse(self.window.save_default_action.isEnabled())
                             time.sleep(delay)
                             self.window._stop_acquisition()
+                            self.assertFalse(self.window.save_session_button.isEnabled())
                             self.assertTrue(thread.wait(10000), "worker requires UI event loop to exit")
                             self.assertIsNone(backend._state)
                             self.app.processEvents()
                             self.assertIsNone(self.window._acquisition_thread)
                             self.assertIsNone(self.window._recording_thread)
                             self.assertTrue(self.window.start_button.isEnabled())
+                            self.assertTrue(self.window.save_session_button.isEnabled())
+                            self.assertTrue(self.window.save_session_action.isEnabled())
+                            self.assertTrue(self.window.save_default_action.isEnabled())
         self.assertEqual(backend.closed_runs, 9)
         self.assertEqual(backend.violations, [])
 
@@ -2522,6 +2597,25 @@ class MainWindowTests(unittest.TestCase):
                 refresh.assert_not_called()
             finally:
                 self.window._acquisition_thread = None
+
+    def test_device_title_follows_selected_product_and_keeps_open_file_name(self):
+        self.controller.backend = type("NIDaqBackend", (_DummyBackend,), {})()
+        self.window._current_source_path = Path("D:/data/003.vna")
+        self.window._apply_device_list([
+            BackendDevice("Dev1", "NI USB-4431"),
+            BackendDevice("Dev2", "NI USB-6000"),
+        ])
+        self.assertIn("NI USB-4431 (Dev1)", self.window.windowTitle())
+        self.window.device_combo.setCurrentIndex(1)
+        self.assertIn("NI USB-6000 (Dev2)", self.window.windowTitle())
+        self.assertIn("003.vna", self.window.windowTitle())
+        self.assertNotIn("USB-4431", self.window.windowTitle())
+        self.window._device_refresh_connection_only = True
+        self.window._handle_devices_ready([BackendDevice("Dev2", "NI USB-4432")])
+        self.assertIn("NI USB-4432 (Dev2)", self.window.windowTitle())
+        self.window._apply_device_list([])
+        self.assertIn("NI-DAQmx", self.window.windowTitle())
+        self.assertNotIn("USB-4432", self.window.windowTitle())
 
     def test_overlay_capture_and_clear(self):
         measurement = self._measurement()

@@ -154,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         append_log("startup default vna: scheduled")
         QtCore.QTimer.singleShot(
-            1000, lambda: window.load_startup_session_async(default_vna_path())
+            1000, window.load_startup_session_async
         )
     if _env_flag("PYTHON_VNA_SKIP_STARTUP_DEVICE_REFRESH"):
         append_log("startup device refresh: skipped by env")
